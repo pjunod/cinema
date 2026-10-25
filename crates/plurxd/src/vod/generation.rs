@@ -11,6 +11,14 @@ pub(super) async fn spawn_generation(
     if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
         return;
     }
+    let generation_epoch = rendition.gen_epoch.load(Relaxed);
+    let generation_current = || {
+        !rendition.closed.load(Relaxed)
+            && rendition.failure().is_none()
+            && rendition.gen_epoch.load(Relaxed) == generation_epoch
+            && rendition.cancelled_preparation_epoch.load(Acquire)
+                != generation_epoch.saturating_add(1)
+    };
     let private_operation = match rendition.private_storage.as_ref() {
         Some(storage) => match storage.operation() {
             Some(operation) => Some(operation),
@@ -21,6 +29,9 @@ pub(super) async fn spawn_generation(
     let source_dispatch = match rendition.source_owners.begin_generation() {
         Ok(dispatch) => dispatch,
         Err(cause) => {
+            if !generation_current() {
+                return;
+            }
             record_failure(
                 shared,
                 rendition,
@@ -33,6 +44,9 @@ pub(super) async fn spawn_generation(
     let source_authority = match source_dispatch.authorize_before_spawn().await {
         Ok(authority) => authority,
         Err(cause) => {
+            if !generation_current() {
+                return;
+            }
             record_failure(
                 shared,
                 rendition,
@@ -43,12 +57,18 @@ pub(super) async fn spawn_generation(
         }
     };
     if !recipe_engine_is_current(&rendition.recipe).await {
+        if !generation_current() {
+            return;
+        }
         record_failure(
             shared,
             rendition,
             crate::playback_control::ProducerDecisionReason::EngineChanged,
             "the immutable media engine changed; restart is required".to_owned(),
         );
+        return;
+    }
+    if !generation_current() {
         return;
     }
     // A spawn position must be a VIDEO entry — the scheduler can name an
@@ -100,6 +120,9 @@ pub(super) async fn spawn_generation(
                 Some(worker)
             }
             None => {
+                if !generation_current() {
+                    return;
+                }
                 record_failure(
                     shared,
                     rendition,
@@ -111,6 +134,9 @@ pub(super) async fn spawn_generation(
         },
         None => None,
     };
+    if !generation_current() {
+        return;
+    }
     #[cfg(target_os = "linux")]
     if let Some((encoding, runtime)) = recipe.encoding.as_ref().and_then(|encoding| {
         encoding
@@ -123,6 +149,9 @@ pub(super) async fn spawn_generation(
         // Explicit seek/replacement/failure revoke its publication allowance.
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
+                if !generation_current() {
+                    return;
+                }
                 runtime.refuse_episode();
                 record_failure(
                     shared,
@@ -151,12 +180,17 @@ pub(super) async fn spawn_generation(
                 .registered(&source_dispatch, &prepared.registration);
             drop(source_dispatch);
             if !runtime.source.unchanged() || !runtime.tools.is_current().await {
-                Err("DV source/backend changed before prepared publication".to_owned())
+                Err("DV source/backend changed before prepared publication".into())
             } else {
-                Ok(prepared)
+                Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
+                    prepared,
+                ))
             }
         } else {
             let Some(worker) = permit else {
+                if !generation_current() {
+                    return;
+                }
                 runtime.refuse_episode();
                 record_failure(
                     shared,
@@ -187,18 +221,31 @@ pub(super) async fn spawn_generation(
                     Some(hook),
                 )
                 .await
-                .and_then(|(window, actual)| match &encoding.dv_processing {
-                    plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
-                        if actual.semantic_digest() == frozen.semantic_digest() =>
-                    {
-                        Ok(window)
+                .and_then(|outcome| match outcome {
+                    crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
+                        Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled)
                     }
-                    _ => Err("completed DV graph differs from frozen rendition".into()),
+                    crate::vodencode::dv_runtime::WindowOutcome::Completed((window, actual)) => {
+                        match &encoding.dv_processing {
+                            plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
+                                if actual.semantic_digest() == frozen.semantic_digest() =>
+                            {
+                                Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
+                                    window,
+                                ))
+                            }
+                            _ => Err("completed DV graph differs from frozen rendition".into()),
+                        }
+                    }
                 })
         };
         let verified = match verified {
-            Ok(window) => window,
+            Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(window)) => window,
+            Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled) => return,
             Err(cause) => {
+                if !generation_current() {
+                    return;
+                }
                 runtime.refuse_episode();
                 record_failure(
                     shared,
@@ -211,6 +258,9 @@ pub(super) async fn spawn_generation(
         };
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
+                if !generation_current() {
+                    return;
+                }
                 runtime.refuse_episode();
                 record_failure(
                     shared,
@@ -221,10 +271,7 @@ pub(super) async fn spawn_generation(
                 return;
             }
         }
-        if rendition.closed.load(Relaxed)
-            || rendition.failure().is_some()
-            || !recipe_engine_is_current(recipe).await
-        {
+        if !recipe_engine_is_current(recipe).await || !generation_current() {
             return;
         }
         shared
@@ -345,6 +392,9 @@ pub(super) async fn spawn_generation(
             .as_ref()
             .filter(|source| source.unchanged())
         else {
+            if !generation_current() {
+                return;
+            }
             record_failure(
                 shared,
                 rendition,
@@ -361,6 +411,9 @@ pub(super) async fn spawn_generation(
         {
             Ok(current) => Some(current),
             Err(cause) => {
+                if !generation_current() {
+                    return;
+                }
                 record_failure(
                     shared,
                     rendition,
@@ -384,6 +437,9 @@ pub(super) async fn spawn_generation(
     let audio_source = match audio_open {
         Ok(source) => source,
         Err(cause) => {
+            if !generation_current() {
+                return;
+            }
             record_failure(
                 shared,
                 rendition,
@@ -397,6 +453,9 @@ pub(super) async fn spawn_generation(
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
     let (child, child_job, stdout, stderr, landing_probe) = {
+        if !generation_current() {
+            return;
+        }
         let mut args = recipe_pipe_args(recipe, start_seconds, attested);
         if rendition.key.starts_with("source-") && recipe.encoding.is_none() {
             bound_source_copy_threads(&mut args);
@@ -423,6 +482,9 @@ pub(super) async fn spawn_generation(
         let env = recipe_child_env(recipe);
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
+                if !generation_current() {
+                    return;
+                }
                 record_failure(
                     shared,
                     rendition,
@@ -445,6 +507,9 @@ pub(super) async fn spawn_generation(
         ) {
             Ok(spawned) => spawned,
             Err(error) => {
+                if !generation_current() {
+                    return;
+                }
                 let cause = format!("spawning the producer: {error}");
                 record_failure(
                     shared,
@@ -506,6 +571,9 @@ pub(super) async fn spawn_generation(
         }
     });
     let Ok((registration, writers, stdout, stderr)) = registration_rx.await else {
+        if !generation_current() {
+            return;
+        }
         record_failure(
             shared,
             rendition,
@@ -516,7 +584,7 @@ pub(super) async fn spawn_generation(
     };
     // A child launched before a close/failure still belongs to the actual
     // registered reaper. Wait errors retain its permit and descendant job.
-    if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
+    if !generation_current() {
         drop(stdout);
         drop(stderr);
         writers.settled();
@@ -1148,6 +1216,10 @@ async fn run_generation(
 /// The identity half of a pre-read generation. `false` means the generation
 /// is over (drift handled or failure recorded) and the caller must return.
 async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result<(), Outcome> {
+    // Hold publication ownership while identity and init are written. The
+    // exact byte reservations below may evict other idle cache entries.
+    let _cache_pin = crate::playback_cache::pin(rendition.dir.path())
+        .map_err(|error| Outcome::Failed(Failure::Sink(error)))?;
     if !recipe_engine_is_current(&rendition.recipe).await {
         return Err(Outcome::Failed(Failure::EngineChanged(
             "the immutable media engine changed before init publication".to_owned(),
@@ -1897,6 +1969,35 @@ impl RenditionSink {
         }
     }
     async fn materialize_observed(&self, entry: u32, bytes: Vec<u8>) -> io::Result<bool> {
+        // Pin the exact entry before the optimistic presence check. A driver
+        // may otherwise evict it while engine validation awaits, turning a
+        // retained replay into a fresh write with no allocation grant.
+        let _entry_pin = crate::playback_cache::pin(
+            &self
+                .rendition
+                .dir
+                .path()
+                .join(segment_name(u64::from(entry))),
+        )?;
+        // Reserve before publication/dependency locks: making room can retire
+        // a different rendition through the same locking protocol.
+        let already_present = self
+            .rendition
+            .manifest
+            .lock()
+            .await
+            .state(entry)
+            .is_some_and(|state| state.is_materialized());
+        self.shared
+            .hooks
+            .get()
+            .after_cache_presence_observed()
+            .await;
+        let reservation = if already_present {
+            None
+        } else {
+            crate::playback_cache::reserve(self.rendition.dir.path(), bytes.len() as u64).await?
+        };
         if self.rendition.closed.load(Relaxed) {
             // The quiet teardown: `NotFound` is how vodgen learns the session
             // ended normally rather than faulted.
@@ -2068,6 +2169,9 @@ impl RenditionSink {
                 .dir
                 .materialize(&mut manifest, entry, &bytes, now_ms())
                 .await?;
+            if let Some(reservation) = reservation {
+                reservation.commit(len);
+            }
             let publication =
                 credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
             if let Some(init) = init.as_ref() {
@@ -2133,6 +2237,65 @@ impl RenditionSink {
 
 #[cfg(test)]
 mod writer_supervision_tests {
+    #[tokio::test]
+    async fn retained_replay_pins_presence_across_working_set_pressure() {
+        use super::*;
+        let base = crate::test_tempdir().expect("replay race");
+        let serve = super::super::tests::bare_serve(base.path());
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(
+            Arc::clone(&serve.shared.store),
+            vec![base.path().to_path_buf()],
+        );
+        budget.configure_for_test(64 << 10);
+        let rendition = super::super::tests::synthetic_rendition(base.path()).await;
+        let sink = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: 0,
+            retirement: tokio_util::sync::CancellationToken::new(),
+        };
+        let original = b"immutable retained bytes";
+        assert!(sink
+            .materialize_observed(0, original.to_vec())
+            .await
+            .expect("fresh write"));
+        let pause = serve
+            .shared
+            .test_hooks()
+            .cache_presence
+            .arm("replay observed existing member");
+        let replay =
+            tokio::spawn(
+                async move { sink.materialize_observed(0, b"replacement".to_vec()).await },
+            );
+        let held = pause.reached().await;
+        let charged = serve.shared.working_set.load(Relaxed);
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            let freed = rendition
+                .dir
+                .make_room(&mut manifest, &[], original.len() as u64)
+                .await
+                .expect("pressure");
+            assert_eq!(
+                freed.bytes, 0,
+                "presence pin must defeat working-set eviction"
+            );
+        }
+        assert_eq!(
+            tokio::fs::read(rendition.dir.path().join(segment_name(0)))
+                .await
+                .expect("original"),
+            original
+        );
+        drop(held);
+        assert!(!replay
+            .await
+            .expect("replay task")
+            .expect("retained traversal"));
+        assert_eq!(serve.shared.working_set.load(Relaxed), charged);
+    }
+
     #[tokio::test]
     async fn deferred_replay_keeps_original_bytes_without_fresh_receipt_authority() {
         use super::*;

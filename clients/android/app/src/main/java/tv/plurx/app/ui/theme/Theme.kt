@@ -81,6 +81,21 @@ private val NoirrLight = ViewerColors(
     good = Color(0xFF35855C), warning = Color(0xFFA3742B), bad = Color(0xFFC96442),
 )
 
+private val MeridianDark = ViewerColors(
+    background = Color(0xFF141416), surface = Color(0xFF1E1E21),
+    surfaceHigh = Color(0xFF29292D), outline = Color(0xFFAAAAB2),
+    text = Color(0xFFF5F5F6), muted = Color(0xFFAAAAB2),
+    accent = Color(0xFFE5A00D), accentSecondary = Color(0xFFE5A00D),
+    good = Color(0xFF52B788), warning = Color(0xFFF2C14E), bad = Color(0xFFEE7168),
+)
+private val MeridianLight = ViewerColors(
+    background = Color(0xFFF5F4F1), surface = Color.White,
+    surfaceHigh = Color(0xFFEAE8E3), outline = Color(0xFF606068),
+    text = Color(0xFF202024), muted = Color(0xFF606068),
+    accent = Color(0xFF805600), accentSecondary = Color(0xFF805600),
+    good = Color(0xFF246B49), warning = Color(0xFF805600), bad = Color(0xFFBD332D),
+)
+
 private val LocalViewerColors = staticCompositionLocalOf { NoirrDark }
 
 val Bg: Color
@@ -126,19 +141,20 @@ fun PlurxTheme(
         ThemeId.Classic -> if (dark) ClassicDark else ClassicLight
         ThemeId.Terminal -> if (dark) TerminalDark else TerminalLight
         ThemeId.Noirr -> if (dark) NoirrDark else NoirrLight
+        ThemeId.Meridian -> if (dark) MeridianDark else MeridianLight
     }
     val scheme = if (dark) {
         darkColorScheme(
-            primary = colors.accent, onPrimary = Color.White,
-            secondary = colors.accentSecondary, background = colors.background,
+            primary = colors.accent, onPrimary = if (theme == ThemeId.Meridian && dark) Color(0xFF171205) else Color.White,
+            secondary = colors.accentSecondary, secondaryContainer = colors.text, onSecondaryContainer = colors.background, background = colors.background,
             onBackground = colors.text, surface = colors.surface, onSurface = colors.text,
             surfaceVariant = colors.surfaceHigh, onSurfaceVariant = colors.muted,
             outline = colors.outline, error = colors.bad,
         )
     } else {
         lightColorScheme(
-            primary = colors.accent, onPrimary = Color.White,
-            secondary = colors.accentSecondary, background = colors.background,
+            primary = colors.accent, onPrimary = if (theme == ThemeId.Meridian && dark) Color(0xFF171205) else Color.White,
+            secondary = colors.accentSecondary, secondaryContainer = colors.text, onSecondaryContainer = colors.background, background = colors.background,
             onBackground = colors.text, surface = colors.surface, onSurface = colors.text,
             surfaceVariant = colors.surfaceHigh, onSurfaceVariant = colors.muted,
             outline = colors.outline, error = colors.bad,

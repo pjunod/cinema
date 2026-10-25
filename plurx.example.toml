@@ -21,8 +21,8 @@ trusted_proxies = []
 # 0 turns this listener off; /jellyfin on the main port always works.
 jellyfin_port = 8096
 
-# HTTPS configuration/identity are staged on the HTTPS effort branch; the
-# listener and Developer editor arrive in the following milestones.
+# Optional HTTPS serves the same public router as HTTP after restart.
+# Settings → Developer edits this node’s saved configuration and certificate names.
 [server.https]
 enabled = false
 port = 32443

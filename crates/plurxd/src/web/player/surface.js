@@ -136,6 +136,8 @@ function stopPlayerForExhaustion(){
 function retireHlsTerminalAttempt(p){
   clearEffectiveProcessing(p);
   if(!p) return;
+  // The retired session's enhancement is not the fallback's.
+  p.enhancement=null;
   const mediaAttachment=p.mediaAttachment||null;
   const episode=p.hlsStartup;
   const ownsEpisode=!!(episode&&p.hls===episode.hls&&episode.attachment.current());
@@ -146,7 +148,8 @@ function retireHlsTerminalAttempt(p){
     episode.cancelledReason='owner_stopped';
     episode.establishedSuspension=null;
     clearTimeout(episode.retry.timer);episode.retry.timer=null;
-    abortHlsStartupLoaders(episode);
+    clearTimeout(episode.native?.deadlineTimer);
+    abortHlsStartupLoaders(episode,true);
   }
   try{if(p.hls)p.hls.stopLoad();}catch(e){}
 }

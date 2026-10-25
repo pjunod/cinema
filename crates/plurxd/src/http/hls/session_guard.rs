@@ -37,6 +37,10 @@ pub struct StartResponse {
         Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>>,
     /// Current production-qualified processing only. A durable replay must
     /// reacquire its receipt; source tags and saved settings cannot supply it.
+    /// FEL / RPU / DYN: what Dolby Vision enhancement the delivered picture
+    /// carries, with a detail row for each (including why one is unused).
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub enhancement: Option<plurx_core::playback::enhancement::PlaybackEnhancement>,
     #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
     pub effective_processing:
         Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,

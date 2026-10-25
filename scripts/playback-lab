@@ -1051,6 +1051,32 @@ function diagnosticPath(urlPath) {
   return String(urlPath || "").split(/[?#]/)[0] || "/";
 }
 
+function controlTraceFields(payload, response = false) {
+  const integer = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const candidate = value => typeof value === "string" && /^[0-9a-f]{32}$/.test(value) ? value : null;
+  const fingerprint = value => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value)
+    ? `s-${crypto.createHash("sha256").update(value).digest("hex")}` : null;
+  const quality = payload?.selection?.quality;
+  const action = payload?.action;
+  const effective = action?.effective_selection ?? action?.effectiveSelection;
+  if (response) return {
+    accepted_sequence: integer(payload?.accepted_sequence ?? payload?.acceptedSequence),
+    action: ["prepare", "hold", "retry_resource", "terminal"].includes(action?.type) ? action.type : "other",
+    action_hash: fingerprint(action?.action_id ?? action?.actionId),
+    prepared_session_hash: fingerprint(action?.session_id ?? action?.sessionId),
+    prepared_candidate: candidate(effective?.candidate_id ?? effective?.candidateId),
+    prepared_height: integer(effective?.height),
+  };
+  return {
+    sequence: integer(payload?.sequence),
+    quality: ["auto", "original", "manual"].includes(quality?.mode) ? quality.mode : "other",
+    candidate: candidate(quality?.candidate_id ?? quality?.candidateId), height: integer(quality?.height),
+    position_ms: integer(payload?.position_ms ?? payload?.positionMs),
+    acknowledgement: ["metadata_ready", "buffer_ready", "committed", "aborted", "failed"]
+      .includes(payload?.acknowledgement?.state) ? payload.acknowledgement.state : null,
+  };
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1118,6 +1144,10 @@ class ShapingProxy {
     this.limiterWaiters = new Set();
     this.frozenTelemetry = null;
     this.clientEvents = [];
+    this.traceRequests = options.traceRequests === true;
+    this.requestRecords = [];
+    this.requestRecordsDropped = 0;
+    this.requestSequence = 0;
     this.transitions = [];
     this.advanceTimer = null;
     this.scheduledAdvance = null;
@@ -1278,6 +1308,8 @@ class ShapingProxy {
       transitions: this.transitions,
       shaping: this.telemetry(),
       client_events: this.clientEvents,
+      ...(this.traceRequests ? { requests: this.requestRecords,
+        requests_dropped: this.requestRecordsDropped } : {}),
     };
   }
 
@@ -1470,6 +1502,54 @@ class ShapingProxy {
     if (request.method === "POST" && route === "/api/v1/client-log" && this.controlToken) {
       this.observeClientLog(request);
     }
+    // Optional acquisition evidence. Retain timing and numeric facts, never
+    // bearer paths, queries, headers or bodies. A session hash matches the
+    // daemon's non-secret session_log_id without authorizing playback.
+    let trace = null;
+    if (this.traceRequests) {
+      if (this.requestRecords.length >= D3_RECORD_LIMIT) this.requestRecordsDropped++;
+      else {
+        const session = /^\/(?:api\/v1\/)?hls\/([^/]+)\/(.*)$/.exec(route);
+        const leaf = session?.[2] ?? "";
+        const segment = /(?:^|\/)seg(\d+)\.(?:m4s|ts)$/.exec(leaf);
+        const parsed = new URL(request.url, this.target);
+        const acquisition = parsed.searchParams.get("acquisition_start_ms");
+        trace = { seq: ++this.requestSequence, method: request.method,
+          resource: session ? (/\.m3u8$/.test(leaf) ? "playlist" : /init[^/]*\.(?:mp4|m4s)$/.test(leaf) ? "init"
+            : segment ? "segment" : leaf === "control" ? "control" : "session_api")
+            : route === "/api/v1/server" ? "server_identity" : "api",
+          session_hash: session ? `s-${crypto.createHash("sha256").update(session[1]).digest("hex")}` : null,
+          segment_index: segment ? Number(segment[1]) : null,
+          acquisition_start_ms: acquisition !== null && /^\d+$/.test(acquisition) && Number.isSafeInteger(Number(acquisition))
+            ? Number(acquisition) : null,
+          started_at_ms: this.now() - this.startedAt, stage_index: this.stageIndex,
+          headers_at_ms: null, first_byte_at_ms: null, upstream_end_at_ms: null,
+          completed_at_ms: null, status: null, upstream_bytes: 0, outcome: "pending" };
+        this.requestRecords.push(trace);
+        if (trace.resource === "control" && request.method === "POST") {
+          let size = 0;
+          const chunks = [];
+          request.on("data", chunk => {
+            size += chunk.length;
+            if (size <= 256 * 1024) chunks.push(chunk);
+          });
+          request.once("end", () => {
+            if (size > 256 * 1024) return;
+            try { trace.control_request = controlTraceFields(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+            catch (_) { /* The upstream owns invalid input. */ }
+          });
+        }
+        response.once("finish", () => {
+          trace.completed_at_ms = this.now() - this.startedAt;
+          trace.outcome = "completed";
+        });
+        response.once("close", () => {
+          if (trace.outcome !== "pending") return;
+          trace.completed_at_ms = this.now() - this.startedAt;
+          trace.outcome = "cancelled";
+        });
+      }
+    }
     const media = isMediaPath(request.url);
     const transfer = { cancelled: false, upstreamResponse: null };
     const cancel = () => {
@@ -1491,13 +1571,18 @@ class ShapingProxy {
       headers: { ...request.headers, host: this.target.host },
     }, (upstreamResponse) => {
       transfer.upstreamResponse = upstreamResponse;
+      if (trace) {
+        trace.headers_at_ms = this.now() - this.startedAt;
+        trace.status = upstreamResponse.statusCode;
+        upstreamResponse.once("end", () => { trace.upstream_end_at_ms = this.now() - this.startedAt; });
+      }
       if (transfer.cancelled) {
         upstreamResponse.destroy();
         return;
       }
       response.writeHead(upstreamResponse.statusCode, upstreamResponse.headers);
       const sessionId = /^\/(?:api\/v1\/)?hls\/([^/]+)\//.exec(route)?.[1] ?? null;
-      this.pump(upstreamResponse, response, media, () => transfer.cancelled, sessionId).catch((error) => {
+      this.pump(upstreamResponse, response, media, () => transfer.cancelled, sessionId, trace).catch((error) => {
         if (!this.closed && !transfer.cancelled) {
           this.errors.push(`${request.method} ${route}: ${error.message}`);
         }
@@ -1637,13 +1722,23 @@ class ShapingProxy {
     for (const wake of [...this.limiterWaiters]) wake();
   }
 
-  async pump(source, sink, media, cancelled, sessionId = null) {
+  async pump(source, sink, media, cancelled, sessionId = null, trace = null) {
+    const controlChunks = [];
     try {
       for await (const chunk of source) {
+        if (trace) {
+          trace.first_byte_at_ms ??= this.now() - this.startedAt;
+          trace.upstream_bytes += chunk.length;
+          if (trace.resource === "control" && trace.upstream_bytes <= 256 * 1024) controlChunks.push(chunk);
+        }
         for (let offset = 0; offset < chunk.length; offset += SHAPER_SLICE_BYTES) {
           const slice = chunk.subarray(offset, offset + SHAPER_SLICE_BYTES);
           await this.writeShaped(slice, sink, media, cancelled, sessionId);
         }
+      }
+      if (trace?.resource === "control" && trace.upstream_bytes <= 256 * 1024) {
+        try { trace.control_response = controlTraceFields(JSON.parse(Buffer.concat(controlChunks).toString("utf8")), true); }
+        catch (_) { /* Timing still describes non-JSON/error responses. */ }
       }
       if (!cancelled()) sink.end();
     } catch (error) {

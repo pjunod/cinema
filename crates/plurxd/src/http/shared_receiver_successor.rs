@@ -641,6 +641,7 @@ impl ReceiverStartActor {
                         .get_or_insert_with(|| Uuid::new_v4().to_string())
                         .clone();
                     response.action = ControlAction::Prepare {
+                        enhancement: start.enhancement.clone().map(Box::new),
                         action_id,
                         session_id: start.session_id.clone(),
                         playlist_url: start.playlist_url.clone(),

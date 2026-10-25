@@ -97,7 +97,10 @@ final class PictureInPictureController: NSObject, ObservableObject,
 
     func attach(to playerLayer: AVPlayerLayer) {
         #if os(iOS)
-        guard self.playerLayer !== playerLayer || controller == nil else { return }
+        // An unsupported device legitimately has no PiP controller. Treat
+        // that attached layer as settled too: updateUIView otherwise keeps
+        // publishing isSupported=false and starves the initial playback task.
+        guard self.playerLayer !== playerLayer else { return }
         detach()
         self.playerLayer = playerLayer
         isSupported = AVPictureInPictureController.isPictureInPictureSupported()

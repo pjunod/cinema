@@ -61,6 +61,7 @@ class KnownRedContractTest(unittest.TestCase):
         validate_opt_in_fixtures(fixtures, ignored, load_entries())
         fixture_ids = {fixture["test"] for fixture in fixtures}
         self.assertEqual(fixture_ids, {
+            "crates/plurxd/src/transcoder_optimization/comparison.rs::transcoder_optimization::comparison::tests::real_media_production_tools_comparison",
             "crates/plurxd/src/pipeprobe.rs::pipeprobe::tests::real_neutral_peak_gate_rejects_old_metal_units",
             "crates/plurxd/src/subtitle_transcription.rs::subtitle_transcription::tests::managed_real_engine_held_fd_clean_environment_recognizes_fixture",
             "crates/plurxd/src/http/shared_receiver_forwarding_fixture.rs::http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure",
@@ -121,7 +122,31 @@ class KnownRedContractTest(unittest.TestCase):
         validate_listed_tests(subtitle_fixtures, (subtitle_fixture.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(subtitle_fixtures, ())
-        admitted_identities = {capture_identity, public_wire_identity} | fixture_ids
+        # Native desktop harnesses are exact opt-in fixtures, not known-red
+        # product tests. The child entry is invoked by its parent regression;
+        # privileged fixtures are executed only in a disposable installation.
+        desktop_harness_reasons = {
+            "crates/plurx-desktop-control/tests/linux_launch_lock.rs::"
+            "linux_launch_lock_allows_only_the_service_group_and_root":
+                "requires disposable Linux root and explicit service UID/GID and unrelated UID fixtures",
+            "crates/plurx-tray/src/tests.rs::tests::process::"
+            "real_controller_runner_writes_effective_xdg_and_refuses_invalid_values":
+                "requires an explicitly supplied real controller and root-owned disposable installation record",
+            "crates/plurx-tray/src/tests.rs::tests::process::xdg_runner_child":
+                "subprocess entry used by the XDG runner regressions",
+        }
+        desktop_harnesses = tuple(
+            item for item in ignored if item.identity in desktop_harness_reasons
+        )
+        self.assertEqual(
+            {item.identity: item.reason for item in desktop_harnesses},
+            desktop_harness_reasons,
+        )
+        admitted_identities = (
+            {capture_identity, public_wire_identity}
+            | fixture_ids
+            | desktop_harness_reasons.keys()
+        )
         # Main's native FFmpeg/libvmaf qualification remains independently
         # admitted; keep it in addition to effort's two acquisition identities.
         # #811 adds three operator-run ffmpeg 8 fixture checks (captured
@@ -184,6 +209,12 @@ class KnownRedContractTest(unittest.TestCase):
             additional_fixture_reasons[identity] = (
                 "needs a private FFmpeg dvh1 capture; PLURX_DVH1_CAPTURE"
             )
+        # Mac package repair (#1239) executes actual Metal/Vulkan graphs with
+        # an explicit complete package; ordinary Linux unit runners lack it.
+        additional_fixture_reasons[
+            "crates/plurxd/src/ffmpeg_support.rs::ffmpeg_support::tests::"
+            "complete_macos_package_runs_metal_and_vulkan"
+        ] = "requires PLURX_TEST_FFMPEG pointing at a complete native Mac package"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -191,9 +222,9 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 12)
-        # HDR runtime and DV completeness add four private checks: 32 -> 36.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 36)
+        self.assertEqual(len(additional_fixtures), 13)
+        # HDR/DV and the explicit Mac graph check are operator-run fixtures.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 37)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

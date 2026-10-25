@@ -207,6 +207,7 @@ function rollbackPreparedReplacement(p,state,successor){
   p.qualityCandidateId=predecessor.qualityCandidateId;
   clearEffectiveProcessing(p);
   p.deliveredRange=predecessor.deliveredRange;
+  p.enhancement=predecessor.enhancement||null;
   // Transport intent belongs to the viewer, including commands made while
   // the successor was awaiting its first frame. Rollback restores media only.
   p.health=predecessor.health;
@@ -269,12 +270,10 @@ function adoptPlaybackMediaElement(p,v){
   // silently disappeared and never came back, because this tick is the only
   // path that re-applies one.
   //
-  // Re-apply directly instead of routing it through a marker the tick reads
-  // for a different purpose. `setSub` is idempotent for the current index and
-  // sets `_subOff` itself, so the tick's own "the offset moved, re-shift the
-  // cues" job keeps working afterwards.
-  if(p.curSub>=0) setSub(p.curSub);
-  else p._subOff=null;
+  // Re-apply the existing choice directly. The viewer's setSub command also
+  // supersedes quality intent, which would revert an automatic handoff's
+  // requested candidate just before its committed acknowledgement is sent.
+  attachPlaybackSubtitle(v,p,p.curSub);
   pbTick(); pbSyncPlayIcon();
 }
 // The retired element leaves the page.

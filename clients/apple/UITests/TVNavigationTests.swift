@@ -24,14 +24,14 @@ final class TVNavigationTests: TVNavigationTestCase {
         defer { app.terminate() }
         let view = app.buttons["library:view"]
         assertFocus(view, in: app, context: "Small library View remains reachable")
-        remote.press(.down)
+        remote.press(.right)
         let sort = app.buttons["library:sort"]
         assertFocus(sort, in: app, context: "Small library Sort")
         remote.press(.select)
         assertFocus(app.buttons["choice:title"], in: app, context: "Small library selected Title sort")
         remote.press(.menu)
         assertFocus(sort, in: app, context: "Small library Sort Back")
-        remote.press(.down)
+        remote.press(.right)
         let filter = app.buttons["library:filter"]
         assertFocus(filter, in: app, context: "Small library Filter")
         remote.press(.select)
@@ -42,8 +42,10 @@ final class TVNavigationTests: TVNavigationTestCase {
             XCTAssertFalse(app.buttons["library:jump"].isEnabled)
             XCTAssertTrue(app.staticTexts["This library is empty"].exists)
         } else {
-            remote.press(.right)
+            remote.press(.down)
             assertFocus(app.buttons["item:1"], in: app, context: "Single movie content return")
+            remote.press(.menu)
+            assertFocus(view, in: app, context: "Single movie Back reaches the toolbar")
         }
         remote.press(.menu)
         XCTAssertTrue(app.buttons["library-open-category:movie"].waitForExistence(timeout: 5), app.debugDescription)
@@ -78,6 +80,66 @@ final class TVNavigationTests: TVNavigationTestCase {
     func testRowsToolsAndJump416() throws { try toolsJourney(itemCount: 416, presentation: "rows") }
     func testRowsToolsAndJump5000() throws { try toolsJourney(itemCount: 5000, presentation: "rows") }
 
+    func testRowsKeepWholeCardsVisibleAtMediumSize() throws { try wholeRowJourney(posterSize: "m") }
+    func testRowsKeepWholeCardsVisibleAtExtraLargeSize() throws { try wholeRowJourney(posterSize: "xl") }
+
+    func testShowRowsKeepWholeCardsVisibleAtExtraLargeSize() throws {
+        let server = try TVNavigationServer(includeShows: true)
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin, presentation: "rows", collectionID: "show", posterSize: "xl")
+        defer { app.terminate() }
+        let card = app.buttons["item:10001"]
+        remote.press(.down)
+        assertFocus(card, in: app, context: "Whole show card")
+        assertWholeCardVisible(card, in: app)
+    }
+
+    private func wholeRowJourney(posterSize: String) throws {
+        let server = try TVNavigationServer(itemCount: 416)
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin, presentation: "rows", posterSize: posterSize)
+        defer { app.terminate() }
+        let jump = app.buttons["library:jump"]
+        reachForSetup(jump, in: app, limit: 8)
+        assertFocus(jump, in: app, context: "Whole row jump opener")
+        remote.press(.select)
+        assertFocus(app.buttons["choice:A"], in: app, context: "Whole row initial group")
+        for _ in 0..<12 { remote.press(.down) }
+        assertFocus(app.buttons["choice:M"], in: app, context: "Whole row deep group")
+        remote.press(.select)
+        let first = app.buttons["item:193"]
+        assertFocus(first, in: app, context: "Whole row first title")
+        assertWholeCardVisible(first, in: app)
+        for id in 194...200 {
+            remote.press(.right)
+            let card = app.buttons["item:\(id)"]
+            assertFocus(card, in: app, context: "Whole row horizontal move \(id)")
+            assertWholeCardVisible(card, in: app)
+        }
+        remote.press(.menu)
+        assertFocus(app.buttons["library:view"], in: app, context: "Whole row Back reaches tools")
+        remote.press(.down)
+        let bookmark = app.buttons["item:200"]
+        assertFocus(bookmark, in: app, context: "Whole row tools return")
+        assertWholeCardVisible(bookmark, in: app)
+    }
+
+    private func assertWholeCardVisible(_ card: XCUIElement, in app: XCUIApplication,
+                                       file: StaticString = #filePath, line: UInt = #line) {
+        let results = app.scrollViews["library-results"]
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let viewport = results.frame
+            let frame = card.frame
+            return frame.height > 0 && frame.minY >= viewport.minY + 4
+                && frame.maxY <= viewport.maxY - 4
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed,
+                       "The entire focused poster, title and metadata must fit below the toolbar: card=\(card.frame), viewport=\(results.frame)",
+                       file: file, line: line)
+    }
+
     private func toolsJourney(itemCount: Int, presentation: String) throws {
         let server = try TVNavigationServer(itemCount: itemCount)
         let origin = try server.start()
@@ -87,6 +149,10 @@ final class TVNavigationTests: TVNavigationTestCase {
         var previousGroup = (letter: "A", index: 0)
         for (letter, groupIndex) in [("A", 0), ("M", 12), ("Z", 25), ("M", 12)] {
             let jump = app.buttons["library:jump"]
+            // From content, one Back reaches the toolbar.
+            if app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch.exists {
+                remote.press(.menu)
+            }
             reachForSetup(jump, in: app, limit: 8)
             assertFocus(jump, in: app, context: "Jump opener")
             remote.press(.select)
@@ -102,32 +168,24 @@ final class TVNavigationTests: TVNavigationTestCase {
             let item = app.buttons["item:\(index + 1)"]
             assertFocus(item, in: app, context: "Jump \(letter) focuses first item")
             let tools = ["view", "sort", "filter", "jump"].map { app.buttons["library:" + $0] }
-            var bookmarkID = item.identifier
-            for _ in 0..<6 {
-                if tools.contains(where: { $0.hasFocus }) { break }
-                let focusedItem = app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch
-                if focusedItem.exists { bookmarkID = focusedItem.identifier }
-                remote.press(.left)
-            }
-            guard let reachedTool = tools.first(where: { $0.hasFocus }) else {
-                XCTFail("Tools must receive native focus within six Left presses: \(app.debugDescription)")
-                return
-            }
-            assertFocus(reachedTool, in: app, context: "Tools within six Left presses")
-            let view = tools[0]
-            for _ in 0..<3 where !view.hasFocus { remote.press(.up) }
-            assertFocus(view, in: app, context: "View within three Up presses inside tools")
+            // Leave the jump target so the bookmark is a title the viewer chose.
+            remote.press(.right)
+            let focusedItem = app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch
+            XCTAssertTrue(focusedItem.waitForExistence(timeout: 5), app.debugDescription)
+            let bookmarkID = focusedItem.identifier
+            remote.press(.menu)
+            assertFocus(tools[0], in: app, context: "One Back from deep content reaches the toolbar")
             for tool in tools.dropFirst() {
-                remote.press(.down)
-                assertFocus(tool, in: app, context: "Down reaches " + tool.identifier)
+                remote.press(.right)
+                assertFocus(tool, in: app, context: "Right reaches " + tool.identifier)
             }
             for tool in tools.dropLast().reversed() {
-                remote.press(.up)
-                assertFocus(tool, in: app, context: "Up reaches " + tool.identifier)
+                remote.press(.left)
+                assertFocus(tool, in: app, context: "Left reaches " + tool.identifier)
             }
-            remote.press(.right)
+            remote.press(.down)
             let bookmark = app.buttons[bookmarkID]
-            assertFocus(bookmark, in: app, context: "Right restores exact content entry bookmark")
+            assertFocus(bookmark, in: app, context: "Down restores exact content entry bookmark")
             let bookmarkLetter = String(bookmark.label.prefix(1))
             previousGroup = (bookmarkLetter, Int(bookmarkLetter.unicodeScalars.first!.value) - 65)
         }
@@ -166,21 +224,21 @@ final class TVNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let libraries = app.tabBars.buttons["Libraries"]
+        let libraries = app.viewerTab("Libraries")
         reachForSetup(libraries, in: app, limit: 4)
         assertFocus(libraries, in: app, context: "Libraries root tab")
         remote.press(.left)
-        assertFocus(app.tabBars.buttons["Home"], in: app, context: "Home root tab")
+        assertFocus(app.viewerTab("Home"), in: app, context: "Home root tab")
         for label in ["Libraries", "Live TV", "Recordings", "Channels", "Search", "Settings"] {
             remote.press(.right)
-            let tab = app.tabBars.buttons[label]
+            let tab = app.viewerTab(label)
             assertFocus(tab, in: app, context: label + " root tab")
             XCTAssertTrue(app.descendants(matching: .any)["root-screen-" + label].waitForExistence(timeout: 5),
                           label + " must display its route without Select: " + app.debugDescription)
         }
         for label in ["Search", "Channels", "Recordings", "Live TV", "Libraries", "Home"] {
             remote.press(.left)
-            assertFocus(app.tabBars.buttons[label], in: app, context: label + " reverse root tab")
+            assertFocus(app.viewerTab(label), in: app, context: label + " reverse root tab")
             XCTAssertTrue(app.descendants(matching: .any)["root-screen-" + label].waitForExistence(timeout: 5),
                           label + " must display its route without Select: " + app.debugDescription)
         }
@@ -227,7 +285,7 @@ final class TVNavigationTests: TVNavigationTestCase {
         remote.press(.menu)
         assertFocus(view, in: app, context: "Rows Back restores View")
         remote.press(.menu)
-        XCTAssertTrue(app.tabBars.buttons["Libraries"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.viewerTab("Libraries").waitForExistence(timeout: 5),
                       "Back must return to Libraries, not leave the app")
     }
 

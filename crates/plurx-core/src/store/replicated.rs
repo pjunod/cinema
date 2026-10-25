@@ -1418,20 +1418,29 @@ mod tests {
         assert_eq!(methods.len(), 114);
     }
 
+    mod source_inventory {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/support/rust_source_inventory.rs"
+        ));
+    }
+
     #[test]
     fn every_sqlite_transaction_site_is_classified() {
         let source_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store/sqlite");
-        let actual_modules = std::fs::read_dir(source_directory)
-            .expect("read SQLite module directory")
-            .map(|entry| entry.expect("SQLite module entry").path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
-            .map(|path| {
-                path.file_name()
-                    .expect("SQLite module filename")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<BTreeSet<_>>();
+
+        let actual_modules = source_inventory::production_files(
+            &source_directory,
+            &[&source_directory.join("mod.rs")],
+        )
+        .into_iter()
+        .map(|path| {
+            path.strip_prefix(&source_directory)
+                .expect("SQLite source file")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect::<BTreeSet<_>>();
         let registered_modules = SQLITE_MODULES
             .iter()
             .map(|(module, _)| (*module).to_owned())

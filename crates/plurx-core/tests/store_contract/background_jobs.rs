@@ -5155,6 +5155,7 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
         for (i, node) in ["node-a", "node-a", "node-b"].into_iter().enumerate() {
             let id = uuid::Uuid::new_v4().to_string();
             let source = JobPayload::SubtitleModelOperation {
+                translation_profile: None,
                 action: if i == 1 {
                     ModelAction::Verify
                 } else {
@@ -5234,6 +5235,7 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
                 .enqueue_job(EnqueueJob {
                     id: id.clone(),
                     payload: JobPayload::SubtitleModelOperation {
+                        translation_profile: None,
                         action: ModelAction::Verify,
                         model_id: id.clone(),
                         catalog_revision: "catalog-v1".into(),
@@ -5304,6 +5306,7 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
         assert!(
             !store
                 .publish_subtitle_model(PublishSubtitleModel {
+                    translation: None,
                     token,
                     source,
                     receipt,
@@ -5333,6 +5336,7 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
             verified_at_ms: now + 2,
         };
         let publication = PublishSubtitleModel {
+            translation: None,
             token: token.clone(),
             source,
             receipt,
@@ -5651,4 +5655,293 @@ async fn managed_caption_execution_provenance_survives_publish_reopen_and_legacy
         serde_json::from_value::<SubtitleTranscription>(unknown).is_err(),
         "execution extension is closed"
     );
+}
+
+#[tokio::test]
+async fn progressive_translation_source_bind_publication_stop_and_read_leases_share_one_store_fence(
+) {
+    use plurx_core::store::{
+        subtitle_translation::{
+            cue_id, ExecutionProvenance, RangeRecipe, SegmentDraft, SourceRevision, TranslationCue,
+            TranslationProfile,
+        },
+        subtitle_translation_mutation::{TranslationAction, TranslationMutation},
+        subtitle_translation_publication::{BindTranslationSource, PublishTranslationSegment},
+        subtitle_translation_read::{AcquireTranslationLease, TranslationQuery, TranslationRead},
+        subtitle_translation_settings::{
+            settings_revision, TranslationSettings, TranslationSettingsWrite,
+        },
+    };
+    for_each_backend(|store, backend| async move {
+        let boot = uuid::Uuid::new_v4().to_string();
+        let (_, id) = seed_file(&store, "progressive-translation").await;
+        let user = store
+            .create_user("translation-admin", "hash", true)
+            .await
+            .expect("admin");
+        let file = store.get_file(id).await.expect("file").expect("file");
+        store
+            .upsert_file(
+                file.item_id,
+                &file.path.to_string_lossy(),
+                file.size,
+                file.mtime,
+                &plurx_core::domain::ProbeResult {
+                    raw_json: Some("{}".into()),
+                    duration_ms: Some(61000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("complete probe");
+        let settings_id = uuid::Uuid::new_v4().to_string();
+        let saved = store
+            .write_translation_settings(TranslationSettingsWrite {
+                user_id: user.id,
+                request_id: settings_id.clone(),
+                request_digest: "1".repeat(64),
+                intent_expires_at_ms: 300000,
+                now_ms: 1000,
+                expected_revision: settings_revision(None).expect("absent"),
+                expected_raw: None,
+                settings: TranslationSettings {
+                    version: 1,
+                    revision: settings_id,
+                    enabled: true,
+                    model_id: None,
+                    profile_id: None,
+                    preferred_spoken_language: None,
+                },
+            })
+            .await
+            .expect("save unready");
+        assert_eq!(saved["outcome"], "saved", "{backend}");
+        let profile = TranslationProfile {
+            version: 1,
+            model_id: "small".into(),
+            model_sha256: "a".repeat(64),
+            adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+            pipeline_revision: "translation-window-v1".into(),
+            core_ms: 30000,
+            left_context_ms: 5000,
+            right_context_ms: 5000,
+            timeline_contract: "source-audio-clock-v1".into(),
+        };
+        let source = SourceRevision {
+            file_id: id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+        };
+        let input = TranslationMutation {
+            user_id: user.id,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            request_digest: "2".repeat(64),
+            intent_expires_at_ms: 300000,
+            now_ms: 1100,
+            action: TranslationAction::Create {
+                source: source.clone(),
+                profile: profile.clone(),
+                audio_index: 0,
+                spoken_language: "de".into(),
+                duration_ms: 61000,
+                target_node_id: "worker".into(),
+                playback_id: uuid::Uuid::new_v4().to_string(),
+                position_ms: 0,
+                playback_rate: 1.0,
+                paused: false,
+            },
+        };
+        let accepted = store
+            .mutate_subtitle_translation(input.clone())
+            .await
+            .expect("create");
+        assert_eq!(accepted["outcome"], "accepted", "{backend}");
+        let op = accepted["operation_id"]
+            .as_str()
+            .expect("operation")
+            .to_owned();
+        let prep = store
+            .background_job(accepted["job_id"].as_str().expect("prep"))
+            .await
+            .expect("job")
+            .expect("job");
+        let claimed = store
+            .claim_artifact_job(ClaimJob {
+                job_id: prep.id.clone(),
+                expected_revision: prep.revision,
+                node_id: "worker".into(),
+                boot_id: boot.clone(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::SubtitleTranslationPrepare,
+                payload_version: 1,
+                now_ms: 1200,
+                dispatched_at_ms: 1200,
+            })
+            .await
+            .expect("claim");
+        let ClaimOutcome::Claimed { job } = claimed else {
+            panic!("{backend}: {claimed:?}");
+        };
+        assert!(
+            store
+                .bind_translation_source(BindTranslationSource {
+                    token: job.token.expect("token"),
+                    source: prep.supported_payload().expect("payload"),
+                    source_sha256: "b".repeat(64),
+                    local_identity: "held-current-boot".into(),
+                    now_ms: 1300
+                })
+                .await
+                .expect("bind"),
+            "{backend}"
+        );
+        let asset = store
+            .read_subtitle_translation(TranslationRead {
+                user_id: user.id,
+                now_ms: 1400,
+                query: TranslationQuery::Operation {
+                    operation_id: op.clone(),
+                },
+            })
+            .await
+            .expect("operation")[0]["asset_id"]
+            .as_str()
+            .expect("asset")
+            .to_owned();
+        let recipe = RangeRecipe {
+            asset_id: asset.clone(),
+            operation_id: op.clone(),
+            operation_epoch: 1,
+            source,
+            source_sha256: "b".repeat(64),
+            profile: profile.clone(),
+            audio_index: 0,
+            spoken_language: "de".into(),
+            duration_ms: 61000,
+            core_index: 0,
+        };
+        let jobid = uuid::Uuid::new_v4().to_string();
+        let payload = JobPayload::SubtitleTranslationRange {
+            file_id: id,
+            recipe: recipe.clone(),
+            target_node_id: "worker".into(),
+        };
+        store
+            .enqueue_job(EnqueueJob {
+                id: jobid.clone(),
+                payload: payload.clone(),
+                dedupe_key: jobid.clone(),
+                priority: 1,
+                not_before_ms: 1400,
+                now_ms: 1400,
+                request: JobRequest {
+                    scope: "translation".into(),
+                    request_id: jobid.clone(),
+                    request_digest: "3".repeat(64),
+                    consumer_kind: "subtitle_translation_range".into(),
+                    consumer_ref: op.clone(),
+                    target_node_id: Some("worker".into()),
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("range");
+        let candidate = store
+            .background_job(&jobid)
+            .await
+            .expect("job")
+            .expect("job");
+        let claimed = store
+            .claim_artifact_job(ClaimJob {
+                job_id: jobid,
+                expected_revision: candidate.revision,
+                node_id: "worker".into(),
+                boot_id: boot.clone(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::SubtitleTranslationRange,
+                payload_version: 1,
+                now_ms: 1500,
+                dispatched_at_ms: 1500,
+            })
+            .await
+            .expect("claim range");
+        let ClaimOutcome::Claimed { job } = claimed else {
+            panic!("{backend}: {claimed:?}");
+        };
+        let token = job.token.expect("token");
+        let segment = SegmentDraft {
+            asset_id: asset.clone(),
+            core_index: 0,
+            start_ms: 0,
+            end_ms: 30000,
+            cues: vec![TranslationCue {
+                cue_id: cue_id(&asset, 0, 0, 0, 1000, "Literal & <caption>").expect("cue id"),
+                start_ms: 0,
+                end_ms: 1000,
+                text: "Literal & <caption>".into(),
+            }],
+            provenance: ExecutionProvenance {
+                engine_sha256: "c".repeat(64),
+                model_sha256: profile.model_sha256.clone(),
+                operation_epoch: 1,
+                platform: "linux-x86_64".into(),
+                profile_id: profile.id().expect("profile"),
+                source_sha256: "b".repeat(64),
+                worker_fence: token.fence,
+            },
+        };
+        assert!(
+            store
+                .publish_translation_segment(PublishTranslationSegment {
+                    token,
+                    source: payload,
+                    segment,
+                    now_ms: 1600
+                })
+                .await
+                .expect("publish"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .acquire_translation_lease(AcquireTranslationLease {
+                    user_id: user.id,
+                    asset_id: asset,
+                    now_ms: 1700
+                })
+                .await
+                .expect("lease")
+                .is_some(),
+            "{backend}"
+        );
+        store
+            .maintain_translation_cache(1800)
+            .await
+            .expect("bounded cache upkeep");
+        let stop = store
+            .mutate_subtitle_translation(TranslationMutation {
+                user_id: user.id,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request_digest: "4".repeat(64),
+                intent_expires_at_ms: 300000,
+                now_ms: 1900,
+                action: TranslationAction::Stop {
+                    operation_id: op,
+                    expected_operation_epoch: 1,
+                },
+            })
+            .await
+            .expect("Stop");
+        assert_eq!(stop["state"], "stopped", "{backend}");
+        assert_eq!(
+            store
+                .mutate_subtitle_translation(input)
+                .await
+                .expect("replay"),
+            accepted,
+            "{backend}"
+        );
+    })
+    .await;
 }

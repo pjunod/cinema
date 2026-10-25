@@ -73,7 +73,7 @@ function hasPendingPlaybackOpen(p){
 // media events/clock samples as playback evidence or trigger automatic work.
 // Transport/selection commands deliberately use desired PLAYER independently.
 function playbackOwnsAttachedMedia(p){
-  return !!p&&PLAYER===p&&!p.pendingMediaChange&&!hasPendingPlaybackOpen(p);
+  return !!p&&PLAYER===p&&!p.playPermissionDenied&&!p.pendingMediaChange&&!hasPendingPlaybackOpen(p);
 }
 // Always released, including on failure: a 5xx on the replacement session must
 // leave Auto able to try again rather than wedging every later rescue.
@@ -586,7 +586,7 @@ async function autoControllerTick(){
   if(stallFree&&now-p.abr.stableSinceMs>=windowMs) rememberAutoRung(currentHeight);
 }
 function candidateQualityContext(p){
-  const caps=currentCapsDocument();
+  const caps=currentCapsDocument(p);
   return JSON.stringify({video:caps.video,display:caps.display,
     audio:selectedAudioIndex(p),subtitle:p.curSub,burn:p.burnedSub,offset:p.aoffset});
 }
@@ -604,6 +604,10 @@ async function refreshQualityCandidates(p){
   if(p.abr.catalogRefreshing||p.directedChange&&!p.directedChange.settled) return false;
   p.abr.catalogRefreshing=true;
   const attachment=p.mediaAttachment, intent=p.controlIntentGeneration;
+  const retainedProcessed=qualityCatalogSelectionCurrent(p)
+    &&p.abr.requestedCandidateId===p.qualityCandidateId
+    ?(p.qualityCandidates||[]).find(candidate=>candidate.id===p.qualityCandidateId
+      &&candidate.processed_hdr10===true):null;
   try{
     const decision=await askDecision(playbackFileContextForPlayer(p),qualityForce(),
       {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},null,p);
@@ -612,10 +616,20 @@ async function refreshQualityCandidates(p){
     p.qualityCandidates=Array.isArray(decision.quality_candidates)
       ?continuousQualityBoundCatalog(decision.quality_candidates,p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null):null;
     p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
-    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
+    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument(p);
     p.abr.candidateContext=key;
     p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
-    p.abr.requestedCandidateId=null;
+    // Dropping this exact running recipe changes named Auto into unnamed
+    // Auto on the next control exchange. Its ordinary replan can replace
+    // HDR10-E with the source's HDR10 base despite no viewer selection change.
+    // Retain it only while the refreshed destination still admits its bytes.
+    p.abr.requestedCandidateId=retainedProcessed
+      &&Array.isArray(retainedProcessed.recipe_digest)&&retainedProcessed.recipe_digest.length===32
+      &&(p.qualityCandidates||[]).some(candidate=>candidate.id===retainedProcessed.id
+        &&candidate.processed_hdr10===true&&candidate.decoder_compatible===true
+        &&Array.isArray(candidate.recipe_digest)&&candidate.recipe_digest.length===32
+        &&candidate.recipe_digest.every((byte,index)=>byte===retainedProcessed.recipe_digest[index]))
+      ?retainedProcessed.id:null;
     if(p.abr.candidateState) p.abr.candidateState.upgradeSinceMs=null;
     return Array.isArray(p.qualityCandidates);
   }catch(e){ return false; }
@@ -734,7 +748,7 @@ async function naturalBoundaryQualityCandidate(p,seekIntent){
       aspect:current?current.width/current.height:null,
       transfer:candidateTransferEvidence(p,now),linkLimitBps:limit});
     p.qualityCandidates=candidates;
-    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
+    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument(p);
     p.abr.candidateContext=candidateQualityContext(p);
     p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
     p.abr.candidateState={...(p.abr.candidateState||{}),switchTimesMs:[],upgradeSinceMs:null,mildSamples:0};
@@ -831,6 +845,21 @@ async function switchAutoCandidate(p,v,current,decision){
     p.abr.requestedCandidateId=chosen.id;
     p.autoRequestedHeight=null;
     p.abr.switching=true;
+    // Record the request before preparation can fail or be superseded. The
+    // completed-switch receipt alone loses the cause of a failed trial.
+    const pressure=p.abr.qualityPressureTransfer, now=performance.now();
+    const pressureKbps=pressure?.attachment===p.mediaAttachment
+      &&now-pressure.atMs>=0&&now-pressure.atMs<=15000
+      &&Number.isFinite(pressure.bps)&&pressure.bps>0
+      ?Math.round(pressure.bps/1000):null;
+    const transferBps=PlaybackPolicy.qualityTransferBps(candidateTransferEvidence(p,now));
+    const encode=p.health&&p.health.active_encode_milli_realtime;
+    clientLog(Object.assign({level:'info',event:'auto_quality_decision',
+      detail:`requested ${move.from} → ${move.to}: ${decision.reason}`,
+      message:`Auto quality trial requested — ${decision.reason}; `+
+        `completed_kbps=${transferBps>0?Math.round(transferBps/1000):'unknown'}; `+
+        `pressure_kbps=${pressureKbps??'unknown'}; encode_milli_realtime=${encode??'unknown'}`},
+      playbackContext()));
     const outcome=await requestQualityChange(p,'auto-quality',reopen,move,standingSelection);
     if(outcome==='continuous'&&p.directedChange&&!p.directedChange.settled){
       retained=true;
@@ -854,7 +883,7 @@ async function switchAutoCandidate(p,v,current,decision){
 // on "Buffering…" forever. A seek gets a shorter grace than a cold start: the
 // file is already open on the server, so 20s of nothing is already wrong.
 function armStall(fromSec, graceMs){
-  clearStall(); if(!PLAYER) return;
+  clearStall(); if(!PLAYER||PLAYER.playPermissionDenied) return;
   configureHlsStartupDeadline(PLAYER,graceMs||PlaybackPolicy.HLS_STARTUP.cold_deadline_ms);
   if(PLAYER.samplingStopped) armPlaybackSampling(document.getElementById("video"),PLAYER);
   PLAYER.stallFrom=(fromSec!=null)?fromSec:pbPosSec();
@@ -875,6 +904,23 @@ function retryPlayback(){
   }
   if(!PLAYER) return;
   const t=(PLAYER.stallFrom!=null)?PLAYER.stallFrom:pbPosSec();
+  if(PLAYER.playPermissionDenied){
+    // The stopped owner is already retired. Reset the SAME element within the
+    // retry gesture, before play can await a replacement session. WebKit's
+    // explicit load records permission; no placeholder or muted play is needed.
+    const video=document.getElementById("video");
+    if(!video||video!==PLAYER.playPermissionDenied.element) return;
+    const p=PLAYER;
+    // stallFrom survives startup and old seeks. Once playback has started,
+    // retry from the current file clock, not that historical/global position.
+    const targetMs=p.controlSeek?.targetMs??Math.round(
+      (p.started?positionForPlaybackIntent(video,p):t)*1000);
+    const retry={wantsPlayback:p.wantsPlayback,selection:playbackSelection(p,playbackFileContextForPlayer(p)),
+      audioOffsetMs:p.aoffset||0,controlSeek:p.controlSeek};
+    resetMediaSource(video);
+    PENDING_ATTEMPT_REASON="retry";
+    return play(p.fileId,p.title||"",targetMs,p.knownDur||0,p.meta,null,retry);
+  }
   raisePlaybackSurface("owner_recovery_step",{title:"Retrying…",detail:null});
   seekTo(t,true);
 }
@@ -887,11 +933,16 @@ async function stallDiagnose(){
   const pending=p&&p.controlSeek;
   if(pending?.localVodSeekFallbackPending&&pending.executed
      &&!playbackSeekBufferCovers(v,p,pending.targetMs)) return;
+  // Startup and stall timers can both be due for the same attachment. A
+  // terminal diagnosis retires its startup episode, so a queued watchdog must
+  // not reinterpret that cancelled episode as a fresh generic source stall.
+  if(playbackAttemptTerminallyStopped(p)) return;
   const hlsStartup=hlsStartupIncomplete(p);
   if(!playbackOwnsAttachedMedia(p) || (!hlsStartup&&p.started)) return;
   if(hlsStartup&&p.hlsStartup.state==='paused') return;
   const generation=p._seekToken||0, action=p.controlIntentGeneration||0, attachment=p.mediaAttachment;
   const current=()=>playbackOwnsAttachedMedia(p)&&(hlsStartupIncomplete(p)||!p.started)
+    &&!playbackAttemptTerminallyStopped(p,attachment)
     &&p.mediaAttachment===attachment
     &&(p._seekToken||0)===generation
     &&(p.controlIntentGeneration||0)===action;

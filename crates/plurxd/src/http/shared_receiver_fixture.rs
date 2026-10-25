@@ -1,7 +1,7 @@
 //! Real selected-store fixtures for B-to-Source playback qualification.
 //! These helpers install only the production pre-serving factories.
 use super::shared_source_playback::{
-    real_source_start_fixture_with, RealSourceStartFixture, SourceFixtureMode,
+    real_source_start_fixture_with_budget, RealSourceStartFixture, SourceFixtureMode,
 };
 use axum::{body::Body, http::Request, response::IntoResponse};
 use plurx_core::{
@@ -30,20 +30,31 @@ pub(crate) fn real_receiver_fixture(
     address: IpAddr,
     mode: SourceFixtureMode,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealReceiverFixture> + Send>> {
-    Box::pin(build_receiver_fixture(address, mode, None))
+    Box::pin(async move {
+        let fixture_body_budget =
+            crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+        build_receiver_fixture(address, mode, None, fixture_body_budget).await
+    })
 }
 
 fn real_receiver_fixture_at(
     address: IpAddr,
     mode: SourceFixtureMode,
     advertised_http: std::net::SocketAddr,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealReceiverFixture> + Send>> {
-    Box::pin(build_receiver_fixture(address, mode, Some(advertised_http)))
+    Box::pin(build_receiver_fixture(
+        address,
+        mode,
+        Some(advertised_http),
+        fixture_body_budget,
+    ))
 }
 async fn build_receiver_fixture(
     address: IpAddr,
     mode: SourceFixtureMode,
     advertised_http: Option<std::net::SocketAddr>,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealReceiverFixture {
     let directory = crate::test_tempdir().expect("real B directory");
     let mut config = Config::default();
@@ -87,7 +98,9 @@ async fn build_receiver_fixture(
         .sharing_identity(crate::state::clock_ms())
         .await
         .expect("actual B sharing identity");
-    let source = real_source_start_fixture_with(mode, Some(identity.server_id)).await;
+    let source =
+        real_source_start_fixture_with_budget(mode, Some(identity.server_id), fixture_body_budget)
+            .await;
     let mut state = super::source_actor_test_state();
     state.store = Arc::clone(&selected.store);
     state.node_id = selected.identity.node_id.clone();
@@ -293,7 +306,7 @@ impl RealReceiverFixture {
         if let Some(clock) = &self.startup_clock {
             clock.stop_and_drain().await;
         }
-        self.source.shutdown().await;
+        let _fixture_body_budget = self.source.shutdown_retaining_fixture_budget().await;
         self.selected
             .shutdown()
             .await
@@ -393,6 +406,8 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
         .expect("fixture IP");
     assert!(plurx_core::sharing::is_tailnet_address(address));
     for h2 in [false, true] {
+        let fixture_body_budget =
+            crate::transcode::TranscodeManager::source_fixture_body_budget().await;
         tokio::time::timeout(
             std::time::Duration::from_secs(330),
             Box::pin(actual_pinned_playback(
@@ -400,11 +415,14 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
                 h2,
                 SourceFixtureMode::Copy,
                 None,
+                fixture_body_budget,
             )),
         )
         .await
         .expect("bounded real playback fixture");
     }
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
     tokio::time::timeout(
         std::time::Duration::from_secs(330),
         Box::pin(actual_pinned_playback(
@@ -412,10 +430,13 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
             false,
             SourceFixtureMode::Copy,
             Some(false),
+            fixture_body_budget,
         )),
     )
     .await
     .expect("retained TLS End refusal reaches approved replacement");
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
     tokio::time::timeout(
         std::time::Duration::from_secs(330),
         Box::pin(actual_pinned_playback(
@@ -423,6 +444,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
             false,
             SourceFixtureMode::Copy,
             Some(true),
+            fixture_body_budget,
         )),
     )
     .await
@@ -439,9 +461,17 @@ async fn sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b(
     assert!(plurx_core::sharing::is_tailnet_address(address));
     for mode in [SourceFixtureMode::Encoded, SourceFixtureMode::NativeCopy] {
         for h2 in [false, true] {
+            let fixture_body_budget =
+                crate::transcode::TranscodeManager::source_fixture_body_budget().await;
             tokio::time::timeout(
                 std::time::Duration::from_secs(330),
-                Box::pin(actual_pinned_playback(address, h2, mode, None)),
+                Box::pin(actual_pinned_playback(
+                    address,
+                    h2,
+                    mode,
+                    None,
+                    fixture_body_budget,
+                )),
             )
             .await
             .expect("bounded real playback fixture");
@@ -497,10 +527,11 @@ async fn actual_pinned_playback(
     h2: bool,
     mode: SourceFixtureMode,
     endpoint_failure: Option<bool>,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) {
     use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
-    let fixture = real_receiver_fixture(address, mode).await;
+    let fixture = build_receiver_fixture(address, mode, None, fixture_body_budget).await;
     let tls = Arc::new(
         LiveNodeTls::open(
             &fixture.directory().join("source-runtime-tls"),
@@ -1145,9 +1176,11 @@ async fn sharing_receiver_real_pinned_quality_reopen_preserves_position_and_rele
         .parse()
         .expect("fixture IP");
     assert!(plurx_core::sharing::is_tailnet_address(address));
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
     tokio::time::timeout(
         std::time::Duration::from_secs(330),
-        Box::pin(actual_pinned_reopen(address)),
+        Box::pin(actual_pinned_reopen(address, fixture_body_budget)),
     )
     .await
     .expect("bounded real reopen fixture");
@@ -1158,9 +1191,12 @@ async fn sharing_receiver_real_pinned_quality_reopen_preserves_position_and_rele
 /// its position, B publishes that successor before it supersedes the
 /// predecessor, and the predecessor retires through its single owner with a
 /// confirmed Source End that frees its Source slot.
-async fn actual_pinned_reopen(address: IpAddr) {
+async fn actual_pinned_reopen(
+    address: IpAddr,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
+) {
     use axum::http::StatusCode;
-    let pair = PinnedPair::start(address).await;
+    let pair = PinnedPair::start(address, fixture_body_budget).await;
     let (fixture, b_address, login, base, session) = (
         &pair.fixture,
         pair.b_address,
@@ -1391,10 +1427,15 @@ struct PinnedPair {
 }
 
 impl PinnedPair {
-    async fn start(address: IpAddr) -> Self {
+    async fn start(
+        address: IpAddr,
+        fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
         use axum::http::StatusCode;
         use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
-        let fixture = real_receiver_fixture(address, SourceFixtureMode::Copy).await;
+        let fixture =
+            build_receiver_fixture(address, SourceFixtureMode::Copy, None, fixture_body_budget)
+                .await;
         let tls = Arc::new(
             LiveNodeTls::open(
                 &fixture.directory().join("source-runtime-tls"),
@@ -1554,9 +1595,15 @@ async fn sharing_receiver_real_pinned_prepared_handoff_commit_and_abort() {
         .expect("fixture IP");
     assert!(plurx_core::sharing::is_tailnet_address(address));
     for h2 in [false, true] {
+        let fixture_body_budget =
+            crate::transcode::TranscodeManager::source_fixture_body_budget().await;
         tokio::time::timeout(
             std::time::Duration::from_secs(330),
-            Box::pin(actual_pinned_prepared_handoff(address, h2)),
+            Box::pin(actual_pinned_prepared_handoff(
+                address,
+                h2,
+                fixture_body_budget,
+            )),
         )
         .await
         .expect("bounded real prepared handoff fixture");
@@ -1679,10 +1726,14 @@ async fn wait_source_sessions(pair: &PinnedPair, expected: i64, what: &str) {
 /// commit, settles a commit exactly (replayed byte-identical, predecessor
 /// retired with a confirmed Source End), and an abort frees the successor's
 /// Source slot and refuses a late commit.
-async fn actual_pinned_prepared_handoff(address: IpAddr, h2: bool) {
+async fn actual_pinned_prepared_handoff(
+    address: IpAddr,
+    h2: bool,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
+) {
     use crate::playback_control::{ControlAction, QualitySelection};
     use axum::http::StatusCode;
-    let pair = PinnedPair::start(address).await;
+    let pair = PinnedPair::start(address, fixture_body_budget).await;
     let (status, _, bytes) = b_request(
         pair.b_address,
         h2,
@@ -1720,6 +1771,7 @@ async fn actual_pinned_prepared_handoff(address: IpAddr, h2: bool) {
         control,
         media_origin_ms,
         effective_selection,
+        ..
     } = watched.offered(&directed).await
     else {
         panic!("an offered preparation carries prepare");
@@ -1905,9 +1957,11 @@ async fn sharing_receiver_real_pinned_source_direct_range_head_through_b() {
         .expect("fixture IP");
     assert!(plurx_core::sharing::is_tailnet_address(address));
     for h2 in [false, true] {
+        let fixture_body_budget =
+            crate::transcode::TranscodeManager::source_fixture_body_budget().await;
         tokio::time::timeout(
             std::time::Duration::from_secs(330),
-            Box::pin(actual_pinned_direct(address, h2)),
+            Box::pin(actual_pinned_direct(address, h2, fixture_body_budget)),
         )
         .await
         .expect("bounded real direct fixture");
@@ -1918,11 +1972,21 @@ async fn sharing_receiver_real_pinned_source_direct_range_head_through_b() {
 /// HEAD, Range, 416 and If-Range relayed with Local's exact answers, all on
 /// one Source claim; foreign and missing bindings refused; logout ends an
 /// open body.
-async fn actual_pinned_direct(address: IpAddr, h2: bool) {
+async fn actual_pinned_direct(
+    address: IpAddr,
+    h2: bool,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
+) {
     use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    let fixture = real_receiver_fixture(address, SourceFixtureMode::Direct).await;
+    let fixture = build_receiver_fixture(
+        address,
+        SourceFixtureMode::Direct,
+        None,
+        fixture_body_budget,
+    )
+    .await;
     let tls = Arc::new(
         LiveNodeTls::open(
             &fixture.directory().join("source-runtime-tls"),

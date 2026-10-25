@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Create/validate an exact-byte, detached Ed25519 desktop release feed.
+
+Run this trusted packaging-tree tool only after all nine native assets have
+passed their build/package checks. Signing keys are explicit files supplied by
+the protected release job; this tool never generates, selects or downloads keys.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+
+REPOSITORY = "pjunod/cinema"
+MANIFEST = "plurx-update-v1.json"
+MAX_ARTIFACT_BYTES = 8 * 1024**3
+HEX = re.compile(r"[0-9a-f]{40}")
+VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+FIELDS = {"schema_version", "repository", "channel", "tag", "version", "sequence", "source_commit", "source_tree", "packaging_commit", "created_unix", "expires_unix", "upgrade_from", "data_compatibility", "cluster_compatibility", "minimum_controller", "rollback", "release_notes_url", "artifacts"}
+ARTIFACT_FIELDS = {"name", "platform", "architecture", "format", "component", "package_name", "package_version", "size", "sha256"}
+
+
+def expected(version):
+    result = []
+    for arch, rpm_arch in [("amd64", "x86_64"), ("arm64", "aarch64")]:
+        for component, package in [("server", "plurxd"), ("desktop", "plurx-desktop")]:
+            for fmt, name in [("deb", f"{package}_{version}-1_{arch}.deb"), ("rpm", f"{package}-{version}-1.{rpm_arch}.rpm")]:
+                result.append(dict(name=name, platform="linux", architecture=arch, format=fmt,
+                                   component=component, package_name=package, package_version=f"{version}-1"))
+    result.append(dict(name=f"plurxd-{version}-macos-universal.tar.gz", platform="macos", architecture="universal", format="tar_gz", component="native_runtime", package_name="plurx-native", package_version=version))
+    return sorted(result, key=lambda x: x["name"])
+
+
+def digest(path):
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"not a regular release artifact: {path.name}")
+    size = path.stat().st_size
+    if not 0 < size <= MAX_ARTIFACT_BYTES:
+        raise ValueError(f"invalid release artifact size: {path.name}")
+    sha = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            sha.update(block)
+    if path.stat().st_size != size:
+        raise ValueError("artifact changed during hashing")
+    return {"size": size, "sha256": sha.hexdigest()}
+
+
+def validate(value):
+    if not isinstance(value, dict) or set(value) != FIELDS:
+        raise ValueError("unexpected manifest fields")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1 or value["repository"] != REPOSITORY or value["channel"] != "stable":
+        raise ValueError("unsupported feed identity")
+    version = value["version"]
+    if not isinstance(version, str) or VERSION.fullmatch(version) is None or value["tag"] != f"v{version}":
+        raise ValueError("invalid release version/tag")
+    for field in ["source_commit", "source_tree", "packaging_commit"]:
+        if not isinstance(value[field], str) or HEX.fullmatch(value[field]) is None:
+            raise ValueError(f"invalid {field}")
+    for field in ["sequence", "created_unix", "expires_unix"]:
+        if type(value[field]) is not int or value[field] <= 0:
+            raise ValueError(f"invalid {field}")
+    if not value["created_unix"] < value["expires_unix"] <= value["created_unix"] + 90 * 86400:
+        raise ValueError("feed validity must be between zero and 90 days")
+    if value["rollback"] not in ["binary_compatible", "manual_recovery"]:
+        raise ValueError("invalid rollback classification")
+    if value["release_notes_url"] != f"https://github.com/{REPOSITORY}/releases/tag/v{version}":
+        raise ValueError("unexpected release notes origin")
+    if not isinstance(value["minimum_controller"], str) or VERSION.fullmatch(value["minimum_controller"]) is None:
+        raise ValueError("invalid minimum controller")
+    if not isinstance(value["upgrade_from"], list) or not value["upgrade_from"] or len(value["upgrade_from"]) > 16:
+        raise ValueError("missing upgrade compatibility")
+    for requirement in value["upgrade_from"]:
+        if not isinstance(requirement, str) or not requirement or len(requirement) > 128 or any(ord(c) < 32 for c in requirement):
+            raise ValueError("invalid upgrade compatibility requirement")
+        if any(re.fullmatch(r"\s*(?:>=|<=|>|<|=|~|\^)?\s*(?:\*|[0-9]+(?:\.(?:[0-9]+|[xX*])){0,2})\s*", clause) is None for clause in requirement.split(",")):
+            raise ValueError("unsupported upgrade compatibility requirement")
+    for field in ["data_compatibility", "cluster_compatibility"]:
+        if not isinstance(value[field], str) or not 1 <= len(value[field]) <= 128 or any(ord(c) < 32 for c in value[field]):
+            raise ValueError(f"missing {field}")
+    artifacts = value["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) != 9:
+        raise ValueError("a release must include the complete nine-asset native cohort")
+    identities = expected(version)
+    if [a.get("name") for a in artifacts if isinstance(a, dict)] != [a["name"] for a in identities]:
+        raise ValueError("missing, duplicated or unexpected native artifact")
+    for artifact, identity in zip(artifacts, identities):
+        if set(artifact) != ARTIFACT_FIELDS or any(artifact[k] != v for k, v in identity.items()):
+            raise ValueError("artifact/package identity mismatch")
+        if type(artifact["size"]) is not int or not 0 < artifact["size"] <= MAX_ARTIFACT_BYTES or not isinstance(artifact["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"]) is None:
+            raise ValueError("invalid artifact hash/size")
+    return value
+
+
+def inspect_artifact(path, identity):
+    """Read package metadata without executing any package code or extracting it."""
+    if identity["format"] == "deb":
+        observed = subprocess.check_output(["dpkg-deb", "--field", str(path), "Package", "Version", "Architecture"], timeout=30, text=True)
+        fields = dict(line.split(": ", 1) for line in observed.splitlines())
+        expected_fields = {"Package": identity["package_name"], "Version": identity["package_version"], "Architecture": identity["architecture"]}
+        if fields != expected_fields:
+            raise ValueError("deb payload identity differs from signed cohort")
+    elif identity["format"] == "rpm":
+        observed = subprocess.check_output(["rpm", "-qp", "--queryformat", "%{NAME}\n%{VERSION}-%{RELEASE}\n%{ARCH}\n", str(path)], timeout=30, text=True)
+        architecture = {"amd64": "x86_64", "arm64": "aarch64"}[identity["architecture"]]
+        if observed.splitlines() != [identity["package_name"], identity["package_version"], architecture]:
+            raise ValueError("rpm payload identity differs from signed cohort")
+    else:
+        required = {"runtime/plurxd", "runtime/ffmpeg", "runtime/ffprobe", "runtime/plurx-source-parser.wasm", "runtime/subtitle-engine/subtitle-engine.json", "control/plurx-control", "control/plurx-install-helper", "control/plurx-update-worker", "control/plurx-service-launch", "control/plurx-recovery", "runtime-closure-v1.json", "release.json", "Plurx Server.app/Contents/Info.plist", "provenance/desktop-release.json", "install"}
+        found = set()
+        total = 0
+        prefix = path.name.removesuffix(".tar.gz") + "/"
+        with tarfile.open(path, "r:gz") as archive:
+            for count, member in enumerate(archive):
+                if count > 100000 or member.name.startswith("/") or ".." in Path(member.name).parts or not (member.name == prefix.rstrip("/") or member.name.startswith(prefix)):
+                    raise ValueError("unsafe native runtime archive member")
+                if not (member.isfile() or member.isdir()):
+                    raise ValueError("native runtime archive may contain only regular files/directories")
+                total += member.size
+                if total > MAX_ARTIFACT_BYTES * 2:
+                    raise ValueError("native runtime archive exceeds unpacked bound")
+                if member.isfile() and member.name.startswith(prefix):
+                    found.add(member.name[len(prefix):])
+        if not required <= found:
+            raise ValueError("native runtime archive is missing runtime/desktop companions")
+
+
+def signing_public_key(path):
+    public = subprocess.check_output(["openssl", "pkey", "-in", str(path), "-pubout", "-outform", "DER"], timeout=30)
+    if len(public) != 44 or public[:12] != bytes.fromhex("302a300506032b6570032100"):
+        raise ValueError("signing key is not an Ed25519 key")
+    return public[12:].hex()
+
+
+def trusted_roots(path):
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
+        raise ValueError("production roots must be a bounded regular approved file")
+    def pairs(items):
+        value = {}
+        for key, member in items:
+            if key in value:
+                raise ValueError("duplicate production root key")
+            value[key] = member
+        return value
+    value = json.loads(path.read_bytes(), object_pairs_hook=pairs)
+    if not isinstance(value, dict) or set(value) != {"schema_version", "repository", "keys"} or type(value["schema_version"]) is not int or value["schema_version"] != 1 or value["repository"] != REPOSITORY or not isinstance(value["keys"], list) or not 1 <= len(value["keys"]) <= 16:
+        raise ValueError("production update trust roots are absent, empty or malformed")
+    identifiers, keys = set(), set()
+    for entry in value["keys"]:
+        if not isinstance(entry, dict) or set(entry) != {"id", "public_key_hex"} or not isinstance(entry["id"], str) or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", entry["id"]) is None or not isinstance(entry["public_key_hex"], str) or re.fullmatch(r"[0-9a-f]{64}", entry["public_key_hex"]) is None or entry["id"] in identifiers or entry["public_key_hex"] in keys:
+            raise ValueError("invalid/duplicate production update root")
+        identifiers.add(entry["id"])
+        keys.add(entry["public_key_hex"])
+    return value
+
+
+def create(args):
+    public_key = signing_public_key(args.signing_key) if args.signing_key else None
+    if getattr(args, "production", False):
+        files = getattr(args, "trusted_roots", None)
+        if public_key is None or not files or len(files) < 2:
+            raise ValueError("production signing requires the signing key and both approved packaging/candidate root files")
+        roots = [trusted_roots(path) for path in files]
+        if any(value != roots[0] for value in roots[1:]):
+            raise ValueError("candidate and approved packaging production trust roots differ")
+        if public_key not in {entry["public_key_hex"] for entry in roots[0]["keys"]}:
+            raise ValueError("production signing key is not pinned by the candidate controller")
+    artifacts = []
+    for identity in expected(args.version):
+        path = args.assets / identity["name"]
+        if args.inspect_packages:
+            inspect_artifact(path, identity)
+        artifacts.append(identity | digest(path))
+    value = dict(schema_version=1, repository=REPOSITORY, channel="stable", tag=f"v{args.version}",
+                 version=args.version, sequence=args.sequence, source_commit=args.source_commit,
+                 source_tree=args.source_tree, packaging_commit=args.packaging_commit,
+                 created_unix=args.created_unix, expires_unix=args.expires_unix,
+                 upgrade_from=args.upgrade_from, data_compatibility=args.data_compatibility,
+                 cluster_compatibility=args.cluster_compatibility, minimum_controller=args.minimum_controller,
+                 rollback=args.rollback, release_notes_url=f"https://github.com/{REPOSITORY}/releases/tag/v{args.version}", artifacts=artifacts)
+    validate(value)
+    args.output.write_bytes((json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
+    if args.signing_key:
+        # OpenSSL 3's rawin Ed25519 signs the exact file bytes, with no digest
+        # parameter and no JSON parse/re-serialization between sign and verify.
+        signature = args.output.with_name(args.output.name + ".sig")
+        subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(args.signing_key), "-in", str(args.output), "-out", str(signature)], check=True, timeout=30)
+        if signature.stat().st_size != 64:
+            signature.unlink(missing_ok=True)
+            raise ValueError("signing key is not an Ed25519 key")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--validate", type=Path)
+    parser.add_argument("--assets", type=Path)
+    parser.add_argument("--output", type=Path)
+    for flag in ["version", "source-commit", "source-tree", "packaging-commit", "data-compatibility", "cluster-compatibility", "minimum-controller", "rollback"]:
+        parser.add_argument("--" + flag)
+    for flag in ["sequence", "created-unix", "expires-unix"]:
+        parser.add_argument("--" + flag, type=int)
+    parser.add_argument("--upgrade-from", action="append")
+    parser.add_argument("--signing-key", type=Path)
+    parser.add_argument("--production", action="store_true", help="require signer pinned in approved packaging and exact candidate production roots")
+    parser.add_argument("--trusted-roots", type=Path, action="append")
+    parser.add_argument("--inspect-packages", action="store_true", help="verify package payload identities without executing them")
+    args = parser.parse_args()
+    try:
+        if args.validate:
+            raw = args.validate.read_bytes()
+            if len(raw) > 1024 * 1024:
+                raise ValueError("manifest exceeds bounded feed size")
+            def pairs(items):
+                result = {}
+                for k, v in items:
+                    if k in result:
+                        raise ValueError("duplicate manifest key")
+                    result[k] = v
+                return result
+            validate(json.loads(raw, object_pairs_hook=pairs))
+        else:
+            for field in ["assets", "output", "version", "sequence", "source_commit", "source_tree", "packaging_commit", "created_unix", "expires_unix", "upgrade_from", "data_compatibility", "cluster_compatibility", "minimum_controller", "rollback"]:
+                if getattr(args, field) is None:
+                    parser.error("--" + field.replace("_", "-") + " is required")
+            create(args)
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        parser.exit(1, f"desktop update manifest: {error}\n")
+
+
+if __name__ == "__main__":
+    main()

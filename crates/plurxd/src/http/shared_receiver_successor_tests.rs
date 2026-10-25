@@ -467,6 +467,7 @@ async fn sharing_receiver_prepare_names_only_b_urls_and_bootstrap() {
         control,
         media_origin_ms,
         effective_selection,
+        ..
     } = &answer.action
     else {
         panic!("offered");

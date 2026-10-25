@@ -8,6 +8,10 @@ import kotlinx.serialization.json.*
 import java.util.UUID
 
 import android.Manifest
+import android.content.Context
+import android.hardware.display.DisplayManager
+import android.os.Handler
+import android.os.Looper
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.graphics.Rect
@@ -161,6 +165,8 @@ import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.TvButton
 import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.components.dynamicRangeLabel
+import tv.plurx.app.ui.components.enhancementLines
+import tv.plurx.app.ui.components.enhancementSummary
 import tv.plurx.app.ui.components.formatTime
 import tv.plurx.app.ui.components.playerMediaFacts
 import tv.plurx.app.ui.components.sourceDynamicRange
@@ -242,6 +248,7 @@ private suspend fun loadPlan(
     requestedQuality: PlaybackQuality,
     presentationTarget: PresentationTarget?,
     audioOffsetMs: Long,
+    retainedPeak: tv.plurx.app.data.DisplayCaps?,
 ): Plan {
     val detail = planLoadStage("item_detail") { vm.itemDetail(itemId) }
     // The pre-play choice reaches the *first* decision, so the plan that comes
@@ -249,7 +256,7 @@ private suspend fun loadPlan(
     // afterwards is what criterion 4 forbids: it is a visible re-buffer to
     // apply something the viewer chose before playback began.
     val playbackDecision = planLoadStage("decision") {
-        vm.playbackDecision(fileId, tracks, requestedQuality, presentationTarget, audioOffsetMs)
+        vm.playbackDecision(fileId, tracks, requestedQuality, presentationTarget, audioOffsetMs, retainedPeak = retainedPeak)
     }
     val decision: Decision = playbackDecision.decision
     val file = detail.files.firstOrNull { it.id == fileId } ?: detail.files.firstOrNull()
@@ -506,6 +513,10 @@ fun PlayerScreen(
     var presentationTarget by remember(itemId, fileId) { mutableStateOf<PresentationTarget?>(null) }
     var presentationRevision by remember(itemId, fileId) { mutableLongStateOf(0L) }
     var plan by remember(itemId, fileId) { mutableStateOf<Plan?>(null) }
+    // The presentation survives quality reloads, including an Unknown peak.
+    var admittedDisplayPeak by remember(itemId, fileId) {
+        mutableStateOf<tv.plurx.app.data.DisplayCaps?>(null)
+    }
     var failed by remember(itemId, fileId) { mutableStateOf(false) }
     var generation by remember(itemId, fileId) { mutableIntStateOf(0) }
     var resumeAt by remember(itemId, fileId) { mutableLongStateOf(startMs) }
@@ -550,7 +561,7 @@ fun PlayerScreen(
             }?.takeIf {
                 presentationLifecycle.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
             }
-            plan = loadPlan(
+            val loadedPlan = loadPlan(
                 vm,
                 itemId,
                 fileId,
@@ -558,7 +569,10 @@ fun PlayerScreen(
                 requestedQuality = requestedQuality,
                 presentationTarget = measuredTarget,
                 audioOffsetMs = playbackAudioOffset,
+                retainedPeak = admittedDisplayPeak,
             )
+            if (admittedDisplayPeak == null) admittedDisplayPeak = loadedPlan.decisionCaps.display
+            plan = loadedPlan
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -863,9 +877,25 @@ private fun PlayerContent(
         is PlaybackSurface.Banner, is PlaybackSurface.None -> null
     }
     val surfaceFocusRequester = remember { FocusRequester() }
-    // Which grades this panel can show. Probed once per playback: it is a
-    // property of the cable, and this screen owns one HDMI route for its life.
-    val displayHdrTypes = remember(context) { Caps.displayHdrTypes(context) }
+    // HDMI hot-plug can change while this screen survives. Refresh display
+    // truth for badges; decisionCaps and prepared successors remain immutable.
+    var displayHdrTypes by remember(context) { mutableStateOf(Caps.displayHdrTypes(context)) }
+    DisposableEffect(context) {
+        val manager = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        fun refreshDisplay() {
+            displayHdrTypes = Caps.displayHdrTypes(context)
+            Log.i("plurx-capabilities", "display changed: desiredMaxLuminance=" +
+                Caps.displayDesiredMaxLuminance(context) + "; applies to next playback")
+        }
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) = refreshDisplay()
+            override fun onDisplayRemoved(displayId: Int) = refreshDisplay()
+            override fun onDisplayChanged(displayId: Int) = refreshDisplay()
+        }
+        manager?.registerDisplayListener(listener, Handler(Looper.getMainLooper()))
+        refreshDisplay()
+        onDispose { manager?.unregisterDisplayListener(listener) }
+    }
 
     var positionMs by remember { mutableLongStateOf(startMs) }
     var pendingMs by remember(controller) { mutableStateOf<Long?>(null) }
@@ -1693,6 +1723,7 @@ private fun PlayerContent(
                     deliveredDolbyVisionProfile = controller.deliveredDolbyVisionProfile,
                     effectiveProcessing = controller.effectiveProcessing,
                     activeGeneration = controller.effectiveProcessingGeneration,
+                    enhancement = controller.enhancement,
                 ),
                 onTransportHeight = { transportHeightPx = it },
                 // The arrow is the `close` control, not the BACK key: `Back`
@@ -2354,6 +2385,11 @@ private fun PlayerInfo(
     ).let { label ->
         controller.pgsOverlayStatus.label?.let { "$label · $it" } ?: label
     }
+    val shownEnhancement = controller.enhancement?.shown(
+        controller.effectiveProcessing,
+        controller.effectiveProcessingGeneration,
+        controller.deliveredRange,
+    )
     val videoFormat = player.videoFormat
     val source = plan.source
     val clientLoadedSeconds = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0) / 1_000.0
@@ -2404,6 +2440,8 @@ private fun PlayerInfo(
                 effectiveProcessing = controller.effectiveProcessing,
                 activeGeneration = controller.effectiveProcessingGeneration,
             ),
+            enhancementSummary = enhancementSummary(shownEnhancement),
+            enhancement = enhancementLines(shownEnhancement),
             subtitles = selectedSubtitle,
             decoder = videoFormat?.codecs ?: videoFormat?.sampleMimeType,
             stalls = "${controller.playbackStallCount} (${controller.playbackStallCount} supply · 0 decode)",
@@ -2497,6 +2535,10 @@ internal data class PlaybackInfoDetails(
     val streamPixelAspect: String? = null,
     val playingAudio: String? = null,
     val dynamicRange: String? = null,
+    /** Active enhancement badges ("FEL · RPU"), or "None active"; null hides the row. */
+    val enhancementSummary: String? = null,
+    /** Server-computed Dolby Vision enhancement, one sentence per line. */
+    val enhancement: List<String>? = null,
     val subtitles: String = "Off",
     val decoder: String? = null,
     val stalls: String? = null,
@@ -2674,6 +2716,16 @@ internal fun playbackInfoRows(
             details.dynamicRange,
             note = toneMapPeakSummary(status),
             placement = "notes",
+        ),
+        InfoRow(
+            "enhancement",
+            "Enhancement",
+            "NOW DECODING",
+            StandardAndDebug,
+            details.enhancementSummary,
+            note = details.enhancement?.joinToString("\n"),
+            placement = "notes",
+            tone = PlaybackStatTone.Muted,
         ),
         InfoRow("decode_audio", "Stream audio track", "NOW DECODING", StandardAndDebug, details.playingAudio, placement = "notes"),
         InfoRow("frames", "Frames", "NOW DECODING", StandardAndDebug, details.frames, tone = videoHealthTone(details.videoHealth)),
@@ -3099,8 +3151,8 @@ internal fun dynamicRangeSummary(
     if (source == null) return null
     if (delivered == null) return dynamicRangeLabel(source)
     val onScreen = rendered ?: delivered
-    if (effectiveProcessing?.matches(activeGeneration, delivered) == true && onScreen == DynamicRange.HDR10)
-        return "HDR10-E — ${effectiveProcessing.detail}"
+    if (effectiveProcessing?.matches(activeGeneration, delivered) == true && onScreen == delivered)
+        return "${effectiveProcessing.mark} — ${effectiveProcessing.detail}"
     if (onScreen == source) return "${dynamicRangeLabel(source)} (rendering)"
     val why = reasons.firstOrNull { reason ->
         reason.contains("dolby vision", ignoreCase = true) || reason.contains("hdr", ignoreCase = true) ||

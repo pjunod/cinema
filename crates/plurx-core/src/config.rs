@@ -14,6 +14,33 @@ pub use https::HttpsConfig;
 /// Default HTTP port. Deliberately near — but never colliding with — the
 /// 32400-era ports ex-Plex users already have muscle memory for.
 pub const DEFAULT_PORT: u16 = 32400;
+/// The server name a deployment has when the operator never chose one. It is
+/// branding, shared by every fresh install and every node of a cluster, so it
+/// names no machine.
+pub const DEFAULT_SERVER_NAME: &str = "plurx";
+
+/// Whether `configured` is the shipped default rather than a name an operator
+/// chose (blank counts as the default).
+#[must_use]
+pub fn is_default_server_name(configured: &str) -> bool {
+    let configured = configured.trim();
+    configured.is_empty() || configured.eq_ignore_ascii_case(DEFAULT_SERVER_NAME)
+}
+
+/// The name a person should read for a server: the operator's chosen name when
+/// there is one, otherwise the machine's hostname, and the default only when
+/// neither exists. The LAN picker label and every client's server label use
+/// this one rule.
+#[must_use]
+pub fn server_display_name(configured: &str, hostname: Option<&str>) -> String {
+    if !is_default_server_name(configured) {
+        return configured.trim().to_owned();
+    }
+    hostname
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map_or_else(|| DEFAULT_SERVER_NAME.to_owned(), ToOwned::to_owned)
+}
 /// Jellyfin's own default HTTP port. Jellyfin clients assume it, at the
 /// server root, when the user types only a host, so the compatibility
 /// facade answers there too (see [`ServerConfig::jellyfin_port`]).
@@ -194,7 +221,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
-            name: "plurx".to_owned(),
+            name: DEFAULT_SERVER_NAME.to_owned(),
             bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
             trusted_proxies: Vec::new(),
             jellyfin_port: DEFAULT_JELLYFIN_PORT,
@@ -680,6 +707,27 @@ mod tests {
         assert_eq!(server.jellyfin_bind(), None);
         let parsed: Config = toml::from_str("[server]\njellyfin_port = 18096\n").expect("toml");
         assert_eq!(parsed.server.jellyfin_port, 18096);
+    }
+
+    /// The complaint this pins: every server read "plurx" in a client's
+    /// Settings because the shipped default was shown as if it were a name.
+    #[test]
+    fn the_default_server_name_gives_way_to_the_machine_hostname() {
+        assert_eq!(server_display_name("plurx", Some("lab6")), "lab6");
+        assert_eq!(server_display_name("PLURX", Some("lab6")), "lab6");
+        assert_eq!(server_display_name("  ", Some("lab6")), "lab6");
+        assert_eq!(server_display_name("plurx", Some("  ")), "plurx");
+        assert_eq!(server_display_name("plurx", None), "plurx");
+    }
+
+    #[test]
+    fn an_operator_chosen_server_name_is_kept() {
+        assert_eq!(
+            server_display_name(" Living Room ", Some("lab6")),
+            "Living Room"
+        );
+        assert_eq!(server_display_name("Living Room", None), "Living Room");
+        assert!(!is_default_server_name("plurx-two"));
     }
 
     #[test]

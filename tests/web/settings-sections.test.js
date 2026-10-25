@@ -44,30 +44,69 @@ const esc = (value) => String(value)
 let failures = 0, started = 0, finished = 0;
 const QUEUE = [];
 function test(name, run) { QUEUE.push({ name, run }); }
+const TEST_FILTER = process.env.SETTINGS_TEST_FILTER;
 
+test("media support warning remains prominent for a working encoder with missing required Metal", () => {
+  const render = new Function("esc", `${shippedSource("ffmpegSupportWarning")}\nreturn ffmpegSupportWarning;`)(esc);
+  const html=render({encoders:{videotoolbox:true},ffmpeg_support:{executable:'/operator/ffmpeg<wrong>',package_problems:[],rows:[
+    {label:"Metal HDR tone mapping",required:true,included:false},
+    {label:"NVENC",required:false,included:false}
+  ]}});
+  assert.match(html,/role="alert"/);
+  assert.match(html,/FFmpeg lacks required support/);
+  assert.match(html,/Metal HDR tone mapping/);
+  assert.doesNotMatch(html,/NVENC/);
+  assert.match(html,/ffmpeg&lt;wrong&gt;/);
+  assert.equal(render({ffmpeg_support:{executable:"ffmpeg",package_problems:[],rows:[{required:true,included:true}]}}),"");
+});
+
+test("media support matrix separates build inclusion from untested execution and unrelated hardware", () => {
+  const render = new Function("esc", `${shippedSource("ffmpegSupportCard")}\nreturn ffmpegSupportCard;`)(esc);
+  const html=render({ffmpeg_support:{executable:"ffmpeg",checked_at:1,package_verified:true,rows:[
+    {id:"metal",label:"Metal",applicable:true,required:true,included:true,runtime:"not_tested",missing:[]},
+    {id:"nvenc",label:"NVENC",applicable:false,required:false,included:false,runtime:"not_applicable",missing:["h264_nvenc"]}
+  ]}});
+  assert.match(html,/✓ Included/);
+  assert.match(html,/Not tested/);
+  assert.match(html,/Other hardware · not required on this node/);
+  assert.doesNotMatch(html,/>Passed</);
+  assert.doesNotMatch(html,/h264_nvenc/);
+});
+
+test("media support warns when a required included device fails execution", () => {
+  const render = new Function("esc", `${shippedSource("ffmpegSupportWarning")}\nreturn ffmpegSupportWarning;`)(esc);
+  const html=render({ffmpeg_support:{executable:"ffmpeg",package_problems:[],rows:[
+    {label:"VideoToolbox",required:true,included:true,runtime:"failed"}
+  ]}});
+  assert.match(html,/Required media hardware check failed/);
+  assert.match(html,/Execution failed for VideoToolbox/);
+  assert.doesNotMatch(html,/Install the complete/);
+});
+
+function renderTranscoder(sys){
+  const helpers=["systemCapabilityHtml","systemGraphicsHtml","systemToneMapDetails","transcoderCard"].map(shippedSource).join("\n");
+  return new Function("esc",`${helpers}\nreturn transcoderCard;`)(esc)(sys);
+}
 test("node transcoder selector hides unsupported backends and explains the unavailable saved choice", () => {
-  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
-  const html = render({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
+  const html = renderTranscoder({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
   assert.doesNotMatch(html, /value="qsv"/);
   assert.match(html, /saved backend is unavailable/);
   assert.match(html, /value="auto" selected/);
   assert.match(html, /waiting for this node to restart/);
   assert.match(html, /data-node-id="rog&quot;node"/);
-  assert.match(html, /Active: <b>NVIDIA NVENC/);
-  assert.doesNotMatch(html, /disabled/);
+  assert.doesNotMatch(html, / disabled/);
 });
 
-test("transcoder menu shows every measured speed against CPU and names Auto winner", () => {
-  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
-  const html = render({node_id:"node",hwaccel_pref:"auto",encoder_selected:"Apple VideoToolbox",encoders:{nvenc:true,videotoolbox:true},transcoder_optimization:{report:{measured_at:1,results:[
-    {backend:"software",fps:120,relative_to_cpu:1},
-    {backend:"videotoolbox",fps:480,relative_to_cpu:4}
+test("transcoder preference keeps available hardware independent of synthetic speed results", () => {
+  const html = renderTranscoder({node_id:"node",hwaccel_pref:"auto",encoders:{nvenc:true,videotoolbox:true},transcoder_optimization:{report:{results:[
+    {backend:"software",fps:480,relative_to_cpu:1},
+    {backend:"videotoolbox",fps:120,relative_to_cpu:.25}
   ]}}});
-  assert.match(html, /Auto — Apple VideoToolbox · 480 fps · 4.00× CPU/);
-  assert.match(html, /CPU — 120 fps · 1.00× CPU/);
-  assert.match(html, /Apple VideoToolbox — 480 fps · 4.00× CPU/);
-  assert.doesNotMatch(html, /value="nvenc"/);
-  assert.match(html, />Optimize<\/button>/);
+  assert.match(html, /value="auto" selected>Auto/);
+  assert.match(html, /value="software">CPU \(software\)/);
+  assert.match(html, /value="videotoolbox">Apple VideoToolbox/);
+  assert.match(html, /value="nvenc">NVIDIA · NVENC/);
+  assert.doesNotMatch(html, /fps|fastest|benchmark on startup/);
 });
 
 test("transcoder polling discards a response from before leaving and reentering System", async () => {
@@ -170,11 +209,22 @@ test("node transcoder save binds the request to the displayed node and preserves
   assert.equal(button.disabled,false);
 });
 async function main() {
+  // Test registrations continue below this call site; let the script finish
+  // loading before deciding which names to run.
+  await Promise.resolve();
+  const filters = TEST_FILTER ? TEST_FILTER.split("|") : [];
+  let matched = 0;
   for (const { name, run } of QUEUE) {
+    if (TEST_FILTER && !filters.some((part) => name.includes(part))) continue;
+    matched += 1;
     started += 1;
     try { await run(); process.stdout.write(`PASS ${name}\n`); }
     catch (error) { failures += 1; process.stderr.write(`FAIL ${name}\n${error && error.stack}\n`); }
     finished += 1;
+  }
+  if (TEST_FILTER && matched === 0) {
+    process.stderr.write(`No settings tests matched SETTINGS_TEST_FILTER=${TEST_FILTER}\n`);
+    failures += 1;
   }
 }
 
@@ -215,6 +265,24 @@ test("subtitle setup belongs to Maintenance without a temporary Developer card",
   assert.doesNotMatch(card,/devGraduation|Leaves Developer when/);
 });
 
+test("English translation setup graduates to Playback and preserves legacy links", () => {
+  for(const route of ["#/settings/playback/enable-subtitle-translation","#/settings/developer/enable-subtitle-translation"]){
+    const r=routing(memoryStorage(),route);
+    assert.equal(r.settingsRouteTab(route),"playback");
+    assert.equal(r.settingsTab(),"playback");
+  }
+  const panels=developerPanels(),settings={},readiness={features:[]};
+  assert.doesNotMatch(panels.developerPanel(settings,readiness),/Configure English translation/);
+  const html=panels.playbackPanel(settings,readiness);
+  assert.match(html,/Configure English translation/);
+  assert.match(html,/id="subtitle-translation-form"/);
+  assert.match(html,/one audio stream/);
+  const card=shippedSource("subtitleTranslationCard");
+  assert.match(card,/Experimental accuracy/);
+  assert.doesNotMatch(card,/devGraduation|Qualification pending|Leaves Developer when/);
+  assert.match(shippedSource("translationOpen"),/#\/settings\/playback\/enable-subtitle-translation/);
+});
+
 test("every section is a route, grouped in the rail's order", () => {
   const r = routing(memoryStorage(), "#/settings/playback");
   assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside", "Developer"]);
@@ -229,7 +297,7 @@ test("every section is a route, grouped in the rail's order", () => {
     analysis: "analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness)",
     maintenance: "maintenancePanel(d.settings,d.dvConversions,d.developerReadiness)",
     users: "usersPanel(d.users,d.settings)",
-    system: "systemPanel(d.sys,d.playbackEvents)",
+    system: "systemPanel(d.sys)",
     cluster: "clusterPanel(d)",
     sharing: "sharingManagementPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
@@ -627,11 +695,13 @@ function developerPanels(){
       // whole gate reports one failure instead of checking anything.
       shippedSource("contentEncodingCard"), shippedSource("vodReorderCard"),
       shippedSource("dolbyVisionHdrProcessingCard"), shippedSource("dolbyVisionFelReencodeCard"),
+      shippedSource("displayTargetHdr10Card"),
       shippedSource("sdrMasterCodecsCard"),
       // The main-merge defects build (2026-10-04): complete-output
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
       shippedSource("subtitleTranscriptionCard"),
+      shippedSource("subtitleTranslationCard"),
       shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
       shippedSource("subtitleStoredSourcesCard"),
@@ -665,7 +735,7 @@ function developerPanels(){
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
       "const SERVER={cluster_enabled:true}, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
       shippedSource("settingsClusterEnabled"),
-      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'',analysisSummaryCard=()=>'';",
+      "const hdrDisplayPeakCard=()=>'',langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'',analysisSummaryCard=()=>'';",
       // `directedChangeRows` reads the live player and returns ""
       // when there is none, which is exactly the state a settings page is in.
       shippedSource("directedChangeRows"),
@@ -1158,7 +1228,18 @@ test("a section repaint carries kept settings cards across as live nodes", () =>
   assert.equal(setupReplacement.replaced.unsavedLanguage,"sv");
   assert.equal(setup.child.focused,1);
 
-  assert.deepEqual(keep.capture("playback").nodes,[],"other sections redraw everything, as before");
+  const translation=make("enable-subtitle-translation");
+  translation.savedEnabled=false;translation.draft={enabled:true,profile:"saved-model-choice",language:"de"};
+  dom={"enable-subtitle-translation":translation};active=translation.child;
+  const translationKeep=keep.capture("playback");
+  const translationReplacement=make("enable-subtitle-translation");dom={"enable-subtitle-translation":translationReplacement};
+  keep.restore(translationKeep);
+  assert.equal(translationReplacement.replaced,translation,"Playback keeps the live translation setup across aggregate repaint");
+  assert.equal(translationReplacement.replaced.savedEnabled,false);
+  assert.deepEqual(translationReplacement.replaced.draft,{enabled:true,profile:"saved-model-choice",language:"de"});
+  assert.equal(translation.child.focused,1,"translation focus survives the repaint");
+
+  assert.deepEqual(keep.capture("integrations").nodes,[],"unowned sections redraw everything, as before");
   const render=shippedSource("renderSettings");
   assert.ok(render.indexOf("captureSettingsMounts(tab)")<render.indexOf('innerHTML=`<div class="setlayout">'),"captured before the repaint");
   assert.ok(render.indexOf("restoreSettingsMounts(keep)")>render.indexOf('innerHTML=`<div class="setlayout">'),"restored after it");
@@ -1733,7 +1814,7 @@ test("password reset is a form with a confirm field, not two prompt() dialogs", 
 });
 
 test("the viewer's four appearance choices share one popover", () => {
-  assert.equal((SHIPPED_UI.match(/id="lookmenu"/g) || []).length, 3, "one menu per layout chrome");
+  assert.equal((SHIPPED_UI.match(/id="lookmenu"/g) || []).length, 4, "one menu per layout chrome");
   assert.equal((SHIPPED_UI.match(/id="thememenu"|id="appmenu"|id="sizemenu"/g) || []).length, 0);
   const menu = shippedSource("lookMenuHtml");
   assert.match(menu, /themeMenuHtml\(\)/); assert.match(menu, /appMenuHtml\(\)/); assert.match(menu, /sizeMenuHtml\(\)/);
@@ -2137,6 +2218,7 @@ test("DV preferences stay independent and editable with unmet or unavailable rea
 
 test("DV preference saves roundtrip either choice and preserve advisory failures", async () => {
   for(const [name,cardName,field,id] of [
+    ["saveDisplayTargetHdr10","displayTargetHdr10Card","dolby_vision_display_target","dv-display-target"],
     ["saveDolbyVisionHdrProcessing","dolbyVisionHdrProcessingCard","dolby_vision_hdr_processing","dv-hdr-processing"],
     ["saveDolbyVisionFelReencode","dolbyVisionFelReencodeCard","dolby_vision_fel_reencode","dv-fel-reencode"]
   ]) {
@@ -2144,7 +2226,7 @@ test("DV preference saves roundtrip either choice and preserve advisory failures
       const writes=[],nodes={[id]:{checked:false},[`${id}-error`]:{textContent:""},[`${id}-card`]:{outerHTML:""}};
       let reject=false;
       const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
-        `${shippedSource(name)} return ${name};`)(
+        `${shippedSource(name)}\nreturn ${name};`)(
         {getElementById:key=>{assert.ok(key in nodes);return nodes[key];}},
         async(path,request)=>{assert.equal(request.method,"PUT");writes.push([path,request.body]);if(reject)throw new Error("Write failed");return {...request.body,dolby_vision_convert:false};},
         value=>value,(settings,evidence)=>{assert.equal(evidence,readiness);return `saved:${settings[field]}`;},readiness,()=>{});
@@ -2165,6 +2247,7 @@ test("DV preference saves roundtrip either choice and preserve advisory failures
 
 test("DV preference responses preserve newer edits and replacement cards", async () => {
   for(const [name,cardName,field,id] of [
+    ["saveDisplayTargetHdr10","displayTargetHdr10Card","dolby_vision_display_target","dv-display-target"],
     ["saveDolbyVisionHdrProcessing","dolbyVisionHdrProcessingCard","dolby_vision_hdr_processing","dv-hdr-processing"],
     ["saveDolbyVisionFelReencode","dolbyVisionFelReencodeCard","dolby_vision_fel_reencode","dv-fel-reencode"]
   ]) {
@@ -2175,7 +2258,7 @@ test("DV preference responses preserve newer edits and replacement cards", async
       let resolve,requested,cached;
       const pending=new Promise(done=>{resolve=done;});
       const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
-        `${shippedSource(name)} return ${name};`)(
+        `${shippedSource(name)}\nreturn ${name};`)(
         {getElementById:key=>nodes[key]},
         (_path,request)=>{requested=request.body;return pending;},
         value=>{cached=value;return value;},()=>"saved:true",{},()=>{});
@@ -2364,4 +2447,19 @@ test("HTTPS unavailable card retries independently of replicated settings",async
   await retry.first();assert.deepEqual(paints,[[null,"local unavailable"]]);
   await retry.retry({disabled:false});assert.deepEqual(paints,[[null,"local unavailable"],[value]]);
   assert.equal(retry.data.https,value);
+});
+
+test("display targeting remains editable with unavailable or unmet advice",()=>{
+  const panels=developerPanels();
+  for(const readiness of [{unavailable:"offline"},{items:[{id:"dolby_vision_display_target",requirements:[{id:"dv_target_helper",status:"unmet",evidence:"helper absent"}]}]}]){
+    for(const enabled of [false,true]){
+      const html=panels.developerPanel({dolby_vision_display_target:enabled},readiness);
+      assert.match(html,new RegExp(`TOG:dv-display-target\\|[^|]*\\|[^|]*\\|checked=${enabled}`));
+      assert.match(html,/FOOT:saveDisplayTargetHdr10/);
+      assert.match(html,/creative trims \(CM v4 L8, CM v2\.9 L2\)/);
+      assert.match(html,/every shot, some shots or none/);
+      assert.match(html,/Pre-encodes and retained VOD stay master-only/);
+    }
+  }
+  assert.doesNotMatch(shippedSource("displayTargetHdr10Card"),/disabled/);
 });

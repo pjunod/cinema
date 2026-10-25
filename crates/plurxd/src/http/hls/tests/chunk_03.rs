@@ -259,6 +259,7 @@
             control,
             media_origin_ms,
             effective_selection,
+            ..
         } = &first.action
         else {
             panic!("the next exchange must announce the staged successor");
@@ -342,6 +343,7 @@
         staged_request.file_id = fixture.file_id();
         staged_request.request_id = Some(staged_incarnation_id.clone());
         let response = StartResponse {
+            enhancement: None,
             effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
@@ -2138,7 +2140,8 @@
         // explicit clear the successor would stage claiming to be a reopen of
         // a session that is still playing.
         let candidate = crate::transcode::SessionRequest {
-            sdr_master_codecs: None,
+            dv_processing_destination: None,
+        sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
             candidate_context: None,

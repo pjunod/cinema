@@ -7,7 +7,6 @@ final class DiagnosticReportingTests: XCTestCase {
     func testOfflineCaptureKeepsUploadExplicitAndRecoversAfterRelaunch() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments += ["-plurx.origin", "http://127.0.0.1:9"]
         app.launch()
         defer { app.terminate() }
         openReport(app)
@@ -49,7 +48,6 @@ final class DiagnosticReportingTests: XCTestCase {
         #else
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments += ["-plurx.origin", "http://127.0.0.1:9"]
         app.launch(); defer { app.terminate() }
         openReport(app)
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "Frozen local report"), object: app.staticTexts["diagnostics-status"])
@@ -66,7 +64,7 @@ final class DiagnosticReportingTests: XCTestCase {
         throw XCTSkip("TV local transfer uses the TV report interface")
         #else
         continueAfterFailure = false
-        let app = XCUIApplication(); app.launchArguments += ["-plurx.origin", "http://127.0.0.1:9"]
+        let app = XCUIApplication()
         app.launch(); defer { app.terminate() }; openReport(app)
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "Frozen local report"), object: app.staticTexts["diagnostics-status"])
         await fulfillment(of: [ready], timeout: 20)

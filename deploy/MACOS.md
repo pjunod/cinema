@@ -12,19 +12,20 @@ stops when the Mac sleeps — are covered under [Keeping it up](#keeping-it-up).
 
 ## 1. Prerequisites
 
-Each of these is a one-time step. Skip any you already have.
+Install Apple's command line tools once. Skip this if you already have them.
 
 ```sh
 # Apple's compiler and git (the build compiles a little C)
 xcode-select --install
-
-# Homebrew — the installer puts plurxd in its prefix (no sudo on Apple Silicon)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Rust. rustup reads rust-toolchain.toml and fetches the pinned version itself
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
 ```
+
+`make install-macos` reuses an installed rustup and installs the exact Rust
+version in [`rust-toolchain.toml`](../rust-toolchain.toml) if it is missing.
+If rustup is missing, it installs rustup through Homebrew, installing Homebrew
+first if needed. Homebrew's installer may request your administrator password.
+Existing rustup and standard Homebrew installations are found even when absent
+from `PATH`; a separate Homebrew Rust compiler can remain installed.
+With the pinned toolchain already installed, this step needs no download.
 
 You do not install ffmpeg yourself. The installer fetches the exact build
 plurx needs — see [the media engine](#the-media-engine-jellyfin-ffmpeg-813-1).
@@ -39,23 +40,24 @@ make install-macos
 
 That one command:
 
-1. builds `plurxd` from this checkout (`cargo build --locked --release`) on
-   the Rust release [`rust-toolchain.toml`](../rust-toolchain.toml) pins,
-   through rustup, even when another Rust (Homebrew's `rust`) comes first on
-   `PATH` — the first build takes several minutes;
-2. downloads **Jellyfin FFmpeg 8.1.3-1** for your Mac's architecture,
-   verifies its SHA-256 against the pinned value, and installs it next to the
-   binary (below);
-3. installs `plurxd` into the Homebrew prefix — `/opt/homebrew/bin` on Apple
-   Silicon (no sudo), `/usr/local/bin` on Intel;
-4. renders `~/Library/LaunchAgents/com.plurx.plurxd.plist` from
-   [`com.plurx.plurxd.plist`](com.plurx.plurxd.plist) with your home directory,
-   the `plurxd` path, and the Jellyfin `ffmpeg`/`ffprobe` paths;
-5. loads and starts the agent, waits for `/readyz`, and prints the version the
-   server reports.
+1. prepares the pinned Rust toolchain, then builds `plurxd`, the local
+   controller helpers and the native Swift menu-bar app with Xcode command
+   line tools;
+2. verifies the pinned Jellyfin FFmpeg, WebAssembly source parser and subtitle
+   engine, and stages their complete runtime before changing the service;
+3. installs the per-user native runtime under
+   `~/Library/Application Support/plurx/runtime` and the companion at
+   `~/Applications/Plurx Server.app`;
+4. adopts the existing `com.plurx.plurxd` LaunchAgent and preserves its data,
+   configuration, running/stopped choice and automatic startup policy;
+5. opens the companion in the logged-in GUI session. Its menu has status,
+   web interface, logs, Start/Stop/Restart, startup choices and release updates.
 
-It is not finished until the server answers. If it times out, it names the log
-to read.
+A bare daemon build or binary replacement does not install the tray. Reopen an
+installed companion with `open "$HOME/Applications/Plurx Server.app"`; choose
+**Show tray app at login** in its menu to retain it across future logins. See
+[desktop controls](../docs/server/DESKTOP-CONTROL.md) for observed startup state
+and the distinction between local source installs and signed release upgrades.
 
 To see every command without running any of them:
 
@@ -65,73 +67,75 @@ make install-macos INSTALL_FLAGS=--dry-run
 
 ### Installing a prebuilt binary instead
 
-If you already have a `plurxd` for macOS (a release build, or one built on
-another Mac), skip Rust entirely:
+A prebuilt daemon must report the exact current checkout through
+`plurxd --source-commit`. The controller and Swift companion still build locally:
 
 ```sh
 make install-macos INSTALL_FLAGS='--binary ~/Downloads/plurxd'
 ```
 
-`--prefix <dir>` puts the binary somewhere other than the Homebrew prefix; the
-agent and the media engine follow it.
+`--server-only --binary <file>` retains the legacy daemon-only installer and
+needs no Rust or Swift build. Its optional `--prefix <dir>` puts the daemon and
+media engine in a custom prefix. Default desktop installs use the fixed native
+layout and reject `--prefix` rather than silently ignoring it.
 
 ### The media engine: Jellyfin FFmpeg 8.1.3-1
 
-plurx on macOS runs **Jellyfin FFmpeg 8.1.3-1**, the official portable build
-from [jellyfin/jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg/releases/tag/v8.1.3-1),
-and nothing else. That build carries what the macOS video path is built and
-qualified against: VideoToolbox encode/decode and `scale_vt`, the
-`tonemap_videotoolbox` and `tonemapx` tone mappers, the AC-4 decoder, and the
-Dolby Vision bitstream filters. **Homebrew's `ffmpeg` is a different build that
-lacks several of these; the installer never installs or uses it**, even if it
-is on your `PATH`.
+Native desktop installs use the **Plurx-patched Jellyfin FFmpeg 8.1.3-1**
+package. A Jellyfin version banner alone is insufficient: the stock upstream
+portable archive lacks the bounded Metal Hable reference-white option and
+Vulkan/libplacebo required by this runtime.
 
-| | |
+The installer validates a complete local package or reuses its verified cache.
+Without one, [`build-macos-source-media`](../scripts/build-macos-source-media)
+builds the pinned Jellyfin source, all codec dependencies, the Plurx patches,
+static MoltenVK, shaderc and libplacebo. The first build needs network access,
+Xcode command line tools and its Metal component, Homebrew build tools, and
+substantial build time. These are build dependencies; the installed media
+binaries link only to macOS libraries and frameworks.
+
+| Requirement | Verification before activation |
 |---|---|
-| Release | `v8.1.3-1` — the same pin as [`scripts/build-macos-video-ffmpeg`](../scripts/build-macos-video-ffmpeg) |
-| Apple Silicon archive | `jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz`, SHA-256 `22445d7299742749ad2eeb9ce87963d50def0357e45b3e6c7b69987c8365dbf6` |
-| Intel archive | `jellyfin-ffmpeg_8.1.3-1_portable_mac64-gpl.tar.xz`, SHA-256 `cb2b5c154d49a6b6bfe29fa6c16510e85dcbf60b805764121a167b093d4bb6fb` |
-| Installed to | `<prefix>/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/` — `/opt/homebrew/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/` on Apple Silicon; deliberately not on `PATH` |
-| Agent settings | `PLURX_FFMPEG` and `PLURX_FFPROBE` point at the two files there |
-| Source parser | `plurx-source-parser.wasm` in the same directory — see below |
+| Jellyfin source and Plurx patches | Exact source commit/archive and every current patch digest |
+| VideoToolbox H.264 / HEVC | Actual encoder and hardware-acceleration declarations |
+| Metal HDR | `scale_vt`, `tonemap_videotoolbox`, bounded `reference_white`, strict Dolby options |
+| Metal subtitles / deinterlacing | Native subtitle, overlay and BWDIF filters and their required options |
+| Vulkan / libplacebo | Actual hardware context and filter, retained static dependency/source closure |
+| Font authority | Matching `fc-list`, `fc-conflist` and relocatable Fontconfig configuration |
+| Source parser | Matching sandboxed FFprobe WebAssembly artifact, ABI and provenance |
 
-**The source parser.** On macOS plurxd reads a file's decoder facts (frame
-geometry, colour, HDR metadata) only through a sandboxed WebAssembly build of
-the same pinned FFprobe, which it looks for beside `PLURX_FFPROBE`. Without it
-no facts can be bound and every transcode is refused with `no bound FFprobe
-identity`. The installer builds it from a checkout with
-[`scripts/build-macos-source-parser`](../scripts/build-macos-source-parser)
-(the pinned Jellyfin source, WASI SDK and wasi-libc, all checksum-verified;
-about two minutes) and records the builder's parser ABI and digest beside it
-as `plurx-source-parser.wasm.abi`, so a rerun keeps it until the builder
-changes. A
-release archive ships the module built the same way, beside `install`. To
-install one you built elsewhere, pass `--source-parser <file>`.
-
-An archive whose checksum differs stops the install before anything is
-replaced. A rerun finds the pinned build already in place and does not
-download it again.
-
-**No internet on the Mac?** Download the archive for your architecture from the
-release page above on any machine, copy it over, and pass it in — it is still
-checksum-verified:
+For an offline install or a package built on another Mac of the same
+architecture, copy the **complete package directory**, including provenance:
 
 ```sh
-make install-macos INSTALL_FLAGS='--ffmpeg-archive ~/Downloads/jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz'
+make install-macos INSTALL_FLAGS='--ffmpeg-package ~/Downloads/plurx-media'
 ```
 
-**Upgrading from an older install** that pointed the agent at Homebrew's
-ffmpeg: `make install-macos` repoints `PLURX_FFMPEG`/`PLURX_FFPROBE` at the
-Jellyfin build and says so. Any engine that already reports itself as Jellyfin
-FFmpeg is left as you set it, as is everything else in your plist.
+`--ffmpeg-archive` remains available only to the legacy `--server-only`
+installer. Native desktop installation refuses that incomplete archive.
+A raw `--source-parser` override must match the verified package artifact.
 
-To confirm what the agent is running:
+The active media tools live beside the daemon under
+`~/Library/Application Support/plurx/runtime/current/runtime/`. The launcher
+rebinds known legacy installer paths and old managed version paths to the
+current package. It preserves custom operator overrides; Settings warns when
+one points outside the verified package.
 
-```sh
-/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:PLURX_FFMPEG' ~/Library/LaunchAgents/com.plurx.plurxd.plist
-"$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:PLURX_FFMPEG' ~/Library/LaunchAgents/com.plurx.plurxd.plist)" -version | head -1
-# ffmpeg version 8.1.3-Jellyfin ...
-```
+**How to read Settings → System.** The prominent warning names package
+identity problems, missing hardware-specific requirements, or failed required
+execution probes. The matrix separates **In build** from **Execution probe**.
+Included is a declaration check, Passed names a completed test, and Not tested
+is not a pass. Mac startup runs short independent Metal and Vulkan HDR graphs,
+even when Auto chooses CPU encoding. Real-source playback and picture quality
+qualification remain separate. Other hardware is collapsed rather than
+reported missing on this Mac. The short SDR benchmark can legitimately rank
+CPU above VideoToolbox; that result does not establish missing hardware.
+
+The source parser remains a sandboxed WebAssembly build of the same pinned
+FFprobe. Without its matching identity, decoder facts cannot be bound and
+transcoding is refused. Complete source and license offers are retained in
+the package provenance; a checksum or capability mismatch stops staging
+before the service is changed.
 
 ## 3. First run
 
@@ -160,8 +164,10 @@ files with permission errors (see
 [reading library scan status](../docs/OPERATIONS.md#reading-library-scan-status)).
 
 Fix it once in **System Settings → Privacy & Security → Full Disk Access**:
-press **+**, press **⌘⇧G**, enter the path the installer printed
-(`/opt/homebrew/bin/plurxd` on Apple Silicon), add it, then restart the agent:
+press **+**, press **⌘⇧G**, enter the installed daemon path under
+`~/Library/Application Support/plurx/runtime/current/runtime/plurxd`
+(or the custom prefix for a server-only install), add it, then use **Restart**
+in the tray. The legacy server-only command is:
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/com.plurx.plurxd
@@ -178,16 +184,19 @@ or a plain folder elsewhere on the internal disk does not need it.
 | Is it running? | `launchctl print gui/$(id -u)/com.plurx.plurxd \| grep -E 'state\|pid'` |
 | Follow the log | `tail -f ~/Library/Logs/plurxd.log` |
 | Health | `curl -fsS http://127.0.0.1:32400/readyz` |
-| Restart | `launchctl kickstart -k gui/$(id -u)/com.plurx.plurxd` |
-| Stop until next login | `launchctl bootout gui/$(id -u)/com.plurx.plurxd` |
+| Restart | **Restart** in the tray (confirmed, drained shutdown) |
+| Stop | **Stop** in the tray; **Start server automatically** controls future logins separately |
 | Upgrade | `git pull && make install-macos` |
-| Uninstall | `make uninstall` |
+| Uninstall a legacy server-only install | `make uninstall` (native runtime removal is a separate operation) |
 
-**Upgrading** stops the agent, replaces the binary, and starts it again. Your
-plist is never overwritten, so edits you made to it survive.
+**Upgrading** prepares the complete new runtime first, then uses the native
+controller to drain and replace a managed service. It preserves stopped/running
+and startup choices. A source install is distinct from a signed GitHub release;
+release checks retain their signature and complete-artifact requirements.
 
-**Uninstalling** removes the agent, the binary and its Jellyfin FFmpeg, and
-keeps your data.
+**Legacy server-only uninstalling** removes that prefix installation while
+keeping data. The legacy uninstall command does not remove the native runtime
+or companion app.
 
 Data — accounts, keys, library metadata, watch state — lives in
 `~/Library/Application Support/plurx`. Back that folder up; nothing else is
@@ -241,7 +250,7 @@ awake. For a Mac that is mainly a server:
 
 | Symptom | Look at |
 |---|---|
-| `make install-macos` says `is not the pinned Jellyfin FFmpeg` | The download was cut short or the file is a different build. Rerun, or fetch the exact archive named in [the media engine](#the-media-engine-jellyfin-ffmpeg-813-1) and pass `--ffmpeg-archive`. |
+| `make install-macos` says `is not the pinned Jellyfin FFmpeg` | The package is incomplete, stale, or altered. Rerun, or pass a complete verified `--ffmpeg-package` directory; a raw portable archive is insufficient for the native runtime. |
 | `make install-macos` notes that a `rustc` `comes before rustup on PATH` | Homebrew's `rust` formula is shadowing rustup. The install itself used the pinned release, but every other `cargo` and `make` build on this Mac uses Homebrew's: `brew uninstall rust`. |
 | `make install-macos` says `could not build plurx-source-parser.wasm` | The builder needs network for its pinned downloads and the Command Line Tools (`python3`, `make`, `patch`). Build it on another Mac from a checkout with `python3 scripts/build-macos-source-parser --output /tmp/plurx-parser` (a path that does not exist yet), copy `/tmp/plurx-parser/bin/plurx-source-parser.wasm` over, and pass `--source-parser`. The build's last lines are printed above the error. |
 | Every transcode fails with `no bound FFprobe identity`; the log says `packaged capability-bound source parser is unavailable` | The engine directory has no `plurx-source-parser.wasm` (an install from before 2026-10-11 lacks it). Rerun `make install-macos`, or `./install` from a current release archive. |

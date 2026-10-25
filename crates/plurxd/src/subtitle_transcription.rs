@@ -617,7 +617,7 @@ impl Pipeline<'_> {
         Ok(())
     }
 }
-fn private_attempt(root: &Path) -> std::io::Result<tempfile::TempDir> {
+pub(crate) fn private_attempt(root: &Path) -> std::io::Result<tempfile::TempDir> {
     let mut builder = tempfile::Builder::new();
     builder.prefix("attempt-");
     #[cfg(unix)]
@@ -628,8 +628,8 @@ fn private_attempt(root: &Path) -> std::io::Result<tempfile::TempDir> {
     builder.tempdir_in(root)
 }
 
-struct EngineInvocation {
-    program: PathBuf,
+pub(crate) struct EngineInvocation {
+    pub(crate) program: PathBuf,
     staged: Option<(std::fs::File, plurx_core::fs_secure::FileIdentity)>,
 }
 
@@ -756,7 +756,7 @@ async fn decoded_pcm(path: &Path, cancel: &CancellationToken) -> Result<(bool, u
         .map_err(|_| "decode_failed")?
 }
 impl EngineInvocation {
-    fn unchanged(&self) -> bool {
+    pub(crate) fn unchanged(&self) -> bool {
         self.staged.as_ref().is_none_or(|(file, identity)| {
             plurx_core::fs_secure::std_file_identity(file).ok() == Some(*identity)
         })
@@ -766,7 +766,7 @@ impl EngineInvocation {
 /// Darwin refuses executable `/dev/fd/N` handoffs. Execute a verified private
 /// copy there, retaining both handles until the owned child has been reaped.
 /// Linux executes the original held descriptor directly.
-async fn engine_invocation(
+pub(crate) async fn engine_invocation(
     engine: &crate::subtitle_models::artifacts::Engine,
     scratch: &Path,
     cancel: &CancellationToken,
@@ -980,6 +980,14 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         .map_err(|_| input.source_failure())?;
     let audio_map = format!("0:a:{audio_index}");
     let scratch_root = runtime_cache_dir.join("subtitle-transcription");
+    // Reserve the bounded WAV plus engine output before the private attempt
+    // can write. The reservation outlives TempDir cleanup on every exit.
+    let _scratch_reservation = crate::playback_cache::reserve(
+        &scratch_root,
+        MAX_WAV_BYTES.saturating_add(80 * 1024 * 1024),
+    )
+    .await
+    .map_err(|_| input.failure("output_invalid", "transcription disk budget exhausted"))?;
     tokio::fs::create_dir_all(&scratch_root)
         .await
         .map_err(|_| {
@@ -1044,6 +1052,13 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
             &(MAX_WAV_BYTES + 1).to_string(),
         ])
         .arg(&wav);
+    crate::subtitle_ride_along::configure_stage_file_limit(&mut decode, MAX_WAV_BYTES + 1)
+        .map_err(|error| {
+            input.failure(
+                "output_invalid",
+                &format!("bounded transcription output unavailable: {error}"),
+            )
+        })?;
     let output = pipeline_output(
         &input,
         &mut decode,
@@ -1144,6 +1159,16 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         .arg(&wav)
         .arg("--output-file")
         .arg(&output_base);
+    crate::subtitle_ride_along::configure_stage_file_limit(
+        &mut whisper,
+        (MAX_DOWNLOADED_SUBTITLE_BYTES + 1) as u64,
+    )
+    .map_err(|error| {
+        input.failure(
+            "output_invalid",
+            &format!("bounded transcription output unavailable: {error}"),
+        )
+    })?;
     let output = pipeline_output(
         &input,
         &mut whisper,
@@ -1323,7 +1348,7 @@ async fn managed_pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
     }
 }
 
-fn managed_artifacts_unchanged(
+pub(crate) fn managed_artifacts_unchanged(
     engine: &crate::subtitle_models::artifacts::Engine,
     model: &crate::subtitle_models::artifacts::ManagedModel,
 ) -> Result<(), StoreError> {
@@ -1658,17 +1683,35 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         }
     }
     let mut model_cache = None;
+    let mut slow_due = tokio::time::Instant::now();
     loop {
         if shutdown.is_cancelled() {
             return;
         }
-        if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
-            tracing::debug!(%error, "managed subtitle worker pass stopped");
+        let translating = match crate::subtitle_translation::worker_pass(&state, &shutdown).await {
+            Ok(active) => active,
+            Err(error) => {
+                tracing::debug!(%error,"translation worker pass stopped");
+                false
+            }
+        };
+        if tokio::time::Instant::now() >= slow_due {
+            if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
+                tracing::debug!(%error, "managed subtitle worker pass stopped");
+            }
+            if let Err(error) = pass(&state, &boot, &shutdown, &mut model_cache).await {
+                tracing::debug!(%error,"offline subtitle transcription pass stopped");
+            }
+            slow_due = tokio::time::Instant::now() + Duration::from_secs(15);
         }
-        if let Err(error) = pass(&state, &boot, &shutdown, &mut model_cache).await {
-            tracing::debug!(%error,"offline subtitle transcription pass stopped");
-        }
-        tokio::select! { ()=shutdown.cancelled()=>return, ()=tokio::time::sleep(Duration::from_secs(15))=>{} }
+        // Live translation demand is served each second; otherwise the loop
+        // sleeps until the 15 s passes are due or a translation mutation wakes it.
+        let idle = if translating {
+            Duration::from_secs(1)
+        } else {
+            slow_due.saturating_duration_since(tokio::time::Instant::now())
+        };
+        tokio::select! { ()=shutdown.cancelled()=>return, ()=tokio::time::sleep(idle)=>{}, ()=state.subtitle_models.translation.wake.notified()=>{} }
     }
 }
 async fn pass(
@@ -1926,7 +1969,7 @@ async fn await_claimed_inference<T>(
         () = watch_capacity(transcode, admission) => { cancel.cancel(); operation.await },
     }
 }
-async fn watch_capacity(
+pub(crate) async fn watch_capacity(
     transcode: &crate::transcode::TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
 ) {
@@ -2274,6 +2317,51 @@ mod tests {
             }
         }
         (file, model, decoder, whisper)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn transcription_runaway_caption_is_stopped_at_the_child_file_limit() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::test_tempdir().expect("caption fixture");
+        let (file, model, decoder, whisper) = process_fixture(root.path()).await;
+        let size_probe = root.path().join("caption-size");
+        std::fs::write(&whisper, format!(
+            "#!/bin/sh\nfor last do :; done\nhead -c 8388608 /dev/zero > \"$last.vtt\"\nwc -c < \"$last.vtt\" > '{}'\nexit 0\n", size_probe.display()
+        )).expect("runaway adapter");
+        std::fs::set_permissions(&whisper, std::fs::Permissions::from_mode(0o700))
+            .expect("adapter executable");
+        let cancel = CancellationToken::new();
+        let error = plurx_core::process::bounded::cancellable(
+            cancel.clone(),
+            transcribe(
+                root.path(),
+                &file,
+                &Settings::default(),
+                &whisper,
+                &model,
+                &cancel,
+                decoder.to_str().expect("decoder"),
+            ),
+        )
+        .await
+        .expect_err("runaway captions cannot publish");
+        let written: u64 = std::fs::read_to_string(size_probe)
+            .expect("child reported size")
+            .trim()
+            .parse()
+            .expect("byte count");
+        assert!(
+            written <= (MAX_DOWNLOADED_SUBTITLE_BYTES + 1) as u64,
+            "the OS stops growth before the child exits"
+        );
+        assert!(error.to_string().contains("exceeds bound"));
+        assert_eq!(
+            std::fs::read_dir(root.path().join("subtitle-transcription"))
+                .expect("scratch")
+                .count(),
+            0
+        );
     }
 
     #[cfg(unix)]
@@ -3273,6 +3361,7 @@ mod tests {
             sha256: hex::encode(Sha256::digest(b"model")),
         };
         let payload = JobPayload::SubtitleModelOperation {
+            translation_profile: None,
             action: ModelAction::Verify,
             model_id: "base.en".into(),
             catalog_revision: crate::subtitle_models::catalog().revision.clone(),

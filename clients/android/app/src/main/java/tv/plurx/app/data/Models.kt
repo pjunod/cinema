@@ -24,6 +24,25 @@ data class Server(
     val display_aware_auto_protocol: String? = null,
 )
 
+/** `GET /api/v1/server/node` (signed in): which machine this client is talking to. */
+@Serializable
+data class ServerNode(
+    val hostname: String? = null,
+    /** The server's own label: a chosen name, else the hostname. */
+    val display_name: String? = null,
+)
+
+/**
+ * The Settings "Server" value: the server's label, with the answering node's
+ * hostname added when the label is a name an operator chose — so every node of
+ * a custom-named cluster still says which machine this client is talking to.
+ */
+fun serverSettingsLabel(name: String?, hostname: String?): String? {
+    if (name.isNullOrEmpty()) return hostname
+    if (hostname.isNullOrEmpty() || hostname.equals(name, ignoreCase = true)) return name
+    return "$name · $hostname"
+}
+
 @Serializable
 data class ClusterIngress(
     val node_urls: List<String> = emptyList(),
@@ -128,6 +147,27 @@ data class Hubs(
     val next_up: List<Item> = emptyList(),
     val recently_added: List<Item> = emptyList(),
 )
+
+/** One review-site score: `imdb` out of 10, `rotten_tomatoes` / `metacritic` / `tmdb` out of 100. */
+@Serializable
+data class Rating(
+    val source: String,
+    val value: Double,
+    val scale: Int,
+    val votes: Long? = null,
+)
+
+/** `GET items/{id}/annotations`: scores and the reader's list flags. */
+@Serializable
+data class ItemAnnotations(
+    val ratings: List<Rating> = emptyList(),
+    val watchlist: Boolean = false,
+    val favorite: Boolean = false,
+)
+
+/** `GET lists/{list}`: the reader's watchlist or favorites, newest first. */
+@Serializable
+data class ItemList(val items: List<Item> = emptyList())
 
 @Serializable
 data class Page(
@@ -622,7 +662,7 @@ data class QualityCandidate(
             if (recipe_digest.size != 32 || recipe_digest.any { it !in 0..255 } || width !in 1..16384 ||
                 height !in 1..16384 || target_height !in 0..16384 || route !in listOf("original", "remux", "encode") ||
                 grade !in listOf("sdr", "hdr10") || processed_hdr10 &&
-                (route != "encode" || grade != "hdr10" || planned_codec != "hevc")) return false
+                (route != "encode" || planned_codec != "hevc")) return false
             val hash = java.security.MessageDigest.getInstance("SHA-256")
             hash.update("plurx:auto-quality-candidate:v1\u0000".toByteArray(Charsets.UTF_8))
             val expected = hash.digest(recipe_digest.map { it.toByte() }.toByteArray())
@@ -716,8 +756,12 @@ data class EffectiveProcessingReport(
     val hdr10Enhanced: Boolean,
     val felContributed: Boolean,
     val appliedOperations: List<String>,
+    val sdrProcessed: Boolean = false,
+    /** Some, but not every, served frame applied creative trims. */
+    val creativeTrimsPartial: Boolean = false,
 ) {
-    fun matches(active: String?, delivered: String?): Boolean = hdr10Enhanced && delivered == "hdr10" &&
+    val mark: String get() = if (sdrProcessed) "SDR-E" else "HDR10-E"
+    fun matches(active: String?, delivered: String?): Boolean = ((hdr10Enhanced && !sdrProcessed && delivered == "hdr10") || (!hdr10Enhanced && sdrProcessed && delivered == "sdr" && appliedOperations.contains("Bt709Gamma24Conversion") && appliedOperations.contains("DisplayTargetMapping:100"))) &&
         active == generation && tv.plurx.app.player.PlaybackControl.isUuid(generation) &&
         appliedOperations.isNotEmpty() && appliedOperations.size <= 16 &&
         appliedOperations.all { it.isNotEmpty() && it.length <= 64 }
@@ -727,7 +771,8 @@ data class EffectiveProcessingReport(
             "RpuColorConversion" to "RPU color conversion", "TargetMapping" to "target mapping",
             "CreativeTrimApplication" to "creative trims")
         val metadata = appliedOperations.mapNotNull { names[it] }.joinToString(", ")
-        return "Dolby Vision–enhanced HDR10 · FEL used: ${if (felContributed) "yes" else "no"}" +
+        val trims = if ("CreativeTrimApplication" in appliedOperations) "creative trims applied" else if (creativeTrimsPartial) "creative trims on some shots" else "L1 only"
+        return "${if (sdrProcessed) "Dolby Vision–processed SDR (BT.709 gamma 2.4, $trims)" else "Dolby Vision–enhanced HDR10"} · FEL used: ${if (felContributed) "yes" else "no"}" +
             if (metadata.isEmpty()) "" else " · Applied: $metadata"
     }
 
@@ -738,16 +783,91 @@ data class EffectiveProcessingReport(
                 ?.takeIf { it.isString }?.content
             fun boolean(key: String): Boolean? = (objectValue[key] as? kotlinx.serialization.json.JsonPrimitive)
                 ?.takeIf { !it.isString }?.content?.let { when (it) { "true" -> true; "false" -> false; else -> null } }
+            val sdr = boolean("sdr_processed") ?: false
             val operations = objectValue["applied_operations"] as? kotlinx.serialization.json.JsonArray ?: return null
-            val names = operations.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { item -> item.isString }?.content ?: return null }
+            val names = operations.map { item ->
+                (item as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content ?: run {
+                    val operation = item as? kotlinx.serialization.json.JsonObject ?: return null
+                    val target = operation["DisplayTargetMapping"] as? kotlinx.serialization.json.JsonObject ?: return null
+                    val nits = (target["nits"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { !it.isString }?.content?.toIntOrNull() ?: return null
+                    if (operation.size != 1 || target.size != 1 || nits !in (if (sdr) listOf(100) else listOf(400, 600, 1000, 1600, 2000, 4000))) return null
+                    "DisplayTargetMapping:$nits"
+                }
+            }
             return EffectiveProcessingReport(string("generation") ?: return null, boolean("hdr10_enhanced") ?: return null,
-                boolean("fel_contributed") ?: return null, names)
+                boolean("fel_contributed") ?: return null, names, sdr, boolean("creative_trims_partial") ?: false)
+        }
+    }
+}
+
+/** A Dolby Vision enhancement the server can name; its wire spelling is [name]. */
+enum class EnhancementBadge { FEL, RPU, DYN }
+
+data class EnhancementDetail(
+    /** Null for a badge this client does not know; its sentence still stands. */
+    val badge: EnhancementBadge?,
+    val active: Boolean,
+    val text: String,
+)
+
+/**
+ * The HLS create response's `enhancement`: what Dolby Vision enhancement the
+ * delivered picture carries, computed once by the server
+ * (`plurx_core::playback::enhancement`) so every client shows the same thing.
+ *
+ * Absent for a non-Dolby-Vision source or SDR. A badge name this client does
+ * not know is dropped from [active] rather than failing the parse.
+ */
+data class PlaybackEnhancement(
+    /** Badges for the active enhancements only, in display order. */
+    val active: List<EnhancementBadge>,
+    /** Every enhancement that applies, active or not, as one sentence each. */
+    val details: List<EnhancementDetail>,
+    /**
+     * The badges of a processed HDR10 delivery are true only while the client
+     * holds a current, generation-matching `effective_processing` report.
+     */
+    val requiresEffectiveProcessing: Boolean = false,
+) {
+    /**
+     * This enhancement as it may be shown right now, or null when it must not
+     * be: a processed delivery whose report is missing, stale or for another
+     * generation shows neither pills nor the info row.
+     */
+    fun shown(report: EffectiveProcessingReport?, activeGeneration: String?, delivered: String?): PlaybackEnhancement? =
+        takeIf { !requiresEffectiveProcessing || report?.matches(activeGeneration, delivered) == true }
+
+    companion object {
+        fun fromJson(value: kotlinx.serialization.json.JsonElement?): PlaybackEnhancement? {
+            val objectValue = value as? kotlinx.serialization.json.JsonObject ?: return null
+            fun badge(element: kotlinx.serialization.json.JsonElement?): EnhancementBadge? =
+                (element as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+                    ?.let { name -> EnhancementBadge.entries.firstOrNull { it.name == name } }
+            val active = (objectValue["active"] as? kotlinx.serialization.json.JsonArray)
+                ?.mapNotNull(::badge)?.distinct().orEmpty()
+            val details = (objectValue["details"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { item ->
+                val detail = item as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                val text = (detail["text"] as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                val activeFlag = (detail["active"] as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.takeIf { !it.isString }?.content == "true"
+                EnhancementDetail(badge(detail["badge"]), activeFlag, text)
+            }.orEmpty()
+            if (active.isEmpty() && details.isEmpty()) return null
+            val requires = (objectValue["requires_effective_processing"] as? kotlinx.serialization.json.JsonPrimitive)
+                ?.takeIf { !it.isString }?.content == "true"
+            return PlaybackEnhancement(active, details, requires)
         }
     }
 }
 
 @Serializable
 data class HlsStart(
+    /**
+     * Raw `enhancement` object, read through [PlaybackEnhancement.fromJson]
+     * so a malformed or newer shape can never fail the whole create response.
+     */
+    val enhancement: kotlinx.serialization.json.JsonElement? = null,
     val effective_processing: kotlinx.serialization.json.JsonElement? = null,
     val session_id: String,
     val playlist_url: String,

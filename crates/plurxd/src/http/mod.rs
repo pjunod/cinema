@@ -7,12 +7,13 @@
 
 mod analysis;
 mod analysis_reconcile;
+pub(crate) mod annotations;
 mod auth;
 mod background_jobs;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
-mod chapter_thumbs;
+pub(crate) mod chapter_thumbs;
 mod cluster;
 pub(crate) mod cluster_operations;
 pub mod comingsoon;
@@ -323,11 +324,17 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/subtitles/search"
         | "/api/v1/files/{id}/subtitles/download"
         | "/api/v1/files/{id}/subtitles/transcribe"
+        | "/api/v1/files/{id}/subtitle-translation/options"
+        | "/api/v1/files/{id}/subtitle-translation/assets"
         | "/api/v1/items/{id}/classification"
         | "/api/v1/items/{id}/photo"
         | "/api/v1/items/{id}/reanalyze"
         | "/api/v1/items/{id}/refresh-artwork"
         | "/api/v1/items/{id}/reading-state"
+        | "/api/v1/items/{id}/annotations"
+        | "/api/v1/items/{id}/watchlist"
+        | "/api/v1/items/{id}/favorite"
+        | "/api/v1/lists/{list}"
         | "/api/v1/files/{id}/preparation"
         | "/api/v1/files/{id}/analysis"
         | "/api/v1/files/{id}/dv-conversion"
@@ -412,6 +419,16 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
+        | "/api/v1/files/{id}/subtitle-translation"
+        | "/api/v1/subtitle-translation/operations/{id}"
+        | "/api/v1/subtitle-translation/operations/{id}/demands/{demand}"
+        | "/api/v1/subtitle-translation/operations/{id}/stop"
+        | "/api/v1/subtitle-translation/operations/{id}/retry"
+        | "/api/v1/subtitle-translation/operations/{id}/failed-ranges"
+        | "/api/v1/subtitle-translation/assets/{id}/manifest"
+        | "/api/v1/subtitle-translation/assets/{id}/segments"
+        | "/api/v1/subtitle-translation/assets/{id}/coverage"
+        | "/api/v1/subtitle-translation/assets/{id}/segments/{segment}"
         | "/api/v1/files/{id}/audio-offset"
         | "/api/v1/files/{id}/offline-options"
         | "/api/v1/files/{id}/offline-packages"
@@ -484,8 +501,11 @@ fn http_route_group(path: &str) -> usize {
         // Configuration, diagnostics, scans, public shell and maintenance.
         "/"
         | "/api/v1/server"
+        | "/api/v1/server/node"
         | "/api/v1/settings"
         | "/api/v1/subtitle-transcription"
+        | "/api/v1/subtitle-translation"
+        | "/api/v1/subtitle-translation/models"
         | "/api/v1/subtitle-transcription/managed"
         | "/api/v1/subtitle-transcription/models"
         | "/api/v1/subtitle-transcription/models/{id}/install"
@@ -1490,6 +1510,17 @@ pub(crate) fn prometheus_handler_deadlines() -> String {
     out
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn desktop_auth_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/auth/login",
+            post(auth::login).layer(DefaultBodyLimit::max(auth::MAX_LOGIN_BODY_BYTES)),
+        )
+        .route("/api/v1/auth/logout", post(auth::logout))
+        .route("/api/v1/me", get(auth::me))
+}
+
 pub fn router(state: AppState) -> Router {
     // A route belongs to exactly one deadline group. The grouping is applied
     // before the shared serving gate so media bodies and blocked GETs remain
@@ -1499,6 +1530,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_library::viewer_router(state.clone()))
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
+        .route("/server/node", get(system::server_node))
         .route("/me", get(auth::me))
         .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
@@ -1623,6 +1655,20 @@ pub fn router(state: AppState) -> Router {
             get(crate::library_search::get_classification)
                 .put(crate::library_search::correct_classification),
         )
+        // Annotations: scores and a person's watchlist and favorites.
+        .route(
+            "/items/{id}/annotations",
+            get(annotations::item_annotations),
+        )
+        .route(
+            "/items/{id}/watchlist",
+            put(annotations::add_to_watchlist).delete(annotations::remove_from_watchlist),
+        )
+        .route(
+            "/items/{id}/favorite",
+            put(annotations::add_to_favorites).delete(annotations::remove_from_favorites),
+        )
+        .route("/lists/{list}", get(annotations::list_items))
         // Watch
         .route("/items/{id}/progress", post(watch::progress))
         .route("/items/{id}/scrobble", post(watch::scrobble))
@@ -1686,6 +1732,64 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/subtitle-transcription",
             put(crate::subtitle_transcription::update_settings),
+        )
+        .route(
+            "/subtitle-translation",
+            get(crate::subtitle_translation::api::settings)
+                .put(crate::subtitle_translation::api::update_settings),
+        )
+        .route(
+            "/subtitle-translation/models",
+            get(crate::subtitle_translation::api::models),
+        )
+        .route(
+            "/files/{id}/subtitle-translation/options",
+            get(crate::subtitle_translation::api::options),
+        )
+        .route(
+            "/files/{id}/subtitle-translation",
+            post(crate::subtitle_translation::api::create),
+        )
+        .route(
+            "/files/{id}/subtitle-translation/assets",
+            get(crate::subtitle_translation::api::assets),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}",
+            get(crate::subtitle_translation::api::operation),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}/demands/{demand}",
+            put(crate::subtitle_translation::api::demand)
+                .delete(crate::subtitle_translation::api::release),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}/stop",
+            post(crate::subtitle_translation::api::stop),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}/retry",
+            post(crate::subtitle_translation::api::retry),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}/failed-ranges",
+            get(crate::subtitle_translation::api::failed_ranges),
+        )
+        .route(
+            "/subtitle-translation/assets/{id}/manifest",
+            get(crate::subtitle_translation::api::manifest),
+        )
+        .route(
+            "/subtitle-translation/assets/{id}/segments",
+            get(crate::subtitle_translation::api::segments),
+        )
+        .route(
+            "/subtitle-translation/assets/{id}/coverage",
+            get(crate::subtitle_translation::api::coverage),
+        )
+        .route(
+            "/subtitle-translation/assets/{id}/segments/{segment}",
+            get(crate::subtitle_translation::api::segment),
         )
         .route(
             "/subtitle-transcription/managed",
@@ -2319,6 +2423,10 @@ pub fn router(state: AppState) -> Router {
         ))
         // Outside the Store attribution, and therefore outside the capacity
         // gate, so a 503 the gate produces is still counted as a request.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            desktop_http_admission_gate,
+        ))
         .layer(axum::middleware::from_fn(http_request_metrics))
         // Outermost: every layer inside reads the id back out of the request
         // headers, so this one has to have written it first.
@@ -2346,6 +2454,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             || matches!(
                 path,
                 "/api/v1/me"
+                    | "/api/v1/server/node"
                     | "/api/v1/features"
                     | "/api/v1/auth/login"
                     | "/api/v1/auth/logout"
@@ -2868,6 +2977,93 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn desktop_http_admission_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    // The legacy prepare/maintenance HTTP request cannot count itself as
+    // work it must drain. These read-only observations also keep cluster
+    // diagnostics and authenticated clock sampling usable while fenced.
+    let control_plane = path.starts_with("/api/v1/cluster/")
+        || path == cluster_operations::INTERNAL_PATH
+        || path == internal_clock::PATH
+        || matches!(
+            path,
+            "/healthz" | "/readyz" | "/metrics" | "/api/v1/server" | "/api/v1/server/node"
+        );
+    if control_plane {
+        return next.run(request).await;
+    }
+    let Some(admission) = state.serving.try_desktop_http_admission().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::RETRY_AFTER, "5"),
+            ],
+            crate::serving_fence::RESTART_DRAIN_JSON,
+        )
+            .into_response();
+    };
+    next.run(request)
+        .await
+        .map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, Some(admission))))
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn desktop_http_admission_gate(
+    State(_state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    next.run(request).await
+}
+
+/// Direct response bodies (including Range reconnects) own admission until
+/// delivery finishes or the connection closes, rather than merely to headers.
+struct RestartAdmissionBody {
+    body: axum::body::Body,
+    _admission: Option<crate::serving_fence::RestartAdmission>,
+}
+impl RestartAdmissionBody {
+    fn new(
+        body: axum::body::Body,
+        mut admission: Option<crate::serving_fence::RestartAdmission>,
+    ) -> Self {
+        if http_body::Body::is_end_stream(&body) {
+            admission.take();
+        }
+        Self {
+            body,
+            _admission: admission,
+        }
+    }
+}
+impl http_body::Body for RestartAdmissionBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let polled = std::pin::Pin::new(&mut self.body).poll_frame(cx);
+        if matches!(&polled, std::task::Poll::Ready(None | Some(Err(_))))
+            || http_body::Body::is_end_stream(&self.body)
+        {
+            self._admission.take();
+        }
+        polled
+    }
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
 async fn mutable_media_serving_gate(
     State(state): State<AppState>,
     request: Request<axum::body::Body>,
@@ -2877,7 +3073,7 @@ async fn mutable_media_serving_gate(
         request.method().as_str(),
         request.uri().path(),
     );
-    let _restart_admission = if starts_media {
+    let restart_admission = if starts_media {
         match state.serving.try_restart_admission().await {
             Some(admission) => Some(admission),
             None => {
@@ -2897,7 +3093,9 @@ async fn mutable_media_serving_gate(
         None
     };
     let Some(policy) = state.serving.http_policy(request.uri().path()) else {
-        return next.run(request).await;
+        let response = next.run(request).await;
+        return response
+            .map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, restart_admission)));
     };
 
     let mut response = (

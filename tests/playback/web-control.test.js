@@ -9,6 +9,18 @@ require("./prepared-frame-rendezvous.test.js");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
+const PREPARE_SESSION = "44444444-4444-4444-8444-444444444444";
+const PREPARE_ACTION_ID = "33333333-3333-4333-8333-333333333333";
+const PREPARE_FIXTURE = JSON.parse(`{
+  "type":"prepare",
+  "action_id":"${PREPARE_ACTION_ID}",
+  "session_id":"${PREPARE_SESSION}",
+  "playlist_url":"/api/v1/hls/${PREPARE_SESSION}/index.m3u8",
+  "media_origin_ms":0,
+  "effective_selection":{"quality_auto":true,"height":1080,
+    "audio_track":null,"subtitle_burn":null,"audio_offset_ms":0,
+    "codec":"server_selected","dynamic_range":"sdr"}}`);
+
 const TEST_CAPTURE_OWNER=Object.freeze({lifecycleId:"test-player",attachmentGeneration:1});
 const captureSnapshot=(value,intentGeneration=0,owner=TEST_CAPTURE_OWNER)=>
   control.capture(value,intentGeneration,owner);
@@ -42,7 +54,7 @@ function qualityResourceTimingSources(){
   return source.slice(begin,end);
 }
 function transportTelemetrySources(){
-  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker"].map(shippedSource).join("\n");
+  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker","prunePlaybackPlayInvocations","cancelPlaybackPlayInvocation"].map(shippedSource).join("\n");
 }
 
 // Extracted intent owners retain the real next-episode invalidation edge.
@@ -231,7 +243,7 @@ function fullOpenHarness() {
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
     shippedSource("naturalBoundaryQualityCandidate"),
-    shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
+    shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),shippedSource("burnSub"),
     shippedSource("offsetLabel"), shippedSource("setSync"),
     shippedSource("playerWantsPlayback"), transportTelemetrySources(),shippedSource("resumeQualityBoundary"),shippedSource("togglePlay"),
     shippedSource("playerInputSurface"), shippedSource("watchRouteInput"),
@@ -361,6 +373,33 @@ async function flushDeep() {
 }
 
 async function main() {
+  const preparedRecovery=preparedHlsRecoveryTests();
+  if(process.argv.includes('--prepared-hls-recovery')) return preparedRecovery;
+  await test("Close and pagehide retain an unacknowledged commit's predecessor after decoder retirement",()=>{
+    for(const pagehide of [false,true]){
+      const h=preparedHarness();
+      const incumbent={destroyed:false,destroy(){this.destroyed=true;}};
+      const p=h.set({offset:0,vod:true,prepared:null,priorKbps:0,pendingMediaChange:null,wantsPlayback:true,sessionId:"accepted-predecessor",attemptId:"a1",hls:incumbent});
+      const state=h.handle({...PREPARE_FIXTURE});
+      h.instances[0].events.manifest();h.spare.ranges=[[0,30]];h.instances[0].events.append();
+      h.provePrepared();
+      assert.equal(h.queue().at(-1).state,"committed");
+      h.fireAll();
+      assert.equal(incumbent.destroyed,true);assert.equal(p.preparedRetiring,null);assert.equal(state.predecessor,null);
+      assert.equal(p.preparedControlPending.predecessorSessionId,"accepted-predecessor",
+        "decoder retirement erased the still-accepted predecessor's cleanup owner");
+      // No commit acknowledgement was accepted. Its predecessor still owns
+      // server playback even though the successor owns the visible decoder.
+      if(pagehide) h.pagehide();else h.close({routeLeave:true});
+      assert.equal(h.released.filter(id=>id==="accepted-predecessor").length,1);
+      assert.equal(h.released.filter(id=>id===PREPARE_SESSION).length,1);
+      assert.equal(h.instances[0].destroyed,true);
+      for(const release of h.releaseStates){assert.equal(release.paused,true);assert.equal(release.src,null);assert.equal(release.hls,null);}
+      assert.equal(p.sessionId,null);
+    }
+  });
+
+
   assert.equal(control.validBootstrap(bootstrap()), true);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { control_epoch: 0 })), false);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { url: "https://attacker/control" })), false);
@@ -1209,7 +1248,7 @@ async function main() {
       // retained branch reads the staged-successor slot before Apply.
       shippedSource("preparedState"),
       shippedSource("setQuality"),shippedSource("setSync"),
-      shippedSource("setSub"),shippedSource("burnSub"),shippedSource("switchAudio"),
+      shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),shippedSource("burnSub"),shippedSource("switchAudio"),
       // A directed change settles a promise chain rather than reopening
       // inline, so the harness hands back a form the cases can await.
       "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();if(retainedQualityChange(PLAYER))applyQualityWithRestart();}",
@@ -1743,7 +1782,7 @@ async function main() {
       "const performance={now:()=>0};function hlsStartupIncomplete(){return false;}function diagnoseHlsStartup(){return {};}function abortHlsStartupLoaders(){}",
       "function setTimeout(fn){timer=fn;return 1;}function clearTimeout(){}function fetch(url){return new Promise(resolve=>requests.push({url,resolve}));}",
       "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
-      shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
+      shippedSource("probePlaybackSource"),shippedSource("playbackAttemptTerminallyStopped"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {requests,loading,surface:surfacePainted,stops:()=>surfaceStops.length,start:stallDiagnose,timeout:()=>timer(),replace(){PLAYER={started:false,method:'remux'};}};",
     ].join("\n"))();
@@ -1771,7 +1810,7 @@ async function main() {
       "const document={getElementById:()=>({classList:{add(){}},currentTime:0})};const console={warn(){}};function fetch(){requests++;throw Error('terminal refusal must suppress generic probe');}",
       "const performance={now:()=>0};function hlsStartupIncomplete(){return false;}function diagnoseHlsStartup(){return {};}function abortHlsStartupLoaders(){}",
       "function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
-      shippedSource("currentStreamFailureOverlay"),shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
+      shippedSource("currentStreamFailureOverlay"),shippedSource("probePlaybackSource"),shippedSource("playbackAttemptTerminallyStopped"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {start:stallDiagnose,result:()=>({requests,loading,surface:surfacePainted(),stops:surfaceStops.length})};",
     ].join("\n"))();
@@ -1789,7 +1828,7 @@ async function main() {
       "const document={getElementById:()=>({})};const console={warn(){}};function fetch(){return new Promise(done=>resolve=done);}",
       "const performance={now:()=>0};function hlsStartupIncomplete(){return false;}function diagnoseHlsStartup(){return {};}function abortHlsStartupLoaders(){}",
       "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){throw Error('stale recovery');}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
-      shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
+      shippedSource("probePlaybackSource"),shippedSource("playbackAttemptTerminallyStopped"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {loading,surface:surfacePainted,start:stallDiagnose,resolve:()=>resolve({status:500}),replace(kind){if(kind==='close')PLAYER=null;else if(kind==='seek')PLAYER.controlIntentGeneration=1;else PLAYER={started:false,method:'transcode'};}};",
     ].join("\n"))();
@@ -1876,11 +1915,11 @@ async function main() {
     const next=fullPlayer();next.internalMediaReset=true;h.attach(next);
     assert.equal(h.video._plurxTransportEvents.pause.length,0,'load cancels the old queued pause expectation');
     h.handlePlaybackTransportEvent(h.video,next,'pause');
-    assert.equal(next.wantsPlayback,false,'native Pause during preparation remains a real command');
-    assert.equal(next.controlIntentGeneration,1);
+    assert.equal(next.wantsPlayback,true,'unowned preparation Pause cannot withdraw requested playback');
+    assert.equal(next.controlIntentGeneration||0,0);
     h.video.paused=false;
     h.handlePlaybackTransportEvent(h.video,next,'play');
-    assert.equal(next.wantsPlayback,true);assert.equal(next.controlIntentGeneration,2);
+    assert.equal(next.wantsPlayback,true);assert.equal(next.controlIntentGeneration||0,0);
     h.video.paused=true;h.applyPlaybackTransportIntent(h.video,next);
     next.wantsPlayback=false;
     h.handlePlaybackTransportEvent(h.video,next,'play');
@@ -1890,9 +1929,9 @@ async function main() {
     // Model HTML's queued media tasks: load/src remove old event tasks, while
     // pending play promise rejections can arrive after the new load has begun.
     const h=new PlaybackContextFunction([
-      "let PLAYER={wantsPlayback:true},queue=[];const plays=[];",
+      "let PLAYER={wantsPlayback:true,mediaAttachment:{}},queue=[];const plays=[];",
       "const v={paused:false,ended:false,removeAttribute(){},load(){queue=[];this.paused=true;},pause(){if(!this.paused){this.paused=true;queue.push('pause');}},play(){if(this.paused){this.paused=false;queue.push('play');}return new Promise((resolve,reject)=>plays.push({resolve,reject}));}};",
-      "Object.defineProperty(v,'src',{set(){v.load();}});",
+      "const document={getElementById:()=>v};PLAYER.transportPresentation={attachment:PLAYER.mediaAttachment,element:v};Object.defineProperty(v,'src',{set(){v.load();}});",
       "function supersedePlaybackControlIntent(p){p.generation=(p.generation||0)+1;}function endWait(){}",
       "function cancelHlsStartup(){}function pauseHlsStartup(){}function resumeHlsStartup(){}",
       // §3.1: the viewer's own transport intent is what tells the presenter a
@@ -1902,9 +1941,9 @@ async function main() {
       shippedSource("playbackTransportEvents"),shippedSource("resetPlaybackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),shippedSource("resetMediaSource"),
       shippedSource("applyPlaybackTransportIntent"),shippedSource("handlePlaybackTransportEvent"),
-      "return {p:PLAYER,v,plays,surfaceEvents,reset:()=>resetMediaSource(v),source:()=>setPlaybackMediaSource(v,'new'),apply:()=>applyPlaybackTransportIntent(v,PLAYER),flush(){while(queue.length)handlePlaybackTransportEvent(v,PLAYER,queue.shift());}};",
+      "return {p:PLAYER,v,plays,surfaceEvents,reset:()=>resetMediaSource(v),source:()=>setPlaybackMediaSource(v,'new'),apply:()=>applyPlaybackTransportIntent(v,PLAYER),present(){PLAYER.mediaAttachment={};PLAYER.transportPresentation={attachment:PLAYER.mediaAttachment,element:v};},flush(){while(queue.length)handlePlaybackTransportEvent(v,PLAYER,queue.shift());}};",
     ].join("\n"))();
-    h.reset();h.apply();h.flush();
+    h.reset();h.apply();h.flush();h.present();
     h.v.pause();h.flush();
     assert.equal(h.p.wantsPlayback,false,'load-canceled internal pause cannot consume the next native Pause');
     h.p.wantsPlayback=true;h.apply();const old=h.plays.at(-1);
@@ -2246,17 +2285,6 @@ async function main() {
   // and eight sites read `action_id`, and `playlist_url`, `media_origin_ms`
   // and `effective_selection` are asserted nowhere. This fixture is what
   // catches the `prepare` / `prepare_replacement` trap in both directions.
-  const PREPARE_SESSION = "44444444-4444-4444-8444-444444444444";
-  const PREPARE_ACTION_ID = "33333333-3333-4333-8333-333333333333";
-  const PREPARE_FIXTURE = JSON.parse(`{
-    "type":"prepare",
-    "action_id":"${PREPARE_ACTION_ID}",
-    "session_id":"${PREPARE_SESSION}",
-    "playlist_url":"/api/v1/hls/${PREPARE_SESSION}/index.m3u8",
-    "media_origin_ms":0,
-    "effective_selection":{"quality_auto":true,"height":1080,
-      "audio_track":null,"subtitle_burn":null,"audio_offset_ms":0,
-      "codec":"server_selected","dynamic_range":"sdr"}}`);
   assert.equal(PREPARE_FIXTURE.type, "prepare", "the wire tag is `prepare`");
   assert.equal(control.PREPARE_REPLACEMENT_ACTION, "prepare_replacement",
     "the DECLARED name is `prepare_replacement` — the two differ, and only here");
@@ -2717,6 +2745,9 @@ async function main() {
         shippedSource("persistentWaitEvidence"),
         shippedSource("endWait"),
         shippedSource("stallRecoverySnapshot"),
+        shippedSource("rememberPlaybackTransportIntent"),transportTelemetrySources(),
+        shippedSource("playbackTransportEvents"),shippedSource("pausePlaybackInternally"),
+        shippedSource("applyPlaybackTransportIntent"),
         shippedSource("persistentWait"),
         "function settlePlaybackControlSeek(){} function completeHlsStartup(){} function clearStall(){} function finishStallRecovery(){return false;}",
         // The control send now attaches the Auto link receipt. Auto's link
@@ -4083,6 +4114,7 @@ async function main() {
       pause() { this.paused = true; },
       load() { this.loads += 1; },
       removeAttribute(name) { if (name === "src") this.src = null; delete this.attributes[name]; },
+      querySelectorAll() { return []; },
       setAttribute(name, value) { this.attributes[name] = value; },
       addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn); },
       removeEventListener(name, fn) {
@@ -4098,6 +4130,8 @@ async function main() {
     // leaves the page with its listeners.
     const created = [];
     const attached = [live];
+    const closeNodes = new Map(["modal", "player", "app"].map(id => [id,
+      { style: {}, classList: { contains: value => value === "open", remove() {} } }]));
     const parent = {
       appendChild(node) { node.parentNode = parent; attached.push(node); },
       removeChild(node) {
@@ -4109,7 +4143,7 @@ async function main() {
     };
     live.parentNode = parent;
     const document = {
-      getElementById: (id) => attached.find((node) => node.id === id) || null,
+      getElementById: (id) => attached.find((node) => node.id === id) || closeNodes.get(id) || null,
       createElement: () => {
         const node = element("");
         node.buffered.owner = node;
@@ -4126,17 +4160,23 @@ async function main() {
     const instances = [];
     class FakeHls {
       static Events = { MANIFEST_PARSED: "manifest", ERROR: "error",
-        BUFFER_APPENDED: "append", LEVEL_LOADED: "level" };
+        BUFFER_APPENDED: "append", LEVEL_LOADED: "level", FRAG_LOADED: "loaded" };
+      static ErrorTypes = { NETWORK_ERROR: "networkError", MEDIA_ERROR: "mediaError" };
+      static ErrorDetails = { BUFFER_FULL_ERROR: "bufferFullError", BUFFER_APPEND_ERROR: "bufferAppendError" };
       static isSupported() { return true; }
       constructor(config) {
         this.config = config; this.events = {}; this.destroyed = false;
         this.bandwidthEstimate = 9_000_000; instances.push(this);
       }
-      on(event, fn) { this.events[event] = fn; }
+      on(event, fn) {
+        const previous=this.events[event];
+        this.events[event]=previous?(...args)=>{previous(...args);fn(...args);}:fn;
+      }
       loadSource(url) { this.source = url; }
       attachMedia(media) { this.media = media; }
       stopLoad() { this.loadsStopped = (this.loadsStopped || 0) + 1; }
       startLoad() { this.loadsResumed = (this.loadsResumed || 0) + 1; }
+      recoverMediaError() { this.mediaRecoveries = (this.mediaRecoveries || 0) + 1; }
       destroy() { this.destroyed = true; }
     }
     const scope = new PlaybackContextFunction(
@@ -4147,6 +4187,14 @@ async function main() {
       "handleEnded", "renderPlayerInfo", "pbTick", "pbSyncPlayIcon", "SHARED_DECISION",
       [
         "let PLAYER=null; let quality='auto';const localStorage={getItem:()=>quality,setItem:(key,value)=>{quality=value;}};",
+        "const SERVER={playback_display_aware_auto:true,display_aware_auto_protocol:'route-v1'};",
+        "let WATCH_CLOSE_PROMISE=null,WATCH_GENERATION=0,WATCH=null,STATS_TIMER=null; const location={hash:'#/'};",
+        "const beginPlaybackPreparation={};const released=[],releaseStates=[];",
+        "const PLAY_OPEN_GATE={invalidate(){},current(){return false;}};",
+        "function watchDetach(){return null;}function reportProgress(){return Promise.resolve();}",
+        "function exitPresentationModes(){}function clearPlayerMediaSession(){}function cancelPendingSeek(){}function resetPlaybackSurface(){}",
+        "function stopPlayerTimers(){stopPlaybackControl(PLAYER);}",
+        "function releaseSession(id){released.push(id);const v=document.getElementById('video');releaseStates.push({id,paused:v.paused,src:v.src,hls:PLAYER.hls});}",
         "function playbackContext(){return {};}",
         "function cancelHlsStartup(){}",
         // The sampling tick refreshes the wait sentence before each presenter
@@ -4162,6 +4210,20 @@ async function main() {
         "function bufferTargets(){return {fwd:20,back:10,budgeted:false};}",
         shippedSource("bufferRunway"),
         "function vodClientContract(){return {fragLoadPolicy:{}};}",
+        "const hlsObservations=[];function markEvent(kind){hlsObservations.push(kind);}",
+        "function clearStreamFailureFor(){}function retuneBuffer(){}function reportBufferLimit(){}",
+        "function playbackControlHlsFatal(d){return {media_failure:d.type==='mediaError',observation:{}};}",
+        "function finishStallRecovery(){return false;}function currentStreamFailureOverlay(){return null;}",
+        "function showStallRecoveryFailure(){}function scheduleUrgentAutoControllerTick(){}",
+        "function exhaustHlsStartup(p){p.hlsStartup.state='exhausted';}",
+        "function endWait(){}function pbSyncSubIcon(){}function subNeedsBurn(s){return !!s?.burn;}",
+        "function restartPendingPlaybackOpen(){return false;}function burnSub(){throw Error('unexpected subtitle burn');}",
+        shippedSource("clearSubs"),shippedSource("rememberPlaybackSelection"),
+        shippedSource("nativeHlsSubtitleOrdinal"),shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),
+        shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),
+        shippedSource("hlsStartupIncomplete"),shippedSource("hlsStartupEpisode"),
+        shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
+        shippedSource("scheduleHlsNetworkRetry"),shippedSource("armHlsStartupRetry"),
         shippedConst("PREPARED_HANDOFF_KEY"),
         shippedConst("PREPARED_BUFFER_LEAD_MS"),
         shippedConst("PREPARED_ALIGN_SLACK_MS"),
@@ -4190,6 +4252,7 @@ async function main() {
         shippedSource("preparedSharedSuccessor"),
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
         qualityResourceTimingSources(),shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
+        shippedSource("adoptPreparedHls"),shippedSource("notePreparedHlsFragmentLoaded"),
         shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
@@ -4228,14 +4291,16 @@ async function main() {
         transportTelemetrySources(),shippedSource("pausePlaybackInternally"),
         shippedSource("settleDirectedChange"),qualityCancellationSources(), shippedSource("supersedeDirectedChange"),
         shippedSource("teardownHls"),
+        shippedSource("retirePlaybackPredecessor"),shippedSource("resetMediaSource"),
+        shippedSource("stopPlaybackControl"),shippedSource("closePlayer"),shippedSource("closeVodForPageHide"),
         // ---- the directed change, end to end -----------------------------
         "let PENDING_ATTEMPT_REASON=null; const plays=[],mediaChanges=[];",
         "function playbackSurfaceStep(){return null;}",
         "function closeMenu(){} function toast(){} function qualityLabel(){return 'x';}",
         "function play(id,title,position,dur,meta){plays.push({id,position,meta,reason:PENDING_ATTEMPT_REASON});PENDING_ATTEMPT_REASON=null;}",
         "async function requestPlaybackMediaChange(p,change){mediaChanges.push(change);return true;}",
-        "function selectedAudioIndex(){return 0;} function playQuality(){return quality;}",
-        "function hlsStartupCurrent(){return false;}",
+        shippedSource("selectedAudioIndex"),shippedSource("newRequestId"),shippedSource("qualityMediaIntent"),
+        "function playQuality(){return quality;}",
         "function recordAutoSwitch(p,from,to,reason,pos,id){(p.abr.switches||(p.abr.switches=[])).push({from,to,reason,pos,id});}",
         shippedConst("PREPARED_OFFER_BOUND_MS"),
         shippedConst("PREPARED_OFFER_CADENCE_MS"),
@@ -4287,15 +4352,17 @@ async function main() {
         " supersede(){return supersedePlaybackControlIntent(PLAYER);},",
         " waiters(){return (PLAYER&&PLAYER.controlWaiters)||[];},",
         " selection(){return playbackControlSelection(PLAYER);},",
+        " intent(){return qualityMediaIntent(PLAYER,playbackControlSelection(PLAYER),true);},",
+        " subtitle(index){return setSub(index);},",
         " requestedRung(){return PLAYER&&PLAYER.autoRequestedHeight;},",
         " commit(){return commitPreparedReplacement(PLAYER,preparedState(PLAYER));},",
-        " plays, mediaChanges,",
-        " surfaceRaised};",
+        " plays, mediaChanges,released,releaseStates,close:closePlayer,pagehide:closeVodForPageHide,",
+        " surfaceRaised,hlsObservations};",
       ].join("\n"),
     );
     const api = scope(
       document, { Hls: FakeHls, PlurxPlaybackControl: control }, FakeHls,
-      { bandwidthSeedBps: () => null }, control, null,
+      { ...require("../../crates/plurxd/src/web/playback-policy.js"),bandwidthSeedBps: () => null }, control, null,
       (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
       (id) => { timers.delete(id); },
       (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
@@ -4376,6 +4443,119 @@ async function main() {
 
   await test("prepared HLS buffer readiness follows incumbent clock and releases listener ownership",
     ()=>preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction));
+
+  function preparedHlsRecoveryTests(){
+    const preparedPlayer=overrides=>({offset:0,vod:true,hls:null,prepared:null,priorKbps:0,
+      controlAcknowledgement:null,pendingMediaChange:null,wantsPlayback:true,...overrides});
+    const prepareAction=()=>({...PREPARE_FIXTURE});
+    return Promise.all([
+    test("prepared HLS subtitle reattachment preserves the automatic candidate through commit",async()=>{
+      const h=preparedHarness(),requested="encode-480",previous="encode-720";
+      const p=h.set(preparedPlayer({fileId:7,sessionId:"predecessor",hls:{destroy(){}},
+        mediaAttachment:{id:1},controlIntentGeneration:0,started:true,method:"transcode",
+        qualityProtocol:"route-v1",qualityCandidateId:previous,curSub:1,burnedSub:null,aoffset:0,
+        subs:[{index:1,native:true,codec:"subrip"}],
+        qualityCandidates:[{id:requested,route:"encode",target_height:480,grade:"sdr"}],
+        abr:{requestedCandidateId:requested,catalogSelectionKey:JSON.stringify([0,1,null,0])},
+        directedChange:{intentGeneration:0,tappedAt:0,settled:false,
+          autoMove:{from:720,to:480,candidateId:requested,previousCandidateId:previous}}}));
+      const selection=h.selection(),intent=h.intent(),change=p.directedChange,attachment=p.mediaAttachment;
+      h.handle({...prepareAction(),effective_selection:{...PREPARE_FIXTURE.effective_selection,
+        candidate_id:requested,height:480}});
+      const staged=h.instances[0];
+      staged.events.manifest();h.spare.ranges=[[0,30]];staged.events.append();h.provePrepared(false);
+      assert.equal(p.abr.requestedCandidateId,requested,"reattaching subtitles cannot revert to the predecessor's candidate");
+      assert.equal(p.controlIntentGeneration,0,"reattaching the selected subtitle is not a viewer command");
+      assert.equal(change.settled,false,"subtitle reattachment cannot supersede the automatic handoff");
+      assert.deepEqual(h.selection(),selection,"exposure keeps the server's reserved candidate selection");
+      assert.deepEqual(h.intent(),intent,"reattachment preserves the media-intent recipe revision");
+      assert.equal(staged.subtitleTrack,0,"the selected native subtitle is attached to the new HLS instance");
+      assert.equal(p.mediaAttachment,attachment);
+      h.spare.frameCallback(0,{mediaTime:4/30,presentedFrames:5});
+      assert.equal(change.outcome,"committed");
+      assert.deepEqual(h.selection(),selection,"the committed acknowledgement carries the same requested recipe");
+      assert.deepEqual(h.intent(),intent,"the commit retains the offer's exact media intent");
+      assert.equal(p.abr.requestedCandidateId,requested);
+      assert.equal(h.queue().at(-1).state,"committed");
+      await h.subtitle(1);
+      assert.equal(p.controlIntentGeneration,1,"an explicit subtitle command still supersedes viewer intent");
+      assert.equal(staged.subtitleTrack,0,"the same explicit selection still reattaches its rendition");
+    }),
+    test("a committed prepared HLS successor owns fatal recovery on its visible element",()=>{
+    for(const kind of ["networkError","mediaError"]){
+      const h=preparedHarness();
+      const attachment={id:1},oldStartup={state:"presenting"};
+      const p=h.set(preparedPlayer({hls:{destroy(){}},mediaAttachment:attachment,
+        hlsStartup:oldStartup,hlsRetryUsed:1,started:true,method:"transcode"}));
+      const state=h.handle(prepareAction());
+      const staged=h.instances[0];
+      staged.events.manifest();h.spare.ranges=[[0,30]];staged.events.append();h.provePrepared();
+      assert.equal(p.mediaAttachment,attachment,"commit retains the reporter's attachment identity");
+      assert.equal(p.hlsStartup.hls,staged,"the active episode follows the visible HLS instance");
+      assert.equal(p.hlsStartup.state,"presenting","adoption does not restart first-frame accounting");
+      assert.equal(p.hlsStartup.attachment.current(),true);
+      assert.equal(p.hlsRetryUsed,0,"the successor owns its own bounded recovery budget");
+      assert.equal(h.logs.filter(row=>row.event==="hls_startup_presenting").length,0);
+      assert.equal(state.hlsAdopted,true);
+      staged.events.append();
+      assert.deepEqual(h.hlsObservations,["append"],"the visible successor records normal append observations");
+      staged.events.loaded(null,{frag:{type:"main",duration:2,
+        stats:{loaded:4096,total:4096,loading:{start:0,end:100}}}});
+      assert.equal(p.segBytes,4096,"normal fragment accounting replaces the staging observer");
+      // Established recovery remains usable long after the original startup
+      // deadline; it must resume the visible element at the backward target.
+      p.hlsStartup.deadlineMs=-1;
+      staged.media.currentTime=7;
+      staged.events.error(null,{fatal:true,type:kind,
+        details:kind==="networkError"?"fragLoadError":"fragParsingError"});
+      if(kind==="networkError"){
+        assert.equal(h.logs.filter(row=>row.event==="hls_fatal").length,1);
+        h.fireAll();
+        assert.equal(staged.loadsResumed,1,"network recovery reaches the committed pipeline");
+        assert.equal(h.logs.find(row=>row.event==="hls_retry").action,"resume_loading");
+      }else{
+        assert.equal(staged.mediaRecoveries,1,"media fatal reaches the usual decoder rescue");
+        assert.equal(h.logs.filter(row=>row.event==="hls_media_recovery").length,1);
+      }
+      const recorded=h.logs.length;
+      p.terminalStop={attachment};
+      staged.events.error(null,{fatal:true,type:kind,details:"fragLoadError"});
+      assert.equal(h.logs.length,recorded,"a stopped successor cannot spend another recovery");
+      p.terminalStop=null;
+      staged.media.id="retired";
+      staged.events.error(null,{fatal:true,type:kind,details:"fragLoadError"});
+      assert.equal(h.logs.length,recorded,"the pipeline must still own the visible element");
+      staged.media.id="video";
+      p.mediaAttachment={id:2};
+      staged.events.error(null,{fatal:true,type:kind,details:"fragLoadError"});
+      assert.equal(h.logs.length,recorded,"a retired successor's queued errors cannot affect a new attachment");
+    }
+    }),
+
+    test("prepared HLS rollback restores the predecessor's recovery owner",()=>{
+    const h=preparedHarness();
+    const incumbent={destroy(){}},oldStartup={hls:incumbent,state:"presenting"};
+    const p=h.set(preparedPlayer({hls:incumbent,hlsStartup:oldStartup,hlsRetryUsed:1}));
+    const state=h.handle(prepareAction());
+    const staged=h.instances[0];
+    staged.events.manifest();h.spare.ranges=[[0,30]];staged.events.append();h.provePrepared(false);
+    assert.equal(state.hlsAdopted,undefined,"exposure alone cannot take recovery away from rollback");
+    assert.equal(p.hlsStartup,oldStartup,"the predecessor keeps its recovery owner until first-frame proof");
+    const beforeFailure=h.logs.length;
+    staged.events.error(null,{fatal:true,type:"networkError",details:"fragLoadError"});
+    assert.equal(h.logs.length,beforeFailure,"a pre-proof failure remains owned by the rollback watchdog");
+    assert.equal(p.terminalStop,undefined,"the unproven successor cannot terminally stop the shared attachment");
+    h.fireAll();
+    assert.equal(p.hls,incumbent);
+    assert.equal(p.hlsStartup,oldStartup,"rollback restores the exact predecessor episode");
+    assert.equal(p.hlsRetryUsed,1,"rollback cannot renew the predecessor's spent retry");
+    const recorded=h.logs.length;
+    staged.events.error(null,{fatal:true,type:"networkError",details:"fragLoadError"});
+    assert.equal(h.logs.length,recorded,"the rolled-back successor no longer reports fatal errors");
+    }),
+    ]);
+  }
+
 
   // A warmed successor remains under the incumbent until aligned advancing
   // successor frames meet a fresh incumbent frame.
@@ -6946,12 +7126,12 @@ function establishedHlsResumeTests(){
     "const player={hls,mediaAttachment:attachment,wantsPlayback:true,controlIntentGeneration:1};PLAYER=player;",
     "const episode={player,attachment,hls,state:'presenting',establishedSuspension:null,retry:{state:'unused',timer:null}};player.hlsStartup=episode;",
     "const video={paused:false,ended:false,error:null,currentTime:44,pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();}};",
-    "const document={getElementById:id=>id==='video'?video:null};",
+    "const document={getElementById:id=>id==='video'?video:null};player.transportPresentation={attachment,element:video};",
     shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
     shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
     transportTelemetrySources(),shippedSource("pausePlaybackInternally"),shippedSource("rememberPlaybackTransportIntent"),
     shippedSource("applyPlaybackTransportIntent"),shippedSource("handlePlaybackTransportEvent"),
-    transportTelemetrySources(),shippedSource("togglePlay"),
+    transportTelemetrySources(),shippedSource("playerWantsPlayback"),shippedSource("togglePlay"),
     "return {calls,player,episode,video,toggle:togglePlay,native:event=>handlePlaybackTransportEvent(video,player,event),reset(){calls.length=0;episode.establishedSuspension=null;player.wantsPlayback=true;player.controlIntentGeneration=1;video.paused=false;resetPlaybackTransportEvents(video);}};",
   ].join("\n"))();
   edges.toggle();
@@ -7072,6 +7252,7 @@ async function vendoredHlsStartupTests(){
       "class StockLoader{load(context,config,callbacks){return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{};}}",
       "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}getResponseHeader(){return null;}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});this.listeners.progress?.({loaded});}}",
       shippedSource("preparedState"),
+      shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("attachedPreparedHls"),
       shippedSource("createPreparedHlsLoader"),
       shippedSource("notePreparedHlsFragmentLoaded"),
@@ -7158,7 +7339,7 @@ async function vendoredHlsStartupTests(){
         shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
         shippedSource("observeStreamFailureResponse"),
         shippedSource("createHlsStartupLoader"),
-        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),
+        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),
         shippedSource("scheduleHlsNetworkRetry"),
         "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({xhrSetup});",
         "loader.load({type:'manifest',url:'/delayed/index.m3u8',responseType:'text'},",
@@ -7418,7 +7599,7 @@ function quorumDiagnosisHarness(fetcher){
     "const TOKEN=null,document={getElementById:()=>({})},performance={now:()=>1},console={warn(){}};",
     "function playbackOwnsAttachedMedia(p){return p===PLAYER;}function hlsStartupIncomplete(){return false;}function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function stopPlayerForExhaustion(){stops.push(true);}function raisePlaybackSurface(source,fault){faults.push(fault);}function playbackStallActions(){return ['retry','close'];}",
     shippedSource('noteStreamFailure'),shippedSource('currentStreamFailureOverlay'),
-    shippedSource('probePlaybackSource'),shippedSource('stallDiagnose'),
+    shippedSource('probePlaybackSource'),shippedSource('playbackAttemptTerminallyStopped'),shippedSource('stallDiagnose'),
     "return {player:PLAYER,faults,stops,diagnose:stallDiagnose,note:(status,body)=>noteStreamFailure(status,body,{attachment:PLAYER.mediaAttachment,resource:'media',request_ordinal:1})};",
   ].join('\n'))(policy,fetcher);
 }
@@ -7632,7 +7813,9 @@ test("native Pause/Play keeps a pending manual continuous choice and a fenced on
   const owner=continuousChangeOwner();
   for(const [edge,paused] of [["pause",true],["play",false]]){
     const h=continuousChangeHarness(owner),change=h.p.directedChange;
-    owner.handlePlaybackTransportEvent({paused,ended:false,error:null},h.p,edge);
+    h.p.transportPresentation={attachment:h.p.mediaAttachment,element:owner.video};
+    owner.video.paused=paused;owner.handlePlaybackTransportEvent(owner.video,h.p,edge);
+    assert.equal(h.p.controlIntentGeneration,5,`native ${edge} advances actual intent`);
     assert.equal(change.intentGeneration,h.p.controlIntentGeneration,`native ${edge} carries the pending manual choice`);
     h.release();
     assert.equal(await h.running,"continuous",`native ${edge} does not abandon the chosen rung`);
@@ -8039,6 +8222,66 @@ test("cached captions follow the attached local or shared owner namespace and fe
 });
 
 
+function processedCatalogRefreshFixture(){
+  const processed={id:"a".repeat(32),recipe_digest:Array(32).fill(10),route:"encode",
+    processed_hdr10:true,planned_codec:"hevc",grade:"hdr10",decoder_compatible:true,
+    sustainable:true,complete_cache:false,width:3840,height:2160,target_height:2160,peak_bps:30000000};
+  const player={mediaAttachment:{},controlIntentGeneration:1,sessionId:"processed-session",
+    qualityProtocol:"route-v1",qualityCandidateId:processed.id,qualityCandidates:[processed],
+    curSub:-1,burnedSub:null,aoffset:0,audio:0,
+    abr:{requestedCandidateId:processed.id,catalogSelectionKey:JSON.stringify([0,-1,null,0])}};
+  const h=new Function("PLAYER",[
+    "const SERVER={playback_display_aware_auto:true,display_aware_auto_protocol:'route-v1'};",
+    "let answer={quality_candidates:PLAYER.qualityCandidates.map(row=>({...row,recipe_digest:[...row.recipe_digest]}))},quality='auto';",
+    "function currentCapsDocument(){return {video:[],display:{}};}function selectedAudioIndex(p){return p.audio;}",
+    "function playQuality(){return quality;}function qualityForce(){return quality;}function playbackFileContextForPlayer(){return {};}",
+    "async function askDecision(){return answer;}function continuousQualityBoundCatalog(rows){return rows;}",
+    ...["qualityCatalogSelectionKey","qualityCatalogSelectionCurrent","playbackControlSelection",
+      "candidateQualityContext","refreshQualityCandidates"].map(shippedSource),
+    "return {player:PLAYER,answer,refresh:()=>refreshQualityCandidates(PLAYER),selection:()=>playbackControlSelection(PLAYER,true),setQuality:value=>quality=value};",
+  ].join("\n"))(player);
+  return {...h,processed};
+}
+
+test("processed Auto catalog refresh retains exact running recipe in the next control selection",async()=>{
+  const h=processedCatalogRefreshFixture();
+  const before=h.selection();
+  assert.equal(await h.refresh(),true);
+  assert.deepEqual(h.selection(),before,"a capability catalog refresh must not ask the owner to replace HDR10-E with unnamed Auto");
+  assert.deepEqual(h.selection().quality,{mode:"auto",candidate_id:h.processed.id,height:2160});
+});
+
+test("processed Auto catalog refresh clears a missing, changed or incompatible recipe and a changed track selection",async()=>{
+  for(const change of [h=>{h.answer.quality_candidates=[];},
+    h=>{h.answer.quality_candidates[0].recipe_digest[31]++;},
+    h=>{h.answer.quality_candidates[0].decoder_compatible=false;},
+    h=>{h.player.audio=1;}]){
+    const h=processedCatalogRefreshFixture();change(h);
+    assert.equal(await h.refresh(),true);
+    assert.deepEqual(h.selection().quality,{mode:"auto"});
+  }
+});
+
+test("processed Auto catalog refresh still permits pressure downshift and preserves manual quality",async()=>{
+  const h=processedCatalogRefreshFixture();
+  const lower={...h.processed,id:"b".repeat(32),recipe_digest:Array(32).fill(11),
+    processed_hdr10:false,width:1920,height:1080,target_height:1080,peak_bps:10000000};
+  h.answer.quality_candidates.push(lower);
+  await h.refresh();
+  const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+  const decision=policy.decideCandidateTransition({state:{},candidates:h.player.qualityCandidates,
+    currentId:h.selection().quality.candidate_id,sample:{now_ms:1000,automatic:true,presenting:true,
+      cause:"link",cause_age_ms:0,stalled:true,runway_ms:1000,
+      transfer:{completed:true,from_cache:false,producer_paced:false,bytes:1500000,elapsed_ms:1000,age_ms:0}}});
+  assert.equal(decision.candidate.id,lower.id,"retaining the request identity must not lock Auto at its current rung");
+  h.setQuality("720");
+  assert.deepEqual(h.selection().quality,{mode:"manual",height:720});
+  const ordinary=processedCatalogRefreshFixture();
+  ordinary.player.qualityCandidates[0].processed_hdr10=false;
+  await ordinary.refresh();
+  assert.deepEqual(ordinary.selection().quality,{mode:"auto"},"ordinary Auto keeps its existing refresh behavior");
+});
+
 test("paused subtitle selection projects ordinal zero and Off immediately", async () => {
   const policy=require("../../crates/plurxd/src/web/playback-policy.js");
   const h=new Function("PlaybackPolicy",[
@@ -8053,9 +8296,9 @@ test("paused subtitle selection projects ordinal zero and Off immediately", asyn
     "function supersedePlaybackControlIntent(){}function notifyPlaybackControl(){}function restartPendingPlaybackOpen(){return false;}function nativeHlsSubtitleOrdinal(){return 0;}",
     "function playbackOwnsAttachedMedia(){return false;}function esc(s){return String(s);}function fmtMbps(){return '';}function fmtSize(){return '';}function fmtDur(){return '';}",
     "function audioFactLabel(t){return t.title;}function subFactLabel(t){return t.title;}function langName(){return 'English';}",
-    ...["setSub","clearSubs","rememberPlaybackSelection","pbSyncSubIcon","watchCurrentFile",
+    ...["setSub","attachPlaybackSubtitle","clearSubs","rememberPlaybackSelection","pbSyncSubIcon","watchCurrentFile",
       "watchSelectedAudio","watchSelectedSub","watchTrackChip","watchFoldButton","watchTrackRow",
-      "watchDeliveryRow","watchLedgerHtml","watchBindLedger","watchRenderLedger","watchFolds","watchRenderSubtitleGeneration","watchCanGenerateSubtitles","watchGenerationAction"].map(shippedSource),
+      "watchDeliveryRow","watchLedgerHtml","watchBindLedger","watchRenderLedger","watchFolds","watchRenderSubtitleGeneration","watchCanGenerateSubtitles","watchGenerationAction","watchTranslationAction"].map(shippedSource),
     "return {setSub,video,player:PLAYER,ledger,band,ccOn:()=>ccOn};",
   ].join("\n"))(policy);
   await h.setSub(0);
@@ -8071,4 +8314,84 @@ test("paused subtitle selection projects ordinal zero and Off immediately", asyn
   assert.equal(h.ccOn(),false);
   assert.match(h.ledger.innerHTML,/data-watch-sub="-1" aria-pressed="true"[^>]*>Off</);
   assert.equal(h.band.innerHTML,h.ledger.innerHTML);
+});
+
+// Model WebKit's per-element permission separately from the async source and
+// presentation facts. Real Safari acceptance is recorded in the incident note.
+function activationVideo(h,{source='',gesture=true}={}){
+ const v=h.video,events=[];let authorized=false,active=gesture,currentSource=source;
+ Object.defineProperty(v,'src',{configurable:true,get:()=>currentSource,set:value=>{currentSource=value;events.push('source');}});
+ v.getAttribute=name=>name==='src'?currentSource:null;
+ v.removeAttribute=name=>{if(name==='src')currentSource='';};
+ v.load=()=>{events.push(active?'gesture-load':'later-load');if(active)authorized=true;v.paused=true;};
+ v.play=()=>{events.push(authorized?'authorized-play':'blocked-play');v.paused=false;return Promise.resolve();};
+ return {v,events,endGesture(){active=false;},beginGesture(){active=true;}};
+}
+const activationDecision={method:'direct_play',play_url:'/movie.mp4',
+ source:{video_codec:'h264',duration_ms:600000},audio:[{index:1,default:true}],subtitles:[],ladder:[]};
+test('initial play prepares the persistent element inside the gesture before asynchronous decisions',async()=>{
+ const h=fullOpenHarness();h.setOpen(false);const media=activationVideo(h);
+ const opening=h.play(9,'Film',42000,600000,{});
+ assert.deepEqual(media.events,['gesture-load']);assert.equal(h.decisions.length,1);
+ media.endGesture();h.decisions[0].resolve(activationDecision);await opening;
+ assert.equal(h.video,media.v);assert.ok(media.events.includes('authorized-play'));
+ assert.ok(!media.events.includes('blocked-play'));assert.equal(h.current().wantsPlayback,true);
+ assert.equal(h.video.muted,undefined,'no muting is used to acquire permission');
+});
+test('preparing a replacement never reloads the incumbent element in the gesture',async()=>{
+ const h=fullOpenHarness();h.attach({fileId:8,started:true,wantsPlayback:false,offset:0,
+  knownDur:600000,source:{},curSub:-1,bookOffset:0});
+ const media=activationVideo(h,{source:'/incumbent.mp4'}),opening=h.play(9,'Replacement',0,600000,{});
+ assert.deepEqual(media.events,[],'the old picture survives pending preparation');
+ media.endGesture();h.advance(20000);await opening;
+ assert.deepEqual(media.events,[],'a refused decision does not touch the incumbent');
+ assert.equal(h.video.src,'/incumbent.mp4');
+});
+test('permission retry loads the same element synchronously and retains destination and selections',async()=>{
+ const h=fullOpenHarness(),media=activationVideo(h,{source:'/refused.mp4'});
+ const p={fileId:9,title:'Film',started:false,wantsPlayback:true,offset:0,knownDur:600000,
+  method:'direct_play',source:{},audio:[{index:1,default:true}],curAudio:0,curSub:-1,
+  preplay:{audio:1,subtitle:-1},aoffset:125,stallFrom:42,mediaAttachment:{},
+  controlSeek:{targetMs:84000,sequence:2,executed:false,frameFloor:0},controlIntentGeneration:2};
+ p.playPermissionDenied={element:media.v,attachment:p.mediaAttachment};h.attach(p);
+ const retry=h.retryPlayback();
+ assert.equal(media.events[0],'gesture-load');assert.equal(h.decisions.length,1);
+ assert.equal(h.decisions[0].selection.audio,1);assert.equal(h.decisions[0].selection.subtitle,-1);
+ assert.equal(h.decisions[0].selection.audio_offset_ms,125);
+ media.endGesture();h.decisions[0].resolve(activationDecision);await retry;
+ assert.equal(h.video,media.v);assert.ok(media.events.includes('authorized-play'));
+ assert.ok(!media.events.includes('blocked-play'));
+ assert.equal(h.current().controlSeek.targetMs,84000);assert.equal(h.current().wantsPlayback,true);
+ assert.equal(h.current().playPermissionDenied,null,'only the new attachment clears the refusal');
+});
+
+test('Pause during a pending permission retry belongs to that open and does not retry again',async()=>{
+ const h=fullOpenHarness(),media=activationVideo(h,{source:'/refused.mp4'});
+ const p={fileId:9,title:'Film',started:false,wantsPlayback:true,offset:0,knownDur:600000,
+  method:'direct_play',source:{},audio:[{index:1,default:true}],curAudio:0,curSub:-1,
+  preplay:{audio:1,subtitle:-1},aoffset:0,stallFrom:42,mediaAttachment:{}};
+ p.playPermissionDenied={element:media.v,attachment:p.mediaAttachment};h.attach(p);
+ const retry=h.retryPlayback();media.endGesture();h.togglePlay();
+ assert.equal(h.decisions.length,1,'Pause never opens another permission retry');
+ h.decisions[0].resolve(activationDecision);await retry;
+ assert.equal(h.current().wantsPlayback,false);assert.equal(h.video.paused,true);
+ assert.ok(!media.events.includes('authorized-play'));assert.ok(!media.events.includes('blocked-play'));
+});
+
+test('permission retry preserves startup and pending destinations but resumes established playback at its current file position',async()=>{
+ for(const [started,pendingTarget,expectedMs] of [[false,null,42000],[true,null,400000],[true,84000,84000]]){
+  const h=fullOpenHarness(),media=activationVideo(h,{source:'/refused.mp4'});
+  const p={fileId:9,title:'Film',started,wantsPlayback:true,offset:100,bookOffset:600000,
+   knownDur:600000,method:'remux',source:{},audio:[{index:1,default:true}],curAudio:0,curSub:-1,
+   preplay:{audio:1,subtitle:-1},aoffset:0,stallFrom:42,mediaAttachment:{}};
+  if(pendingTarget!==null)p.controlSeek={targetMs:pendingTarget,sequence:2,executed:false,frameFloor:0};
+  p.playPermissionDenied={element:media.v,attachment:p.mediaAttachment};h.attach(p);
+  h.video.currentTime=300;
+  const retry=h.retryPlayback();media.endGesture();
+  h.decisions[0].resolve(activationDecision);await retry;
+  assert.equal(h.current().offset,expectedMs/1000,
+   `started=${started}, pending=${pendingTarget}: retry uses the file-relative destination`);
+  assert.equal(h.video.src,`/remux?audio=1&start=${expectedMs/1000}`);
+  assert.ok(media.events.includes('authorized-play'));
+ }
 });

@@ -1354,6 +1354,7 @@ validate-help: ## Explain the validation workflow and UI golden commands
 .PHONY: validation-lint
 validation-lint: ## Verify every governed file maps to a valid functionality point
 	@scripts/validate lint
+	@scripts/knowledge lint --scope pilot --body-env
 
 .PHONY: validate-plan
 validate-plan: ## Explain which points and checks the staged diff selects
@@ -1476,7 +1477,7 @@ cinema-remote-browser-check: ## Run Cinema browser contracts with provisioned Pl
 	@export PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}"; \
 		node="$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}"; \
 		if [ "$$(uname -s)" = Linux ]; then set -- xvfb-run -a "$$node"; else set -- "$$node"; fi; \
-		"$$@" --test tests/web/cinema-remote-direction.browser.cjs tests/web/cinema-remote.browser.cjs tests/web/cinema-remote-live.browser.cjs tests/web/cinema-remote-couch.browser.cjs
+		"$$@" --test tests/web/cinema-remote-direction.browser.cjs tests/web/cinema-remote.browser.cjs tests/web/cinema-remote-live.browser.cjs tests/web/cinema-remote-couch.browser.cjs tests/web/meridian.browser.cjs
 
 .PHONY: library-rows-browser-check
 library-rows-browser-check: ## Test grouped library rows with the provisioned Playwright browser
@@ -1498,8 +1499,8 @@ subtitle-generation-browser-check: ## Run subtitle setup and attached playback r
 		command -v ffmpeg >/dev/null 2>&1 || { echo 'subtitle browser check requires provisioned FFmpeg with the libx264 encoder' >&2; exit 2; }; \
 		fixture_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/plurx-subtitle-browser.XXXXXX")"; \
 		trap 'rm -rf "$$fixture_dir"' EXIT HUP INT TERM; \
-		ffmpeg -nostdin -v error -f lavfi -i 'color=c=black:s=640x360:r=24:d=120' -an -c:v libx264 -preset ultrafast -pix_fmt yuv420p -movflags +faststart "$$fixture_dir/watch.mp4" || { echo 'subtitle browser check could not generate its bounded H.264 fixture' >&2; exit 2; }; \
-		PLAYWRIGHT_MODULE="$$pw_module" WATCH_MEDIA="$$fixture_dir/watch.mp4" "$$pw_node" --test tests/web/subtitle-generation.browser.cjs tests/web/watch-subtitle-generation.browser.cjs
+		ffmpeg -nostdin -v error -f lavfi -i 'color=c=black:s=640x360:r=24:d=120' -f lavfi -i 'anullsrc=r=48000:cl=stereo' -shortest -t 120 -c:a aac -threads 2 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -movflags +faststart "$$fixture_dir/watch.mp4" || { echo 'subtitle browser check could not generate its bounded H.264 fixture' >&2; exit 2; }; \
+		PLAYWRIGHT_MODULE="$$pw_module" WATCH_MEDIA="$$fixture_dir/watch.mp4" "$$pw_node" --test --test-concurrency=1 tests/web/subtitle-generation.browser.cjs tests/web/watch-subtitle-generation.browser.cjs tests/web/subtitle-translation.browser.cjs
 
 # Regenerating the golden is a deliberate act that shows up in a git diff, never
 # a side effect of a normal run — a golden that rewrites itself asserts nothing.
@@ -1548,6 +1549,7 @@ web-check: web-unit-check ## Test playback policy, embedded JS, and every shippe
 # runs exactly this, so a web pull request executes the same tests web-check
 # does apart from the two real-browser scripts.
 web-unit-check: ## Run every Node web and playback test (no browser)
+	@node --test tests/playback/frame-drop-recorder.test.js
 	@node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
 	@node --test tests/web/cinema-remote-browser-support.test.js
 	@node --test tests/web/cinema-remote-client.test.js
@@ -1580,6 +1582,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/page-read-budget.test.js
 	@node --test tests/web/media-preparation.test.js
 	@node tests/web/theme-family.test.js
+	@node tests/web/meridian.test.js
 	@node tests/web/activity-node-names.test.js
 	# Every child process is listed with its priority class and a stop (P-02 §3.2).
 	@node tests/web/activity-processes.test.js
@@ -1587,16 +1590,19 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/analysis-reconciliation.test.js
 	@node --test tests/web/analysis-coverage.test.js
 	@node tests/web/settings-sections.test.js
-	@node --test tests/web/subtitle-generation.test.js
+	@node --test tests/web/subtitle-generation.test.js tests/web/subtitle-translation.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
+	@node --test tests/web/hdr-display-peak.test.js
+	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
+	@node --test tests/web/hdr-display-change.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js
 	# An idle-expired sign-in lands on the login page saying why.
 	@node tests/web/session-expiry.test.js
 	# The Transcoding backend buttons send objects, not pre-serialized strings.
-	@node --test tests/web/transcoder-backend-requests.test.js
+	@node --test tests/web/transcoder-backend-requests.test.js tests/web/system-settings.test.js
 	@node tests/web/read-after.test.js
 	# The validation runner already has this as `web-membership`, but this is
 	# the target a web change reaches for, and the Cluster panel is a web
@@ -1606,6 +1612,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/playback/current-main-effort-quality.test.js
 	@node --test tests/playback/frame-diagnostics.test.js
 	@node tests/playback/network-shaping.test.js
+	@node --test tests/playback/cq-native-shipping-evidence.test.js
 	@node --test tests/playback/preparation-measurement.test.js
 	@node --test tests/playback/frame-clock.test.js
 	@node --test tests/playback/quality-cancellation.test.js
@@ -1837,22 +1844,22 @@ pi-uninstall: ## Remove an owned Pi installation while retaining data and browse
 	@python3 deploy/pi-setup uninstall $(PI_SETUP_FLAGS)
 
 .PHONY: install install-linux install-macos install-windows install-docker install-binary uninstall uninstall-docker
-install: ## Install plurxd as a service on this OS (systemd, launchd, or the Windows service)
+install: ## Install the native server and the applicable local GUI tray companion
 	@deploy/install auto $(INSTALL_FLAGS)
 
-install-linux: ## Install plurxd as a systemd service (dedicated plurx user, sandboxed unit)
+install-linux: ## Install the systemd server and, in GUI sessions, its tray companion
 	@deploy/install linux $(INSTALL_FLAGS)
 
-install-macos: ## Install plurxd as a launchd LaunchAgent (keeps VideoToolbox available)
+install-macos: ## Install the native macOS server and menu bar companion
 	@deploy/install macos $(INSTALL_FLAGS)
 
 install-windows: ## Install plurxd as the native Windows service (runs deploy/install.ps1)
 	@deploy/install windows $(INSTALL_FLAGS)
 
-install-docker: ## First-run Compose install: .env, override file, data dir, then docker-up
+install-docker: ## Install Compose server and, in Linux GUI sessions, its host tray
 	@deploy/install docker $(INSTALL_FLAGS)
 
-install-binary: ## Put plurxd on PATH with no service (run it with `plurxd run`)
+install-binary: ## Install core binaries and, in GUI sessions, system tray binaries
 	@deploy/install binary $(INSTALL_FLAGS)
 
 uninstall: ## Stop and remove the service installed by `make install`; data stays
@@ -1870,6 +1877,25 @@ hooks: ## Install the pre-commit (lint) and pre-push (paperwork) hooks, and Ripw
 	@if perl -e 'alarm 30; exec @ARGV' scripts/ripwire setup >/dev/null 2>&1; then echo "Ripwire is installed (scripts/ripwire find '<words>')."; \
 	  else echo "Ripwire setup failed or took over 30 s (offline?); run scripts/ripwire setup when online."; fi
 	@echo "Bypass one run with 'git commit --no-verify' or 'git push --no-verify'."
+
+## ---- native macOS server tray ------------------------------------------
+
+.PHONY: desktop-macos-build desktop-macos-test desktop-macos-check
+# Cross-architecture slices prove compilation; unit tests execute only on the
+# runner's actual architecture. Separate scratch roots allow parallel make.
+desktop-macos-build: ## Compile both macOS server tray architectures without executing tests
+	@set -e; for arch in arm64 x86_64; do \
+	  clients/server-tray/macos/build --configuration release \
+	    --version "$(VERSION)" --arch "$$arch" \
+	    --scratch "$(CURDIR)/target/desktop-macos/scratch/$$arch" \
+	    --output "$(CURDIR)/target/desktop-macos/$$arch/Plurx Server.app"; \
+	done
+
+desktop-macos-test: ## Run native server tray Swift and AppKit unit contracts
+	swift test --package-path clients/server-tray/macos \
+	  --scratch-path "$(CURDIR)/target/desktop-macos/tests"
+
+desktop-macos-check: desktop-macos-build desktop-macos-test ## Build both slices and test on the native macOS architecture
 
 ## ---- apple clients -----------------------------------------------------
 

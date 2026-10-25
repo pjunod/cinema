@@ -6,13 +6,16 @@ import Foundation
 struct SettingsStore {
     private let defaults: UserDefaults
     private let tokenVault: any TokenStoring
+    private let persistentDomainName: String?
 
     init(
         defaults: UserDefaults = .standard,
-        tokenVault: any TokenStoring = TokenVault()
+        tokenVault: any TokenStoring = TokenVault(),
+        persistentDomainName: String? = Bundle.main.bundleIdentifier
     ) {
         self.defaults = defaults
         self.tokenVault = tokenVault
+        self.persistentDomainName = persistentDomainName
     }
 
     private enum Key {
@@ -27,6 +30,7 @@ struct SettingsStore {
         static let subtitleReadiness = "plurx.subtitleReadiness"
         static let playbackQuality = "plurx.playbackQuality"
         static let autoSkip = "plurx.autoSkip"
+        static let layout = "plurx.layout"
         static let theme = "plurx.theme"
         static let appearance = "plurx.appearance"
         static let libraryGrouping = "plurx.libraryGrouping"
@@ -37,14 +41,24 @@ struct SettingsStore {
         static let boundedResume = "plurx.boundedResume"
         static let liveTvLayout = "plurx.liveTvLayout"
         static let tvHomeLayout = "plurx.tvHomeLayout"
-        static let liveTvMobileGuide = "plurx.liveTvMobileGuide"
     }
 
     /// Read-only on purpose. Every write goes through `setServer`, which is
     /// what keeps the origin and the bearer token from drifting apart.
-    var origin: String { defaults.string(forKey: Key.origin) ?? "" }
+    /// Launch arguments are preferences, not authority to re-pair a saved
+    /// bearer with another origin or identity. Explicit DEBUG acceptance has
+    /// its own verified, transient launch path.
+    private func savedObject(forKey key: String) -> Any? {
+        guard defaults.volatileDomain(forName: UserDefaults.argumentDomain)[key] != nil else {
+            return defaults.object(forKey: key)
+        }
+        guard let persistentDomainName else { return nil }
+        return defaults.persistentDomain(forName: persistentDomainName)?[key]
+    }
+
+    var origin: String { savedObject(forKey: Key.origin) as? String ?? "" }
     var instanceId: String? {
-        get { defaults.string(forKey: Key.instanceId) }
+        get { savedObject(forKey: Key.instanceId) as? String }
         nonmutating set { defaults.set(newValue, forKey: Key.instanceId) }
     }
     var token: String? {
@@ -54,7 +68,7 @@ struct SettingsStore {
             // One-time migration for existing installs. Keep the legacy copy
             // only if Keychain is unavailable, so a working session is never
             // discarded while improving its storage.
-            guard let legacy = defaults.string(forKey: Key.token) else { return nil }
+            guard let legacy = savedObject(forKey: Key.token) as? String else { return nil }
             if tokenVault.write(legacy) {
                 defaults.removeObject(forKey: Key.token)
             }
@@ -87,13 +101,12 @@ struct SettingsStore {
     #endif
 
     var username: String? {
-        get { defaults.string(forKey: Key.username) }
+        get { savedObject(forKey: Key.username) as? String }
         nonmutating set { defaults.set(newValue, forKey: Key.username) }
     }
     var userId: Int? {
         get {
-            guard defaults.object(forKey: Key.userId) != nil else { return nil }
-            return defaults.integer(forKey: Key.userId)
+            (savedObject(forKey: Key.userId) as? NSNumber)?.intValue
         }
         nonmutating set {
             if let newValue { defaults.set(newValue, forKey: Key.userId) }
@@ -143,6 +156,10 @@ struct SettingsStore {
     /// Preserve the native client's established noirr-dark presentation until
     /// a person chooses otherwise. New choices are remembered per device, like
     /// the web and Android viewer preferences.
+    var layout: ViewerLayout {
+        get { ViewerLayout(rawValue: defaults.string(forKey: Key.layout) ?? "") ?? .standard }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.layout) }
+    }
     var theme: ViewerTheme {
         get {
             ViewerTheme(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .noirr
@@ -210,11 +227,6 @@ struct SettingsStore {
     var tvHomeLayout: TvHomeLayout {
         get { TvHomeLayout(rawValue: defaults.string(forKey: Key.tvHomeLayout) ?? "") ?? .classic }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.tvHomeLayout) }
-    }
-
-    var liveTvMobileGuideUsesGrid: Bool {
-        get { defaults.string(forKey: Key.liveTvMobileGuide) == "grid" }
-        nonmutating set { defaults.set(newValue ? "grid" : "schedule", forKey: Key.liveTvMobileGuide) }
     }
 
     /// Drop the token (sign out) but keep the origin so login stays pre-filled.

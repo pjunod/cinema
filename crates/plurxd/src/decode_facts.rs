@@ -30,6 +30,9 @@ mod macos_wasm;
 #[cfg(target_os = "linux")]
 mod pi_namespace;
 
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod mastering;
+
 /// Internal synchronous launcher dispatch; normal daemon startup stays unchanged.
 pub(crate) fn dispatch_probe_bootstrap() -> Option<std::io::Result<()>> {
     #[cfg(target_os = "linux")]
@@ -781,6 +784,7 @@ pub(crate) struct DecodeFactSource {
     work: crate::process_control::ChildWork,
     projection: ProbeProjection,
     seed: Option<FreshFactSeed>,
+    expected_frame_key: Option<CacheKey>,
     /// The observation delays; see [`DecodeFactSourceHooks`]. Shared by
     /// clones, since a clone is the same source.
     hooks: Arc<dyn DecodeFactSourceHooks>,
@@ -798,6 +802,7 @@ impl DecodeFactSource {
             work,
             projection: ProbeProjection::Decoder,
             seed: None,
+            expected_frame_key: None,
             hooks: Arc::new(NoopDecodeFactSourceHooks),
         }
     }
@@ -3792,6 +3797,15 @@ pub(crate) struct FreshSourceProbe {
     pub(crate) document: String,
     facts: Result<DecodeFacts, DecodeFactError>,
     key: CacheKey,
+    #[cfg(target_os = "linux")]
+    selected_absolute_stream: Option<u32>,
+}
+
+#[cfg(target_os = "linux")]
+impl FreshSourceProbe {
+    pub(crate) fn absolute_video_stream(&self) -> Option<u32> {
+        self.selected_absolute_stream
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3810,16 +3824,30 @@ struct CollectedProbe {
 enum ProbeProjection {
     Decoder,
     SourceDocument,
+    #[cfg(any(target_os = "linux", test))]
+    SourceFrames(u32),
 }
 
 impl ProbeProjection {
-    fn arguments(self) -> Vec<&'static str> {
+    fn arguments(self) -> Vec<String> {
         let mut args = vec!["-v", "error", "-print_format", "json"];
         match self {
             Self::Decoder => args.extend(["-show_entries",
                 "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,sample_aspect_ratio,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_tags=rotate:stream_side_data=side_data_type,rotation,displaymatrix,max_content,max_average,max_luminance",
                 "-show_streams"]),
             Self::SourceDocument => args.extend(["-show_format", "-show_streams", "-show_chapters"]),
+            #[cfg(any(target_os = "linux", test))]
+            Self::SourceFrames(_) => args.extend([
+                "-threads", "1", "-read_intervals", "%+#3", "-show_frames", "-show_entries",
+                "frame=stream_index:frame_side_data=side_data_type,red_x,red_y,green_x,green_y,blue_x,blue_y,white_point_x,white_point_y,min_luminance,max_luminance",
+            ]),
+        }
+        let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        #[cfg(any(target_os = "linux", test))]
+        if let Self::SourceFrames(index) = self {
+            let mut args = args;
+            args.extend(["-select_streams".to_owned(), index.to_string()]);
+            return args;
         }
         args
     }
@@ -3829,6 +3857,8 @@ impl ProbeProjection {
             Self::Decoder => MAX_PROBE_STDOUT_BYTES,
             // Same bound as the held-source comparison this replaces.
             Self::SourceDocument => 16 * 1024 * 1024,
+            #[cfg(any(target_os = "linux", test))]
+            Self::SourceFrames(_) => 256 * 1024,
         }
     }
 
@@ -3838,10 +3868,12 @@ impl ProbeProjection {
         stdout: &[u8],
         reporter: &str,
     ) -> Result<CollectedProbe, DecodeFactError> {
-        let document = if self == Self::SourceDocument {
+        let document = if self != Self::Decoder {
             let mut document: serde_json::Value = serde_json::from_slice(stdout)
                 .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))?;
-            plurx_core::scan::probe::stamp_reporter(&mut document, reporter);
+            if self == Self::SourceDocument {
+                plurx_core::scan::probe::stamp_reporter(&mut document, reporter);
+            }
             Some(
                 serde_json::to_string(&document)
                     .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))?,
@@ -3854,6 +3886,61 @@ impl ProbeProjection {
             document,
             key: None,
         })
+    }
+}
+
+/// A lazy frame-side-data observation of one already verified source/stream.
+/// Its private cache is distinct from decoder/raw-document caches: the key is
+/// the complete source/probe/catalog identity, selected absolute stream, and
+/// this projection revision. No frame JSON is grafted into the raw document.
+#[cfg(target_os = "linux")]
+pub(crate) struct SourceFrameProbe {
+    cache: Arc<DecodeFactCache>,
+    probe: DecodeProbeIdentity,
+    source: DecodeFactSource,
+    catalog: Option<DecodeCatalogMetadata>,
+    expected: CacheKey,
+    absolute_stream: u32,
+    projection_revision: u32,
+    document: tokio::sync::OnceCell<serde_json::Value>,
+}
+
+#[cfg(target_os = "linux")]
+impl SourceFrameProbe {
+    pub(crate) fn absolute_stream(&self) -> u32 {
+        self.absolute_stream
+    }
+
+    pub(crate) async fn document(
+        &self,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<&serde_json::Value, DecodeFactError> {
+        self.document
+            .get_or_try_init(|| async {
+                if self.projection_revision != 1 {
+                    return Err(DecodeFactError::CacheInvariant);
+                }
+                let mut source = self.source.clone();
+                source.projection = ProbeProjection::SourceFrames(self.absolute_stream);
+                source.expected_frame_key = Some(self.expected.clone());
+                let (collected, _) = self
+                    .cache
+                    .get_or_probe_inner(
+                        &self.probe,
+                        source,
+                        self.catalog.as_ref(),
+                        self.expected.selected_stream,
+                        Duration::from_secs(5),
+                        cancelled,
+                    )
+                    .await?;
+                if collected.key.as_ref() != Some(&self.expected) {
+                    return Err(DecodeFactError::SourceChanged);
+                }
+                serde_json::from_str(&collected.document.ok_or(DecodeFactError::CacheInvariant)?)
+                    .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))
+            })
+            .await
     }
 }
 
@@ -3871,6 +3958,32 @@ pub(crate) struct DecodeFactCache {
 }
 
 impl DecodeFactCache {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn source_frame_probe(
+        self: &Arc<Self>,
+        probe: &DecodeProbeIdentity,
+        source: DecodeFactSource,
+        catalog: Option<DecodeCatalogMetadata>,
+        prepared: &FreshSourceProbe,
+        absolute_stream: u32,
+    ) -> Result<Arc<SourceFrameProbe>, DecodeFactError> {
+        if prepared.selected_absolute_stream != Some(absolute_stream) {
+            return Err(DecodeFactError::InvalidFacts(
+                "source frame projection selected stream differs from held probe".into(),
+            ));
+        }
+        Ok(Arc::new(SourceFrameProbe {
+            cache: Arc::clone(self),
+            probe: probe.clone(),
+            source,
+            catalog,
+            expected: prepared.key.clone(),
+            absolute_stream,
+            projection_revision: 1,
+            document: tokio::sync::OnceCell::new(),
+        }))
+    }
+
     pub(crate) fn new() -> Self {
         Self::with_capacity(MAX_CACHE_ENTRIES)
     }
@@ -3933,10 +4046,35 @@ impl DecodeFactCache {
             Err(_) => DecodeFactLookupResult::Refused,
         });
         let (collected, _) = result?;
+        let document = collected.document.ok_or(DecodeFactError::CacheInvariant)?;
+        #[cfg(target_os = "linux")]
+        let value: serde_json::Value = serde_json::from_str(&document)
+            .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))?;
+        #[cfg(target_os = "linux")]
+        let selected_absolute_stream = match selected_stream {
+            ProbeStreamSelection::FirstPlayable => first_playable_video_index(&value),
+            ProbeStreamSelection::LegacyVideoOrdinal(ordinal) => {
+                absolute_video_ordinal(&value, ordinal)
+            }
+            ProbeStreamSelection::Absolute(index) => value
+                .get("streams")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|streams| {
+                    streams.iter().find(|stream| {
+                        stream.get("index").and_then(serde_json::Value::as_u64)
+                            == Some(u64::from(index))
+                            && stream.get("codec_type").and_then(serde_json::Value::as_str)
+                                == Some("video")
+                    })
+                })
+                .map(|_| index),
+        };
         Ok(FreshSourceProbe {
             facts: collected.facts,
-            document: collected.document.ok_or(DecodeFactError::CacheInvariant)?,
+            document,
             key: collected.key.ok_or(DecodeFactError::CacheInvariant)?,
+            #[cfg(target_os = "linux")]
+            selected_absolute_stream,
         })
     }
 
@@ -4035,6 +4173,17 @@ impl DecodeFactCache {
             catalog_digest: catalog.map(|metadata| metadata.digest().to_owned()),
             selected_stream,
         };
+        if let Some(expected) = &source.expected_frame_key {
+            if expected.source != key.source {
+                return Err(DecodeFactError::SourceChanged);
+            }
+            if expected.ffprobe_build_digest != key.ffprobe_build_digest {
+                return Err(DecodeFactError::ProbeChanged);
+            }
+            if expected != &key {
+                return Err(DecodeFactError::CacheInvariant);
+            }
+        }
         if let Some(seed) = &source.seed {
             if seed.key.source != key.source {
                 return Err(DecodeFactError::SourceChanged);
@@ -4175,6 +4324,12 @@ impl DecodeFactCache {
         );
         source_outcome?;
         collected.key = Some(key.clone());
+        #[cfg(any(target_os = "linux", test))]
+        if matches!(source.projection, ProbeProjection::SourceFrames(_)) {
+            // The lazy sidecar owns its projection-specific cache. Even a
+            // surprising extra stream list must never replace decoder facts.
+            return Ok((collected, DecodeFactLookupResult::MissCollected));
+        }
         let mut entries = self.entries.lock().await;
         let Ok(facts) = &collected.facts else {
             // Source verification succeeded; preserve the decoder's typed
@@ -4906,11 +5061,7 @@ async fn collect(
     }
     #[cfg(target_os = "macos")]
     if probe.launch_mode.is_production() {
-        let mut args = projection
-            .arguments()
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        let mut args = projection.arguments();
         args.push("/dev/fd/3".into());
         let output = run_macos_parser(
             &probe.executable_snapshot,
@@ -5091,7 +5242,7 @@ async fn collect(
         return Err(DecodeFactError::Failed(status.code(), reason));
     }
     let facts = parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream);
-    if projection == ProbeProjection::SourceDocument {
+    if projection != ProbeProjection::Decoder {
         drop(restore_offset);
         drop(offset_permit);
         return projection.finish(facts, &stdout.0, &probe.reporter);
@@ -5305,7 +5456,7 @@ async fn collect(
         return Err(DecodeFactError::ProbeChanged);
     }
     let facts = parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream);
-    if projection == ProbeProjection::SourceDocument {
+    if projection != ProbeProjection::Decoder {
         return projection.finish(facts, &stdout.0, &probe.reporter);
     }
     let mut facts = facts?;

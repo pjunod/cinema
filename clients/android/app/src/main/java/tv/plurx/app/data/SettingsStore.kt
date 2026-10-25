@@ -41,12 +41,14 @@ class SettingsStore(private val context: Context) {
         val USER_ID = longPreferencesKey("user_id")
         val AUDIO_LANG = stringPreferencesKey("audio_lang")
         val SUB_LANG = stringPreferencesKey("sub_lang")
+        val VIEWER_LAYOUT = stringPreferencesKey("viewer_layout")
         val THEME = stringPreferencesKey("theme")
         val APPEARANCE = stringPreferencesKey("appearance")
         val LIBRARY_PRESENTATION = stringPreferencesKey("library_presentation")
         val POSTER_SIZE = stringPreferencesKey("poster_size")
         val HOME_GROUPING = stringPreferencesKey("home_grouping")
         val PLAYBACK_QUALITY = stringPreferencesKey("playback_quality")
+        val HDR_DISPLAY_PEAK = stringPreferencesKey("hdr_display_peak")
         val SUBTITLE_READINESS = stringPreferencesKey("subtitle_readiness")
         val AUTO_SKIP = booleanPreferencesKey("auto_skip")
         val AUTOPLAY_NEXT = booleanPreferencesKey("autoplay_next")
@@ -76,11 +78,13 @@ class SettingsStore(private val context: Context) {
             subLang = p[Keys.SUB_LANG] ?: "eng",
             preferences = ViewerPreferences(
                 theme = ThemeId.fromStorage(p[Keys.THEME]),
+                layout = ViewerLayout.fromStorage(p[Keys.VIEWER_LAYOUT]),
                 appearance = Appearance.fromStorage(p[Keys.APPEARANCE]),
                 posterSize = PosterSize.fromStorage(p[Keys.POSTER_SIZE]),
                 libraryPresentation = LibraryPresentation.fromStorage(p[Keys.LIBRARY_PRESENTATION]),
                 homeGrouping = HomeGrouping.fromStorage(p[Keys.HOME_GROUPING]),
                 playbackQuality = PlaybackQuality.fromStorage(p[Keys.PLAYBACK_QUALITY]),
+                hdrDisplayPeak = HdrDisplayPeak.fromStorage(p[Keys.HDR_DISPLAY_PEAK]),
                 subtitleReadiness = SubtitleReadiness.fromStorage(p[Keys.SUBTITLE_READINESS]),
                 autoSkip = p[Keys.AUTO_SKIP] ?: false,
                 autoplayNext = p[Keys.AUTOPLAY_NEXT] ?: true,
@@ -183,11 +187,13 @@ class SettingsStore(private val context: Context) {
     suspend fun saveViewerPreferences(value: ViewerPreferences) {
         context.dataStore.edit { p ->
             p[Keys.THEME] = value.theme.storageValue
+            p[Keys.VIEWER_LAYOUT] = value.layout.storageValue
             p[Keys.APPEARANCE] = value.appearance.storageValue
             p[Keys.POSTER_SIZE] = value.posterSize.storageValue
             p[Keys.LIBRARY_PRESENTATION] = value.libraryPresentation.storageValue
             p[Keys.HOME_GROUPING] = value.homeGrouping.storageValue
             p[Keys.PLAYBACK_QUALITY] = value.playbackQuality.storageValue
+            p[Keys.HDR_DISPLAY_PEAK] = value.hdrDisplayPeak.storageValue
             p[Keys.SUBTITLE_READINESS] = value.subtitleReadiness.storageValue
             p[Keys.AUTO_SKIP] = value.autoSkip
             p[Keys.AUTOPLAY_NEXT] = value.autoplayNext

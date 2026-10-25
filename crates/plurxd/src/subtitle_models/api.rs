@@ -542,6 +542,7 @@ mod tests {
     #[test]
     fn model_jobs_have_no_source_and_cannot_leak_payload_paths_or_claim_authority() {
         let model = JobPayload::SubtitleModelOperation {
+            translation_profile: None,
             action: ModelAction::Install,
             model_id: "base.en".into(),
             catalog_revision: "reviewed-catalog-v1".into(),

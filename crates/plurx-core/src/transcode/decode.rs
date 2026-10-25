@@ -1434,9 +1434,29 @@ fn parse_rational(value: Option<&str>) -> Option<Rational> {
     Rational::new(numerator.parse().ok()?, denominator.parse().ok()?)
 }
 
+/// |average − nominal| ≤ nominal / 10 000, in exact integer arithmetic.
+fn agrees_with_nominal(average: Rational, nominal: Rational) -> bool {
+    let average_scaled = u128::from(average.numerator()) * u128::from(nominal.denominator());
+    let nominal_scaled = u128::from(nominal.numerator()) * u128::from(average.denominator());
+    average_scaled.abs_diff(nominal_scaled) * 10_000 <= nominal_scaled
+}
+
 fn parse_frame_rate(stream: &Value) -> FrameRate {
     let average = parse_rational(stream.get("avg_frame_rate").and_then(Value::as_str));
     let nominal = parse_rational(stream.get("r_frame_rate").and_then(Value::as_str));
+    // A container's average is computed from its sample durations and total
+    // duration, so a constant-rate stream often averages a hair off its
+    // nominal rate (1814437059/75601540 for a 24/1 WEB-DL). Within one part
+    // in ten thousand that is the nominal rate, measured; only a real
+    // difference is a variable rate.
+    if let (Some(measured), Some(declared)) = (average, nominal) {
+        if measured != declared && agrees_with_nominal(measured, declared) {
+            return FrameRate {
+                value: Some(declared),
+                provenance: FrameRateProvenance::Average,
+            };
+        }
+    }
     match (average, nominal) {
         (Some(average), Some(nominal)) if average != nominal => FrameRate {
             value: None,
@@ -2133,7 +2153,7 @@ pub enum VideoSampleEnvelope {
 /// Level 5.0 frame-size and macroblock-rate limits, using the exact rational
 /// output cadence. VBR admission bounds both the 3/2 peak and the two-second
 /// coded-picture buffer below High's conservative VCL limits.
-pub(super) fn continuous_avc_envelope_accepts(
+pub fn continuous_avc_envelope_accepts(
     width: u32,
     height: u32,
     rate_numerator: u32,
@@ -2616,6 +2636,12 @@ pub struct CompletedReconstructedOutputPlan<'a> {
     vaapi_hdr_policy: Option<super::VaapiHdrPolicy>,
 }
 impl<'a> CompletedReconstructedOutputPlan<'a> {
+    /// The ordinary source plan remains unchanged; the completed GPU export
+    /// owns the final SDR transfer/gamut and encoder declaration.
+    pub fn with_sdr_output(mut self) -> Self {
+        self.codec = self.codec.with_sdr();
+        self
+    }
     pub fn source_plan(&self) -> &'a ResolvedTranscode {
         self.source
     }
@@ -2661,15 +2687,6 @@ impl ResolvedTranscode {
             || self.output_contract.output_codec() != "hevc"
             || self.options.subtitle_burn.is_some()
             || self.options.video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50
-            || encoder == Encoder::Vaapi
-                && (self
-                    .output_contract
-                    .effective_width()
-                    .is_none_or(|width| width > 1920)
-                    || self
-                        .output_contract
-                        .effective_height()
-                        .is_none_or(|height| height > 1080))
         {
             return None;
         }
@@ -4674,3 +4691,26 @@ fn surface_contract(
 
 #[cfg(test)]
 mod software_vulkan_tests;
+
+#[cfg(test)]
+mod frame_rate_tests {
+    use super::{parse_frame_rate, FrameRateProvenance, Rational};
+
+    /// A constant-rate WEB-DL whose container average misses 24/1 by 99 in
+    /// 1.8 billion has a frame rate; it is not a variable-rate stream.
+    #[test]
+    fn an_average_within_a_hair_of_the_nominal_rate_is_the_nominal_rate() {
+        let rate = parse_frame_rate(&serde_json::json!({
+            "avg_frame_rate": "1814437059/75601540",
+            "r_frame_rate": "24/1",
+        }));
+        assert_eq!(rate.value, Rational::new(24, 1));
+        assert_eq!(rate.provenance, FrameRateProvenance::Average);
+        let variable = parse_frame_rate(&serde_json::json!({
+            "avg_frame_rate": "2950/100",
+            "r_frame_rate": "30/1",
+        }));
+        assert_eq!(variable.value, None);
+        assert_eq!(variable.provenance, FrameRateProvenance::Variable);
+    }
+}

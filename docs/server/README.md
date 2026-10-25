@@ -14,6 +14,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 | [HTTPS-BUILD.md](HTTPS-BUILD.md) | HTTPS implementation built, physical acceptance open; qualification tracked by task/promotion PR receipts. | built |
 | [HTTPS-EVIDENCE-LEDGER.md](HTTPS-EVIDENCE-LEDGER.md) | The HTTPS build's checkpoint-by-checkpoint evidence ledger (section 5 of HTTPS-BUILD). | built |
 | [HTTPS-REVIEW.md](HTTPS-REVIEW.md) | Adversarial HTTPS design findings, the single-task workflow amendment, and the final implementation review with correction dispositions. | done |
+| [DESKTOP-CONTROL.md](DESKTOP-CONTROL.md) | How to install and use native tray controls, choose server/tray startup independently, inspect local JSON status and recover signed-release upgrades. | open |
 | [DETAIL-READS-AND-STORAGE-AVAILABILITY.md](DETAIL-READS-AND-STORAGE-AVAILABILITY.md) | Implementation plan from the 2026-09-20 architecture review: why an item-detail page stalls on an unmounted share, and how the index badge is decided without loading the index. | open |
 | [TELEMETRY-BACKPRESSURE.md](TELEMETRY-BACKPRESSURE.md) | Implementation plan from the 2026-09-20 architecture review: what bounds playback telemetry when the node-local writer is slow, and why the metrics survive retention being turned off. | open |
 | [PLEX-FACADE-PAGING.md](PLEX-FACADE-PAGING.md) | Implementation plan from the 2026-09-20 architecture review: how the Plex façade answers a 5,000-item section without an N+1, and what must be proven before the media-session route cache is touched. | open |

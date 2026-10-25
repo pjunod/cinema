@@ -3,6 +3,29 @@ import XCTest
 
 @MainActor
 final class TVHomeNavigationTests: TVNavigationTestCase {
+    func testStandardNativeTabsReturnAfterLeavingLibrary() throws {
+        let server = try TVNavigationServer()
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin)
+        defer { app.terminate() }
+        XCTAssertFalse(app.tabBars.firstMatch.exists, "Standard's pushed library replaces the tab shell")
+        remote.press(.menu)
+        XCTAssertTrue(app.viewerTab("Libraries").waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.tabBars.firstMatch.exists, "Back restores the system tab bar")
+        for title in ["Home", "Settings", "Home", "Settings"] {
+            let tab = app.viewerTab(title)
+            reachForSetup(tab, in: app, limit: 8)
+            assertFocus(tab, in: app, context: "Native \(title) tab")
+            remote.press(.select)
+            XCTAssertTrue(app.tabBars.firstMatch.exists, "Revisiting \(title) must retain native tabs")
+        }
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "Restored Standard Apple TV native tabs after Back"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testForegroundRefreshRetainsHomeContentAndRetryRecovers() throws {
         let server = try TVNavigationServer(homeTitles: true)
         let origin = try server.start()
@@ -10,7 +33,7 @@ final class TVHomeNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let home = app.tabBars.buttons["Home"]
+        let home = app.viewerTab("Home")
         reachForSetup(home, in: app, limit: 8)
         remote.press(.select)
         let title = app.staticTexts["A Movie 0"].firstMatch

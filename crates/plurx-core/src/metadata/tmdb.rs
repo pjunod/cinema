@@ -502,6 +502,26 @@ impl TmdbClient {
         Ok(show_match(tmdb_id, &details))
     }
 
+    /// TMDB's own user score for a movie or show, and the IMDb id TMDB knows
+    /// for it — a show matched by search never stored one, and OMDb is keyed
+    /// by it. One request either way.
+    pub async fn score(
+        &self,
+        kind: crate::domain::ItemKind,
+        tmdb_id: i64,
+    ) -> Result<TmdbScore, MetadataError> {
+        let body = if kind == crate::domain::ItemKind::Show {
+            self.get(
+                &format!("/tv/{tmdb_id}"),
+                &[("append_to_response", "external_ids".to_owned())],
+            )
+            .await?
+        } else {
+            self.get(&format!("/movie/{tmdb_id}"), &[]).await?
+        };
+        Ok(tmdb_score(&body))
+    }
+
     /// The TMDB id behind an IMDb id, or `None` if TMDB does not know it.
     ///
     /// An item can reach plurx carrying only an IMDb id — Curator's movie side
@@ -734,6 +754,42 @@ fn parse_genre_index(body: &Value) -> GenreIndex {
         .unwrap_or_default()
 }
 
+/// TMDB's user score for one title, from its details body.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TmdbScore {
+    /// 0–10, as TMDB publishes it.
+    pub vote_average: Option<f64>,
+    pub vote_count: Option<i64>,
+    pub imdb_id: Option<String>,
+}
+
+impl TmdbScore {
+    /// The score as plurx shows it: a percentage, as TMDB's own site does.
+    /// No votes means no score (TMDB says "NR"), not zero.
+    #[must_use]
+    pub fn rating(&self) -> Option<crate::annotations::Rating> {
+        let average = self.vote_average.filter(|v| v.is_finite() && *v > 0.0)?;
+        let votes = self.vote_count.filter(|c| *c > 0)?;
+        Some(crate::annotations::Rating {
+            source: crate::annotations::RatingSource::Tmdb,
+            value: (average * 10.0).round(),
+            scale: 100,
+            votes: Some(votes),
+        })
+    }
+}
+
+fn tmdb_score(body: &Value) -> TmdbScore {
+    TmdbScore {
+        vote_average: body.get("vote_average").and_then(Value::as_f64),
+        vote_count: body.get("vote_count").and_then(Value::as_i64),
+        imdb_id: str_opt(body, "imdb_id").or_else(|| {
+            body.get("external_ids")
+                .and_then(|ids| str_opt(ids, "imdb_id"))
+        }),
+    }
+}
+
 fn movie_match(id: i64, search: &Value, details: &Value) -> Match {
     Match {
         tmdb_id: id,
@@ -795,6 +851,21 @@ fn episode_meta(v: &Value) -> EpisodeMeta {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_tmdb_score_is_a_percentage_and_no_votes_is_no_score() {
+        let body = serde_json::json!({"vote_average": 7.83, "vote_count": 3900, "external_ids": {"imdb_id": "tt0000001"}});
+        let score = tmdb_score(&body);
+        assert_eq!(score.imdb_id.as_deref(), Some("tt0000001"));
+        let rating = score.rating().expect("rated");
+        assert_eq!(
+            (rating.value, rating.scale, rating.votes),
+            (78.0, 100, Some(3900))
+        );
+        let unrated = tmdb_score(&serde_json::json!({"vote_average": 0.0, "vote_count": 0}));
+        assert_eq!(unrated.rating(), None);
+    }
+
     use super::*;
     use serde_json::json;
     use std::time::Duration;

@@ -6,6 +6,68 @@ import XCTest
 /// fixture owns a loopback-only API; no server credentials or app test mode.
 @MainActor
 final class LibraryRowsNavigationTests: XCTestCase {
+    func testPortraitLiveGuideShowsMultipleChannelsDespiteLegacySchedulePreference() throws {
+        let server = try LibraryRowsServer()
+        let origin = try server.start()
+        defer { server.stop() }
+        XCUIDevice.shared.orientation = .portrait
+        let app = appAtLogin(origin: origin, launchArguments: [
+            "-plurx.liveTvMobileGuide", "schedule", "-plurx.liveTvView", "list"
+        ])
+        defer { app.terminate() }
+        signInToFixture(app)
+        let live = app.viewerTab("Live TV")
+        XCTAssertTrue(live.waitForExistence(timeout: 15), app.debugDescription)
+        live.tap()
+        let view = app.buttons["Live TV view, On now"]
+        XCTAssertTrue(view.waitForExistence(timeout: 10), app.debugDescription)
+        view.tap()
+        app.buttons["Guide"].tap()
+
+        let grid = app.scrollViews["live-guide-grid"]
+        XCTAssertTrue(grid.waitForExistence(timeout: 10), app.debugDescription)
+        let news = grid.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "live-guide-programme:news:")).firstMatch
+        let film = grid.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "live-guide-programme:film:")).firstMatch
+        XCTAssertTrue(news.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(film.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(news.isHittable && film.isHittable,
+                      "Portrait Guide must show programmes from multiple stations together; "
+                      + "news=\(news.frame), film=\(film.frame), grid=\(grid.frame)\n\(app.debugDescription)")
+        XCTAssertGreaterThan(film.frame.midY, news.frame.midY,
+                             "Stations must occupy separate rows of the time grid")
+        XCTAssertFalse(app.buttons["Grid"].exists, "Guide must open directly as a grid")
+        XCTAssertFalse(app.buttons["Selected channel schedule"].exists)
+        XCTAssertFalse(app.buttons["Channel"].exists, "The single-channel picker must be absent")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "portrait-live-guide-grid-legacy-preference"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        news.tap()
+        XCTAssertTrue(app.buttons["Watch"].waitForExistence(timeout: 5),
+                      "A grid programme must still open its programme actions")
+    }
+
+    func testSignInCanReturnToServerPickerAndConnectAgain() throws {
+        let server = try LibraryRowsServer()
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = appAtLogin(origin: origin)
+        defer { app.terminate() }
+
+        let changeServer = app.buttons["Use a different server"]
+        XCTAssertTrue(changeServer.isHittable, app.debugDescription)
+        changeServer.tap()
+        XCTAssertTrue(app.buttons["Add server manually"].waitForExistence(timeout: 5), app.debugDescription)
+        connectManually(origin: origin, in: app)
+        signInToFixture(app)
+        XCTAssertTrue(app.viewerTab("Libraries").waitForExistence(timeout: 15), app.debugDescription)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "sign-in-server-picker-recovery"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testLetterIndexScrollsToOffscreenRowAndRepeatsAfterManualScroll() throws {
         let server = try LibraryRowsServer()
         let origin = try server.start()
@@ -46,19 +108,9 @@ final class LibraryRowsNavigationTests: XCTestCase {
     }
 
     private func openLibrary(origin: String) -> XCUIApplication {
-        continueAfterFailure = false
-        let app = XCUIApplication()
-        app.launchArguments += ["-plurx.origin", origin, "-plurx.libraryPresentation", "rows",
-                                "-plurx.libraryGrouping", "category"]
-        app.launch()
-        if app.textFields["Username"].waitForExistence(timeout: 5) {
-            app.textFields["Username"].tap()
-            app.textFields["Username"].typeText("fixture")
-            app.secureTextFields["Password"].tap()
-            app.secureTextFields["Password"].typeText("fixture")
-            app.buttons["Sign in"].tap()
-        }
-        let libraries = app.tabBars.buttons["Libraries"]
+        let app = appAtLogin(origin: origin)
+        signInToFixture(app)
+        let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 15), app.debugDescription)
         libraries.tap()
         let open = app.buttons["library-open-category:movie"]
@@ -68,6 +120,68 @@ final class LibraryRowsNavigationTests: XCTestCase {
         let loaded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "416 items"), object: summary)
         XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 15), .completed)
         return app
+    }
+
+    private func appAtLogin(origin: String, launchArguments: [String] = []) -> XCUIApplication {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-plurx.libraryPresentation", "rows",
+                                "-plurx.libraryGrouping", "category"]
+        app.launchArguments += launchArguments
+        app.launch()
+        let manual = app.buttons["Add server manually"]
+        let changeServer = app.buttons["Use a different server"]
+        let libraries = app.viewerTab("Libraries")
+        // A previous fixture's closed port may spend the production 30 s
+        // connectivity budget before recovery controls replace the spinner.
+        let initialScreen = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            manual.exists || changeServer.exists || libraries.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [initialScreen], timeout: 45), .completed, app.debugDescription)
+        if !manual.exists {
+            if changeServer.exists {
+                changeServer.tap()
+            } else {
+                // A fixture from a preceding test may still be reachable at
+                // this port. Leave it through the ordinary Account control.
+                let settings = app.viewerTab("Settings")
+                XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
+                settings.tap()
+                let change = app.buttons["Change server"]
+                for _ in 0..<12 {
+                    if change.exists && change.isHittable { break }
+                    app.swipeUp()
+                }
+                XCTAssertTrue(change.isHittable, app.debugDescription)
+                change.tap()
+            }
+        }
+        XCTAssertTrue(manual.waitForExistence(timeout: 5), app.debugDescription)
+        connectManually(origin: origin, in: app)
+        return app
+    }
+
+    private func connectManually(origin: String, in app: XCUIApplication) {
+        app.buttons["Add server manually"].tap()
+        let address = app.textFields.firstMatch
+        XCTAssertTrue(address.waitForExistence(timeout: 5), app.debugDescription)
+        address.tap()
+        let previous = address.value as? String ?? ""
+        address.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + origin)
+        let connect = app.buttons["Connect"]
+        XCTAssertTrue(connect.isHittable, app.debugDescription)
+        connect.tap()
+        XCTAssertTrue(app.textFields["Username"].waitForExistence(timeout: 10), app.debugDescription)
+    }
+
+    private func signInToFixture(_ app: XCUIApplication) {
+        let username = app.textFields["Username"]
+        username.tap()
+        let previous = username.value as? String ?? ""
+        username.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + "fixture")
+        app.secureTextFields["Password"].tap()
+        app.secureTextFields["Password"].typeText("fixture")
+        app.buttons["Sign in"].tap()
     }
 
     private func reveal(_ label: String, in index: XCUIElement, forward: Bool) {
@@ -160,6 +274,23 @@ private final class LibraryRowsServer: @unchecked Sendable {
         case "/api/v1/me": value = user
         case "/api/v1/server": value = ["name": "Library fixture", "instance_id": "library-fixture"]
         case "/api/v1/libraries": value = [["id": 1, "name": "Movies", "kind": "movie"]]
+        case "/api/v1/live-tv/channels":
+            value = ["channels": [
+                ["id": "news", "guide_number": "12.1", "guide_name": "Evening News", "favorite": false, "drm": false, "support": "ready"],
+                ["id": "film", "guide_number": "27", "guide_name": "Film", "favorite": false, "drm": false, "support": "ready"]
+            ], "freshness": "fresh", "age_seconds": 0]
+        case "/api/v1/live-tv/guide":
+            let now = Int(Date().timeIntervalSince1970)
+            value = ["source": "fixture", "freshness": "fresh", "age_seconds": 0,
+                     "window": ["start": now - 3600, "end": now + 7200],
+                     "channels": [
+                         ["id": "news", "guide_number": "12.1", "programmes": [
+                             ["start": now - 300, "end": now + 3300, "title": "Fixture evening news"]
+                         ]],
+                         ["id": "film", "guide_number": "27", "programmes": [
+                             ["start": now - 300, "end": now + 3300, "title": "Fixture film"]
+                         ]]
+                     ]]
         case "/api/v1/libraries/1/items":
             let query = Dictionary(uniqueKeysWithValues: (url.queryItems ?? []).map { ($0.name, $0.value ?? "") })
             let offset = Int(query["offset"] ?? "0") ?? 0

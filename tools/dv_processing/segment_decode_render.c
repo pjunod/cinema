@@ -10,11 +10,15 @@
 #include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/dovi_meta.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/opt.h>
 #include <libavutil/sha.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <pthread.h>
 #include <unistd.h>
+#include <va/va.h>
 
 #define PAIR_WINDOW 16
 static bool base_only;
@@ -22,6 +26,14 @@ static int source_profile;
 static int expected_w[2], expected_h[2], frame_cap, emitted;
 static bool debug_frames, initialized, window_mode, window_done, first_pair;
 static bool source_eof, discover_el;
+// GPU decode: PLURX_DV_DECODE_DEVICE names the admitted VA-API render node.
+// Surfaces stay on the GPU and are mapped into the renderer; a host copy of
+// a decoded 4K picture costs more than software decoding it.
+// Without a usable device the helper decodes in software, as before GPU
+// decode existed, and says why in its decoder trace.
+static AVBufferRef *hw_device;
+static bool hw_fell_back;
+static const char *software_reason = "no-decode-device";
 static unsigned preroll, paired, preroll_cap;
 struct rational {
   int64_t num;
@@ -47,6 +59,9 @@ static AVStream *nut_stream;
 static int64_t output_pts, output_duration, nut_tick_scale;
 static int64_t last_pts = AV_NOPTS_VALUE;
 static AVRational source_time_base;
+static struct rational source_origin;
+static int64_t source_origin_ticks;
+static const char *source_origin_provenance;
 struct coded_input {
   int64_t pts, duration;
   char packet_sha[65], rpu_sha[65];
@@ -93,7 +108,7 @@ static int video_duration_ns(const char *text, int64_t *duration) {
 static void need(int ok, const char *reason) {
   if (!ok) {
     fprintf(stderr, "Segment refused: %s\n", reason);
-    exit(1);
+    dv_exit(1);
   }
 }
 static struct rational rational(const char *text) {
@@ -108,6 +123,41 @@ static struct rational rational(const char *text) {
   need(!errno && end != den && *end == 0 && d > 0 && d <= INT_MAX,
        "bounded window denominator");
   return (struct rational){n, (int)d};
+}
+// Convert the frozen held-probe epoch exactly; never round it onto a different
+// source clock or infer it from mutable partial-demux AVStream timestamps.
+static int origin_in_source_ticks(struct rational origin, AVRational clock,
+                                 int64_t *ticks) {
+  if (origin.num < 0 || origin.den <= 0 || clock.num <= 0 || clock.den <= 0)
+    return 0;
+  __int128 numerator = (__int128)origin.num * clock.den;
+  __int128 denominator = (__int128)origin.den * clock.num;
+  if (numerator % denominator || numerator / denominator > INT64_MAX)
+    return 0;
+  *ticks = (int64_t)(numerator / denominator);
+  return 1;
+}
+static int bind_source_origin(bool held, struct rational supplied,
+                              const AVStream *stream, struct rational *origin,
+                              int64_t *ticks) {
+  if (!held) {
+    // Private legacy zero-origin controls carry no held-probe authority. Only
+    // their actually observed zero is meaningful; unknown/nonzero still refuse.
+    if (stream->start_time != 0)
+      return 0;
+    supplied = (struct rational){0, 1};
+  }
+  if (!origin_in_source_ticks(supplied, stream->time_base, ticks))
+    return 0;
+  *origin = supplied;
+  return 1;
+}
+static int declared_video_endpoint(int64_t origin, int64_t duration,
+                                   int64_t *endpoint) {
+  if (origin < 0 || duration <= 0 || origin > INT64_MAX - duration)
+    return 0;
+  *endpoint = origin + duration;
+  return 1;
 }
 static int compare_window(int64_t pts, struct rational value) {
   return av_compare_ts(pts, source_time_base, value.num,
@@ -155,6 +205,21 @@ static void open_movie_io(AVFormatContext *input, const char *source) {
   input->pb = movie_avio;
   input->flags |= AVFMT_FLAG_CUSTOM_IO;
 }
+// A queued export may still be sampling the decoded surfaces of the frame
+// just rendered; references held here keep the decoder from reusing them
+// until that frame has been written.
+static AVFrame *held[2];
+static void release_held(void) {
+  for (int k = 0; k < 2; k++)
+    av_frame_free(&held[k]);
+}
+static void hold_rendered_pair(void) {
+  release_held();
+  for (int k = 0; k < (base_only ? 1 : 2); k++) {
+    held[k] = av_frame_clone(layers[k].queue[0]);
+    need(held[k] != NULL, "rendered surface hold");
+  }
+}
 static void drop_pair(void) {
   for (int k = 0; k < (base_only ? 1 : 2); k++) {
     av_frame_free(&layers[k].queue[0]);
@@ -163,23 +228,101 @@ static void drop_pair(void) {
             (size_t)layers[k].count * sizeof(AVFrame *));
   }
 }
-// The packed buffer remains owned by gpu_render for the duration of this
-// synchronous write. A blocked pipe provides backpressure without a frame
-// queue.
+// A blocked pipe provides backpressure without a frame queue: at most one
+// frame is being written while the next is rendered.
+static void write_frame(const uint8_t *rgb, size_t bytes, int64_t pts,
+                        int64_t duration);
+// Exported frames are written to the encoder pipe on a writer thread, so a
+// frame's 25 MB pipe write overlaps the next frame's decode and GPU work. The
+// yuv420p10 export downloads into alternating buffers, and a frame is queued
+// only once the writer has finished the frame before it, so the buffer being
+// written is never the one being downloaded into. Any other export frees its
+// buffer when the sink returns, so it waits for its own write.
+static pthread_t writer_thread;
+static pthread_mutex_t writer_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t writer_cond = PTHREAD_COND_INITIALIZER;
+static struct {
+  const uint8_t *data;
+  pl_buf buf;
+  size_t bytes;
+  int64_t pts, duration;
+  bool pending, busy, stop;
+} writer;
+static void *writer_main(void *unused) {
+  (void)unused;
+  pthread_mutex_lock(&writer_lock);
+  for (;;) {
+    while (!writer.pending && !writer.stop)
+      pthread_cond_wait(&writer_cond, &writer_lock);
+    if (!writer.pending)
+      break;
+    const uint8_t *data = writer.data;
+    pl_buf buf = writer.buf;
+    size_t bytes = writer.bytes;
+    int64_t pts = writer.pts, duration = writer.duration;
+    writer.pending = false;
+    writer.busy = true;
+    pthread_mutex_unlock(&writer_lock);
+    dv_yuv10_wait_buffer(buf);
+    write_frame(data, bytes, pts, duration);
+    pthread_mutex_lock(&writer_lock);
+    writer.busy = false;
+    pthread_cond_broadcast(&writer_cond);
+  }
+  pthread_mutex_unlock(&writer_lock);
+  return NULL;
+}
+static void writer_wait_idle(void) {
+  pthread_mutex_lock(&writer_lock);
+  while (writer.pending || writer.busy)
+    pthread_cond_wait(&writer_cond, &writer_lock);
+  pthread_mutex_unlock(&writer_lock);
+}
 static void write_rgb(const uint8_t *rgb, size_t bytes, void *unused) {
   (void)unused;
+  writer_wait_idle();
+  // The previous frame is written, so the GPU has finished reading its
+  // decoded surfaces.
+  release_held();
+  pthread_mutex_lock(&writer_lock);
+  writer.data = rgb;
+  writer.buf = EXPORT_YUV10 ? dv_yuv10_context.frame_buf : NULL;
+  writer.bytes = bytes;
+  writer.pts = output_pts;
+  writer.duration = output_duration;
+  writer.pending = true;
+  pthread_cond_broadcast(&writer_cond);
+  pthread_mutex_unlock(&writer_lock);
+  if (!EXPORT_YUV10)
+    writer_wait_idle();
+}
+static void writer_start(void) {
+  need(pthread_create(&writer_thread, NULL, writer_main, NULL) == 0,
+       "export writer thread");
+  dv_threads_live = true;
+}
+static void writer_finish(void) {
+  pthread_mutex_lock(&writer_lock);
+  writer.stop = true;
+  pthread_cond_broadcast(&writer_cond);
+  pthread_mutex_unlock(&writer_lock);
+  need(pthread_join(writer_thread, NULL) == 0, "export writer join");
+  dv_threads_live = false;
+}
+static void write_frame(const uint8_t *rgb, size_t bytes, int64_t pts,
+                        int64_t duration) {
   if (!nut_output) {
     need(fwrite(rgb, 1, bytes, rgb_output) == bytes, "RGB frame write");
     return;
   }
-  need(bytes <= INT_MAX && output_pts >= 0 && output_duration > 0,
+  need(bytes <= INT_MAX && pts >= 0 && duration > 0,
        "bounded nonnegative NUT presentation interval");
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "NUT packet allocation");
   packet->data = (uint8_t *)rgb;
   packet->size = (int)bytes;
   packet->stream_index = nut_stream->index;
-  need(nut_scale_interval(output_pts, output_duration, nut_tick_scale,
+  need(nut_scale_interval(pts, duration, nut_tick_scale,
                           &packet->pts, &packet->duration),
        "NUT timestamp interval overflow");
   packet->dts = packet->pts;
@@ -204,16 +347,20 @@ static void open_nut(const char *path) {
   AVCodecParameters *p = nut_stream->codecpar;
   p->codec_type = AVMEDIA_TYPE_VIDEO;
   p->codec_id = AV_CODEC_ID_RAWVIDEO;
-  p->format = AV_PIX_FMT_RGB48LE;
-  p->codec_tag = avcodec_pix_fmt_to_codec_tag(AV_PIX_FMT_RGB48LE);
-  need(p->codec_tag != 0, "explicit RGB48 NUT tag");
+  enum AVPixelFormat format = EXPORT_YUV10 ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_RGB48LE;
+  p->format = format;
+  p->codec_tag = avcodec_pix_fmt_to_codec_tag(format);
+  need(p->codec_tag != 0, "explicit raw NUT pixel tag");
   p->width = EXPORT_WIDTH;
   p->height = EXPORT_HEIGHT;
-  p->bits_per_coded_sample = 48;
-  p->color_primaries = AVCOL_PRI_BT2020;
-  p->color_trc = AVCOL_TRC_SMPTE2084;
-  p->color_space = AVCOL_SPC_RGB;
-  p->color_range = AVCOL_RANGE_JPEG;
+  p->bits_per_coded_sample = EXPORT_YUV10 ? 15 : 48;
+  p->color_primaries = dv_target.sdr ? AVCOL_PRI_BT709 : AVCOL_PRI_BT2020;
+  // H.273 has no pure gamma-2.4 identifier; conventional SDR is BT.709.
+  p->color_trc = dv_target.sdr ? AVCOL_TRC_BT709 : AVCOL_TRC_SMPTE2084;
+  p->color_space = EXPORT_YUV10 ? (dv_target.sdr ? AVCOL_SPC_BT709 : AVCOL_SPC_BT2020_NCL) : AVCOL_SPC_RGB;
+  p->color_range = EXPORT_YUV10 ? AVCOL_RANGE_MPEG : AVCOL_RANGE_JPEG;
+  if (EXPORT_YUV10)
+    p->chroma_location = AVCHROMA_LOC_LEFT;
   need(avio_open(&nut_output->pb, path, AVIO_FLAG_WRITE) >= 0,
        "NUT output open");
   need(avformat_write_header(nut_output, NULL) >= 0, "NUT output header");
@@ -250,10 +397,35 @@ static enum pl_chroma_location chroma(enum AVChromaLocation value) {
   }
 }
 static uint16_t *pack(const AVFrame *frame) {
+  if (frame->format == AV_PIX_FMT_VAAPI) {
+    AVFrame *host = av_frame_alloc();
+    need(host && av_hwframe_transfer_data(host, frame, 0) >= 0 &&
+             host->format == AV_PIX_FMT_P010LE,
+         "diagnostic decoded surface download");
+    uint16_t *out = pack(host);
+    av_frame_free(&host);
+    return out;
+  }
   size_t count = (size_t)frame->width * frame->height * 3 / 2;
   uint16_t *out = malloc(count * 2);
   need(out != NULL, "native pair allocation");
   size_t at = 0;
+  if (frame->format == AV_PIX_FMT_P010LE) {
+    // Same planar ten-bit codes the software decoder produces.
+    for (int y = 0; y < frame->height; y++) {
+      const uint16_t *row = (const uint16_t *)(frame->data[0] + (size_t)y * frame->linesize[0]);
+      for (int x = 0; x < frame->width; x++) out[at++] = row[x] >> 6;
+    }
+    size_t u = at, v = at + count / 6;
+    for (int y = 0; y < frame->height / 2; y++) {
+      const uint16_t *row = (const uint16_t *)(frame->data[1] + (size_t)y * frame->linesize[1]);
+      for (int x = 0; x < frame->width / 2; x++) {
+        out[u++] = row[2 * x] >> 6;
+        out[v++] = row[2 * x + 1] >> 6;
+      }
+    }
+    return out;
+  }
   for (int c = 0; c < 3; c++) {
     int w = c ? frame->width / 2 : frame->width,
         h = c ? frame->height / 2 : frame->height;
@@ -375,15 +547,16 @@ static void render_pairs(void) {
          "fresh decoder-attached RPU required; cached metadata insufficient");
     uint8_t nalu[4098] = {0x7c, 0x01};
     memcpy(nalu + 2, raw->data, raw->size);
-    struct base_mapping base_mapped;
+    struct base_mapping base_mapped = {0};
     if (base_only)
       base_metadata(bl, nalu, raw->size + 2, source_profile, &base_mapped);
+    struct pl_dovi_metadata fel_mapped = {0};
+    if (!base_only)
+      map_fel_rpu(bl, nalu, raw->size + 2, &fel_mapped,
+                  !window_mode || compare_window(bl->pts, window_start) >= 0,
+                  bl->width, bl->height);
     if (window_mode) {
       if (compare_window(bl->pts, window_start) < 0) {
-        struct pl_dovi_metadata guarded;
-        if (!base_only)
-          map_parsed_rpu(nalu, raw->size + 2, &guarded, false,
-                         bl->width, bl->height);
         last_pts = bl->pts;
         need(++preroll <= preroll_cap, "bounded preroll exhausted");
         drop_pair();
@@ -392,8 +565,16 @@ static void render_pairs(void) {
     }
     need(emitted < frame_cap, "emitted window frame cap exhausted");
     bool diagnostic_hashes = debug_frames || dv_frame_hashes();
-    uint16_t *native[2] = {base_only && !diagnostic_hashes ? NULL : pack(bl),
-                           base_only ? NULL : pack(el)};
+    bool surfaces = bl->format == AV_PIX_FMT_VAAPI;
+    need(base_only || surfaces == (el->format == AV_PIX_FMT_VAAPI),
+         "both layers decoded the same way");
+    // Mapped surfaces need no host copy; after an import failure the
+    // renderer takes host copies for the rest of the window.
+    bool mapped = surfaces && !dv_hw_host_copy;
+    uint16_t *native[2] = {
+        (base_only || mapped) && !diagnostic_hashes ? NULL : pack(bl),
+        base_only || (mapped && !diagnostic_hashes) ? NULL : pack(el)};
+    const AVFrame *hardware[2] = {bl, el};
     if (!initialized) {
       if (base_only)
         base_gpu_init(expected_w[0], expected_h[0]);
@@ -447,9 +628,11 @@ static void render_pairs(void) {
     if (base_only)
       base_gpu_render(bl, &base_mapped, emitted, pts, duration, write_rgb, diagnostic_hashes);
     else
-      gpu_render(native, nalu, raw->size + 2, emitted, pts, duration,
+      gpu_render_mapped(native, mapped ? hardware : NULL, nalu, raw->size + 2, emitted, pts, duration,
                  chroma(bl->chroma_location), chroma(el->chroma_location),
-                 write_rgb, NULL, debug_frames);
+                 write_rgb, NULL, debug_frames, &fel_mapped);
+    if (EXPORT_YUV10 && dv_yuv10_context.frame_buf)
+      hold_rendered_pair();
     char rpu_path[64];
     int rpu_length =
         snprintf(rpu_path, sizeof(rpu_path), "rpus/frame-%03d.nal", emitted);
@@ -489,7 +672,10 @@ static void receive(struct layer *layer) {
       expected_w[1] = frame->width;
       expected_h[1] = frame->height;
     }
-    need(frame->format == AV_PIX_FMT_YUV420P10LE &&
+    bool surface = frame->format == AV_PIX_FMT_VAAPI && frame->hw_frames_ctx &&
+                   ((AVHWFramesContext *)frame->hw_frames_ctx->data)->sw_format ==
+                       AV_PIX_FMT_P010LE;
+    need((frame->format == AV_PIX_FMT_YUV420P10LE || surface) &&
              frame->width == expected_w[layer->index] &&
              frame->height == expected_h[layer->index] &&
              frame->pts != AV_NOPTS_VALUE &&
@@ -508,6 +694,43 @@ static void receive(struct layer *layer) {
   need(window_done || result == AVERROR(EAGAIN) || result == AVERROR_EOF,
        "decoder receive");
   av_frame_free(&frame);
+}
+// The device must decode HEVC Main10 itself; otherwise every window would be
+// a single-threaded software decode behind a GPU device that does nothing.
+static bool decodes_hevc_main10(AVBufferRef *device) {
+  VADisplay display =
+      ((AVVAAPIDeviceContext *)((AVHWDeviceContext *)device->data)->hwctx)->display;
+  int profiles = vaMaxNumProfiles(display), entrypoints = vaMaxNumEntrypoints(display);
+  if (profiles <= 0 || entrypoints <= 0)
+    return false;
+  VAProfile *profile = calloc((size_t)profiles, sizeof(*profile));
+  VAEntrypoint *entrypoint = calloc((size_t)entrypoints, sizeof(*entrypoint));
+  bool main10 = false, decode = false;
+  if (profile && vaQueryConfigProfiles(display, profile, &profiles) == VA_STATUS_SUCCESS)
+    for (int i = 0; i < profiles; i++)
+      main10 |= profile[i] == VAProfileHEVCMain10;
+  if (main10 && entrypoint &&
+      vaQueryConfigEntrypoints(display, VAProfileHEVCMain10, entrypoint,
+                               &entrypoints) == VA_STATUS_SUCCESS)
+    for (int i = 0; i < entrypoints; i++)
+      decode |= entrypoint[i] == VAEntrypointVLD;
+  free(profile);
+  free(entrypoint);
+  return main10 && decode;
+}
+static enum AVPixelFormat hardware_format(AVCodecContext *context,
+                                          const enum AVPixelFormat *offered) {
+  (void)context;
+  for (const enum AVPixelFormat *p = offered; *p != AV_PIX_FMT_NONE; p++)
+    if (*p == AV_PIX_FMT_VAAPI)
+      return *p;
+  // The decoder offers no GPU surface for this stream; decode it in software
+  // and say so in the trace.
+  hw_fell_back = true;
+  for (const enum AVPixelFormat *p = offered; *p != AV_PIX_FMT_NONE; p++)
+    if (*p == AV_PIX_FMT_YUV420P10LE)
+      return *p;
+  return AV_PIX_FMT_NONE;
 }
 static struct layer open_layer(AVStream *stream, int index) {
   struct layer out = {.index = index};
@@ -531,16 +754,25 @@ static struct layer open_layer(AVStream *stream, int index) {
   out.decoder->height = expected_h[index];
   // Window admission reserves four frame workers per layer, plus the helper
   // caller and the one software-Vulkan worker. Disable nested slice threading.
-  out.decoder->thread_count = window_mode ? 4 : 1;
+  out.decoder->thread_count = window_mode && !hw_device ? 4 : 1;
   out.decoder->thread_type = FF_THREAD_FRAME;
+  if (hw_device) {
+    out.decoder->hw_device_ctx = av_buffer_ref(hw_device);
+    need(out.decoder->hw_device_ctx != NULL, "GPU decoder device reference");
+    out.decoder->get_format = hardware_format;
+    // Each layer queues up to PAIR_WINDOW decoded pictures while it waits
+    // for its partner; the surface pool must hold them plus references.
+    out.decoder->extra_hw_frames = PAIR_WINDOW + 4;
+  }
   out.decoder->max_pixels = discover_el && index == 1
                                 ? (int64_t)expected_w[0] * expected_h[0]
                                 : (int64_t)expected_w[index] * expected_h[index];
   out.decoder->err_recognition = AV_EF_CAREFUL | AV_EF_EXPLODE;
   need(avcodec_open2(out.decoder, codec, NULL) >= 0,
        "independent decoder open");
-  need(!window_mode || (out.decoder->thread_count == 4 &&
-                           out.decoder->active_thread_type == FF_THREAD_FRAME),
+  need(!window_mode || hw_device ||
+           (out.decoder->thread_count == 4 &&
+            out.decoder->active_thread_type == FF_THREAD_FRAME),
        "bounded frame-only decoder workers");
   return out;
 }
@@ -565,16 +797,24 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
   av_packet_free(&out);
 }
 int main(int argc, char **argv) {
+  bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
+  struct rational supplied_origin = {0, 1};
+  if (held_origin) {
+    supplied_origin = rational(argv[argc - 1]);
+    argc -= 2;
+  }
   need(argc == 11 || argc == 12 || argc == 15 ||
            (argc == 16 && !strcmp(argv[15], "base-rpu")) ||
-           (argc == 19 && (!strcmp(argv[15], "base-rpu") ||
+           ((argc == 19 || argc == 21) && (!strcmp(argv[15], "base-rpu") ||
                            !strcmp(argv[15], "fel"))),
        "usage: segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX "
        "MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START "
-       "END MAX_PREROLL [base-rpu|fel [EXPORT_W EXPORT_H EXPORT_POLICY]]]]");
+       "END MAX_PREROLL [base-rpu|fel [EXPORT_W EXPORT_H EXPORT_POLICY "
+       "[TITLE_MIN_1E4 TITLE_PEAK]]]]] [--held-source-origin N/D]");
   bool streaming = argc >= 12;
   base_only = argc >= 16 && !strcmp(argv[15], "base-rpu");
   window_mode = argc >= 15;
+  need(!held_origin || window_mode, "held source origin requires a bounded window");
   if (window_mode) {
     window_start = rational(argv[12]);
     window_end = rational(argv[13]);
@@ -590,16 +830,17 @@ int main(int argc, char **argv) {
   }
   int stream_index = number(argv[3], 0, 255);
   frame_cap = number(argv[4], 1, 64);
-  expected_w[0] = number(argv[5], 64, 3840);
+  expected_w[0] = number(argv[5], 64, 4096);
   expected_h[0] = number(argv[6], 64, 2160);
-  expected_w[1] = number(argv[7], 0, 3840);
+  expected_w[1] = number(argv[7], 0, 4096);
   expected_h[1] = number(argv[8], 0, 2160);
   EXPORT_WIDTH = expected_w[0];
   EXPORT_HEIGHT = expected_h[0];
-  if (argc == 19) {
-    EXPORT_WIDTH = number(argv[16], 32, 3840);
+  if (argc >= 19) {
+    EXPORT_WIDTH = number(argv[16], 32, 4096);
     EXPORT_HEIGHT = number(argv[17], 32, 2160);
-    need(!strcmp(argv[18], "pq-bilinear-rgb48-v1") &&
+    EXPORT_YUV10 = !strcmp(argv[18], "pq-bilinear-yuv420p10-v1");
+    need((EXPORT_YUV10 || !strcmp(argv[18], "pq-bilinear-rgb48-v1")) &&
              EXPORT_WIDTH <= expected_w[0] && EXPORT_HEIGHT <= expected_h[0] &&
              EXPORT_WIDTH % 2 == 0 && EXPORT_HEIGHT % 2 == 0,
          "unsupported export geometry or policy");
@@ -615,10 +856,10 @@ int main(int argc, char **argv) {
   need(!base_only || (expected_w[1] == 0 && expected_h[1] == 0),
        "base-only mode has no declared EL");
   debug_frames = number(argv[9], 0, 1) != 0;
-  // argv[10] reserves an explicit output policy; never interpreted as a display
-  // target.
-  need(strcmp(argv[10], "bt2020-pq-master-clip") == 0,
-       "unsupported output policy");
+  // Explicit control API only. Session/caps selection is a later PR.
+  need(argc == 21 ? dv_target_policy(argv[10], argv[19], argv[20]) :
+                       strcmp(argv[10], "bt2020-pq-master-clip") == 0,
+        "unsupported output policy");
   need(
       expected_w[0] % 2 == 0 && expected_h[0] % 2 == 0 &&
           expected_w[1] % 2 == 0 && expected_h[1] % 2 == 0 &&
@@ -716,8 +957,14 @@ int main(int argc, char **argv) {
   need(source_time_base.num > 0 && source_time_base.den > 0,
        "positive source time base");
   if (window_mode) {
-    need(stream->start_time == 0,
-         "initial window requires observed zero source origin");
+    need(bind_source_origin(held_origin, supplied_origin, stream,
+                            &source_origin, &source_origin_ticks),
+         "window requires an exact held source origin or observed legacy zero");
+    source_origin_provenance = held_origin
+        ? "observed_held_format_and_selected_video_probe"
+        : "observed_stream_start_time";
+    need(compare_window(source_origin_ticks, window_start) <= 0,
+         "window starts before frozen source origin");
     int64_t target =
         av_rescale_q_rnd(window_start.num, (AVRational){1, window_start.den},
                          source_time_base, AV_ROUND_DOWN);
@@ -728,6 +975,19 @@ int main(int argc, char **argv) {
   }
   if (streaming)
     open_nut(argv[11]);
+  dv_host_pack = pack;
+  writer_start();
+  const char *decode_device = getenv("PLURX_DV_DECODE_DEVICE");
+  if (decode_device && *decode_device) {
+    if (av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_VAAPI,
+                               decode_device, NULL, 0) < 0) {
+      hw_device = NULL;
+      software_reason = "decode-device-unavailable";
+    } else if (!decodes_hevc_main10(hw_device)) {
+      av_buffer_unref(&hw_device);
+      software_reason = "no-hevc-main10-decode";
+    }
+  }
   layers[0] = open_layer(stream, 0);
   if (!base_only)
     layers[1] = open_layer(stream, 1);
@@ -759,6 +1019,9 @@ int main(int argc, char **argv) {
     need(avcodec_send_packet(layers[k].decoder, NULL) >= 0, "decoder drain");
     receive(&layers[k]);
   }
+  // Every frame is rendered: finish its writes before the window checks.
+  writer_finish();
+  release_held();
   need(emitted > 0 &&
            (window_done || (layers[0].count == 0 && layers[1].count == 0)),
        "nonempty complete pair coverage");
@@ -774,9 +1037,9 @@ int main(int argc, char **argv) {
          "source EOF before requested window end");
     need(last_emitted_end < INT64_MAX, "EOF extent overflow");
     if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0) {
-      need(stream->start_time <= INT64_MAX - stream->duration &&
-               last_emitted_end + 1 >= stream->start_time + stream->duration &&
-               last_emitted_end - 1 <= stream->start_time + stream->duration,
+      int64_t endpoint;
+      need(declared_video_endpoint(source_origin_ticks, stream->duration, &endpoint) &&
+               last_emitted_end + 1 >= endpoint && last_emitted_end - 1 <= endpoint,
            "source EOF disagrees with declared video extent");
     } else if (av_dict_get(stream->metadata, "DURATION", NULL, 0)) {
       const AVDictionaryEntry *declared = av_dict_get(stream->metadata, "DURATION", NULL, 0);
@@ -824,6 +1087,15 @@ int main(int argc, char **argv) {
     av_bsf_free(&layers[k].split);
     avcodec_free_context(&layers[k].decoder);
   }
+  const char *decoder_mode = !hw_device       ? "software"
+                             : hw_fell_back     ? "vaapi-software-fallback"
+                             : dv_hw_host_copy  ? "vaapi-host-copy"
+                                                : "vaapi";
+  const char *decoder_reason = !hw_device       ? software_reason
+                               : hw_fell_back    ? "no-gpu-surface-offered"
+                               : dv_hw_host_copy ? "surface-import-failed"
+                                                 : "";
+  av_buffer_unref(&hw_device);
   av_packet_free(&packet);
   avformat_close_input(&input);
   if (movie_avio) {
@@ -833,8 +1105,8 @@ int main(int argc, char **argv) {
   }
   if (window_mode) {
     printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"
-           "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"0/"
-           "1\",\"origin_provenance\":\"observed_stream_start_time\","
+           "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"%lld/"
+           "%d\",\"origin_provenance\":\"%s\","
            "\"frames\":%d,\"preroll_pairs\":%u,\"paired_pictures\":%u,"
            "\"boundary_pts_ticks\":%lld,\"boundary_observed\":%s,\"source_eof_"
            "observed\":%s,\"first_emitted_pts_ticks\":%lld,\"last_emitted_end_"
@@ -843,20 +1115,24 @@ int main(int argc, char **argv) {
            "observed\",\"membership\":\"frame_pts_in_half_open_window_"
            "durations_unclipped\",\"production_qualified\":false}\n",
            (long long)window_start.num, window_start.den,
-           (long long)window_end.num, window_end.den, emitted, preroll, paired,
+           (long long)window_end.num, window_end.den,
+           (long long)source_origin.num, source_origin.den, source_origin_provenance,
+           emitted, preroll, paired,
            (long long)boundary_pts, window_done ? "true" : "false",
            source_eof ? "true" : "false", (long long)first_emitted_pts,
            (long long)last_emitted_end, source_time_base.num,
            source_time_base.den, (unsigned long long)movie_io.bytes);
   }
+  printf("{\"kind\":\"decoder\",\"mode\":\"%s\",\"reason\":\"%s\"}\n",
+         decoder_mode, decoder_reason);
   printf("{\"kind\":\"segment_complete\",\"frames\":%d,\"pair_window_bound\":"
-         "16,\"gpu_contexts\":1,\"output_policy\":\"bt2020-pq-master-clip\","
+         "16,\"gpu_contexts\":1,\"output_policy\":\"%s\","
          "\"production_qualified\":false}\n",
-         emitted);
+         emitted, dv_target_policy_name());
   if (base_only)
     printf("{\"kind\":\"base_processing_complete\",\"profile\":%d,"
            "\"frames\":%d,\"decoded_layers\":1,\"el_bound\":false,"
-           "\"fel_contributed\":false,\"creative_trims_applied\":false,"
+           "\"fel_contributed\":false,"
            "\"production_qualified\":false}\n", source_profile, emitted);
   need(fflush(stdout) == 0, "observations flush");
   return 0;

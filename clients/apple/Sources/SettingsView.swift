@@ -195,6 +195,12 @@ struct SettingsView: View {
             #endif
 
             Section {
+                Picker("Layout", selection: Binding(
+                    get: { model.layout }, set: { model.setLayout($0) }
+                )) {
+                    ForEach(ViewerLayout.allCases) { layout in Text(layout.label).tag(layout) }
+                }
+                .accessibilityIdentifier("settings-viewer-layout")
                 Picker("Theme", selection: Binding(
                     get: { model.theme },
                     set: { model.setTheme($0) }
@@ -220,6 +226,7 @@ struct SettingsView: View {
                     }
                 }
                 #if os(tvOS)
+                if model.layout == .standard {
                 Picker("Home layout", selection: Binding(
                     get: { TvHomeLayout(rawValue: tvHomeLayoutRaw) ?? .classic },
                     set: { tvHomeLayoutRaw = $0.rawValue }
@@ -229,6 +236,10 @@ struct SettingsView: View {
                     }
                 }
                 .accessibilityIdentifier("settings-tv-home-layout")
+                } else {
+                    Text("Meridian provides its own featured Home. Your Standard Home choice is remembered.")
+                        .foregroundStyle(Palette.muted)
+                }
                 #endif
                 Picker(libraryGroupingLabel, selection: Binding(
                     get: { model.libraryGrouping },
@@ -281,7 +292,7 @@ struct SettingsView: View {
 
             Section("Account") {
                 LabeledContent("Signed in as", value: model.username ?? "—")
-                LabeledContent("Server", value: model.serverName ?? model.origin)
+                LabeledContent("Server", value: serverSettingsLabel(name: model.serverName, hostname: model.serverHostname) ?? model.origin)
                 Button("Change server") { model.changeServer() }
                 Button("Sign out", role: .destructive) {
                     if DiagnosticReportModel.shared.hasPendingUnsubmitted { diagnosticSignOutConfirmation = true; return }

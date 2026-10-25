@@ -155,6 +155,8 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         sharing_source_sessions::*,
         store::sharing_catalogue_details::SourceDetailsRead,
     };
+    let _fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
     let directory = crate::test_tempdir().expect("actual Source root");
     eprintln!("Source fixture: actual standalone selection");
     let mut config = Config::default();
@@ -884,6 +886,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
     );
     let request = SessionRequest {
         continuous_media: None,
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         vod_only: false,
         passive_vod: false,

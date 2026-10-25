@@ -498,12 +498,713 @@ async fn restore_archive_remaps_paths_resets_fingerprint_and_mints_fence() {
     assert_eq!(generation, report.source_built_at_unix_ms.to_string());
 }
 
+// These two restore tests may reacquire only their initial source endpoints.
+// A reaped process, rather than a dropped Tokio runtime, also closes the
+// vendor's detached SQLite/WAL OS threads after pre-Client bind failures.
+#[cfg(feature = "hiqlite-store")]
+mod restore_endpoints {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::time::Instant;
+
+    const CHILD: &str = "PLURX_RESTORE_ENDPOINT_CHILD";
+    const COLLISION: i32 = 75;
+    const ATTEMPTS: usize = 5;
+    const LOG_LIMIT: u64 = 8 * 1024 * 1024;
+    const REPORT_LIMIT: u64 = 16 * 1024;
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) enum Probe {
+        Actual,
+        FirstCollision,
+        AlwaysCollision,
+        Unknown,
+        WrongEndpoint,
+        MissingReport,
+        AcquiredThenRefuse,
+        AcquiredPanic,
+        Timeout,
+        OutputLimit,
+        WrongChild,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Context {
+        case: String,
+        nonce: String,
+        attempt: usize,
+        directory: PathBuf,
+        state: PathBuf,
+        sharing: bool,
+        probe: Probe,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Report {
+        context: Context,
+        pid: u32,
+        stage: String,
+        source: PathBuf,
+        raft: std::net::SocketAddr,
+        api: std::net::SocketAddr,
+        error: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct Attempt {
+        number: usize,
+        pid: u32,
+        directory: PathBuf,
+        status: String,
+        acquired: bool,
+        collision: Option<Report>,
+        error: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub(super) struct Run {
+        pub(super) success: bool,
+        pub(super) error: String,
+        pub(super) attempts: usize,
+        pub(super) directories: Vec<PathBuf>,
+        archive: PathBuf,
+    }
+
+    struct OwnedChild(Option<Child>);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                child.wait().expect("reap owned restore candidate");
+            }
+        }
+    }
+
+    fn json_file(path: &Path, value: &impl Serialize) {
+        let bytes = serde_json::to_vec(value).expect("encode owned restore report");
+        assert!(bytes.len() as u64 <= REPORT_LIMIT);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("create immutable restore report");
+        file.write_all(&bytes).expect("write restore report");
+    }
+
+    fn context(expected: &str) -> Option<Context> {
+        let encoded = std::env::var_os(CHILD)?;
+        let encoded = encoded.to_str().expect("UTF-8 child context");
+        assert!(encoded.len() as u64 <= REPORT_LIMIT);
+        let context: Context = serde_json::from_str(encoded).expect("exact child context");
+        assert_eq!(
+            context.case,
+            format!("cluster::migration::tests::{expected}")
+        );
+        assert!((1..=ATTEMPTS).contains(&context.attempt));
+        uuid::Uuid::parse_str(&context.nonce).expect("owned child nonce");
+        assert_eq!(context.state, context.directory.join("state"));
+        assert!(context.directory.is_absolute());
+        assert_eq!(
+            context.directory.canonicalize().expect("owned candidate"),
+            context.directory
+        );
+        assert_eq!(
+            std::fs::read(context.directory.join("context.json")).expect("sealed child context"),
+            encoded.as_bytes()
+        );
+        Some(context)
+    }
+
+    fn current_context() -> Context {
+        let encoded = std::env::var(CHILD).expect("source setup runs only in owned child");
+        serde_json::from_str(&encoded).expect("validated current restore context")
+    }
+
+    pub(super) fn source_directory() -> tempfile::TempDir {
+        tempfile::tempdir_in(current_context().state).expect("owned source data directory")
+    }
+
+    // StoreError intentionally has string payloads. Recognize only the two
+    // exact production bind contexts, this candidate's addresses and rollback
+    // path, and this platform's actual AddrInUse rendering. Never substring-
+    // match an arbitrary database, census, I/O, permission or timeout error.
+    fn bind_collision(
+        error: &StoreError,
+        source: &Path,
+        raft: std::net::SocketAddr,
+        api: std::net::SocketAddr,
+    ) -> bool {
+        let StoreError::Migration(message) = error else {
+            return false;
+        };
+        let suffix = format!(
+            "; SQLite source {} remains available; rollback command: plurxd run",
+            source.join(SQLITE_FILENAME).display()
+        );
+        let Some(message) = message.strip_suffix(&suffix) else {
+            return false;
+        };
+        let occupied = std::io::Error::from_raw_os_error(libc::EADDRINUSE).to_string();
+        [("raft", "Raft", raft), ("cluster API", "API", api)].into_iter().any(|(preflight, vendor, address)| {
+            message == format!("database error: starting Hiqlite voter: Connect: bind {vendor} listener {address}: {occupied}")
+                || message == format!("schema migration failed: the {preflight} port {address} is not available: {occupied}. Another plurxd on this host is using it — cluster ports are host-wide, so a second data directory needs its own raft_bind and api_bind")
+        })
+    }
+
+    fn report(config: &Config, stage: &str, error: Option<String>) {
+        let context = current_context();
+        let path = context.directory.join(format!("{stage}.json"));
+        json_file(
+            &path,
+            &Report {
+                context,
+                pid: std::process::id(),
+                stage: stage.into(),
+                source: config.storage.data_dir.clone(),
+                raft: config.cluster.raft_bind,
+                api: config.cluster.api_bind,
+                error,
+            },
+        );
+    }
+
+    pub(super) async fn source_voter(config: &Config) -> SelectedStore {
+        match startup_observer::select_applied_singleton(config).await {
+            Ok(source) => {
+                report(config, "acquired", None);
+                source
+            }
+            Err(error)
+                if bind_collision(
+                    &error,
+                    &config.storage.data_dir,
+                    config.cluster.raft_bind,
+                    config.cluster.api_bind,
+                ) =>
+            {
+                let StoreError::Migration(message) = error else {
+                    unreachable!("matched migration variant")
+                };
+                report(config, "refused", Some(message));
+                std::process::exit(COLLISION);
+            }
+            Err(error) => panic!("source voter: {error:?}"),
+        }
+    }
+
+    fn read_report(context: &Context, pid: u32, stage: &str) -> Result<Report, String> {
+        let path = context.directory.join(format!("{stage}.json"));
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("missing {stage} report: {error}"))?;
+        if !metadata.is_file() || metadata.len() > REPORT_LIMIT {
+            return Err(format!("invalid {stage} report file"));
+        }
+        let report: Report =
+            serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        if report.context != *context
+            || report.pid != pid
+            || report.stage != stage
+            || !report.source.starts_with(&context.state)
+            || report.source == context.state
+            || report
+                .source
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+            || !report.raft.ip().is_loopback()
+            || !report.api.ip().is_loopback()
+            || report.raft.port() == 0
+            || report.api.port() == 0
+            || report.raft == report.api
+        {
+            return Err(format!("invalid {stage} report identity"));
+        }
+        Ok(report)
+    }
+
+    fn completed(context: &Context) {
+        let mut acquired = read_report(context, std::process::id(), "acquired")
+            .expect("actual source acquisition");
+        acquired.stage = "completed".into();
+        json_file(&context.directory.join("completed.json"), &acquired);
+    }
+
+    fn sizes(directory: &Path) -> u64 {
+        ["stdout.log", "stderr.log"]
+            .into_iter()
+            .map(|name| {
+                std::fs::metadata(directory.join(name))
+                    .expect("owned child log")
+                    .len()
+            })
+            .sum()
+    }
+
+    pub(super) fn failure_tail(directory: &Path) -> String {
+        let mut output = String::new();
+        for name in ["stdout.log", "stderr.log"] {
+            let label = format!("--- restore child {name} tail ---\n");
+            let mut file = std::fs::File::open(directory.join(name)).expect("owned failure log");
+            let bytes = file.metadata().expect("failure log size").len().min(8192);
+            file.seek(SeekFrom::End(-(bytes as i64)))
+                .expect("seek bounded failure tail");
+            let mut tail = Vec::new();
+            file.take(bytes)
+                .read_to_end(&mut tail)
+                .expect("read bounded failure tail");
+            let text = String::from_utf8_lossy(&tail);
+            let mut end = text.len().min(8192 - label.len() - 1);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            output.push_str(&label);
+            output.push_str(&text[..end]);
+            output.push('\n');
+        }
+        output
+    }
+
+    fn wait(
+        child: &mut OwnedChild,
+        directory: &Path,
+        started: Instant,
+        timeout: Duration,
+        limit: u64,
+    ) -> Result<ExitStatus, String> {
+        loop {
+            let status = child
+                .0
+                .as_mut()
+                .expect("owned child")
+                .try_wait()
+                .map_err(|error| error.to_string())?;
+            // Check even a fast-exited child: neither exit0 nor reserved exit
+            // can bypass the finite time and combined output admission bounds.
+            let elapsed = started.elapsed();
+            let bytes = sizes(directory);
+            if let Some(status) = status {
+                child
+                    .0
+                    .take()
+                    .expect("exited child")
+                    .wait()
+                    .expect("reap exited child");
+                if elapsed > timeout {
+                    return Err("child deadline exceeded".into());
+                }
+                if bytes > limit {
+                    return Err("child output limit exceeded".into());
+                }
+                return Ok(status);
+            }
+            if elapsed > timeout {
+                return Err("child deadline exceeded".into());
+            }
+            if bytes > limit {
+                return Err("child output limit exceeded".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn attempt(context: &Context, timeout: Duration, limit: u64) -> Attempt {
+        let mut child_context = context.clone();
+        if context.probe == Probe::WrongChild {
+            child_context.case.push_str("-wrong");
+        }
+        let encoded = serde_json::to_string(&child_context).expect("encode candidate context");
+        json_file(&context.directory.join("context.json"), &child_context);
+        let stdout =
+            std::fs::File::create(context.directory.join("stdout.log")).expect("owned stdout");
+        let stderr =
+            std::fs::File::create(context.directory.join("stderr.log")).expect("owned stderr");
+        let started = Instant::now();
+        let child = Command::new(std::env::current_exe().expect("current test binary"))
+            .args(["--exact", &context.case, "--nocapture", "--test-threads=1"])
+            .env(CHILD, encoded)
+            .env("TMPDIR", &context.state)
+            .env("TMP", &context.state)
+            .env("TEMP", &context.state)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("owned restore child");
+        let pid = child.id();
+        let mut child = OwnedChild(Some(child));
+        let status = wait(&mut child, &context.directory, started, timeout, limit);
+        drop(child); // All outcomes reap before report validation or another candidate.
+        let acquired = context.directory.join("acquired.json").exists();
+        let mut record = Attempt {
+            number: context.attempt,
+            pid,
+            directory: context.directory.clone(),
+            status: format!("{status:?}"),
+            acquired,
+            collision: None,
+            error: None,
+        };
+        record.error = match status {
+            Err(error) => Some(error),
+            Ok(status) if status.success() => read_report(context, pid, "acquired")
+                .and_then(|acquired| {
+                    let complete = read_report(context, pid, "completed")?;
+                    if context.directory.join("refused.json").exists()
+                        || acquired.error.is_some()
+                        || complete.error.is_some()
+                        || acquired.source != complete.source
+                        || acquired.raft != complete.raft
+                        || acquired.api != complete.api
+                    {
+                        Err("inconsistent completed body reports".into())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .err(),
+            Ok(status)
+                if status.code() == Some(COLLISION)
+                    && !acquired
+                    && !context.directory.join("completed.json").exists() =>
+            {
+                match read_report(context, pid, "refused") {
+                    Ok(report)
+                        if report.error.as_ref().is_some_and(|message| {
+                            bind_collision(
+                                &StoreError::Migration(message.clone()),
+                                &report.source,
+                                report.raft,
+                                report.api,
+                            )
+                        }) =>
+                    {
+                        record.collision = Some(report);
+                        None
+                    }
+                    _ => Some("reserved exit without exact source bind refusal".into()),
+                }
+            }
+            Ok(_) if acquired => Some("child failed after source acquisition; no retry".into()),
+            Ok(_) => Some("child failed outside recognized source acquisition".into()),
+        };
+        json_file(&context.directory.join("attempt.json"), &record);
+        // Direct OS stdio survives ordinary passing libtest capture. Keep raw
+        // bounded logs separately; print only structured candidate diagnostics.
+        let diagnostic = serde_json::to_vec(&record).expect("encode acquisition diagnostic");
+        let mut output = std::io::stdout().lock();
+        output
+            .write_all(b"RESTORE_ENDPOINT_ATTEMPT ")
+            .expect("visible diagnostic");
+        output.write_all(&diagnostic).expect("visible diagnostic");
+        output.write_all(b"\n").expect("visible diagnostic");
+        if record.error.is_some() {
+            output
+                .write_all(failure_tail(&context.directory).as_bytes())
+                .expect("visible bounded original child failure");
+        }
+        std::fs::remove_dir_all(&context.state).expect("remove reaped candidate state");
+        record
+    }
+
+    pub(super) fn run(
+        case: &str,
+        sharing: bool,
+        probe: Probe,
+        timeout: Duration,
+        limit: u64,
+    ) -> Run {
+        assert!(
+            std::env::var_os(CHILD).is_none(),
+            "child cannot recursively allocate candidates"
+        );
+        let archive = tempfile::Builder::new()
+            .prefix("plurx-restore-endpoints-")
+            .tempdir()
+            .expect("owned attempt archive")
+            .keep()
+            .canonicalize()
+            .expect("canonical attempt archive");
+        let mut result = Run {
+            success: false,
+            error: String::new(),
+            attempts: 0,
+            directories: Vec::new(),
+            archive: archive.clone(),
+        };
+        for number in 1..=ATTEMPTS {
+            let directory = archive.join(format!("attempt-{number}"));
+            let state = directory.join("state");
+            std::fs::create_dir_all(&state).expect("fresh candidate state");
+            let context = Context {
+                case: format!("cluster::migration::tests::{case}"),
+                nonce: uuid::Uuid::now_v7().to_string(),
+                attempt: number,
+                directory: directory.clone(),
+                state,
+                sharing,
+                probe: probe.clone(),
+            };
+            let record = attempt(&context, timeout, limit);
+            result.attempts = number;
+            result.directories.push(directory);
+            if let Some(error) = record.error {
+                result.error = error;
+                break;
+            }
+            if record.collision.is_some() {
+                result.error = format!("exhausted {ATTEMPTS} source endpoint candidates");
+                continue;
+            }
+            result.success = true;
+            result.error.clear();
+            break;
+        }
+        json_file(&archive.join("summary.json"), &result);
+        result
+    }
+
+    pub(super) fn actual(case: &str, sharing: bool) {
+        if let Some(context) = context(case) {
+            assert_eq!(context.probe, Probe::Actual);
+            assert_eq!(context.sharing, sharing);
+            if sharing {
+                startup_observer::run_full_hiqlite_fixture(
+                    "restore-sharing-census",
+                    restore_archive_sharing_observation_fixture,
+                );
+            } else {
+                startup_observer::run_full_hiqlite_fixture(
+                    "k06-r1-restore",
+                    restore_archive_observation_fixture,
+                );
+            }
+            completed(&context);
+            return;
+        }
+        let run = run(
+            case,
+            sharing,
+            Probe::Actual,
+            Duration::from_secs(180),
+            LOG_LIMIT,
+        );
+        assert!(
+            run.success,
+            "restore observation failed without assertion retry: {run:?}"
+        );
+    }
+
+    pub(super) fn probe_child(case: &str) -> bool {
+        let Some(context) = context(case) else {
+            return false;
+        };
+        assert_ne!(context.probe, Probe::Actual);
+        if context.probe == Probe::MissingReport {
+            std::process::exit(COLLISION);
+        }
+        if context.probe == Probe::Timeout {
+            std::thread::sleep(Duration::from_secs(1));
+            return true;
+        }
+        if context.probe == Probe::OutputLimit {
+            std::io::stdout()
+                .write_all(&[b'x'; 2048])
+                .expect("controlled output");
+            return true;
+        }
+        let candidate = context.clone();
+        startup_observer::run_full_hiqlite_fixture(
+            "restore-endpoint-control",
+            move || async move {
+                let context = candidate;
+                install_default_crypto_provider();
+                let source = source_directory();
+                let config = membership_test_config(source.path());
+                if matches!(context.probe, Probe::Unknown | Probe::WrongEndpoint) {
+                    let occupied = std::io::Error::from_raw_os_error(libc::EADDRINUSE);
+                    let address = if context.probe == Probe::WrongEndpoint {
+                        config.cluster.api_bind
+                    } else {
+                        config.cluster.raft_bind
+                    };
+                    let message = format!(
+                        "database error: starting Hiqlite voter: Connect: bind Raft listener {address}: {occupied}; SQLite source {} remains available; rollback command: plurxd run",
+                        source.path().join(SQLITE_FILENAME).display()
+                    );
+                    report(
+                        &config,
+                        "refused",
+                        Some(if context.probe == Probe::Unknown {
+                            format!("census failed: {message}")
+                        } else {
+                            message
+                        }),
+                    );
+                    std::process::exit(COLLISION);
+                }
+                let _collider = (context.probe == Probe::AlwaysCollision
+                    || (context.probe == Probe::FirstCollision && context.attempt == 1))
+                    .then(|| {
+                        std::net::TcpListener::bind(config.cluster.raft_bind)
+                            .expect("controlled real source collision")
+                    });
+                drop(
+                    SqliteStore::open(&source.path().join(SQLITE_FILENAME))
+                        .expect("controlled legacy source"),
+                );
+                let selected = source_voter(&config).await;
+                if context.probe == Probe::AcquiredPanic {
+                    panic!("RESTORE_POST_ACQUISITION_FAILURE_SENTINEL");
+                }
+                if context.probe == Probe::AcquiredThenRefuse {
+                    let message = format!(
+                        "database error: starting Hiqlite voter: Connect: bind Raft listener {}: {}; SQLite source {} remains available; rollback command: plurxd run",
+                        config.cluster.raft_bind,
+                        std::io::Error::from_raw_os_error(libc::EADDRINUSE),
+                        source.path().join(SQLITE_FILENAME).display()
+                    );
+                    report(&config, "refused", Some(message));
+                    std::process::exit(COLLISION);
+                }
+                selected.shutdown().await.expect("control source shutdown");
+            },
+        );
+        completed(&context);
+        true
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn restore_source_endpoints_reacquire_only_before_the_body_and_exhaust_finitely() {
+    const CASE: &str =
+        "restore_source_endpoints_reacquire_only_before_the_body_and_exhaust_finitely";
+    if restore_endpoints::probe_child(CASE) {
+        return;
+    }
+    let acquired = restore_endpoints::run(
+        CASE,
+        false,
+        restore_endpoints::Probe::FirstCollision,
+        Duration::from_secs(180),
+        8 * 1024 * 1024,
+    );
+    assert!(acquired.success, "{acquired:?}");
+    assert_eq!(acquired.attempts, 2);
+    assert_eq!(
+        acquired
+            .directories
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        2
+    );
+    for directory in &acquired.directories {
+        assert!(!directory.join("state").exists());
+    }
+    assert!(!acquired.directories[0].join("acquired.json").exists());
+    assert!(acquired.directories[1].join("completed.json").exists());
+    let exhausted = restore_endpoints::run(
+        CASE,
+        false,
+        restore_endpoints::Probe::AlwaysCollision,
+        Duration::from_secs(180),
+        8 * 1024 * 1024,
+    );
+    assert!(!exhausted.success);
+    assert_eq!(exhausted.attempts, 5);
+    assert!(exhausted.error.contains("exhausted"));
+    assert!(exhausted
+        .directories
+        .iter()
+        .all(|path| !path.join("acquired.json").exists() && !path.join("state").exists()));
+    assert!(!exhausted.directories[4]
+        .with_file_name("attempt-6")
+        .exists());
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn restore_source_endpoints_refuse_unknown_wrong_endpoint_and_post_acquisition_retries() {
+    const CASE: &str =
+        "restore_source_endpoints_refuse_unknown_wrong_endpoint_and_post_acquisition_retries";
+    if restore_endpoints::probe_child(CASE) {
+        return;
+    }
+    for probe in [
+        restore_endpoints::Probe::Unknown,
+        restore_endpoints::Probe::WrongEndpoint,
+        restore_endpoints::Probe::MissingReport,
+        restore_endpoints::Probe::AcquiredThenRefuse,
+        restore_endpoints::Probe::AcquiredPanic,
+        restore_endpoints::Probe::WrongChild,
+    ] {
+        let acquired_failure = matches!(
+            probe,
+            restore_endpoints::Probe::AcquiredThenRefuse | restore_endpoints::Probe::AcquiredPanic
+        );
+        let panic_failure = probe == restore_endpoints::Probe::AcquiredPanic;
+        let run = restore_endpoints::run(
+            CASE,
+            false,
+            probe,
+            Duration::from_secs(180),
+            8 * 1024 * 1024,
+        );
+        assert!(!run.success, "{run:?}");
+        assert_eq!(run.attempts, 1, "{run:?}");
+        assert!(!run.directories[0].join("state").exists());
+        if acquired_failure {
+            assert!(run.error.contains("after source acquisition"), "{run:?}");
+            assert!(run.directories[0].join("acquired.json").exists());
+            assert!(!run.directories[0].join("completed.json").exists());
+        }
+        if panic_failure {
+            let tail = restore_endpoints::failure_tail(&run.directories[0]);
+            assert!(tail.contains("RESTORE_POST_ACQUISITION_FAILURE_SENTINEL"));
+            assert!(tail.len() <= 16 * 1024);
+        }
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn restore_source_endpoints_deadline_and_fast_output_failure_are_not_retried() {
+    const CASE: &str = "restore_source_endpoints_deadline_and_fast_output_failure_are_not_retried";
+    if restore_endpoints::probe_child(CASE) {
+        return;
+    }
+    for (probe, timeout, limit, expected) in [
+        (
+            restore_endpoints::Probe::Timeout,
+            Duration::from_millis(100),
+            8 * 1024 * 1024,
+            "deadline",
+        ),
+        (
+            restore_endpoints::Probe::OutputLimit,
+            Duration::from_secs(180),
+            1024,
+            "output limit",
+        ),
+    ] {
+        let run = restore_endpoints::run(CASE, false, probe, timeout, limit);
+        assert!(!run.success);
+        assert_eq!(run.attempts, 1);
+        assert!(run.error.contains(expected), "{run:?}");
+        assert!(!run.directories[0].join("state").exists());
+    }
+}
+
 #[cfg(feature = "hiqlite-store")]
 #[test]
 fn restore_archive_from_real_snapshot_starts_as_the_only_voter() {
-    startup_observer::run_full_hiqlite_fixture(
-        "k06-r1-restore",
-        restore_archive_observation_fixture,
+    restore_endpoints::actual(
+        "restore_archive_from_real_snapshot_starts_as_the_only_voter",
+        false,
     );
 }
 
@@ -515,9 +1216,9 @@ async fn restore_archive_observation_fixture() {
 #[cfg(feature = "hiqlite-store")]
 #[test]
 fn restore_archive_with_retired_purpose_keys_admits_new_node_before_key_census() {
-    startup_observer::run_full_hiqlite_fixture(
-        "restore-sharing-census",
-        restore_archive_sharing_observation_fixture,
+    restore_endpoints::actual(
+        "restore_archive_with_retired_purpose_keys_admits_new_node_before_key_census",
+        true,
     );
 }
 
@@ -530,12 +1231,10 @@ async fn restore_archive_sharing_observation_fixture() {
 async fn restore_archive_observation_fixture_with_sharing(sharing: bool) {
     install_default_crypto_provider();
 
-    let source_dir = tempfile::tempdir().expect("source data dir");
+    let source_dir = restore_endpoints::source_directory();
     let source_config = membership_test_config(source_dir.path());
     drop(SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME)).expect("legacy source store"));
-    let mut source = startup_observer::select_applied_singleton(&source_config)
-        .await
-        .expect("source voter");
+    let mut source = restore_endpoints::source_voter(&source_config).await;
     if sharing {
         source
             .store

@@ -19,6 +19,23 @@ struct ServerInfo: Codable {
     var displayAwareAutoProtocol: String?
 }
 
+/// `GET /api/v1/server/node` (signed in): which machine this client is
+/// talking to. `displayName` is the server's own label for itself — a chosen
+/// name, else the hostname — so the client never re-derives it.
+struct ServerNode: Codable {
+    var hostname: String?
+    var displayName: String?
+}
+
+/// The Settings "Server" value: the server's label, with the answering node's
+/// hostname added when the label is a name an operator chose — so every node of
+/// a custom-named cluster still says which machine this client is talking to.
+func serverSettingsLabel(name: String?, hostname: String?) -> String? {
+    guard let name, !name.isEmpty else { return hostname }
+    guard let hostname, !hostname.isEmpty, hostname.caseInsensitiveCompare(name) != .orderedSame else { return name }
+    return "\(name) · \(hostname)"
+}
+
 struct ClusterIngress: Codable {
     var nodeUrls: [String]?
 }
@@ -238,10 +255,17 @@ enum LibraryGrouping: String, CaseIterable, Identifiable {
 
 /// Native themes shared with the Android viewer. Web-only catalogue themes can
 /// be added here once their tokens and platform treatment have an Apple port.
+enum ViewerLayout: String, CaseIterable, Identifiable {
+    case standard, meridian
+    var id: String { rawValue }
+    var label: String { self == .standard ? "Standard" : "Meridian" }
+}
+
 enum ViewerTheme: String, CaseIterable, Identifiable {
     case classic
     case terminal
     case noirr
+    case meridian
 
     var id: String { rawValue }
     var label: String {
@@ -249,6 +273,7 @@ enum ViewerTheme: String, CaseIterable, Identifiable {
         case .classic: return "Classic"
         case .terminal: return "Terminal"
         case .noirr: return "noirr"
+        case .meridian: return "Meridian"
         }
     }
 }
@@ -814,7 +839,7 @@ struct QualityCandidate: Codable, Identifiable {
         guard recipeDigest.count == 32, (1...16_384).contains(width), (1...16_384).contains(height),
               (0...16_384).contains(targetHeight), ["original", "remux", "encode"].contains(route),
               ["sdr", "hdr10"].contains(grade),
-              processedHdr10 != true || (route == "encode" && grade == "hdr10" && plannedCodec == "hevc") else { return false }
+              processedHdr10 != true || (route == "encode" && plannedCodec == "hevc") else { return false }
         var bytes = Data("plurx:auto-quality-candidate:v1\0".utf8)
         bytes.append(contentsOf: recipeDigest)
         let expected = SHA256.hash(data: bytes).prefix(16).map { String(format: "%02x", $0) }.joined()
@@ -943,11 +968,15 @@ struct Decision: Codable {
 struct EffectiveProcessingReport: Equatable, Codable {
     var generation: String
     var hdr10Enhanced: Bool
+    var sdrProcessed: Bool = false
+    var mark: String { sdrProcessed ? "SDR-E" : "HDR10-E" }
     var felContributed: Bool
     var appliedOperations: [String]
+    /// Some, but not every, served frame applied creative trims.
+    var creativeTrimsPartial: Bool = false
 
     func matches(generation active: String?, delivered: String?) -> Bool {
-        hdr10Enhanced && delivered == "hdr10" && active == generation
+        ((hdr10Enhanced && !sdrProcessed && delivered == "hdr10") || (!hdr10Enhanced && sdrProcessed && delivered == "sdr" && appliedOperations.contains("Bt709Gamma24Conversion") && appliedOperations.contains("DisplayTargetMapping:100"))) && active == generation
             && UUID(uuidString: generation) != nil
             && !appliedOperations.isEmpty && appliedOperations.count <= 16
             && appliedOperations.allSatisfy { !$0.isEmpty && $0.count <= 64 }
@@ -958,30 +987,151 @@ struct EffectiveProcessingReport: Equatable, Codable {
                      "RpuColorConversion": "RPU color conversion", "TargetMapping": "target mapping",
                      "CreativeTrimApplication": "creative trims"]
         let metadata = appliedOperations.compactMap { names[$0] }.joined(separator: ", ")
-        return "Dolby Vision–enhanced HDR10 · FEL used: \(felContributed ? "yes" : "no")"
+        let trims = appliedOperations.contains("CreativeTrimApplication") ? "creative trims applied" : creativeTrimsPartial ? "creative trims on some shots" : "L1 only"
+        return "\(sdrProcessed ? "Dolby Vision–processed SDR (BT.709 gamma 2.4, \(trims))" : "Dolby Vision–enhanced HDR10") · FEL used: \(felContributed ? "yes" : "no")"
             + (metadata.isEmpty ? "" : " · Applied: \(metadata)")
     }
 
-    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, felContributed, appliedOperations }
+    private struct WireOperation: Decodable {
+        var name: String
+        private enum Keys: String, CodingKey { case target = "DisplayTargetMapping" }
+        private struct Target: Decodable { var nits: Int }
+        init(from decoder: Decoder) throws {
+            if let string = try? decoder.singleValueContainer().decode(String.self) { name = string; return }
+            let values = try decoder.container(keyedBy: Keys.self)
+            let nits = try values.decode(Target.self, forKey: .target).nits
+            guard [100, 400, 600, 1000, 1600, 2000, 4000].contains(nits) else {
+                throw DecodingError.dataCorruptedError(forKey: .target, in: values, debugDescription: "unsupported display target")
+            }
+            name = "DisplayTargetMapping:\(nits)"
+        }
+    }
+    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, sdrProcessed, felContributed, appliedOperations, creativeTrimsPartial }
     init(from decoder: Decoder) throws {
         let values = try? decoder.container(keyedBy: CodingKeys.self)
         generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
         hdr10Enhanced = ((try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == true)
             && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
+        sdrProcessed = ((try? values?.decode(Bool.self, forKey: .sdrProcessed)) == true) && (try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == false && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
         felContributed = (try? values?.decode(Bool.self, forKey: .felContributed)) ?? false
-        appliedOperations = (try? values?.decode([String].self, forKey: .appliedOperations)) ?? []
+        appliedOperations = (try? values?.decode([WireOperation].self, forKey: .appliedOperations).map(\.name)) ?? []
+        creativeTrimsPartial = (try? values?.decode(Bool.self, forKey: .creativeTrimsPartial)) == true
+        if appliedOperations.contains(where: { $0.hasPrefix("DisplayTargetMapping:") && ($0 == "DisplayTargetMapping:100") != sdrProcessed }) { appliedOperations = [] }
     }
 
-    init(generation: String, hdr10Enhanced: Bool, felContributed: Bool, appliedOperations: [String]) {
+    init(generation: String, hdr10Enhanced: Bool, felContributed: Bool, appliedOperations: [String], sdrProcessed: Bool = false) {
         self.generation = generation
         self.hdr10Enhanced = hdr10Enhanced
+        self.sdrProcessed = sdrProcessed
         self.felContributed = felContributed
         self.appliedOperations = appliedOperations
     }
 }
 
+/// What Dolby Vision enhancement the delivered picture carries, computed by
+/// the server (`plurx_core::playback::enhancement`) so every client shows the
+/// same thing: a pill per *active* enhancement (FEL, RPU, DYN) and one plain
+/// line per enhancement that applies, active or not.
+///
+/// Absent for a non-DV source, for SDR, and from an older server. Additive
+/// and never load-bearing: a malformed value decodes to an empty answer that
+/// shows nothing, and never refuses the session it rides on.
+struct PlaybackEnhancement: Equatable, Codable {
+    /// The badges this client can draw. A badge it does not know is dropped
+    /// from the pills rather than rendered under an invented label.
+    enum Badge: String, Equatable, Codable, CaseIterable {
+        case fel = "FEL"
+        case rpu = "RPU"
+        case dyn = "DYN"
+    }
+
+    struct Detail: Equatable, Codable {
+        /// The raw badge name, kept even when this client does not know it:
+        /// the line is server-authored text and stays readable either way.
+        var badge: String
+        var active: Bool
+        var text: String
+
+        private enum CodingKeys: String, CodingKey { case badge, active, text }
+        init(from decoder: Decoder) throws {
+            let values = try? decoder.container(keyedBy: CodingKeys.self)
+            badge = (try? values?.decode(String.self, forKey: .badge)) ?? ""
+            active = (try? values?.decode(Bool.self, forKey: .active)) ?? false
+            text = (try? values?.decode(String.self, forKey: .text)) ?? ""
+        }
+
+        init(badge: String, active: Bool, text: String) {
+            self.badge = badge
+            self.active = active
+            self.text = text
+        }
+    }
+
+    /// Active enhancements only, in the server's display order.
+    var active: [Badge]
+    var details: [Detail]
+    /// The pills (and the row) of a processed HDR10 delivery are shown only
+    /// while the player holds a current, generation-matching
+    /// `EffectiveProcessingReport`. Omitted by the server when false.
+    var requiresEffectiveProcessing: Bool
+
+    private enum CodingKeys: String, CodingKey { case active, details, requiresEffectiveProcessing }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        var seen = Set<Badge>()
+        active = ((try? values?.decode([String].self, forKey: .active)) ?? [])
+            .compactMap(Badge.init(rawValue:))
+            .filter { seen.insert($0).inserted }
+        details = (try? values?.decode([Detail].self, forKey: .details)) ?? []
+        requiresEffectiveProcessing = (try? values?.decode(Bool.self, forKey: .requiresEffectiveProcessing)) ?? false
+    }
+
+    init(active: [Badge], details: [Detail], requiresEffectiveProcessing: Bool = false) {
+        self.active = active
+        self.details = details
+        self.requiresEffectiveProcessing = requiresEffectiveProcessing
+    }
+
+    /// One neutral line per enhancement, blank server lines dropped.
+    var detailLines: [String] {
+        details
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// What the player may show right now, or nil for nothing at all — no
+    /// pills and no info-panel row.
+    ///
+    /// A delivery that `requiresEffectiveProcessing` is shown only while the
+    /// report is current for the active generation, by the same test the
+    /// HDR10-E badge uses, so the pills clear on seek, fallback or
+    /// replacement together with it.
+    func presented(
+        effectiveProcessing: EffectiveProcessingReport?,
+        activeGeneration: String?,
+        delivered: String?
+    ) -> PlaybackEnhancement? {
+        if requiresEffectiveProcessing {
+            guard let report = effectiveProcessing,
+                  report.matches(generation: activeGeneration, delivered: delivered)
+            else { return nil }
+        }
+        guard !active.isEmpty || !detailLines.isEmpty else { return nil }
+        return self
+    }
+
+    /// The accessibility text for one pill: the server's own line for it.
+    func accessibilityLabel(for badge: Badge) -> String {
+        details.first { $0.active && $0.badge == badge.rawValue && !$0.text.isEmpty }?.text
+            ?? "Dolby Vision \(badge.rawValue) active"
+    }
+}
+
 struct HlsStart: Codable {
     var effectiveProcessing: EffectiveProcessingReport?
+    /// Server-computed Dolby Vision enhancement (FEL / RPU / DYN). Absent
+    /// for a non-DV source and from an older server.
+    var enhancement: PlaybackEnhancement?
     let sessionId: String
     let playlistUrl: String
     var durationMs: Int?

@@ -3,6 +3,24 @@ import XCTest
 
 @MainActor
 final class TVConnectionNavigationTests: TVNavigationTestCase {
+    func testSignInCanChooseAnotherServerAndReconnectWithNativeRemote() throws {
+        let server = try TVNavigationServer()
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openSignIn(origin: origin)
+        defer { app.terminate() }
+        let change = app.buttons["Use a different server"]
+        reachForSetup(change, in: app, limit: 8)
+        assertFocus(change, in: app, context: "Sign in can choose another server")
+        remote.press(.select)
+        let manual = app.buttons["Add server manually"]
+        assertFocus(manual, in: app, context: "Server picker remains reachable after leaving Sign in")
+        connectManually(origin: origin, in: app)
+        signInToFixture(in: app)
+        XCTAssertTrue(app.viewerTab("Home").waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertEqual(server.requestCount("POST /api/v1/auth/login"), 1)
+    }
+
     func testSavedConnectionRecoveryReportAndRetryKeepCredentials() throws {
         let server = try TVNavigationServer()
         let origin = try server.start()
@@ -31,7 +49,7 @@ final class TVConnectionNavigationTests: TVNavigationTestCase {
         assertFocus(retry, in: app, context: "Retry after connection recovers")
         let signIns = server.requestCount("POST /api/v1/auth/login")
         remote.press(.select)
-        XCTAssertTrue(app.tabBars.buttons["Home"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.viewerTab("Home").waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertEqual(server.requestCount("POST /api/v1/auth/login"), signIns,
                        "Retry must reuse the saved sign-in")
     }

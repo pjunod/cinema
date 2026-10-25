@@ -13,6 +13,8 @@ candidate, not a notarized distribution or a fresh-install acceptance receipt.
 """
 import argparse
 import hashlib
+import gzip
+import os
 import importlib.machinery
 import importlib.util
 import json
@@ -20,10 +22,12 @@ from pathlib import Path
 import plistlib
 import re
 import stat
+import struct
 import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 
 
 def recipe():
@@ -91,6 +95,303 @@ def validate_native_package(package):
     if font_tools is not None or any((package / name).exists() for name in ["fc-list", "fc-conflist", "fontconfig"]):
         validate_font_tools(package, font_tools)
     return manifest
+
+
+def combine_ffmpeg_packages(arm, intel, output):
+    """Combine two independently verified packages, retaining both slice facts."""
+    if not output.is_absolute() or output.exists():
+        raise ValueError("universal media output must be an absolute new directory")
+    left, right = validate_native_package(arm), validate_native_package(intel)
+    parser_identity = ["source_commit", "source_sha256", "parser_abi", "module_sha256", "module_bytes"]
+    if any(left.get(key) != right.get(key) for key in parser_identity):
+        raise ValueError("universal media slices have different source parser bytes/ABI")
+    facts = [json.loads((item / "provenance/manifest.json").read_text()) for item in [arm, intel]]
+    fonts = [fact.get("font_tools") for fact in facts]
+    if (fonts[0] is None) != (fonts[1] is None):
+        raise ValueError("universal media slices have different font-tool cohorts")
+    names = ["ffmpeg", "ffprobe"] + (["fc-list", "fc-conflist"] if fonts[0] else [])
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"}
+    for package, architecture in [(arm, "arm64"), (intel, "x86_64")]:
+        for name in names:
+            observed = subprocess.check_output(["/usr/bin/lipo", "-archs", str(package / name)], env=env, timeout=30).decode().strip()
+            if observed != architecture:
+                raise ValueError("universal media input is not its claimed native slice")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".universal-media-", dir=output.parent) as temporary:
+        stage = Path(temporary) / "package"
+        shutil.copytree(arm, stage)
+        manifest = facts[0]
+        (stage / "provenance/slices").mkdir()
+        for architecture, fact in zip(["arm64", "x86_64"], facts):
+            (stage / f"provenance/slices/{architecture}.json").write_text(json.dumps(fact, indent=2, sort_keys=True) + "\n")
+        manifest["universal_slices"] = {architecture: {"manifest_sha256": hashlib.sha256((package / "provenance/manifest.json").read_bytes()).hexdigest()}
+                                        for architecture, package in [("arm64", arm), ("x86_64", intel)]}
+        for name in names:
+            destination = stage / name
+            destination.unlink()
+            subprocess.run(["/usr/bin/lipo", "-create", str(arm / name), str(intel / name), "-output", str(destination)], env=env, check=True, timeout=60)
+            destination.chmod(0o755)
+            subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(destination)], env=env, check=True, timeout=60)
+            subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(destination)], env=env, check=True, timeout=60)
+            fact = manifest["binaries"][name] if name in ["ffmpeg", "ffprobe"] else manifest["font_tools"]["binaries"][name]
+            fact["sha256"] = recipe().digest(destination)
+            fact["architecture"] = "x86_64 arm64"
+            if "bytes" in fact:
+                fact["bytes"] = destination.stat().st_size
+        (stage / "provenance/manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        validate_native_package(stage)
+        stage.rename(output)
+    return manifest
+
+
+def attach_desktop(output, app, controls, version, source_commit, signing_identity):
+    """Add the complete desktop/control cohort without installing on this host."""
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version or "") is None or re.fullmatch(r"[0-9a-f]{40}", source_commit or "") is None:
+        raise ValueError("desktop release requires explicit version and source commit")
+    if not app.is_absolute() or app.is_symlink() or not app.is_dir() or app.name != "Plurx Server.app":
+        raise ValueError("desktop app must be the explicit stable Plurx Server.app bundle")
+    # Validate before adding embedded code: an app directory link must never
+    # redirect a packaging write outside the task-owned destination.
+    for member in app.rglob("*"):
+        if member.is_symlink() or not (member.is_file() or member.is_dir()):
+            raise ValueError("desktop app contains a link or special file")
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"}
+    (output / "bin").rename(output / "runtime")
+    (output / "control").mkdir(mode=0o755)
+    for name in ["plurx-control", "plurx-install-helper", "plurx-update-worker", "plurx-service-launch", "plurx-recovery"]:
+        source = controls / name
+        if not source.is_absolute() or source.is_symlink() or not source.is_file():
+            raise ValueError(f"missing built controller {name}")
+        architectures = set(subprocess.check_output(["/usr/bin/lipo", "-archs", str(source)], env=env, timeout=30).decode().split())
+        if architectures != {"arm64", "x86_64"}:
+            raise ValueError(f"controller {name} is not universal")
+        destination = output / "control" / name
+        shutil.copyfile(source, destination)
+        destination.chmod(0o755)
+        subprocess.run(["/usr/bin/codesign", "--force", "--sign", signing_identity, "--options", "runtime", str(destination)], env=env, check=True, timeout=60)
+        subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(destination)], env=env, check=True, timeout=60)
+    destination = output / "Plurx Server.app"
+    shutil.copytree(app, destination, symlinks=True)
+    # The GUI invokes only its bundled frontend. Install the identical signed
+    # universal controller, then reseal the outer app after nested code changes.
+    embedded = destination / "Contents/MacOS/plurx-control"
+    if embedded.is_symlink():
+        raise ValueError("unsafe embedded desktop controller")
+    shutil.copyfile(output / "control/plurx-control", embedded)
+    embedded.chmod(0o755)
+    subprocess.run(["/usr/bin/codesign", "--force", "--sign", signing_identity, "--options", "runtime", str(destination)], env=env, check=True, timeout=60)
+    subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(destination)], env=env, check=True, timeout=60)
+    with (destination / "Contents/Info.plist").open("rb") as stream:
+        info = plistlib.load(stream)
+    if info.get("CFBundleShortVersionString") != version or info.get("CFBundleIdentifier") != "tv.plurx.Server":
+        raise ValueError("desktop application version/identity differs from release")
+    executable = destination / "Contents/MacOS" / info["CFBundleExecutable"]
+    if executable.is_symlink() or not executable.is_file() or executable.parent != destination / "Contents/MacOS":
+        raise ValueError("unsafe desktop application executable")
+    if set(subprocess.check_output(["/usr/bin/lipo", "-archs", str(executable)], env=env, timeout=30).decode().split()) != {"arm64", "x86_64"}:
+        raise ValueError("desktop application is not universal")
+    root = Path(__file__).resolve().parent.parent
+    shutil.copyfile(root / "deploy/install", output / "install")
+    (output / "install").chmod(0o755)
+    facts = {"schema_version": 1, "version": version, "source_commit": source_commit,
+             "architecture": "universal", "bundle_identifier": info["CFBundleIdentifier"],
+             "trust_key_ids": [], "qualification": "package integrity; real signing roots and native install acceptance remain required"}
+    (output / "provenance/desktop-release.json").write_text(json.dumps(facts, sort_keys=True, indent=2) + "\n")
+    release = {"schema_version": 1, "repository": "pjunod/cinema", "version": version,
+               "source_commit": source_commit, "architecture": "universal"}
+    (output / "release.json").write_text(json.dumps(release, sort_keys=True, indent=2) + "\n")
+    closure = {"schema_version": 1, "version": version, "files": []}
+    for path in sorted(output.rglob("*")):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise ValueError("desktop closure contains a link/special file")
+        if path.is_file():
+            closure["files"].append({"path": path.relative_to(output).as_posix(), "size": path.stat().st_size,
+                                      "sha256": recipe().digest(path), "executable": bool(path.stat().st_mode & 0o111)})
+    (output / "runtime-closure-v1.json").write_text(json.dumps(closure, sort_keys=True, separators=(",", ":")) + "\n")
+    return facts
+
+
+def loadable_macho(path):
+    """Recognize all thin/fat native images independently of filename or mode.
+
+    DWARF dSYM images and relocatable object data are not loadable signed code.
+    Every other Mach-O file type is assessed; malformed native headers refuse.
+    """
+    thin = {b"\xce\xfa\xed\xfe": "<", b"\xcf\xfa\xed\xfe": "<", b"\xfe\xed\xfa\xce": ">", b"\xfe\xed\xfa\xcf": ">"}
+    fat = {b"\xca\xfe\xba\xbe": (">", False), b"\xbe\xba\xfe\xca": ("<", False),
+           b"\xca\xfe\xba\xbf": (">", True), b"\xbf\xba\xfe\xca": ("<", True)}
+    with path.open("rb") as stream:
+        head = stream.read(16)
+        magic = head[:4]
+        if magic in thin:
+            if len(head) != 16:
+                raise ValueError("truncated Mach-O header")
+            return struct.unpack(thin[magic] + "I", head[12:16])[0] not in [1, 10]
+        if magic not in fat:
+            return False
+        if len(head) < 8:
+            raise ValueError("truncated universal Mach-O header")
+        endian, wide = fat[magic]
+        count = struct.unpack(endian + "I", head[4:8])[0]
+        if not 0 < count <= 16:
+            raise ValueError("invalid universal Mach-O slice count")
+        size = path.stat().st_size
+        stride = 32 if wide else 20
+        kinds = []
+        for index in range(count):
+            stream.seek(8 + index * stride)
+            item = stream.read(stride)
+            if len(item) != stride:
+                raise ValueError("truncated universal Mach-O architecture")
+            offset, length = struct.unpack(endian + ("QQ" if wide else "II"), item[8:24] if wide else item[8:16])
+            if offset < 8 + count * stride or length < 16 or offset + length > size:
+                raise ValueError("universal Mach-O slice escapes file")
+            stream.seek(offset)
+            header = stream.read(16)
+            if header[:4] not in thin:
+                raise ValueError("universal Mach-O slice has no native header")
+            kinds.append(struct.unpack(thin[header[:4]] + "I", header[12:16])[0])
+        return any(kind not in [1, 10] for kind in kinds)
+
+
+def verify_package_closure(package):
+    """Check every archive member before copying bytes or invoking Apple tools."""
+    release = json.loads((package / "release.json").read_bytes())
+    closure = json.loads((package / "runtime-closure-v1.json").read_bytes())
+    if closure.get("schema_version") != 1 or closure.get("version") != release.get("version"):
+        raise ValueError("distribution closure/release identity mismatch")
+    expected = {"runtime-closure-v1.json"}
+    for entry in closure.get("files", []):
+        relative = Path(entry["path"])
+        if relative.is_absolute() or not relative.parts or any(part in [".", ".."] for part in relative.parts) or str(relative) in expected:
+            raise ValueError("unsafe distribution closure path")
+        expected.add(str(relative))
+        target = package / relative
+        if target.is_symlink() or not target.is_file() or target.stat().st_size != entry["size"] or recipe().digest(target) != entry["sha256"] or bool(target.stat().st_mode & 0o111) != entry["executable"]:
+            raise ValueError("distribution closure bytes/mode mismatch")
+    actual = set()
+    for target in package.rglob("*"):
+        if target.is_symlink() or not (target.is_dir() or target.is_file()):
+            raise ValueError("unsafe distribution package member")
+        if target.is_file():
+            actual.add(target.relative_to(package).as_posix())
+    if expected != actual:
+        raise ValueError("distribution package has missing/unlisted closure members")
+    return release, closure, actual
+
+
+def archive_native(package, output, epoch=0):
+    """Write the one canonical USTAR wrapper accepted by native update staging.
+
+    PAX/GNU extensions are intentionally forbidden by the root extractor. Stable
+    tar/gzip metadata changes no signed member bytes, executable bits or closure.
+    """
+    if not package.is_absolute() or package.is_symlink() or not package.is_dir():
+        raise ValueError("archive needs an absolute real native package directory")
+    if not output.is_absolute() or output.exists() or output.is_symlink() or output.is_relative_to(package):
+        raise ValueError("archive output must be a fresh absolute path outside the package")
+    if type(epoch) is not int or not 0 <= epoch <= 0xffffffff:
+        raise ValueError("archive epoch must fit a portable gzip timestamp")
+    release, _, _ = verify_package_closure(package)
+    fields = {"schema_version", "repository", "version", "source_commit", "architecture"}
+    if set(release) != fields or release["schema_version"] != 1 or release["repository"] != "pjunod/cinema" or release["architecture"] != "universal" or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", release["version"]) is None or re.fullmatch(r"[0-9a-f]{40}", release["source_commit"]) is None:
+        raise ValueError("archive native release identity is invalid")
+    wrapper = f"plurxd-{release['version']}-macos-universal"
+    if output.name != wrapper + ".tar.gz":
+        raise ValueError("archive filename must match the canonical release identity")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".native-archive-", dir=output.parent) as scratch:
+        temporary = Path(scratch) / "archive.tar.gz"
+        with temporary.open("wb") as raw:
+            with gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=epoch) as compressed:
+                with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+                    for member in [package, *sorted(package.rglob("*"))]:
+                        relative = member.relative_to(package).as_posix()
+                        name = wrapper if relative == "." else wrapper + "/" + relative
+                        info = archive.gettarinfo(str(member), arcname=name)
+                        if not (info.isfile() or info.isdir()):
+                            raise ValueError("native archive refuses links and special files")
+                        info.uid = info.gid = 0
+                        info.uname = info.gname = ""
+                        info.mtime = epoch
+                        if info.isfile():
+                            with member.open("rb") as stream:
+                                archive.addfile(info, stream)
+                        else:
+                            archive.addfile(info)
+            raw.flush()
+            os.fsync(raw.fileno())
+        verify_package_closure(package)
+        os.link(temporary, output)  # atomic create, never replace another writer's artifact
+    return {"archive": output.name, "format": "ustar", "wrapper": wrapper,
+            "sha256": recipe().digest(output), "size": output.stat().st_size}
+
+
+def verify_distribution(package, team_id):
+    """Fail closed on actual Apple signature/notary evidence, never an env claim.
+
+    Candidates remain useful locally; official release cohorts must pass this
+    on macOS after protected Developer ID signing, notarization and stapling.
+    Bare command-line images use codesign's notarization check; the app must
+    also carry a valid stapled ticket and pass Gatekeeper assessment.
+    """
+    if not package.is_absolute() or package.is_symlink() or not package.is_dir() or re.fullmatch(r"[A-Z0-9]{10}", team_id or "") is None:
+        raise ValueError("distribution verification needs a real package and explicit Apple team ID")
+    release, _, actual = verify_package_closure(package)
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"}
+    images = [package / "Plurx Server.app"]
+    required = ["runtime/plurxd", "runtime/ffmpeg", "runtime/ffprobe", "runtime/subtitle-engine/whisper-cli"]
+    required += ["control/" + name for name in ["plurx-control", "plurx-install-helper", "plurx-update-worker", "plurx-service-launch", "plurx-recovery"]]
+    for relative in required:
+        target = package / relative
+        if not target.is_file() or not target.stat().st_mode & 0o111:
+            raise ValueError("distribution package lacks a required executable code image")
+        images.append(target)
+    # A dylib need not have its executable bit set, and code can live under
+    # any app/runtime/provenance filename. Enumerate the complete closure.
+    for relative in sorted(actual):
+        target = package / relative
+        if loadable_macho(target) and target not in images:
+            images.append(target)
+    for image in images:
+        subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--check-notarization", str(image)], env=env, check=True, timeout=90)
+        observed = subprocess.run(["/usr/bin/codesign", "-d", "--verbose=4", str(image)], env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        description = observed.stderr.decode("utf-8", errors="strict")
+        teams = re.findall(r"^TeamIdentifier=(.*)$", description, re.MULTILINE)
+        directories = re.findall(r"^CodeDirectory .* flags=(0x[0-9a-fA-F]+)(?:\([^)]*\))?", description, re.MULTILINE)
+        if "Authority=Developer ID Application:" not in description or teams != [team_id] or len(directories) != 1 or not int(directories[0], 16) & 0x10000:
+            raise ValueError("distribution code lacks expected Developer ID/team/Hardened Runtime")
+    entitlement_result = subprocess.run(["/usr/bin/codesign", "-d", "--entitlements", ":-", str(package / "runtime/plurxd")], env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    with Path(__file__).with_name("macos-source-parser.entitlements").open("rb") as stream:
+        if plistlib.loads(entitlement_result.stdout) != plistlib.load(stream):
+            raise ValueError("distribution daemon lost required parser entitlement")
+    app = package / "Plurx Server.app"
+    subprocess.run(["/usr/bin/xcrun", "stapler", "validate", str(app)], env=env, check=True, timeout=90)
+    assessment = subprocess.run(["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=4", str(app)], env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+    if b"source=Notarized Developer ID" not in assessment.stderr:
+        raise ValueError("Gatekeeper did not report notarized Developer ID acceptance")
+    return {"schema_version": 1, "version": release["version"], "team_id": team_id,
+            "qualification": "Developer ID/notarization/staple/Gatekeeper verification; no native upgrade behavior inferred"}
+
+
+def copy_legal_notices(stage):
+    """Redistribute runtime-data attribution with the installed native package."""
+    root = Path(__file__).resolve().parent.parent
+    destination = stage / "share/doc/plurx"
+    destination.mkdir(parents=True)
+    sources = [root / name for name in ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"]]
+    sources += sorted((root / "licenses").glob("*"))
+    facts = {}
+    for source in sources:
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("legal notice must be a regular repository file")
+        relative = source.relative_to(root)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        target.chmod(0o444)
+        facts[str(relative)] = hashlib.sha256(target.read_bytes()).hexdigest()
+    return {"path": "share/doc/plurx", "files": facts}
 
 
 def symbol_entries(symbols):
@@ -208,7 +509,8 @@ def assemble(daemon, package, output, signing_identity, debug_symbols=None, engi
         provenance = stage / "provenance"
         provenance.mkdir()
         shutil.copyfile(entitlements, provenance / entitlements.name)
-        facts = {"schema_version": 1, "platform": "macos", "layout": "bin siblings",
+        legal_notices = copy_legal_notices(stage)
+        facts = {"legal_notices": legal_notices, "schema_version": 1, "platform": "macos", "layout": "bin siblings",
                  "signing": "ad-hoc candidate" if signing_identity == "-" else "Developer ID signature; notarization not established",
                  "parser_abi": manifest["parser_abi"], "parser_sha256": manifest["module_sha256"],
                  "artifacts": {name: tool.digest(stage / "bin" / name)
@@ -223,17 +525,54 @@ def assemble(daemon, package, output, signing_identity, debug_symbols=None, engi
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--daemon", type=Path, required=True)
-    parser.add_argument("--ffmpeg-package", type=Path, required=True)
-    parser.add_argument("--subtitle-engine-package", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--daemon", type=Path)
+    parser.add_argument("--ffmpeg-package", type=Path)
+    parser.add_argument("--subtitle-engine-package", type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--debug-symbols", type=Path, help="explicit paired dSYM; UUID match and regular entries required; absence is recorded")
     parser.add_argument("--sign", default="-", help="explicit Developer ID identity; default '-' is a local ad-hoc candidate")
+    parser.add_argument("--verify-distribution", type=Path)
+    parser.add_argument("--archive", type=Path, help="complete native package root to wrap in strict portable USTAR")
+    parser.add_argument("--team-id")
+    parser.add_argument("--combine-ffmpeg", nargs=2, type=Path, metavar=("ARM64", "X86_64"))
+    parser.add_argument("--desktop-app", type=Path)
+    parser.add_argument("--control-dir", type=Path)
+    parser.add_argument("--version")
+    parser.add_argument("--source-commit")
     args = parser.parse_args()
+    if args.archive:
+        if args.output is None:
+            parser.error("--archive requires --output")
+        print(json.dumps(archive_native(args.archive, args.output, int(os.environ.get("SOURCE_DATE_EPOCH", "0"))), sort_keys=True))
+        return
     if sys.platform != "darwin":
         parser.error("native daemon signing requires macOS")
-    print(json.dumps(assemble(args.daemon, args.ffmpeg_package, args.output, args.sign, args.debug_symbols,
-                              args.subtitle_engine_package), sort_keys=True))
+    if args.verify_distribution:
+        print(json.dumps(verify_distribution(args.verify_distribution, args.team_id), sort_keys=True))
+        return
+    if args.output is None:
+        parser.error("--output is required for assembly")
+    if args.combine_ffmpeg:
+        print(json.dumps(combine_ffmpeg_packages(*args.combine_ffmpeg, args.output), sort_keys=True))
+        return
+    if args.daemon is None or args.ffmpeg_package is None or args.subtitle_engine_package is None:
+        parser.error("--daemon, --ffmpeg-package and --subtitle-engine-package are required")
+    if any([args.desktop_app, args.control_dir, args.version, args.source_commit]) and not all([args.desktop_app, args.control_dir, args.version, args.source_commit]):
+        parser.error("desktop packaging requires --desktop-app, --control-dir, --version and --source-commit together")
+    if args.desktop_app:
+        if not args.output.is_absolute() or args.output.exists():
+            parser.error("output must be an absolute new directory")
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".desktop-cohort-", dir=args.output.parent) as temporary:
+            stage = Path(temporary) / "package"
+            facts = assemble(args.daemon, args.ffmpeg_package, stage, args.sign, args.debug_symbols, args.subtitle_engine_package)
+            facts["desktop"] = attach_desktop(stage, args.desktop_app, args.control_dir, args.version, args.source_commit, args.sign)
+            if args.output.exists():
+                raise ValueError("desktop output appeared during packaging")
+            stage.rename(args.output)
+    else:
+        facts = assemble(args.daemon, args.ffmpeg_package, args.output, args.sign, args.debug_symbols, args.subtitle_engine_package)
+    print(json.dumps(facts, sort_keys=True))
 
 
 if __name__ == "__main__":

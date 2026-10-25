@@ -3125,6 +3125,227 @@ async fn setup_admin(app: &Router) -> String {
     body["token"].as_str().expect("token").to_owned()
 }
 
+/// A person's watchlist and favorites: per item flags, the list read, and a
+/// finished movie leaving the watchlist without anyone deleting it.
+#[tokio::test]
+async fn a_watchlist_and_favorites_belong_to_the_reader_and_a_finished_movie_leaves_the_watchlist()
+{
+    let state = test_state_without_router();
+    let app = router(state.clone());
+    let seed = seed_content(&state).await;
+    let token = setup_admin(&app).await;
+    let annotations = |id: i64| format!("/api/v1/items/{id}/annotations");
+
+    let (status, empty) = call(&app, get(&annotations(seed.movie), Some(&token))).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(
+        empty,
+        json!({"ratings": [], "watchlist": false, "favorite": false})
+    );
+
+    for uri in [
+        format!("/api/v1/items/{}/watchlist", seed.movie),
+        format!("/api/v1/items/{}/watchlist", seed.show),
+        format!("/api/v1/items/{}/favorite", seed.show),
+    ] {
+        let (status, body) = call(&app, put(&uri, Some(&token), json!({}))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{uri}: {body}");
+    }
+    let (status, _) = call(
+        &app,
+        put(
+            &format!("/api/v1/items/{}/favorite", seed.ep),
+            Some(&token),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an episode is not listable"
+    );
+    assert_eq!(
+        call(
+            &app,
+            put(
+                &format!("/api/v1/items/{}/favorite", 9_999_999),
+                Some(&token),
+                json!({})
+            )
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+
+    let (_, flags) = call(&app, get(&annotations(seed.show), Some(&token))).await;
+    assert_eq!(
+        (flags["watchlist"].clone(), flags["favorite"].clone()),
+        (json!(true), json!(true))
+    );
+    let ids = |body: &Value| -> Vec<i64> {
+        body["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|i| i["id"].as_i64().expect("id"))
+            .collect()
+    };
+    let (status, watchlist) = call(&app, get("/api/v1/lists/watchlist", Some(&token))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids(&watchlist), vec![seed.show, seed.movie], "newest first");
+    let (_, favorites) = call(&app, get("/api/v1/lists/favorites", Some(&token))).await;
+    assert_eq!(ids(&favorites), vec![seed.show]);
+    assert_eq!(
+        call(&app, get("/api/v1/lists/wishlist", Some(&token)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Another person sees none of it.
+    let other = state
+        .store
+        .create_user("household", "hash", false)
+        .await
+        .expect("user");
+    let other_token = "household-reader-token".to_owned();
+    state
+        .store
+        .create_token(&plurx_core::auth::hash_token(&other_token), other.id, None)
+        .await
+        .expect("token");
+    let (_, theirs) = call(&app, get("/api/v1/lists/watchlist", Some(&other_token))).await;
+    assert!(ids(&theirs).is_empty());
+
+    // Finishing the movie takes it off the watchlist, without a delete.
+    let (status, _) = call(
+        &app,
+        post(
+            &format!("/api/v1/items/{}/scrobble", seed.movie),
+            Some(&token),
+            json!({}),
+        ),
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    let (_, watchlist) = call(&app, get("/api/v1/lists/watchlist", Some(&token))).await;
+    assert_eq!(ids(&watchlist), vec![seed.show]);
+    let (_, movie) = call(&app, get(&annotations(seed.movie), Some(&token))).await;
+    assert_eq!(movie["watchlist"], false);
+
+    let (status, _) = call(
+        &app,
+        delete(
+            &format!("/api/v1/items/{}/favorite", seed.show),
+            Some(&token),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, favorites) = call(&app, get("/api/v1/lists/favorite", Some(&token))).await;
+    assert!(ids(&favorites).is_empty());
+}
+
+/// Scores come from TMDB and OMDb once, are stored, and are served from the
+/// store on the next read; without provider keys there are none.
+#[tokio::test]
+async fn item_scores_are_fetched_once_from_tmdb_and_omdb_then_served_from_the_store() {
+    use axum::routing::get as route_get;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tmdb_calls = Arc::clone(&calls);
+    let omdb_calls = Arc::clone(&calls);
+    let providers = axum::Router::new()
+        .route(
+            "/movie/{id}",
+            route_get(move || {
+                tmdb_calls.fetch_add(1, Ordering::SeqCst);
+                async { axum::Json(json!({"vote_average": 7.8, "vote_count": 3900, "imdb_id": "tt0000042"})) }
+            }),
+        )
+        .route(
+            "/omdb",
+            route_get(move || {
+                omdb_calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    axum::Json(json!({"Response": "True", "imdbRating": "8.1", "imdbVotes": "214,000",
+                        "Metascore": "81", "Ratings": [{"Source": "Rotten Tomatoes", "Value": "94%"}]}))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, providers).await;
+    });
+
+    let mut state = test_state_without_router();
+    state.provider_endpoints =
+        crate::http::annotations::ProviderEndpoints::at(&base, &format!("{base}/omdb"));
+    let app = router(state.clone());
+    let seed = seed_content(&state).await;
+    let token = setup_admin(&app).await;
+    state
+        .store
+        .apply_metadata(
+            seed.movie,
+            &plurx_core::domain::MetadataPatch {
+                tmdb_id: Some(42),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("tmdb id");
+    let uri = format!("/api/v1/items/{}/annotations", seed.movie);
+
+    let (_, unkeyed) = call(&app, get(&uri, Some(&token))).await;
+    assert_eq!(unkeyed["ratings"], json!([]), "no provider keys, no scores");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    for (key, value) in [
+        (plurx_core::store::keys::TMDB_API_KEY, "tmdb-key"),
+        (plurx_core::store::keys::OMDB_API_KEY, "omdb-key"),
+    ] {
+        state.store.put_setting(key, value).await.expect("key");
+    }
+    let expected = json!([
+        {"source": "imdb", "value": 8.1, "scale": 10, "votes": 214000},
+        {"source": "rotten_tomatoes", "value": 94.0, "scale": 100},
+        {"source": "metacritic", "value": 81.0, "scale": 100},
+        {"source": "tmdb", "value": 78.0, "scale": 100, "votes": 3900}
+    ]);
+    let (status, fetched) = call(&app, get(&uri, Some(&token))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["ratings"], expected);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "one TMDB and one OMDb request"
+    );
+
+    let (_, stored) = call(&app, get(&uri, Some(&token))).await;
+    assert_eq!(stored["ratings"], expected);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the second read is the store's"
+    );
+
+    let (_, episode) = call(
+        &app,
+        get(
+            &format!("/api/v1/items/{}/annotations", seed.ep),
+            Some(&token),
+        ),
+    )
+    .await;
+    assert_eq!(episode["ratings"], json!([]), "episodes carry no scores");
+}
+
 #[tokio::test]
 async fn local_classification_refresh_preserves_corrections_and_discards_old_identity_keywords() {
     use plurx_core::{metadata::classification, store::classification::Record};
@@ -6942,6 +7163,50 @@ async fn an_unknown_request_id_is_a_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// Settings used to call every server "plurx": the shipped default name, the
+/// same on every node. A signed-in reader is now told the node's hostname and
+/// a label built from it; the public identity route still carries neither.
+#[tokio::test]
+async fn a_signed_in_reader_is_told_the_node_hostname_and_a_label_from_it() {
+    let mut state = test_state_without_router();
+    state.server_name = "plurx".into();
+    state.node_hostname = Some("lab6".into());
+    let app = router(state);
+
+    let (_, public) = call(&app, get("/api/v1/server", None)).await;
+    assert!(public.get("hostname").is_none(), "{public}");
+    assert_eq!(
+        call(&app, get("/api/v1/server/node", None)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let token = setup_admin(&app).await;
+    let (status, node) = call(&app, get("/api/v1/server/node", Some(&token))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(node, json!({"hostname": "lab6", "display_name": "lab6"}));
+
+    // A chosen name is kept; the hostname still says which machine.
+    let (status, _) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&token),
+            json!({"server_name": "Living Room"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, node) = call(&app, get("/api/v1/server/node", Some(&token))).await;
+    assert_eq!(
+        node,
+        json!({"hostname": "lab6", "display_name": "Living Room"})
+    );
+
+    let (_, system) = call(&app, get("/api/v1/system", Some(&token))).await;
+    assert_eq!(system["hostname"], "lab6");
+    assert_eq!(system["display_name"], "Living Room");
+}
+
 #[tokio::test]
 async fn setup_then_login_flow() {
     let app = test_app();
@@ -8401,6 +8666,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "chapter_thumbnails",
             "dolby_vision_convert",
             "dolby_vision_hdr_processing",
+            "dolby_vision_display_target",
             "dolby_vision_fel_reencode",
             "source_probe_comparison",
             "output_preparation",
@@ -14798,6 +15064,151 @@ async fn the_decision_carries_an_executable_delivery_plan() {
     assert_eq!(body["delivered_dynamic_range"], "sdr", "{body}");
 }
 
+/// Avatar on a Pixel 11 (no Dolby Vision decoder) came back as a progressive
+/// remux of its HDR10 base: HDR10-E is applied only on an HLS session, so
+/// the Developer setting had no effect there. With the setting on, a DV
+/// source a non-DV client would receive as HDR10 comes over HLS; with it off
+/// the decision is unchanged.
+#[tokio::test]
+async fn processed_hdr10_setting_routes_a_non_dv_client_over_hls() {
+    use plurx_core::domain::{AudioStream, DolbyVisionFacts, ProbeResult};
+
+    crate::transcode::require_ffmpeg();
+    let system = crate::state::SystemInfo {
+        dovi_rpu: true,
+        dolby_vision_convert: true,
+        ..Default::default()
+    };
+    let (app, state) = test_state_with_system(system);
+    let admin = setup_admin(&app).await;
+    let seeded = seed_content(&state).await;
+    let seed = |profile: i64, container: &str, audio: &str| ProbeResult {
+        duration_ms: Some(12_000),
+        container: Some(container.into()),
+        video_codec: Some("hevc".into()),
+        video_profile: Some("Main 10".into()),
+        width: Some(640),
+        height: Some(360),
+        bit_depth: Some(10),
+        hdr: Some("dolby_vision".into()),
+        hdr_format: Some(format!(
+            "Dolby Vision · Profile {profile} (HDR10-compatible)"
+        )),
+        dolby_vision: DolbyVisionFacts {
+            profile: Some(profile),
+            level: Some(6),
+            bl_compat_id: Some(1),
+            el_present: Some(profile == 7),
+            rpu_present: Some(true),
+        },
+        bitrate: Some(2_000_000),
+        audio_streams: vec![AudioStream {
+            index: 0,
+            codec: audio.into(),
+            channels: Some(2),
+            language: Some("eng".into()),
+            default: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut files = Vec::new();
+    for (kind, probe) in [
+        ("closed-gop", seed(7, "mkv", "truehd")),
+        ("open-gop", seed(8, "mp4", "aac")),
+    ] {
+        let source = plurx_core::testfixtures::source(kind);
+        let metadata = std::fs::metadata(&source).expect("DV fixture metadata");
+        files.push(
+            state
+                .store
+                .upsert_file(
+                    seeded.movie,
+                    &source.to_string_lossy(),
+                    metadata.len() as i64,
+                    1,
+                    &probe,
+                )
+                .await
+                .expect("seed DV source"),
+        );
+    }
+    let caps = |transports: Value| {
+        json!({
+            "v": 2,
+            "client": {"kind": "android", "build": "175"},
+            "video": [{
+                "codec": "hevc",
+                "profiles": ["main10"],
+                "max_height": 2160,
+                "present": ["sdr", "pq"],
+                "dv_profiles": []
+            }],
+            "audio": ["aac"],
+            "containers": ["mp4", "mkv"],
+            "transports": transports,
+            "display": {"hdr": true, "dolby_vision": false}
+        })
+    };
+    let decide = |file: i64, transports: Value| {
+        let app = app.clone();
+        let caps = caps(transports);
+        let admin = admin.clone();
+        async move {
+            let (status, body) = call(
+                &app,
+                post(
+                    &format!("/api/v1/files/{file}/decision"),
+                    Some(&admin),
+                    json!({"caps": caps}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body
+        }
+    };
+    let both = || json!(["progressive", "hls"]);
+    // Setting off: the ordinary progressive delivery of the HDR10 base.
+    for file in &files {
+        let body = decide(*file, both()).await;
+        assert_eq!(body["delivered_dynamic_range"], "hdr10", "{body}");
+        assert_ne!(body["method"], "transcode", "{body}");
+        assert!(body["delivery"].get("requires_hls").is_none(), "{body}");
+    }
+
+    let (status, saved) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({"dolby_vision_hdr_processing": true}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    for file in &files {
+        let body = decide(*file, both()).await;
+        assert_eq!(body["method"], "remux", "{body}");
+        assert_eq!(body["delivery"]["requires_hls"], true, "{body}");
+        assert_eq!(body["delivered_dynamic_range"], "hdr10", "{body}");
+        assert!(
+            body["reasons"]
+                .as_array()
+                .expect("reasons")
+                .iter()
+                .any(|reason| reason.as_str().is_some_and(|text| text.contains("HDR10"))),
+            "{body}"
+        );
+        // A client that cannot take HLS keeps its ordinary delivery.
+        let progressive = decide(*file, json!(["progressive"])).await;
+        assert!(
+            progressive["delivery"].get("requires_hls").is_none(),
+            "{progressive}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_progressive() {
     use plurx_core::domain::{AudioStream, DolbyVisionFacts, ProbeResult};
@@ -20194,4 +20605,191 @@ async fn facts_skip_photos_and_folders() {
         }),
         "an SDR home video should carry no hdr key at all"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn desktop_drain_holds_direct_response_bodies_and_refuses_range_reconnects() {
+    use tower::ServiceExt;
+    let state = test_state_without_router();
+    let fence = state.serving.clone();
+    let app = Router::new()
+        .route(
+            "/items/one/direct",
+            axum::routing::get(|| async {
+                axum::body::Body::from_stream(futures_util::stream::pending::<
+                    Result<bytes::Bytes, std::io::Error>,
+                >())
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ))
+        .with_state(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/items/one/direct")
+                .body(Body::empty())
+                .expect("desktop direct-read fixture"),
+        )
+        .await
+        .expect("desktop direct-read fixture");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 1);
+    let token = fence
+        .begin_desktop_preparation_until(crate::media_sessions::unix_ms() as u64 + 10_000)
+        .await
+        .expect("desktop direct-read fixture");
+    assert!(!fence.commit_desktop_shutdown(token, 0).await);
+    let reconnect = app
+        .oneshot(
+            Request::builder()
+                .uri("/items/one/direct")
+                .header("Range", "bytes=1024-")
+                .body(Body::empty())
+                .expect("desktop direct-read fixture"),
+        )
+        .await
+        .expect("desktop direct-read fixture");
+    assert_eq!(reconnect.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(response);
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+    assert!(fence.commit_desktop_shutdown(token, 0).await);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn desktop_drain_accounts_internal_proxy_and_post_relay_bodies() {
+    use tower::ServiceExt;
+    let state = test_state_without_router();
+    let fence = state.serving.clone();
+    let app = Router::new()
+        .route(
+            "/internal/media/fragment-index/key",
+            axum::routing::get(|| async {
+                Body::from_stream(futures_util::stream::pending::<
+                    Result<bytes::Bytes, std::io::Error>,
+                >())
+            }),
+        )
+        .route(
+            "/internal/cluster/media/sessions/relay",
+            axum::routing::post(|| async {
+                Body::from_stream(futures_util::stream::pending::<
+                    Result<bytes::Bytes, std::io::Error>,
+                >())
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            desktop_http_admission_gate,
+        ))
+        .with_state(state);
+    let read = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/internal/media/fragment-index/key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("internal read");
+    let relay = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/cluster/media/sessions/relay")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("internal relay");
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 2);
+    let legacy = fence
+        .begin_restart_preparation_until(crate::media_sessions::unix_ms() as u64 + 10_000)
+        .await
+        .expect("legacy token");
+    let continued = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/internal/media/fragment-index/key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("legacy read");
+    assert_eq!(continued.status(), StatusCode::OK);
+    drop(continued);
+    fence.cancel_planned_outage_preparation(legacy, 0).await;
+    let token = fence
+        .begin_desktop_preparation_until(crate::media_sessions::unix_ms() as u64 + 10_000)
+        .await
+        .expect("desktop token");
+    assert!(!fence.commit_desktop_shutdown(token, 0).await);
+    let reconnect = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/cluster/media/sessions/relay")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("refused relay");
+    assert_eq!(reconnect.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(read);
+    drop(relay);
+    assert!(fence.commit_desktop_shutdown(token, 0).await);
+}
+
+#[tokio::test]
+async fn display_target_setting_defaults_off_and_saves_despite_unmet_advice() {
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let (_, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+    assert_eq!(initial["dolby_vision_display_target"], false);
+    for enabled in [true, false] {
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"dolby_vision_display_target": enabled}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["dolby_vision_display_target"], enabled);
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::DV_DISPLAY_TARGET)
+                .await
+                .expect("stored"),
+            Some(if enabled { "1" } else { "0" }.into())
+        );
+        let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+        let item = readiness["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .find(|item| item["id"] == "dolby_vision_display_target")
+            .expect("target item");
+        assert_eq!(item["enabled"], enabled);
+        assert!(item["requirements"]
+            .as_array()
+            .expect("requirements")
+            .iter()
+            .any(|row| row["status"] != "met"));
+        assert_eq!(
+            saved["dolby_vision_hdr_processing"], false,
+            "targeting never silently enables HDR10-E"
+        );
+    }
 }

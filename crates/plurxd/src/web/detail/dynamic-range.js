@@ -102,25 +102,80 @@ function dynamicRangeBadge(f, delivered, displayHdr, deliveredDvProfile){
 // silently degrades the chip to the state it had before that argument existed,
 // which is a correct-looking badge for the wrong delivery.
 function effectiveHdrProcessing(report,generation,delivered){
-  if(!report||report.hdr10_enhanced!==true||typeof report.fel_contributed!=='boolean'
-    ||delivered!=='hdr10'||typeof generation!=='string'||report.generation!==generation
+  const sdr=delivered==='sdr'&&report?.sdr_processed===true&&report?.hdr10_enhanced===false;
+  if(!report||(!sdr&&(report.hdr10_enhanced!==true||report.sdr_processed===true||delivered!=='hdr10'))||typeof report.fel_contributed!=='boolean'
+    ||!['hdr10','sdr'].includes(delivered)||typeof generation!=='string'||report.generation!==generation
     ||!/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(generation)
     ||!Array.isArray(report.applied_operations)||!report.applied_operations.length
     ||report.applied_operations.length>16
-    ||!report.applied_operations.every(op=>typeof op==='string'&&op.length>0&&op.length<=64)) return null;
+    ||!report.applied_operations.every(op=>typeof op==='string'?op.length>0&&op.length<=64
+      :op&&typeof op==='object'&&Object.keys(op).length===1
+        &&op.DisplayTargetMapping&&Object.keys(op.DisplayTargetMapping).length===1
+        &&(sdr?[100]:[400,600,1000,1600,2000,4000]).includes(op.DisplayTargetMapping.nits))
+    ||sdr&&(!report.applied_operations.includes('Bt709Gamma24Conversion')||!report.applied_operations.some(op=>op?.DisplayTargetMapping?.nits===100))) return null;
   return report;
 }
 function effectiveProcessingDetail(report){
   const names={PolynomialReshape:'RPU polynomial mapping',MmrReshape:'RPU MMR mapping',
     RpuColorConversion:'RPU color conversion',TargetMapping:'target mapping',CreativeTrimApplication:'creative trims'};
   const metadata=report.applied_operations.map(op=>names[op]).filter(Boolean).join(', ');
-  return `Dolby Vision–enhanced HDR10 · FEL used: ${report.fel_contributed?'yes':'no'}${metadata?` · Applied: ${metadata}`:''}`;
+  return `${report.sdr_processed?`Dolby Vision–processed SDR (BT.709 gamma 2.4, ${report.applied_operations.includes('CreativeTrimApplication')?'creative trims applied':report.creative_trims_partial===true?'creative trims on some shots':'L1 only'})`:'Dolby Vision–enhanced HDR10'} · FEL used: ${report.fel_contributed?'yes':'no'}${metadata?` · Applied: ${metadata}`:''}`;
 }
 function clearEffectiveProcessing(p){
   if(!p) return;
   const changed=!!p.effectiveProcessing;
   p.effectiveProcessing=null;
   if(changed&&typeof PLAYER!=='undefined'&&p===PLAYER&&typeof renderPlayerInfo==='function') renderPlayerInfo();
+}
+// The Dolby Vision enhancement the server says this session's picture carries
+// (StartResponse.enhancement, crates/plurx-core/src/playback/enhancement.rs).
+// The server computes it so every client renders the same pills and lines
+// rather than reconstructing the delivery route; this only refuses what it
+// cannot render. Absent (no Dolby Vision, an old server) is null; an SDR
+// play has details and no active badges.
+function playbackEnhancementFromWire(raw){
+  const known=['FEL','RPU','DYN'];
+  if(!raw||typeof raw!=='object'||!Array.isArray(raw.active)||!Array.isArray(raw.details)) return null;
+  const active=[...new Set(raw.active.filter(badge=>known.includes(badge)))];
+  // A detail line for a badge this client has no pill for (a newer server's
+  // enhancement) still says something true, so the Playback info row keeps its
+  // text; only the pills are limited to the badges `known` lists.
+  const details=raw.details.filter(d=>d&&typeof d.badge==='string'&&typeof d.text==='string'
+    &&d.text.length>0&&d.text.length<=240).map(d=>({badge:d.badge,active:d.active===true,text:d.text}));
+  return {active,details,requires_effective_processing:raw.requires_effective_processing===true};
+}
+// The current, generation-matching HDR10-E report — the same reading
+// playerRangeBadge makes, for a caller that is not painting the range chip.
+function playerEffectiveProcessing(p){
+  if(!p) return null;
+  const stream=typeof statsStreamFormat==="function"?statsStreamFormat(p):null;
+  return effectiveHdrProcessing(p.effectiveProcessing,p.controlReporter?.bootstrap?.generation,
+    stream?.dynamic_range||p.deliveredRange);
+}
+// What the player may show now. A processed-HDR10 delivery's FEL/RPU claim is
+// only true while the report proving it is current: a seek, fallback or
+// replacement clears the report, and with it every pill and the details row.
+function playerEnhancement(p){
+  const enhancement=p&&p.enhancement;
+  if(!enhancement) return null;
+  if(enhancement.requires_effective_processing&&!playerEffectiveProcessing(p)) return null;
+  return enhancement;
+}
+// The Playback info row: the active badges, then one neutral line per
+// enhancement — active or not — exactly as the server wrote it.
+function playerEnhancementRow(p){
+  const enhancement=playerEnhancement(p);
+  if(!enhancement) return null;
+  return {value:enhancement.active.length?enhancement.active.join(' · '):'None active',
+    note:enhancement.details.length?enhancement.details.map(d=>d.text).join('\n'):null};
+}
+function enhancementPills(enhancement){
+  if(!enhancement||!enhancement.active.length) return '';
+  return enhancement.active.map(badge=>{
+    const detail=enhancement.details.find(d=>d.badge===badge&&d.active);
+    const label=detail?detail.text:badge;
+    return `<span class="vbadge enh" title="${esc(label)}" aria-label="${esc(label)}">${esc(badge)}</span>`;
+  }).join('');
 }
 function playerRangeBadge(f){
   const stream=typeof statsStreamFormat==="function"?statsStreamFormat(PLAYER):null;
@@ -129,11 +184,12 @@ function playerRangeBadge(f){
   const generation=PLAYER.controlReporter?.bootstrap?.generation;
   const report=effectiveHdrProcessing(PLAYER.effectiveProcessing,generation,delivered);
   if(!report) return badge;
-  const source=sourceDynamicRange(f),same=source==='hdr10';
+  const mark=report.sdr_processed?'SDR-E':'HDR10-E';
+  const source=sourceDynamicRange(f),same=source===(report.sdr_processed?'sdr':'hdr10');
   const detail=effectiveProcessingDetail(report);
-  const base=same?'HDR10-E':badge?.base||'HDR10-E';
+  const base=same?mark:badge?.base||mark;
   return {...(badge||{cls:'hdr',source,rendered:null,off:false}),base,
-    text:same||!badge?'HDR10-E':`${base} → HDR10-E`,arrow:same||!badge?null:'HDR10-E',
+    text:same||!badge?mark:`${base} → ${mark}`,arrow:same||!badge?null:mark,
     full:`${detail} · display output unverified`,aria:detail,panel:detail};
 }
 function premiumAudio(f){ const cs=(f.audio_streams||[]).map(a=>(a.codec||'').toLowerCase());
@@ -179,6 +235,10 @@ function playerFactBadges(){
   if(h) b.push(`<span class="vbadge ${h.cls}${h.off?' off':''}" title="${esc(h.full||h.text)}" aria-label="${
     esc(h.aria||h.text)}">${mediaIcon('dynamic')}<span class="vsrc">${esc(h.base)}</span>${
     h.arrow?`<span class="varrow">→ ${esc(h.arrow)}</span>`:''}</span>`);
+  // Active Dolby Vision enhancements only, right after the range chip they
+  // qualify; the reasons for the inactive ones live in the details panel.
+  const enhancement=enhancementPills(playerEnhancement(PLAYER));
+  if(enhancement) b.push(enhancement);
   const au=playbackAudioChip(PLAYER.audio&&PLAYER.audio[PLAYER.curAudio]);
   if(au) b.push(`<span class="vbadge audio" title="${esc(au.full)}">${mediaIcon('audio')}${esc(au.text)}</span>`);
   return b.join('');

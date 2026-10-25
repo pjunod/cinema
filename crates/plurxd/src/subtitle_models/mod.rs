@@ -31,6 +31,32 @@ pub(crate) struct Catalog {
 static CATALOG: LazyLock<Catalog> = LazyLock::new(|| {
     serde_json::from_str(include_str!("catalog.json")).expect("reviewed subtitle catalog")
 });
+static CATALOG_V1: LazyLock<Catalog> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("catalog-v1.json"))
+        .expect("previous accepted subtitle catalog")
+});
+pub(crate) fn accepted_model_spec(
+    revision: &str,
+    id: &str,
+    sha: &str,
+    adapter: &str,
+) -> Option<&'static CatalogModel> {
+    let current = catalog();
+    if adapter != current.adapter_contract {
+        return None;
+    }
+    let model = current
+        .models
+        .iter()
+        .find(|m| m.id == id && m.sha256 == sha)?;
+    if revision == current.revision {
+        return Some(model);
+    }
+    (revision == CATALOG_V1.revision
+        && adapter == CATALOG_V1.adapter_contract
+        && CATALOG_V1.models.iter().any(|old| old == model))
+    .then_some(model)
+}
 pub(crate) fn catalog() -> &'static Catalog {
     &CATALOG
 }
@@ -74,6 +100,7 @@ pub(crate) struct WorkerObservation {
 const OBSERVATION_TTL: Duration = Duration::from_secs(60);
 
 pub(crate) struct Runtime {
+    pub(crate) translation: crate::subtitle_translation::Runtime,
     /// Persistent service data, never the disposable runtime-cache directory.
     pub root: PathBuf,
     pub boot_id: String,
@@ -96,6 +123,7 @@ impl Runtime {
                 .unwrap_or_default()
         };
         Self {
+            translation: crate::subtitle_translation::Runtime::new(),
             root: if data_dir.is_absolute() {
                 data_dir.join("subtitle-models")
             } else {
@@ -177,7 +205,7 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, Store
                         v.node_id == *node_id
                             && v.expires_at_ms > crate::state::clock_ms()
                             && v.observed_at_ms <= crate::state::clock_ms().saturating_add(5000)
-                            && v.models.len() <= 3
+                            && v.models.len() <= 4
                             && v.waits.len() <= 32
                     })
                     .map(|v| json!(v))
@@ -268,16 +296,38 @@ pub(crate) async fn install(
     _admin: crate::http::extract::AdminUser,
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-    axum::Json(request): axum::Json<ModelOperationRequest>,
+    axum::Json(request): axum::Json<Value>,
 ) -> Result<axum::Json<Value>, ApiError> {
+    if request["version"] == 2 {
+        return crate::subtitle_translation::model_operation(
+            &state,
+            &id,
+            ModelAction::TranslationInstall,
+            request,
+        )
+        .await;
+    }
+    let request = serde_json::from_value(request)
+        .map_err(|_| ApiError::BadRequest("Invalid model installation request".into()))?;
     model_operation(&state, &id, ModelAction::Install, request).await
 }
 pub(crate) async fn verify(
     _admin: crate::http::extract::AdminUser,
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-    axum::Json(request): axum::Json<ModelOperationRequest>,
+    axum::Json(request): axum::Json<Value>,
 ) -> Result<axum::Json<Value>, ApiError> {
+    if request["version"] == 2 {
+        return crate::subtitle_translation::model_operation(
+            &state,
+            &id,
+            ModelAction::TranslationVerify,
+            request,
+        )
+        .await;
+    }
+    let request = serde_json::from_value(request)
+        .map_err(|_| ApiError::BadRequest("Invalid model verification request".into()))?;
     model_operation(&state, &id, ModelAction::Verify, request).await
 }
 async fn model_operation(
@@ -348,6 +398,7 @@ async fn enqueue_model_operation(
     boot: Option<&str>,
 ) -> Result<EnqueueOutcome, StoreError> {
     let payload = JobPayload::SubtitleModelOperation {
+        translation_profile: None,
         action,
         model_id: model.id.clone(),
         catalog_revision: catalog().revision.clone(),
@@ -618,7 +669,7 @@ impl WorkerObservation {
             && self.observed_at_ms >= 0
             && self.expires_at_ms >= self.observed_at_ms
             && self.expires_at_ms.saturating_sub(self.observed_at_ms) <= 60_000
-            && self.models.len() <= 3
+            && self.models.len() <= 4
             && self.waits.len() <= 32
             && self.engine.as_ref().is_none_or(|engine| {
                 engine.contract.len() <= 256
@@ -1148,6 +1199,10 @@ pub(crate) async fn worker_pass(
     let candidates = next_candidates(state, kinds).await?;
     for candidate in candidates.jobs {
         let payload = candidate.supported_payload()?;
+        if matches!(&payload,JobPayload::SubtitleModelOperation{action,..} if action.is_translation())
+        {
+            continue;
+        }
         let kind = payload.kind();
         if !authority.may_execute_job(kind).await || shutdown.is_cancelled() {
             continue;
@@ -1158,29 +1213,18 @@ pub(crate) async fn worker_pass(
                 catalog_revision,
                 model_sha256,
                 adapter_contract,
-                target_node_id,
                 ..
-            } if target_node_id == &state.node_id
-                && catalog_revision == &catalog().revision
-                && adapter_contract == &catalog().adapter_contract =>
-            {
-                catalog()
-                    .models
-                    .iter()
-                    .find(|model| model.id == *model_id && model.sha256 == *model_sha256)
-            }
+            } => accepted_model_spec(catalog_revision, model_id, model_sha256, adapter_contract),
             JobPayload::SubtitleTranscribeManaged {
                 model_sha256,
                 profile,
                 ..
-            } if profile.catalog_revision == catalog().revision
-                && profile.adapter_contract == catalog().adapter_contract =>
-            {
-                catalog()
-                    .models
-                    .iter()
-                    .find(|model| model.id == profile.model_id && model.sha256 == *model_sha256)
-            }
+            } => accepted_model_spec(
+                &profile.catalog_revision,
+                &profile.model_id,
+                model_sha256,
+                &profile.adapter_contract,
+            ),
             _ => None,
         };
         let Some(spec) = spec else {
@@ -1396,6 +1440,11 @@ pub(crate) async fn worker_pass(
                                 preadmission.as_ref().expect("verification admission"),
                             )
                             .await?
+                        }
+                        _ => {
+                            return Err(StoreError::Task(
+                                "translation model operation owned by translation worker".into(),
+                            ))
                         }
                     };
                     if automatic_model_identity.is_some_and(|accepted| accepted != model.identity) {
@@ -1778,6 +1827,7 @@ mod tests {
             assert!(!state
                 .store
                 .publish_subtitle_model(PublishSubtitleModel {
+                    translation: None,
                     token,
                     source,
                     receipt,
@@ -1798,6 +1848,7 @@ mod tests {
             assert!(state
                 .store
                 .publish_subtitle_model(PublishSubtitleModel {
+                    translation: None,
                     token,
                     source,
                     receipt,
@@ -1806,6 +1857,53 @@ mod tests {
                 .await
                 .expect("successful fenced receipt"));
         }
+    }
+
+    #[test]
+    fn additive_small_catalog_preserves_only_exact_prior_generation_model_tuples() {
+        let previous = &*CATALOG_V1;
+        for old in &previous.models {
+            assert_eq!(
+                accepted_model_spec(
+                    &previous.revision,
+                    &old.id,
+                    &old.sha256,
+                    &previous.adapter_contract
+                ),
+                Some(old)
+            );
+            assert!(accepted_model_spec(
+                &previous.revision,
+                &old.id,
+                &"f".repeat(64),
+                &previous.adapter_contract
+            )
+            .is_none());
+            assert!(accepted_model_spec(
+                "unknown",
+                &old.id,
+                &old.sha256,
+                &previous.adapter_contract
+            )
+            .is_none());
+        }
+        let small = catalog()
+            .models
+            .iter()
+            .find(|m| m.id == "small")
+            .expect("appended model");
+        assert!(accepted_model_spec(
+            &previous.revision,
+            &small.id,
+            &small.sha256,
+            &previous.adapter_contract
+        )
+        .is_none());
+        assert_eq!(small, &crate::subtitle_translation::profile::model_spec());
+        assert!(serde_json::from_value::<ModelOperationRequest>(
+            json!({"version":1,"node_ids":["worker"],"purpose":"translation"})
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -2134,6 +2232,7 @@ mod tests {
                 .enqueue_job(EnqueueJob {
                     id: id.clone(),
                     payload: JobPayload::SubtitleModelOperation {
+                        translation_profile: None,
                         action: ModelAction::Install,
                         model_id: format!("occupied-{index}"),
                         catalog_revision: catalog().revision.clone(),

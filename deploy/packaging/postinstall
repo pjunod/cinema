@@ -36,6 +36,21 @@ fi
 [ -d "$state" ] || install -d -o plurx -g plurx -m 0750 "$state"
 rm -f "$marker"
 
+# Root transaction authority is separate from daemon-writable clean receipts.
+# The traversable root contains no secrets; private transaction/staging children
+# remain 0700, while a 0444 launch lock can be held by the service UID.
+# the helper creates transactions/staging as root-owned 0700 directories.
+install -d -o root -g root -m 0755 /etc/plurx
+install -d -o root -g root -m 0755 /var/lib/plurx-control
+install -d -o plurx -g plurx -m 0700 /var/lib/plurx-control/shutdown-receipts
+joined=0
+/usr/lib/plurx-control/plurx-install-helper package-script postinstall server -- "$@" || joined=$?
+case $joined in
+  0) ;;
+  10) exit 0 ;; # The authenticated worker owns restore/commit; never recurse.
+  *) exit "$joined" ;;
+esac
+
 # No systemd (a container, a chroot): the files are in place and the operator
 # starts plurxd however that environment runs services.
 [ -d /run/systemd/system ] || exit 0

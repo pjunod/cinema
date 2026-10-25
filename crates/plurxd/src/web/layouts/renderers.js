@@ -10,6 +10,91 @@
 // The section the current chrome was painted for, kept so a nav repaint can
 // light the same tab without re-rendering the page under it.
 let LAYOUT_ACTIVE="home";
+// A callback belongs to the current route load, not to a stale last library
+// or item model. Layout changes never increment the router generation.
+let LAYOUT_PRESENTATION=null,LAYOUT_PRESENTATION_REVISION=0;
+function registerLayoutPresentation(recompose,ready=()=>true){
+  LAYOUT_PRESENTATION={route:location.hash,generation:PAGE_RENDER_GENERATION,recompose,ready};
+}
+function layoutFocusSelector(element){
+  if(!element||element===document.body) return null;
+  if(element.id) return "#"+CSS.escape(element.id);
+  const item=element.closest("[data-remote-item]");
+  if(item) return '[data-remote-item="'+CSS.escape(item.dataset.remoteItem)+'"]';
+  for(const name of ["href","aria-label"]){
+    const value=element.getAttribute(name);
+    if(value) return element.tagName.toLowerCase()+'['+name+'="'+CSS.escape(value)+'"]';
+  }
+  return null;
+}
+function recomposeLayoutPresentation(){
+  const main=document.getElementById("main");
+  // The book reader owns a separate iframe shell. A preference change must
+  // not replace it, navigate, or begin another reading/playback session.
+  if(!main) return;
+  const route=location.hash,generation=PAGE_RENDER_GENERATION,revision=++LAYOUT_PRESENTATION_REVISION;
+  const focused=/** @type {HTMLElement|null} */(document.activeElement),selector=layoutFocusSelector(focused),search=captureSearchFocus();
+  const scroll={x:window.scrollX,y:window.scrollY};
+  const owner=LAYOUT_PRESENTATION;
+  if(typeof meridianClosePanel==="function")meridianClosePanel(false);
+  LAYOUT_RECOMPOSING=true;
+  try{
+    layoutChrome(LAYOUT_ACTIVE,"");
+    if(owner&&owner.route===route&&owner.generation===generation) owner.recompose();
+  }finally{ LAYOUT_RECOMPOSING=false; }
+  const target=focused&&focused.isConnected?focused:selector?/** @type {HTMLElement|null} */(document.querySelector(selector)):null;
+  if(target&&target.getClientRects().length&&!target.closest("[inert],[hidden]")) target.focus({preventScroll:true});
+  restoreSearchFocus(search);
+  if(typeof WATCH!=="undefined"&&WATCH) watchScheduleLayout();
+  if(route==="#/live-tv") liveTvTrackSlot();
+  CinemaRemote.invalidate("layout_presentation");cinemaRemoteBind();
+  requestAnimationFrame(()=>{
+    if(revision===LAYOUT_PRESENTATION_REVISION&&generation===PAGE_RENDER_GENERATION&&route===location.hash)
+      window.scrollTo(scroll.x,scroll.y);
+  });
+}
+function recomposeHomePresentation(page){
+  if(typeof WATCH!=="undefined"&&WATCH) return;
+  const main=document.getElementById("main"),positions=new Map();
+  for(const row of /** @type {NodeListOf<HTMLElement>} */(main.querySelectorAll(".rowscroll[data-shelf-key]"))) positions.set(row.dataset.shelfKey,row.scrollLeft);
+  main.innerHTML=layoutView("home",page);
+  for(const row of /** @type {NodeListOf<HTMLElement>} */(main.querySelectorAll(".rowscroll[data-shelf-key]"))) if(positions.has(row.dataset.shelfKey))row.scrollLeft=positions.get(row.dataset.shelfKey);
+  wireRails();
+}
+function recomposeLibraryPresentation(model){
+  const main=document.getElementById("main"),template=document.createElement("template");
+  const selectors=[".libbar",".search-tools","#library-group-index","#library-group-detail","#library-load-error","#libbody","#libpager","#librail","#libcount"];
+  const owners=selectors.map(selector=>({selector,node:main.querySelector(selector)}));
+  template.innerHTML=layoutRegion("library","shell",model);
+  let toolsAfter=null;
+  for(const {selector,node} of owners){
+    if(!node) continue;
+    const incoming=template.content.querySelector(selector);
+    if(incoming){if(incoming!==node)incoming.replaceWith(node);}
+    else if([".search-tools","#library-group-index","#library-group-detail","#library-load-error"].includes(selector)){
+      const anchor=toolsAfter||template.content.querySelector(".libbar");
+      if(anchor){anchor.after(node);toolsAfter=node;}
+    }
+  }
+  main.replaceChildren(template.content);
+}
+function recomposeItemPresentation(page){
+  if(!page||typeof WATCH!=="undefined"&&WATCH) return;
+  const main=document.getElementById("main");
+  if(CINEMA_REMOTE_PRESENTATION&&main.contains(CINEMA_REMOTE_PRESENTATION.root)) return;
+  const template=document.createElement("template");template.innerHTML=layoutView("item",page);
+  // File panels own subtitle-generation/search closures and PREPLAY controls.
+  // Keep the exact nodes, including their private state and attached listeners.
+  const panels=Array.from(main.querySelectorAll(".version"));
+  const incoming=Array.from(template.content.querySelectorAll(".version"));
+  if(panels.length===incoming.length)panels.forEach((node,index)=>incoming[index].replaceWith(node));
+  for(const node of Array.from(main.querySelectorAll('.preplay,[id^="subtitle-"],[id^="dv-file-"]'))){
+    const replacement=node.id?template.content.querySelector("#"+CSS.escape(node.id)):null;
+    if(replacement&&replacement!==node)replacement.replaceWith(node);
+  }
+  main.replaceChildren(template.content);
+  if(page.annotations&&page.item) paintAnnotationSlots(page.item.id,page.annotations);
+}
 function layoutChrome(active, inner){
   LAYOUT_ACTIVE=active;
   const L=LAYOUTS[layoutId()];
@@ -48,8 +133,9 @@ function classicHomeBody(p){
   let hubs=installBannerHtml(), soon="", previews="";
   // The first two rails pass watchCtx: those rows are about where you are in
   // something, so the card carries "23m left" / "watched Tuesday".
-  if(p.hubs.continue_watching.length){ hubs+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join("")); }
-  if(p.hubs.next_up && p.hubs.next_up.length){ hubs+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join("")); }
+  if(p.hubs.continue_watching.length){ hubs+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join(""),"watch"); }
+  if(p.hubs.next_up && p.hubs.next_up.length){ hubs+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join(""),"watch"); }
+  hubs+=listRails(p);
   if(p.hubs.recently_added.length){ hubs+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
   // Coming soon: what Curator expects. Absent entirely when nothing is paired
   // or Curator had nothing to say — an empty rail is worse than no rail.
@@ -75,16 +161,28 @@ function classicHomeBody(p){
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
     `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
 }
+// The reader's watchlist and favorites, newest first; a list with nothing on
+// it is no rail at all. The last tile opens the whole list.
+function listRails(p){
+  const lists=p.lists||{};
+  let out="";
+  for(const [key,heading] of [["watchlist","Watchlist"],["favorite","Favorites"]]){
+    const items=lists[key]||[];
+    if(!items.length) continue;
+    out+=rail(heading, items.map(i=>card(i)).join("")+`<a class="seeall" href="#/list/${key}">See all</a>`, "list");
+  }
+  return out;
+}
 // One rail: a heading, and a strip with an arrow at each end.
 //
 // A helper rather than four copies of the markup, because the arrows need a
 // wrapper the strip cannot provide — they are positioned against it, and the
 // hover that reveals the scrollbar has to cover them too.
-function rail(heading, cards){
+function rail(heading, cards, kind=""){
   return `<h2 class="section">${heading}</h2>
     <div class="railbox">
       <button class="railarrow l" aria-label="Scroll left" onclick="railScroll(this,-1)">‹</button>
-      <div class="rowscroll">${cards}</div>
+      <div class="rowscroll" data-shelf-key="${esc(heading)}" data-shelf-kind="${esc(kind)}">${cards}</div>
       <button class="railarrow r" aria-label="Scroll right" onclick="railScroll(this,1)">›</button>
     </div>`;
 }
@@ -93,7 +191,7 @@ function rail(heading, cards){
 // the complaint people have about carousels that page.
 function railScroll(btn, dir){
   const strip=btn.parentElement.querySelector(".rowscroll"); if(!strip) return;
-  strip.scrollBy({left:dir*Math.max(160,strip.clientWidth*0.85),behavior:"smooth"});
+  strip.scrollBy({left:dir*Math.max(160,strip.clientWidth*0.85),behavior:window.matchMedia("(prefers-reduced-motion: reduce)").matches?"instant":"smooth"});
 }
 // Which arrows apply right now. Recomputed on scroll and on resize: a window
 // that grows can turn a scrollable rail into one that fits, and an arrow that

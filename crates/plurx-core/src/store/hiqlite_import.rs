@@ -2127,6 +2127,34 @@ const TABLES: &[TablePlan] = &[
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
+    }, // A person's watchlist and favorites, and the provider scores cached per
+    // item, follow the catalogue they reference.
+    TablePlan {
+        name: "library_annotations_lists",
+        columns: &["user_id", "list", "item_id", "added_at_ms"],
+        order_by: "user_id, list, item_id",
+        minimum_schema: 113,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "library_annotations_ratings",
+        columns: &["item_id", "source", "value", "scale", "votes"],
+        order_by: "item_id, source",
+        minimum_schema: 113,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "library_annotations_rating_fetches",
+        columns: &["item_id", "fetched_at_ms", "omdb_consulted"],
+        order_by: "item_id",
+        minimum_schema: 113,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
     },
 ];
 

@@ -219,11 +219,8 @@ fn post_cas_repair_proof_distinguishes_quorum_age_from_topology_change() {
 
 #[test]
 fn read_only_repair_evidence_preserves_forward_to_leader_as_typed() {
-    let source = include_str!("lib.rs");
-    let production = source
-        .rsplit_once("\n#[cfg(test)]\nmod tests {")
-        .expect("test module boundary")
-        .0;
+    // The unit tests live in tests.rs, so lib.rs is production source only.
+    let production = include_str!("lib.rs");
     let handler = production
         .rsplit_once("Request::ReadArtworkRepairFence { item_id } => {")
         .expect("repair evidence request handler")
@@ -281,11 +278,8 @@ fn mutating_artwork_claim_retries_only_a_confirmed_noop() {
 
 #[test]
 fn stable_term_rerepair_reestablishes_quorum_before_the_cas() {
-    let source = include_str!("lib.rs");
-    let production = source
-        .rsplit_once("\n#[cfg(test)]\nmod tests {")
-        .expect("test module boundary")
-        .0;
+    // The unit tests live in tests.rs, so lib.rs is production source only.
+    let production = include_str!("lib.rs");
     let proof = production
         .split_once("let stable_claim_deadline")
         .expect("stable-term repair proof")

@@ -18,7 +18,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import java.net.URI
+import tv.plurx.app.data.ItemAnnotations
 import tv.plurx.app.data.PresentationTarget
+import tv.plurx.app.data.withPeakFrom
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.CapabilitySnapshot
 import tv.plurx.app.data.DecisionCapsReq
@@ -82,6 +84,8 @@ sealed interface Phase {
 
 data class HomeState(
     val hubs: Hubs = Hubs(),
+    val watchlist: List<Item> = emptyList(),
+    val favorites: List<Item> = emptyList(),
     val libraries: List<Library> = emptyList(),
     val libraryItems: Map<Long, List<Item>> = emptyMap(),
     val loading: Boolean = true,
@@ -155,6 +159,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var serverName: String? = null
         private set
+    var serverHostname: String? = null
+        private set
     var audioLang: String = "eng"
         private set
     var subLang: String = "eng"
@@ -224,6 +230,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             if (recovered != null) {
                                 bindOrigin(recovered.origin, saved.token)
                                 serverName = recovered.info.name
+                                serverHostname = null
                                 Session.displayModeMatch = recovered.info.display_mode_match
                                 Session.displayAwareAuto = recovered.info.playback_display_aware_auto
                                 Session.autoAbr = recovered.info.playback_auto_abr
@@ -382,6 +389,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 coroutineScope {
                     val hubs = async { api().hubs() }
+                    // The reader's lists never cost Home its load.
+                    val watchlist = async { catchingUnlessCancelled { api().list("watchlist").items }.getOrDefault(emptyList()) }
+                    val favorites = async { catchingUnlessCancelled { api().list("favorite").items }.getOrDefault(emptyList()) }
                     val libraries = async { api().libraries() }
                     val libs = libraries.await()
                     _home.value = _home.value.copy(libraries = libs, loading = false)
@@ -394,7 +404,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             }.getOrDefault(emptyList())
                         }
                     }
-                    _home.value = _home.value.copy(hubs = hubs.await(), loading = false)
+                    _home.value = _home.value.copy(hubs = hubs.await(), watchlist = watchlist.await(), favorites = favorites.await(), loading = false)
                     previews.forEach { (id, items) ->
                         _home.value = _home.value.copy(
                             libraryItems = _home.value.libraryItems + (id to items.await()),
@@ -548,6 +558,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { settings.saveLangs(audio, sub) }
     }
 
+    fun setLayout(layout: tv.plurx.app.data.ViewerLayout) = updatePreferences { copy(layout = layout) }
+
     fun setTheme(theme: ThemeId) = updatePreferences { copy(theme = theme) }
 
     fun setAppearance(appearance: Appearance) = updatePreferences { copy(appearance = appearance) }
@@ -557,6 +569,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setPosterSize(size: PosterSize) = updatePreferences { copy(posterSize = size) }
 
     fun setHomeGrouping(grouping: HomeGrouping) = updatePreferences { copy(homeGrouping = grouping) }
+
+    fun setHdrDisplayPeak(peak: tv.plurx.app.data.HdrDisplayPeak) = updatePreferences { copy(hdrDisplayPeak = peak) }
 
     fun setPlaybackQuality(quality: PlaybackQuality) = updatePreferences { copy(playbackQuality = quality) }
 
@@ -841,11 +855,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         audioOffsetMs: Long = 0,
         fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId),
         linkReceipt: String? = null,
+        retainedPeak: tv.plurx.app.data.DisplayCaps? = null,
     ): PlaybackDecision {
         fileContext.localId(fileId)
         val measured = Caps.snapshot(getApplication<Application>())
         val snapshot = measured.copy(document = measured.document.copy(
-            display = measured.document.display.copy(
+            display = measured.document.display.withPeakFrom(retainedPeak).copy(
                 presentation_target = presentationTarget.takeIf { Session.displayAwareAuto },
             ),
         ))
@@ -862,6 +877,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             api().decisionForContext(fileContext, snapshot.legacyQuery + request)
         }
         return PlaybackDecision(decision, snapshot)
+    }
+
+    suspend fun annotations(itemId: Long): ItemAnnotations = api().annotations(itemId)
+
+    /** Re-read the reader's lists after a toggle so Home matches on return. */
+    suspend fun refreshLists() {
+        val watchlist = catchingUnlessCancelled { api().list("watchlist").items }.getOrNull()
+        val favorites = catchingUnlessCancelled { api().list("favorite").items }.getOrNull()
+        _home.value = _home.value.copy(
+            watchlist = watchlist ?: _home.value.watchlist,
+            favorites = favorites ?: _home.value.favorites,
+        )
+    }
+
+    /** Put an item on, or take it off, the reader's `watchlist` or `favorite` list. */
+    suspend fun setListed(itemId: Long, list: String, listed: Boolean) {
+        if (listed) api().addToList(itemId, list) else api().removeFromList(itemId, list)
     }
 
     suspend fun setWatched(itemId: Long, watched: Boolean): Int = if (watched) {
@@ -917,6 +949,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun episodePlayback(episode: Item): EpisodePlaybackTarget? = playableEpisode(listOf(episode))
+
+    /** Home delegates to the same series/file/resume selectors as the detail screen. */
+    internal suspend fun homePlayback(itemId: Long): PlaybackTarget? {
+        val detail = itemDetail(itemId)
+        seriesPlayback(detail)?.let { return it.playback }
+        val item = detail.item
+        if (!item.isPlayable) return null
+        val position = item.watch?.position_ms ?: 0L
+        val file = playbackFile(item, detail.files, position) ?: return null
+        val start = resumableStartMs(position, file.duration_ms ?: item.runtime_ms)
+        return PlaybackTarget(item.id, file.id, if (item.isAudiobook) audiobookLocalPosition(start, file.part_offset_ms) else start)
+    }
 
     private suspend fun playableEpisode(episodes: List<Item>): EpisodePlaybackTarget? {
         for (episode in episodes) {
@@ -1050,6 +1094,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         origin = normalized
         api = candidate
         serverName = info.name
+        serverHostname = null
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
         Session.displayAwareAuto = info.playback_display_aware_auto
@@ -1103,7 +1148,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             authorization = Session::playbackAuthorization,
             fetch = { api().server() },
             apply = { info ->
-                serverName = info.name
+                val node = catchingUnlessCancelled { api().serverNode() }.getOrNull()
+                serverName = node?.display_name ?: info.name
+                serverHostname = node?.hostname
                 if (serverInstanceId != info.instance_id) invalidateLibraryPager()
                 serverInstanceId = info.instance_id
                 Session.displayModeMatch = info.display_mode_match

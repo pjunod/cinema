@@ -20,6 +20,9 @@ final class AppModel: ObservableObject {
     @Published var authError: String?
 
     @Published var hubs = Hubs()
+    /// The reader's lists, newest first; empty hides their Home rows.
+    @Published var watchlist: [Item] = []
+    @Published var favorites: [Item] = []
     @Published var comingSoon: [ComingSoonEntry] = []
     @Published var libraries: [Library] = []
     @Published var libraryPreviews: [Int: [Item]] = [:]
@@ -35,6 +38,7 @@ final class AppModel: ObservableObject {
     @Published var audioLang: String
     @Published var subLang: String
     @Published var autoplay: Bool
+    @Published var layout: ViewerLayout
     @Published var theme: ViewerTheme
     @Published var appearance: ViewerAppearance
     @Published var posterSize: PosterSize
@@ -54,16 +58,38 @@ final class AppModel: ObservableObject {
     private(set) var username: String?
     private(set) var userId: Int?
     private(set) var serverName: String?
+    private(set) var serverHostname: String?
     private(set) var displayAwareAuto = false
     private(set) var autoAbr = false
     private(set) var displayAwareAutoProtocol: String?
 
-    private let settings = SettingsStore()
+    private let settings: SettingsStore
+    private let makeAPI: (String) -> PlurxAPI
+    private let findSavedServers: (() async -> [DiscoveredServer])?
+    private let logoutRequest: ((String, String) async throws -> Void)?
+    private var authenticationGeneration: UInt64 = 0
+    private var transientAuthentication = false
+    #if DEBUG
+    var testAcceptanceLaunch: PlaybackAcceptanceLaunch?
+    #endif
     private var api: PlurxAPI?
     private var homeLoadTask: Task<Void, Never>?
-    private var recoveryAttempt = UUID()
+    private var logoutTask: Task<Void, Never>?
+    private struct HomeLoadOwner: Equatable {
+        let generation: UInt64
+        let origin: String
+        let token: String?
+    }
+    private var homeLoadOwner: HomeLoadOwner?
 
-    init(startServices: Bool = true) {
+    init(startServices: Bool = true, settings: SettingsStore = SettingsStore(),
+         makeAPI: @escaping (String) -> PlurxAPI = { PlurxAPI(origin: $0) },
+         findSavedServers: (() async -> [DiscoveredServer])? = nil,
+         logoutRequest: ((String, String) async throws -> Void)? = nil) {
+        self.settings = settings
+        self.makeAPI = makeAPI
+        self.findSavedServers = findSavedServers
+        self.logoutRequest = logoutRequest
         discovery = ServerDiscovery()
         origin = settings.origin
         username = settings.username
@@ -71,6 +97,7 @@ final class AppModel: ObservableObject {
         audioLang = settings.audioLang
         subLang = settings.subLang
         autoplay = settings.autoplay
+        layout = settings.layout
         theme = settings.theme
         appearance = settings.appearance
         posterSize = settings.posterSize
@@ -80,12 +107,35 @@ final class AppModel: ObservableObject {
         libraryGrouping = settings.libraryGrouping
         offlineQuality = settings.offlineQuality
         offlineNetwork = settings.offlineNetwork
+        #if DEBUG
+        // Simulator visual evidence uses the shipping shell and owners without
+        // contacting a server or touching a viewer's media. Release has no seam.
+        if ProcessInfo.processInfo.arguments.contains("-meridian-ui-fixture") {
+            layout = .meridian
+            theme = .meridian
+            appearance = .dark
+            settings.theme = .meridian
+            phase = .ready
+            homeLoading = false
+            libraries = [Library(id: 1, name: "Movies", kind: "movie"), Library(id: 2, name: "Series", kind: "show")]
+            hubs = Hubs(
+                continueWatching: [Item(id: 7, kind: "movie", title: "The Meridian Signal", year: 2026,
+                    overview: "An engineer follows a mysterious transmission across the midnight city, finding an unlikely ally at the last station before dawn.",
+                    poster: "meridian-fixture:signal:poster", backdrop: "meridian-fixture:signal:backdrop", runtimeMs: 7_200_000, watch: Watch(positionMs: 900_000, watched: false))],
+                nextUp: [Item(id: 8, kind: "episode", title: "After the Crossing", poster: "meridian-fixture:night:poster", showTitle: "Night Routes")],
+                recentlyAdded: [Item(id: 9, kind: "movie", title: "Beyond the Horizon", poster: "meridian-fixture:horizon:poster")]
+            )
+            return
+        }
+        #endif
         guard startServices else { return }
         discovery.start()
+        let generation = authenticationGeneration
         Task {
             // Give NWBrowser a turn to enter its permission-gated operation
             // before a saved-session request starts.
             await Task.yield()
+            guard generation == authenticationGeneration else { return }
             await bootstrap()
         }
     }
@@ -98,7 +148,7 @@ final class AppModel: ObservableObject {
 
     func requireAPI() -> PlurxAPI {
         if let api { return api }
-        let a = PlurxAPI(origin: origin)
+        let a = makeAPI(origin)
         api = a
         return a
     }
@@ -110,13 +160,13 @@ final class AppModel: ObservableObject {
     // MARK: - Session lifecycle
 
     private func bootstrap() async {
-        recoveryAttempt = UUID()
-        let attempt = recoveryAttempt
+        let generation = authenticationGeneration
         #if DEBUG
         // Physical acceptance must use the argument the lab supplied, not a
         // previously saved server. Never rediscover another ingress when that
         // proxy cannot be reached: the resulting playback would be unshaped.
-        let acceptance = PlaybackAcceptanceLaunch.current()
+        let acceptance = testAcceptanceLaunch ?? PlaybackAcceptanceLaunch.current()
+        transientAuthentication = acceptance != nil
         let savedOrigin = acceptance?.requestedOrigin ?? settings.origin
         #else
         let savedOrigin = settings.origin
@@ -146,7 +196,8 @@ final class AppModel: ObservableObject {
             // at another server. This is also an on-device route readback:
             // the proxy must observe this API request before any media starts.
             do {
-                let server = try await PlurxAPI(origin: savedOrigin).serverInfo()
+                let server = try await makeAPI(savedOrigin).serverInfo()
+                guard generation == authenticationGeneration else { return }
                 guard let actual = server.instanceId,
                       let expected = settings.instanceId,
                       !expected.isEmpty,
@@ -157,6 +208,7 @@ final class AppModel: ObservableObject {
                     return
                 }
             } catch {
+                guard generation == authenticationGeneration else { return }
                 authError = "Acceptance proxy API was unreachable on this device."
                 phase = .reconnectFailed
                 return
@@ -164,25 +216,42 @@ final class AppModel: ObservableObject {
         }
         #endif
 
-        Session.shared.setCredentials(origin: savedOrigin, token: savedToken)
+        guard generation == authenticationGeneration else { return }
+        Session.shared.setCredentials(origin: savedOrigin, token: nil)
         origin = savedOrigin
-        api = PlurxAPI(origin: savedOrigin)
+        api = makeAPI(savedOrigin)
 
         guard let savedToken else { phase = .needLogin; return }
+        var verifiedSavedOrigin = false
         do {
+            // A saved address can now name another server. Prove the saved
+            // instance without credentials before sending its bearer there.
+            if let expected = settings.instanceId, !expected.isEmpty {
+                let server = try await requireAPI().serverInfo()
+                guard generation == authenticationGeneration else { return }
+                guard server.instanceId?.caseInsensitiveCompare(expected) == .orderedSame else {
+                    authError = "This address no longer identifies your saved server. Your sign-in is still saved."
+                    phase = .reconnectFailed
+                    return
+                }
+            }
+            verifiedSavedOrigin = true
+            Session.shared.setCredentials(origin: savedOrigin, token: savedToken)
             let me = try await requireAPI().me()
-            // Retry, sign-out or a server change while this was in flight
-            // owns the session now; never adopt the abandoned origin.
-            guard recoveryAttempt == attempt else { return }
+            guard generation == authenticationGeneration else { return }
             username = me.username
             userId = me.id
-            settings.username = me.username
-            settings.userId = me.id
-            await backfillServerIdentityIfNeeded()
+            if !transientAuthentication {
+                settings.username = me.username
+                settings.userId = me.id
+            }
+            await backfillServerIdentityIfNeeded(generation: generation)
+            guard generation == authenticationGeneration else { return }
             phase = .ready
             discovery.stop()
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
+            guard generation == authenticationGeneration else { return }
             #if DEBUG
             if acceptance != nil {
                 authError = "Acceptance proxy refused the saved session (HTTP \(code))."
@@ -190,12 +259,18 @@ final class AppModel: ObservableObject {
                 return
             }
             #endif
+            guard verifiedSavedOrigin else {
+                authError = "Couldn't verify the saved server. Your sign-in is still saved."
+                phase = .reconnectFailed
+                return
+            }
             Session.shared.setCredentials(origin: savedOrigin, token: nil) // token rotated / server reset
             settings.clearToken()
             // "Signed out after 90 days of inactivity." when that is why.
             authError = Session.shared.takeSessionExpiryNotice()
             phase = .needLogin
         } catch {
+            guard generation == authenticationGeneration else { return }
             #if DEBUG
             if acceptance != nil {
                 authError = "Acceptance proxy could not be reached. Playback did not start."
@@ -203,19 +278,17 @@ final class AppModel: ObservableObject {
                 return
             }
             #endif
-            // Network discovery may probe several unavailable hosts. Keep
-            // recovery actions usable while it runs, and retire its answer if
-            // the viewer retries, signs out, or chooses another server.
-            guard recoveryAttempt == attempt else { return }
+            // Discovery may probe several unavailable hosts. Keep recovery
+            // controls on screen while this attempt searches the network.
             showReconnectFailure(searching: true)
             let recovered = await rediscoverSavedServer(
                 expectedInstanceId: settings.instanceId,
                 savedOrigin: savedOrigin,
-                attempt: attempt
+                generation: generation
             )
-            guard recoveryAttempt == attempt, phase == .reconnectFailed else { return }
+            guard generation == authenticationGeneration, phase == .reconnectFailed else { return }
             if let recovered {
-                await retrySavedSession(at: recovered, token: savedToken, attempt: attempt)
+                await retrySavedSession(at: recovered, token: savedToken, generation: generation)
             } else {
                 showReconnectFailure()
             }
@@ -223,18 +296,20 @@ final class AppModel: ObservableObject {
     }
 
     func retrySavedSession() async {
+        beginAuthentication()
         authError = nil
         phase = .loading
         await bootstrap()
     }
 
     func connect(_ raw: String) async {
-        recoveryAttempt = UUID()
         let normalized = Self.normalizeOrigin(raw)
         guard !normalized.isEmpty else { return }
+        let generation = beginAuthentication()
+        transientAuthentication = false
         authError = nil
         busy = true
-        defer { busy = false }
+        defer { if generation == authenticationGeneration { busy = false } }
 
         // Point the shared session at the candidate before probing it, and drop
         // any in-memory bearer in the same breath: a token belongs to exactly
@@ -244,12 +319,14 @@ final class AppModel: ObservableObject {
         displayAwareAuto = false
         autoAbr = false
         displayAwareAutoProtocol = nil
-        let a = PlurxAPI(origin: normalized)
+        let a = makeAPI(normalized)
         do {
             let info = try await a.serverInfo()
+            guard generation == authenticationGeneration else { return }
             origin = normalized
             api = a
             serverName = info.name
+            serverHostname = nil
             displayAwareAuto = info.playbackDisplayAwareAuto == true
             autoAbr = info.playbackAutoAbr == true
             displayAwareAutoProtocol = info.displayAwareAutoProtocol
@@ -260,18 +337,22 @@ final class AppModel: ObservableObject {
             settings.setServer(origin: normalized, instanceId: info.instanceId, token: nil)
             phase = .needLogin
         } catch {
+            guard generation == authenticationGeneration else { return }
             authError = "Couldn't reach a Cinema server at \(normalized)"
         }
     }
 
     func login(_ user: String, _ pass: String) async {
+        let generation = beginAuthentication()
+        transientAuthentication = false
         authError = nil
         busy = true
-        defer { busy = false }
+        defer { if generation == authenticationGeneration { busy = false } }
         do {
             let resp = try await requireAPI().login(
                 LoginRequest(username: user.trimmingCharacters(in: .whitespaces), password: pass)
             )
+            guard generation == authenticationGeneration else { return }
             Session.shared.setCredentials(origin: origin, token: resp.token)
             // A reason left over from the credential this one replaces
             // belongs to no future sign-out.
@@ -285,10 +366,13 @@ final class AppModel: ObservableObject {
             discovery.stop()
             // Now, not at connect: the ingress list is signed-in only.
             await refreshClusterIngress()
+            guard generation == authenticationGeneration else { return }
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
+            guard generation == authenticationGeneration else { return }
             authError = "Wrong username or password"
         } catch {
+            guard generation == authenticationGeneration else { return }
             authError = "Couldn't reach \(serverName ?? origin). Check Local Network access and the server."
         }
     }
@@ -298,21 +382,45 @@ final class AppModel: ObservableObject {
         // reconstructing the iPad tab/sidebar hierarchy. Run one shared,
         // unstructured refresh so that lifecycle churn cannot cancel the
         // underlying requests, and coalesce overlapping launch/manual loads.
-        if let homeLoadTask {
+        let owner = HomeLoadOwner(generation: authenticationGeneration,
+            origin: origin, token: Session.shared.credentials.token)
+        if let homeLoadTask, homeLoadOwner == owner {
             await homeLoadTask.value
             return
         }
 
+        homeLoadTask?.cancel()
+        let capturedAPI = requireAPI()
         let task = Task<Void, Never> { [weak self] in
             guard let self else { return }
-            await self.performHomeLoad()
+            await self.performHomeLoad(api: capturedAPI, owner: owner)
         }
+        homeLoadOwner = owner
         homeLoadTask = task
         await task.value
-        homeLoadTask = nil
+        if homeLoadOwner == owner {
+            homeLoadTask = nil
+            homeLoadOwner = nil
+        }
     }
 
-    private func performHomeLoad() async {
+    @discardableResult
+    private func beginAuthentication() -> UInt64 {
+        authenticationGeneration &+= 1
+        homeLoadTask?.cancel()
+        homeLoadTask = nil
+        homeLoadOwner = nil
+        return authenticationGeneration
+    }
+
+    private func ownsHomeLoad(_ owner: HomeLoadOwner) -> Bool {
+        let credentials = Session.shared.credentials
+        return !Task.isCancelled && authenticationGeneration == owner.generation
+            && origin == owner.origin && credentials.origin == owner.origin && credentials.token == owner.token
+    }
+
+    private func performHomeLoad(api: PlurxAPI, owner: HomeLoadOwner) async {
+        guard ownsHomeLoad(owner) else { return }
         // The spinner belongs to a dashboard that has never held anything
         // useful. Raising it for every refresh is what let pull-to-refresh —
         // and, now, returning from the player or from the background — blank a
@@ -324,23 +432,38 @@ final class AppModel: ObservableObject {
             // Three independent requests, one round trip. Coming Soon is
             // started with the other two rather than after them: it is never
             // required for first paint, and waiting for it delayed the shelves.
-            async let h = requireAPI().hubs()
-            async let l = requireAPI().libraries()
-            async let soon = requireAPI().comingSoon()
+            async let h = api.hubs()
+            async let l = api.libraries()
+            async let soon = api.comingSoon()
             // Started with the others; an admin's change to Live TV, DVR,
             // Shared libraries or Library channels reaches the tab bar on the
             // next launch, sign-in, foreground or pull-to-refresh.
-            async let loadedFeatures = requireAPI().features()
+            async let loadedFeatures = api.features()
+            // The reader's lists never cost Home its load.
+            async let loadedWatchlist = try? api.list("watchlist")
+            async let loadedFavorites = try? api.list("favorite")
             let loadedHubs = try await h
             let loadedLibraries = try await l
+            // Awaited before the ownership check so nothing suspends between
+            // the check and publishing: a late answer for another sign-in
+            // never lands.
+            let ownWatchlist = await loadedWatchlist ?? []
+            let ownFavorites = await loadedFavorites ?? []
+            guard ownsHomeLoad(owner) else { return }
             hubs = loadedHubs
             libraries = loadedLibraries
+            watchlist = ownWatchlist
+            favorites = ownFavorites
             // Paint as soon as the responses that make a home screen useful
             // have arrived, not once the last shelf preview has.
             homeLoading = false
 
-            comingSoon = (try? await soon)?.entries ?? []
-            if let loaded = try? await loadedFeatures { features = loaded }
+            let loadedSoon = try? await soon
+            guard ownsHomeLoad(owner) else { return }
+            comingSoon = loadedSoon?.entries ?? []
+            let featuresResult = try? await loadedFeatures
+            guard ownsHomeLoad(owner) else { return }
+            if let loaded = featuresResult { features = loaded }
 
             // Prime the category/library shelves after the useful first paint,
             // publishing each page the moment it lands so shelves fill in
@@ -349,11 +472,13 @@ final class AppModel: ObservableObject {
             var removed = Set(libraryPreviews.keys)
             for library in loadedLibraries {
                 removed.remove(library.id)
-                if let page = try? await requireAPI().libraryItems(
+                let page = try? await api.libraryItems(
                     library.id,
                     sort: .added,
                     limit: 24
-                ) {
+                )
+                guard ownsHomeLoad(owner) else { return }
+                if let page {
                     libraryPreviews[library.id] = page.items ?? []
                 }
             }
@@ -362,7 +487,8 @@ final class AppModel: ObservableObject {
             // whole-dictionary replacement did it implicitly.
             for id in removed { libraryPreviews.removeValue(forKey: id) }
         } catch {
-            noteAuthFailure(error)
+            guard ownsHomeLoad(owner) else { return }
+            if noteAuthFailure(error) { return }
             homeError = Self.homeErrorMessage(for: error, hasCachedContent: hasHomeContent)
             homeLoading = false
         }
@@ -376,7 +502,6 @@ final class AppModel: ObservableObject {
             || !comingSoon.isEmpty
     }
 
-    /// A cancelled refresh should leave the last good Home screen in place.
     /// A failed refresh keeps cached titles but exposes the inline Retry row.
     /// Cancellation alone is silent; it is not a failed user-visible refresh.
     nonisolated static func homeErrorMessage(for error: Error, hasCachedContent: Bool) -> String? {
@@ -406,6 +531,14 @@ final class AppModel: ObservableObject {
         // Only after bootstrap: the launch paths clear their own token and
         // choose between `.needLogin` and `.reconnectFailed` themselves.
         guard case .ready = phase, Self.isSessionExpired(error) else { return false }
+        if transientAuthentication {
+            beginAuthentication()
+            Session.shared.setCredentials(origin: origin, token: nil)
+            busy = false
+            authError = "Acceptance session was refused. Your saved sign-in was kept."
+            phase = .reconnectFailed
+            return true
+        }
         signOutLocally(message: Session.shared.takeSessionExpiryNotice())
         return true
     }
@@ -416,15 +549,20 @@ final class AppModel: ObservableObject {
             signOutLocally(message: "Signed out on this device.")
             return
         }
+        let generation = beginAuthentication()
         let capturedOrigin = origin
-        let diagnostics = DiagnosticTransport(scope: diagnosticNamespace)
+        let diagnostics = logoutRequest == nil ? DiagnosticTransport(scope: diagnosticNamespace) : nil
         busy = true
-        Task { @MainActor [weak self] in
+        logoutTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await diagnostics.revokeEnrollment(); diagnostics.cancel()
             let confirmed: Bool
             do {
-                try await PlurxAPI(origin: capturedOrigin).logout(token: token)
+                if let logoutRequest = self.logoutRequest {
+                    try await logoutRequest(capturedOrigin, token)
+                } else {
+                    if let diagnostics { await diagnostics.revokeEnrollment(); diagnostics.cancel() }
+                    try await PlurxAPI(origin: capturedOrigin).logout(token: token)
+                }
                 confirmed = true
             } catch APIError.http(let code) where code == 401 {
                 confirmed = true
@@ -433,10 +571,8 @@ final class AppModel: ObservableObject {
             }
             // The result belongs only to the session that launched it. A login
             // or server change while the request was in flight wins.
-            guard self.origin == capturedOrigin, Session.shared.credentials.token == token else {
-                self.busy = false
-                return
-            }
+            guard self.authenticationGeneration == generation,
+                  self.origin == capturedOrigin, Session.shared.credentials.token == token else { return }
             self.busy = false
             self.signOutLocally(
                 message: confirmed
@@ -446,15 +582,23 @@ final class AppModel: ObservableObject {
         }
     }
 
+    #if DEBUG
+    func waitForLogoutForTesting() async { await logoutTask?.value }
+    #endif
+
     private func signOutLocally(message: String? = nil) {
-        recoveryAttempt = UUID()
+        beginAuthentication()
+        busy = false
         DiagnosticReportModel.shared.signOut()
-        settings.clearToken()
+        if !transientAuthentication { settings.clearToken() }
         Session.shared.setCredentials(origin: origin, token: nil)
         userId = nil
-        settings.userId = nil
+        if !transientAuthentication { settings.userId = nil }
         AuthImageCache.shared.clear()
         hubs = Hubs()
+        // A person's lists are theirs: never shown to whoever signs in next.
+        watchlist = []
+        favorites = []
         comingSoon = []
         libraries = []
         libraryPreviews = [:]
@@ -465,8 +609,25 @@ final class AppModel: ObservableObject {
         phase = .needLogin
     }
 
+    /// Re-read the reader's lists after a toggle so Home matches on return.
+    func refreshLists() async {
+        let generation = authenticationGeneration
+        let api = requireAPI()
+        async let w = try? api.list("watchlist")
+        async let f = try? api.list("favorite")
+        let (newWatchlist, newFavorites) = await (w, f)
+        guard generation == authenticationGeneration else { return }
+        if let newWatchlist { watchlist = newWatchlist }
+        if let newFavorites { favorites = newFavorites }
+    }
+
     func changeServer() {
-        recoveryAttempt = UUID()
+        beginAuthentication()
+        watchlist = []
+        favorites = []
+        transientAuthentication = false
+        busy = false
+        authError = nil
         DiagnosticReportModel.shared.signOut()
         // Clearing the origin clears the persisted bearer in the same write:
         // abandoning a server must not leave its credential on disk where the
@@ -486,27 +647,23 @@ final class AppModel: ObservableObject {
         discovery.restart()
     }
 
-    private func retrySavedSession(at recovered: RecoveredServer, token: String, attempt: UUID) async {
-        guard recoveryAttempt == attempt else { return }
+    private func retrySavedSession(at recovered: RecoveredServer, token: String, generation: UInt64) async {
+        guard generation == authenticationGeneration else { return }
         origin = recovered.origin
         serverName = recovered.name
+        serverHostname = nil
         displayAwareAuto = false
         autoAbr = false
         displayAwareAutoProtocol = nil
-        api = PlurxAPI(origin: recovered.origin)
+        api = makeAPI(recovered.origin)
         Session.shared.setCredentials(origin: recovered.origin, token: token)
-        // The same server instance at a new address: a move, not a change of
-        // identity, so this token stays with it. `matchesSavedServer` already
-        // proved the instance id matches before we got here.
-        settings.setServer(
-            origin: recovered.origin,
-            instanceId: recovered.instanceId,
-            token: token
-        )
 
         do {
             let me = try await requireAPI().me()
-            guard recoveryAttempt == attempt else { return }
+            guard generation == authenticationGeneration else { return }
+            // Persist a move only after this matching instance accepts its
+            // token. A failed retry must leave the saved pairing intact.
+            settings.setServer(origin: recovered.origin, instanceId: recovered.instanceId, token: token)
             username = me.username
             userId = me.id
             settings.username = me.username
@@ -514,15 +671,16 @@ final class AppModel: ObservableObject {
             phase = .ready
             discovery.stop()
             await refreshClusterIngress()
+            guard generation == authenticationGeneration else { return }
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
-            guard recoveryAttempt == attempt else { return }
+            guard generation == authenticationGeneration else { return }
             Session.shared.setCredentials(origin: recovered.origin, token: nil)
-            settings.clearToken()
+            settings.setServer(origin: recovered.origin, instanceId: recovered.instanceId, token: nil)
             authError = Session.shared.takeSessionExpiryNotice()
             phase = .needLogin
         } catch {
-            guard recoveryAttempt == attempt else { return }
+            guard generation == authenticationGeneration else { return }
             showReconnectFailure()
         }
     }
@@ -530,19 +688,22 @@ final class AppModel: ObservableObject {
     private func rediscoverSavedServer(
         expectedInstanceId: String?,
         savedOrigin: String,
-        attempt: UUID
+        generation: UInt64
     ) async -> RecoveredServer? {
-        let candidates = await discovery.availableServers()
+        let candidates: [DiscoveredServer]
+        if let findSavedServers { candidates = await findSavedServers() }
+        else { candidates = await discovery.availableServers() }
         for candidate in candidates {
-            guard recoveryAttempt == attempt, !Task.isCancelled else { return nil }
-            guard let candidateOrigin = try? await discovery.resolve(candidate),
-                  let info = try? await PlurxAPI(origin: candidateOrigin).serverInfo(),
+            guard generation == authenticationGeneration, !Task.isCancelled else { return nil }
+            guard let candidateOrigin = try? await discovery.resolve(candidate) else { continue }
+            guard generation == authenticationGeneration, !Task.isCancelled else { return nil }
+            guard let info = try? await makeAPI(candidateOrigin).serverInfo(),
                   Self.matchesSavedServer(
                     candidateInstanceId: info.instanceId,
                     expectedInstanceId: expectedInstanceId,
                     savedOrigin: savedOrigin
                   ) else { continue }
-            guard recoveryAttempt == attempt, !Task.isCancelled else { return nil }
+            guard generation == authenticationGeneration, !Task.isCancelled else { return nil }
             return RecoveredServer(
                 origin: candidateOrigin,
                 instanceId: info.instanceId,
@@ -552,10 +713,16 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    private func backfillServerIdentityIfNeeded() async {
+    private func backfillServerIdentityIfNeeded(generation: UInt64) async {
         guard let info = try? await requireAPI().serverInfo() else { return }
-        if settings.instanceId == nil { settings.instanceId = info.instanceId }
+        guard generation == authenticationGeneration else { return }
+        if !transientAuthentication, settings.instanceId == nil { settings.instanceId = info.instanceId }
         serverName = info.name
+        serverHostname = nil
+        if let node = try? await requireAPI().serverNode(), generation == authenticationGeneration {
+            serverName = node.displayName ?? info.name
+            serverHostname = node.hostname
+        }
         displayAwareAuto = info.playbackDisplayAwareAuto == true
         autoAbr = info.playbackAutoAbr == true
         displayAwareAutoProtocol = info.displayAwareAutoProtocol
@@ -569,7 +736,10 @@ final class AppModel: ObservableObject {
     /// that a stream cannot be retried elsewhere, which is exactly where the
     /// app was before this existed.
     private func refreshClusterIngress() async {
+        let generation = authenticationGeneration
+        let capturedOrigin = origin
         guard let ingress = try? await requireAPI().clusterIngress() else { return }
+        guard generation == authenticationGeneration, origin == capturedOrigin else { return }
         Session.shared.configureNodeOrigins(ingress.nodeUrls ?? [], primary: origin)
     }
 
@@ -640,6 +810,11 @@ final class AppModel: ObservableObject {
     func setAutoSkip(_ enabled: Bool) {
         autoSkip = enabled
         settings.autoSkip = enabled
+    }
+
+    func setLayout(_ layout: ViewerLayout) {
+        settings.layout = layout
+        self.layout = layout
     }
 
     func setTheme(_ theme: ViewerTheme) {

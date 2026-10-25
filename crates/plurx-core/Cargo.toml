@@ -107,6 +107,8 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# Parse actual cfg(test) module ownership in source census fixtures.
+syn = { version = "2", features = ["full", "visit"] }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 openraft = { version = "0.9.25", features = ["serde"] }

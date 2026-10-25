@@ -56,9 +56,9 @@ impl SegmentShape {
         let (w, h) = self.bl;
         let (ew, eh) = self.el;
         if !(1..=64).contains(&self.max_frames)
-            || !(64..=3840).contains(&w)
+            || !(64..=4096).contains(&w)
             || !(64..=2160).contains(&h)
-            || !(32..=3840).contains(&ew)
+            || !(32..=4096).contains(&ew)
             || !(32..=2160).contains(&eh)
             || [w, h, ew, eh].iter().any(|v| v % 2 != 0)
             || !((w == ew && h == eh) || (w == 2 * ew && h == 2 * eh))
@@ -209,6 +209,85 @@ impl SegmentEvidence {
     }
 }
 
+/// Causal helper result, retained separately from the encoder's retirement.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+pub(crate) enum HelperOutcome {
+    Completed,
+    Cancelled,
+    Failed(String),
+}
+
+/// One authoritative result, published before the supervisor's cleanup.
+/// Clones observe the same retained value, including after child retirement.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct HelperCompletion(tokio::sync::watch::Receiver<Option<HelperOutcome>>);
+#[cfg(target_os = "linux")]
+impl HelperCompletion {
+    pub(crate) fn outcome(&self) -> Option<HelperOutcome> {
+        self.0.borrow().clone()
+    }
+    pub(crate) async fn wait(mut self) -> HelperOutcome {
+        loop {
+            if let Some(outcome) = self.outcome() {
+                return outcome;
+            }
+            if self.0.changed().await.is_err() {
+                return HelperOutcome::Failed("DV helper completion owner lost".into());
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn supervise_streaming_helper(
+    helper: impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+    helper_cancel: CancellationToken,
+    cancel: CancellationToken,
+    slot: std::sync::Weak<ProducerSlot>,
+    registration: ProducerRegistration,
+) -> HelperCompletion {
+    let (completed, completion) = tokio::sync::watch::channel(None);
+    tokio::spawn(async move {
+        tokio::pin!(helper);
+        let retirement = registration.retirement();
+        let result = tokio::select! {
+            result = &mut helper => result,
+            _ = cancel.cancelled() => {
+                helper_cancel.cancel();
+                // Retire the encoder before joining a helper that may be
+                // blocked writing into it. The original slot still owns reap.
+                if let Some(slot) = slot.upgrade() {
+                    let _ = slot.request_registered_retirement(&registration).await;
+                }
+                helper.await
+            },
+            _ = retirement.cancelled() => { helper_cancel.cancel(); helper.await },
+        };
+        let outcome = if cancel.is_cancelled() || retirement.is_cancelled() {
+            HelperOutcome::Cancelled
+        } else {
+            match result {
+                Ok(()) => HelperOutcome::Completed,
+                Err(cause) => HelperOutcome::Failed(cause),
+            }
+        };
+        let finished = matches!(outcome, HelperOutcome::Completed);
+        let _ = completed.send_replace(Some(outcome));
+        if finished {
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = retirement.cancelled() => {},
+            }
+        }
+        if let Some(slot) = slot.upgrade() {
+            let _ = slot.request_registered_retirement(&registration).await;
+        }
+    });
+    HelperCompletion(completion)
+}
+
 /// Same registered pipes/writer barrier the existing producer consumes. On
 /// unsuccessful handoff the detached owner retires this exact generation.
 pub(crate) struct SegmentProducer {
@@ -217,7 +296,8 @@ pub(crate) struct SegmentProducer {
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     unaccepted_cancel: Option<CancellationToken>,
-    helper_completion: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    #[cfg(target_os = "linux")]
+    helper_completion: Option<HelperCompletion>,
     #[cfg(target_os = "linux")]
     evidence: Option<SegmentEvidence>,
 }
@@ -230,9 +310,8 @@ impl SegmentProducer {
     /// Reports actual helper exit, source fencing and bounded observation capture.
     /// The consumer must validate those observations and final encoder bytes
     /// before publishing an interval or effective-processing report.
-    pub(crate) fn take_helper_completion(
-        &mut self,
-    ) -> Option<tokio::sync::oneshot::Receiver<Result<(), String>>> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_helper_completion(&mut self) -> Option<HelperCompletion> {
         self.helper_completion.take()
     }
 
@@ -486,7 +565,6 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
             || !filters[0][1].contains("format=p010le")
             || [
                 ("-profile:v", "main10"),
-                ("-level:v", "4"),
                 ("-async_depth", "1"),
                 ("-bf", "0"),
             ]
@@ -496,8 +574,20 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
                     output.windows(2).filter(|pair| pair[0] == *flag).collect();
                 occurrences.len() != 1 || occurrences[0][1] != *value
             })
+            || {
+                // The level describes the window's raster and cadence
+                // (`hevc_level_for`), so any defined Main-tier step is valid.
+                let levels: Vec<_> = output
+                    .windows(2)
+                    .filter(|pair| pair[0] == "-level:v")
+                    .collect();
+                levels.len() != 1
+                    || !["4", "4.1", "5", "5.1", "5.2", "6", "6.1"].contains(&levels[0][1].as_str())
+            }
         {
-            return Err("VAAPI requires the bounded P010/Main10/level4 upload graph".into());
+            return Err(
+                "VAAPI requires the bounded P010/Main10 upload graph with one HEVC level".into(),
+            );
         }
         return Ok(());
     }
@@ -758,6 +848,7 @@ async fn run(
         stdout: Some(encoded.stdout),
         stderr: Some(encoded.stderr),
         unaccepted_cancel: Some(handoff_cancel),
+        #[cfg(target_os = "linux")]
         helper_completion: None,
         #[cfg(target_os = "linux")]
         evidence: None,
@@ -772,13 +863,19 @@ pub(crate) struct SegmentWindow {
     pub(crate) start: (i64, u32),
     pub(crate) end: (i64, u32),
     pub(crate) max_preroll: u16,
+    /// Production always supplies its typed held FORMAT/selected-video origin.
+    /// None is reserved for private legacy observed-zero helper controls.
+    pub(crate) source_origin: Option<plurx_core::transcode::dv_processing::DvSourceOrigin>,
 }
 #[cfg(target_os = "linux")]
 impl SegmentWindow {
     fn args(&self) -> Result<[String; 3], String> {
         let (start, sd) = self.start;
         let (end, ed) = self.end;
-        if start < 0
+        let (origin, od) = self.source_origin.map_or((0, 1), |origin| origin.exact());
+        if od > i32::MAX as u32
+            || i128::from(start) * i128::from(od) < i128::from(origin) * i128::from(sd)
+            || start < 0
             || end < 0
             || sd == 0
             || ed == 0
@@ -797,6 +894,15 @@ impl SegmentWindow {
             self.max_preroll.to_string(),
         ])
     }
+    fn held_origin_args(self) -> Option<[String; 2]> {
+        self.source_origin.map(|origin| {
+            let (numerator, denominator) = origin.exact();
+            [
+                "--held-source-origin".into(),
+                format!("{numerator}/{denominator}"),
+            ]
+        })
+    }
 }
 
 /// Direct timestamped NUT transport. The renderer and encoder run concurrently
@@ -810,6 +916,8 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) window: Option<SegmentWindow>,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     pub(crate) export_raster: Option<(u32, u32)>,
+    /// Explicit producer policy only; this layer never reads client caps.
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
 }
 
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
@@ -960,7 +1068,7 @@ async fn run_streaming(
         }
     }
     if let Some((width, height)) = stream.export_raster {
-        plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearRgb48V1 {
+        plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearYuv420p10V1 {
             raster: (width, height),
         }
         .raster(request.shape.bl)
@@ -968,8 +1076,22 @@ async fn run_streaming(
         args.extend([
             width.to_string(),
             height.to_string(),
-            "pq-bilinear-rgb48-v1".into(),
+            "pq-bilinear-yuv420p10-v1".into(),
         ]);
+    }
+    if let Some(target) = stream.display_target {
+        if !windowed || stream.export_raster.is_none() {
+            return Err(
+                "display targeting requires an explicit bounded window/export policy".into(),
+            );
+        }
+        // Helper argv[10]: executable is not part of this Vec. Title endpoints
+        // follow the export policy; no environment-dependent renderer defaults.
+        args[9] = target.output_policy();
+        args.extend(target.endpoint_args());
+    }
+    if let Some(origin_args) = stream.window.and_then(SegmentWindow::held_origin_args) {
+        args.extend(origin_args);
     }
     let renderer_env: Vec<_> = request
         .renderer_env
@@ -1044,18 +1166,12 @@ async fn run_streaming(
         request.at,
         Box::new(resources),
     );
-    let watched = registration.clone();
-    let slot = Arc::downgrade(&request.producer);
     let handoff_cancel = cancel.clone();
-    let (completed, completion) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let mut helper = helper;
-        let helper_result = tokio::select! {
-            result = &mut helper => result.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))),
-            _ = cancel.cancelled() => { helper_cancel.cancel(); if let Some(slot) = slot.upgrade() { let _ = slot.request_registered_retirement(&watched).await; } helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
-            _ = watched.wait_confirmed_reap() => { helper_cancel.cancel(); helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
-        };
-        let helper_result = helper_result.and_then(|observations| {
+    let completed_helper = async move {
+        let helper_result = helper
+            .await
+            .unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}")));
+        helper_result.and_then(|observations| {
             check_source(&watched_source)?;
             use std::io::Write;
             let _lease = (&evidence_lease, &evidence_hold);
@@ -1065,20 +1181,15 @@ async fn run_streaming(
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
             )?;
             file.write_all(&observations).map_err(|e| e.to_string())
-        });
-        let failed = helper_result.is_err();
-        let _ = completed.send(helper_result);
-        if failed || cancel.is_cancelled() {
-            if let Some(slot) = slot.upgrade() {
-                let _ = slot.request_registered_retirement(&watched).await;
-            }
-        } else {
-            tokio::select! {
-                _ = cancel.cancelled() => { if let Some(slot) = slot.upgrade() { let _ = slot.request_registered_retirement(&watched).await; } },
-                _ = watched.wait_confirmed_reap() => {},
-            }
-        }
-    });
+        })
+    };
+    let completion = supervise_streaming_helper(
+        completed_helper,
+        helper_cancel,
+        cancel,
+        Arc::downgrade(&request.producer),
+        registration.clone(),
+    );
     Ok(SegmentProducer {
         registration,
         writers: Some(writers),
@@ -1173,6 +1284,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
         #[cfg(target_os = "linux")]
         return spawn_streaming(StreamingSegmentRequest {
             export_raster: None,
+            display_target: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
             request,
             renderer_deadline: Instant::now() + Duration::from_secs(30),
@@ -1192,6 +1304,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
                             &std::env::var("PLURX_DV_SEGMENT_WINDOW_END").expect("window end"),
                         ),
                         max_preroll: 512,
+                        source_origin: None,
                     }
                 }),
         })
@@ -1208,6 +1321,7 @@ fn window_argument_regression() {
         start: (42, 1000),
         end: (167, 1000),
         max_preroll: 512,
+        source_origin: None,
     };
     assert_eq!(
         window.args().expect("bounded original-source window"),
@@ -1217,6 +1331,7 @@ fn window_argument_regression() {
         start: (0, 1),
         end: (48 * 1001, 24000),
         max_preroll: 512,
+        source_origin: None,
     };
     assert!(
         film_entry.args().is_ok(),
@@ -1455,7 +1570,7 @@ pub(crate) async fn physical_probe() {
     })
     .await
     .expect("predecessor slot fully settled");
-    let mut producer = probe_spawn(
+    let producer = probe_spawn(
         SegmentRequest {
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
@@ -1486,7 +1601,10 @@ pub(crate) async fn physical_probe() {
     .await
     .expect("physical graph handoff");
     #[cfg(target_os = "linux")]
+    let mut producer = producer;
+    #[cfg(target_os = "linux")]
     let evidence = producer.take_evidence();
+    #[cfg(target_os = "linux")]
     let completion = producer.take_helper_completion();
     let (registration, writers, stdout, stderr) = producer.into_parts();
     assert_eq!(
@@ -1518,11 +1636,12 @@ pub(crate) async fn physical_probe() {
         "encoder: {}",
         String::from_utf8_lossy(&diagnostic)
     );
+    #[cfg(target_os = "linux")]
     if let Some(completion) = completion {
-        completion
-            .await
-            .expect("streaming renderer completion")
-            .expect("streaming renderer success");
+        assert!(
+            matches!(completion.wait().await, HelperOutcome::Completed),
+            "streaming renderer success"
+        );
     }
     assert!(encoded.len() > 100, "actual encoded Matroska output");
     assert!(source.unchanged(), "same source revision retained");
@@ -1581,7 +1700,7 @@ pub(crate) async fn physical_probe() {
         );
     }
     let slot = Arc::new(ProducerSlot::new());
-    let mut unaccepted = probe_spawn(
+    let unaccepted = probe_spawn(
         SegmentRequest {
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
@@ -1615,6 +1734,9 @@ pub(crate) async fn physical_probe() {
     )
     .await
     .expect("actual unaccepted encoder handoff");
+    #[cfg(target_os = "linux")]
+    let mut unaccepted = unaccepted;
+    #[cfg(target_os = "linux")]
     let completion = unaccepted.take_helper_completion();
     let abandoned = unaccepted.registration.clone();
     assert_eq!(offsets.available_permits(), 0);
@@ -1623,8 +1745,9 @@ pub(crate) async fn physical_probe() {
         .await
         .expect("dropped actual handoff retires encoder");
     assert!(receipt.matches(&abandoned));
+    #[cfg(target_os = "linux")]
     if let Some(completion) = completion {
-        let _ = completion.await.expect("cancelled helper owned completion");
+        assert!(matches!(completion.wait().await, HelperOutcome::Cancelled));
     }
     assert_eq!(
         receipt.writers(),
@@ -1635,6 +1758,7 @@ pub(crate) async fn physical_probe() {
         .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
         .is_some());
     assert!(source.unchanged());
+    #[cfg(target_os = "linux")]
     if streaming {
         let slot = Arc::new(ProducerSlot::new());
         let mut refused = probe_spawn(
@@ -1674,11 +1798,12 @@ pub(crate) async fn physical_probe() {
         let completion = refused
             .take_helper_completion()
             .expect("actual streaming completion");
-        assert!(tokio::time::timeout(Duration::from_secs(5), completion)
-            .await
-            .expect("refusal completion bounded")
-            .expect("refusal owner completes")
-            .is_err());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), completion.wait())
+                .await
+                .expect("refusal completion bounded"),
+            HelperOutcome::Failed(_)
+        ));
         let registration = refused.registration.clone();
         drop(refused);
         tokio::time::timeout(Duration::from_secs(5), registration.wait_confirmed_reap())
@@ -1814,7 +1939,7 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn reconstructed_vaapi_selection_requires_actual_raster_cadence_and_upload_proof() {
+    fn reconstructed_intel_preferences_use_only_proved_vaapi_output() {
         use plurx_core::transcode::*;
         let mut source = encoded_recipe_source(true);
         source.width = Some(3840);
@@ -1827,22 +1952,29 @@ mod tests {
             };
             let (plan, _, _, _) = recipe_fixture_parts(&source, &options);
             for proved in [false, true] {
-                for rate in [24, 30, 60] {
-                    let actual = crate::vodencode::dv_runtime::completed_window_encoder(
-                        Encoder::Vaapi,
-                        proved,
-                        &plan,
-                        VodFrameGrid::new(rate, 1).expect("grid"),
-                    );
-                    assert_eq!(
-                        actual,
-                        if proved && height <= 1080 && rate <= 30 {
-                            Encoder::Vaapi
-                        } else {
-                            Encoder::Software
-                        },
-                        "{height} {rate} {proved}"
-                    );
+                let intel_output = if proved {
+                    Encoder::Vaapi
+                } else {
+                    Encoder::Software
+                };
+                for (preferred, expected) in [
+                    (Encoder::Qsv, intel_output),
+                    (Encoder::Vaapi, intel_output),
+                    (Encoder::Software, Encoder::Software),
+                    (Encoder::Nvenc, Encoder::Nvenc),
+                ] {
+                    for (numerator, denominator) in [(24, 1), (24000, 1001), (30, 1), (60, 1)] {
+                        let actual = crate::vodencode::dv_runtime::completed_window_encoder(
+                            preferred,
+                            proved,
+                            &plan,
+                            VodFrameGrid::new(numerator, denominator).expect("grid"),
+                        );
+                        assert_eq!(
+                            actual, expected,
+                            "{height} {numerator}/{denominator} {preferred:?} {proved}"
+                        );
+                    }
                 }
             }
         }
@@ -2205,6 +2337,51 @@ mod tests {
     #[test]
     fn original_movie_window_uses_exact_bounded_rationals() {
         window_argument_regression();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_origin_window_arguments_bind_the_exact_epoch_before_absolute_bounds() {
+        use plurx_core::transcode::{
+            dv_processing::{DvSourceOrigin, DvTimestamp},
+            VodSourceClock,
+        };
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(1, 8).expect("exact held selected-video origin"),
+            VodSourceClock::ReportedOrigin(125_000),
+        )
+        .expect("matching observed FORMAT/video clock");
+        let mut window = SegmentWindow {
+            start: (1, 8),
+            end: (1063, 500),
+            max_preroll: 512,
+            source_origin: Some(origin),
+        };
+        assert_eq!(
+            window.args().expect("absolute first window"),
+            ["1/8", "1063/500", "512"]
+        );
+        assert_eq!(
+            window.held_origin_args().expect("typed held argument"),
+            ["--held-source-origin", "1/8"]
+        );
+        window.start = (124, 1000);
+        assert!(
+            window.args().is_err(),
+            "membership cannot precede frozen epoch"
+        );
+        window.start = (1, 8);
+        window.end = (i64::MAX, 1);
+        assert!(
+            window.args().is_err(),
+            "large endpoints cannot overflow the three-second bound"
+        );
+        window.end = (1063, 500);
+        window.source_origin = None;
+        assert!(
+            window.held_origin_args().is_none(),
+            "private legacy control never invents held-probe authority"
+        );
     }
 
     #[test]

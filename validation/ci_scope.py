@@ -24,6 +24,7 @@ from validation.runner import (
 SCOPE_KEYS = (
     "rust",
     "apple",
+    "desktop_macos",
     "android_jvm",
     "android_device",
     "web_layout",
@@ -109,6 +110,20 @@ SHIPPED_SOURCE_PATHS = (
 # which resolve through all_scope() before a commit can land on main. The one
 # cross-surface file that compiles into BOTH native clients is the shared wire
 # fixture: editing it re-runs both client suites on the PR itself.
+# The server menu-bar app has its own Swift package and no mobile release counter.
+# Shared controller changes can alter its protocol even when its Swift is unchanged.
+DESKTOP_MACOS_PATHS = (
+    "scripts/build-macos-source-runtime",
+    "clients/server-tray/macos/**",
+    "crates/plurx-desktop-control/**",
+    "Makefile",
+    "validation/ci_scope.py",
+    "validation/points.toml",
+    ".github/workflows/effort-ci.yml",
+    ".github/workflows/main-fast-lane.yml",
+    ".github/workflows/ci.yml",
+)
+
 APPLE_PATHS = (
     "clients/apple/**",
     # The required TV navigation gate's own inputs.
@@ -429,6 +444,7 @@ def scope_for_paths(
     scope = {
         "rust": needs_rust_gate(paths),
         "apple": any(matches(path, APPLE_PATHS) for path in paths),
+        "desktop_macos": any(matches(path, DESKTOP_MACOS_PATHS) for path in paths),
         "android_jvm": any(matches(path, ANDROID_JVM_PATHS) for path in paths),
         "android_device": any(matches(path, ANDROID_DEVICE_PATHS) for path in paths),
         "web_layout": any(matches(path, WEB_LAYOUT_PATHS) for path in paths),

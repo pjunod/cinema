@@ -2210,6 +2210,7 @@ pub(crate) struct RealSourceStartFixture {
     membership_owner: SourceFixtureMembershipOwner,
     replication_owner: SourceFixtureMembershipOwner,
     _directory: tempfile::TempDir,
+    _fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 }
 #[cfg(test)]
 impl RealSourceStartFixture {
@@ -2258,7 +2259,12 @@ impl RealSourceStartFixture {
             expires_at_ms: self.invitation.expires_at_ms,
         })
     }
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(self) {
+        drop(self.shutdown_retaining_fixture_budget().await);
+    }
+    pub(crate) async fn shutdown_retaining_fixture_budget(
+        mut self,
+    ) -> tokio::sync::OwnedSemaphorePermit {
         self.membership_owner.finish().await;
         self.replication_owner.finish().await;
         if let Some(clock) = &self.startup_clock {
@@ -2268,6 +2274,7 @@ impl RealSourceStartFixture {
             .shutdown()
             .await
             .expect("actual voter shutdown");
+        self._fixture_body_budget
     }
 }
 /// PGS display sets from the fuzz corpus's real `mkpgs` capture, retimed to
@@ -2330,20 +2337,35 @@ pub(crate) fn real_source_start_fixture_with(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
+    Box::pin(async move {
+        let fixture_body_budget =
+            crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+        build_real_source_start_fixture(mode, recipient_server_id, None, fixture_body_budget).await
+    })
+}
+#[cfg(test)]
+pub(crate) fn real_source_start_fixture_with_budget(
+    mode: SourceFixtureMode,
+    recipient_server_id: Option<Uuid>,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
     Box::pin(build_real_source_start_fixture(
         mode,
         recipient_server_id,
         None,
+        fixture_body_budget,
     ))
 }
 #[cfg(test)]
 fn real_source_start_fixture_at(
     address: std::net::SocketAddr,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
     Box::pin(build_real_source_start_fixture(
         SourceFixtureMode::Copy,
         None,
         Some(address),
+        fixture_body_budget,
     ))
 }
 #[cfg(test)]
@@ -2351,6 +2373,7 @@ async fn build_real_source_start_fixture(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
     advertised_http: Option<std::net::SocketAddr>,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealSourceStartFixture {
     use plurx_core::{
         cluster::migration::select_daemon_store_observing,
@@ -2848,6 +2871,7 @@ async fn build_real_source_start_fixture(
         membership_owner,
         replication_owner,
         _directory: directory,
+        _fixture_body_budget: fixture_body_budget,
     }
 }
 

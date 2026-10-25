@@ -10,7 +10,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let tab = app.tabBars.buttons["Live TV"]
+        let tab = app.viewerTab("Live TV")
         reachForSetup(tab, in: app, limit: 8)
         remote.press(.select)
         let guide = app.buttons["Guide"]
@@ -62,7 +62,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let tab = app.tabBars.buttons["Live TV"]
+        let tab = app.viewerTab("Live TV")
         reachForSetup(tab, in: app, limit: 8)
         remote.press(.select)
         let guide = app.buttons["Guide"]
@@ -108,7 +108,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let tab = app.tabBars.buttons["Live TV"]
+        let tab = app.viewerTab("Live TV")
         reachForSetup(tab, in: app, limit: 8)
         assertFocus(tab, in: app, context: "Live TV tab")
         remote.press(.select)
@@ -174,10 +174,12 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
                 for pass in 1...20 {
                     remote.press(.right)
                     assertFocus(app.buttons["live-player-channels"], in: app,
-                                context: "Guide return Right reaches Channels pass \(pass)")
+                                context: "Guide return Right reaches Channels pass \(pass)",
+                                captureOnSuccess: false)
                     remote.press(.left)
                     assertFocus(app.buttons[identifier], in: app,
-                                context: "Guide return Left reaches Guide pass \(pass)")
+                                context: "Guide return Left reaches Guide pass \(pass)",
+                                captureOnSuccess: false)
                 }
             }
         }

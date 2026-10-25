@@ -2026,6 +2026,10 @@ pub(crate) enum ControlAction {
         /// this is the server's answer, and a client that no longer wants it
         /// can decline by simply not acknowledging.
         effective_selection: EffectiveSelection,
+        /// The successor's FEL / RPU / DYN indicator, as its create response
+        /// carries it, so a switch does not drop the indicator.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        enhancement: Option<Box<plurx_core::playback::enhancement::PlaybackEnhancement>>,
     },
 }
 
@@ -2050,6 +2054,7 @@ pub(crate) struct PreparedSuccessorAction {
     pub control: Option<Box<ControlBootstrap>>,
     pub media_origin_ms: i64,
     pub effective_selection: EffectiveSelection,
+    pub enhancement: Option<plurx_core::playback::enhancement::PlaybackEnhancement>,
 }
 
 impl PreparedSuccessorAction {
@@ -2061,6 +2066,7 @@ impl PreparedSuccessorAction {
             control: self.control,
             media_origin_ms: self.media_origin_ms,
             effective_selection: self.effective_selection,
+            enhancement: self.enhancement.map(Box::new),
         }
     }
 }

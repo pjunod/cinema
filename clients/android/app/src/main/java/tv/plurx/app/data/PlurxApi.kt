@@ -22,6 +22,10 @@ interface PlurxApi {
     @GET("server")
     suspend fun server(): Server
 
+    /** Signed in: the answering node's hostname and the server's label. */
+    @GET("server/node")
+    suspend fun serverNode(): ServerNode
+
     /** Signed-in only: the other ingresses a stream may be retried through. */
     @GET("cluster/ingress")
     suspend fun clusterIngress(): ClusterIngress
@@ -110,6 +114,20 @@ interface PlurxApi {
 
     @GET("hubs")
     suspend fun hubs(): Hubs
+
+    /** Scores and list flags, beside the item page rather than inside it. */
+    @GET("items/{id}/annotations")
+    suspend fun annotations(@Path("id") id: Long): ItemAnnotations
+
+    /** `list` is `watchlist` or `favorite`. */
+    @PUT("items/{id}/{list}")
+    suspend fun addToList(@Path("id") id: Long, @Path("list") list: String)
+
+    @DELETE("items/{id}/{list}")
+    suspend fun removeFromList(@Path("id") id: Long, @Path("list") list: String)
+
+    @GET("lists/{list}")
+    suspend fun list(@Path("list") list: String, @Query("limit") limit: Int = 20): ItemList
 
     @GET("items/{id}")
     suspend fun item(@Path("id") id: Long): ItemDetail

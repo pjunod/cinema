@@ -36,11 +36,10 @@ use super::placeholder_census::STORE_SOURCES;
 
 /// Consistent-read call sites per replicated slice, production code only.
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
-    // Managed subtitle installation adds the schema shape and version-marker
-    // reads, both preceding any decision to install or accept its schema.
-    ("hiqlite.rs", 48),
-    // Bootstrap validates committed managed-schema shape and its singleton
-    // marker before deciding whether the shared resource view may be replaced.
+    // Progressive translation checks both the committed extension shape and its
+    // singleton marker before migration/admission; neither may use a stale replica.
+    ("hiqlite.rs", 50),
+    // Managed-schema bootstrap validates committed shape and the singleton marker.
     ("hiqlite_background_jobs.rs", 4),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),

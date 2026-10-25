@@ -310,6 +310,9 @@ let PLAY_HEVC_TIERS=hevcTiersSync(
   t=>{ try{ return !!(window.MediaSource && MediaSource.isTypeSupported(t)); }catch(e){ return false; } }
 );
 let PLAY_HEVC_PQ_TIERS=[];
+// Whether MediaCapabilities answered the PQ question at all. Until it has, the
+// PQ tiers are unknown (null), not empty: an empty list is a "no".
+let PLAY_HEVC_PQ_PROBED=false;
 let PLAY_CAPS=buildPlayCaps(hevcTierSummary(PLAY_HEVC_TIERS, null));
 // Safe even before the async probe settles: [] is an explicit restrictive
 // claim, never the legacy/unrestricted omission.
@@ -478,10 +481,30 @@ function measuredPresentationTarget(){
   }
   return {...PRESENTATION_TARGET_RECT};
 }
-function currentCapsDocument(){
+function hdrDisplayPeakCaps(){
+  // Browsers expose HDR support, never optical luminance. Auto stays unknown.
+  try{
+    const value=localStorage.getItem("plurx.hdrDisplayPeak");
+    const peak=Number(value);
+    return [400,600,1000,1600,2000,4000].includes(peak)
+      ?{max_nits:peak,peak_source:"viewer"}:{};
+  }catch(e){return {};}
+}
+function currentCapsDocument(incumbent=null){
   const sinks=browserAudioSinks(PLAY_CAPS.acodec, browserOutputChannelsCached());
   const caps=capsDocument(sinks.length?Object.assign({}, PLAY_CAPS, {audioSinks:sinks}):PLAY_CAPS,
     decodeLimits());
+  // Re-decisions for an admitted playback keep its original peak, including
+  // Unknown. Geometry/decoder refreshes must not change the rendering target.
+  const retained=incumbent&&incumbent.capsSnapshot;
+  const peak=retained?(retained.display||{}):hdrDisplayPeakCaps();
+  // The HDR display claim is part of the rendering target too: the browser can
+  // change its answer mid-playback (a window moved to another monitor), and a
+  // seek must not switch the admitted session between tone-mapped and HDR.
+  if(retained&&typeof retained.display?.hdr==="boolean") caps.display.hdr=retained.display.hdr;
+  if(peak.max_nits!=null&&peak.peak_source!=null){
+    Object.assign(caps.display,{max_nits:peak.max_nits,peak_source:peak.peak_source});
+  }
   const target=measuredPresentationTarget();
   if(SERVER&&SERVER.playback_display_aware_auto&&target){
     Object.assign(caps.display,{presentation_target:target});
@@ -600,6 +623,7 @@ const PLAY_CAPS_READY=(async()=>{
     if(mc){
       PLAY_HEVC_TIERS=mc.passed.slice();
       PLAY_HEVC_PQ_TIERS=mc.pqPassed.slice();
+      PLAY_HEVC_PQ_PROBED=true;
       PLAY_CAPS=buildPlayCaps(hevcTierSummary(mc.passed, mc.pqPassed));
     }
     const dvProfiles=String(PLAY_CAPS.dvprofile||"").split(",")
@@ -609,9 +633,45 @@ const PLAY_CAPS_READY=(async()=>{
         PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS,dvProfiles);
     PLAY_CAPS.hlsHevcSampleEntries=await hlsHevcSampleEntries(PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS);
     CAPS_Q=capsQuery(PLAY_CAPS);
+    // Only once the probed answer stands: after a rejection the synchronous
+    // answer is kept, and rebuilding from half-probed tiers would undo that.
+    watchDisplayDynamicRange();
   }catch(e){}
   return PLAY_CAPS;
 })();
+
+// The display half of the claims, re-asked when the browser changes its mind.
+//
+// `(dynamic-range: high)` is not a constant for the page. Chrome on Linux
+// (Wayland) answers false until its GPU process has started and true a few
+// seconds later, so a plurx tab restored with the browser booted claiming an
+// SDR screen and every session it started was tone-mapped to SDR on an HDR
+// display. Moving the window between an SDR and an HDR monitor changes the
+// answer the same way. The decoder half (tiers, sample entries) does not
+// depend on the display, so only the claims built from it are rebuilt; a
+// playback already admitted keeps the caps it started with.
+function rebuildPlayCapsForDisplay(){
+  const previous=PLAY_CAPS;
+  const next=buildPlayCaps(hevcTierSummary(PLAY_HEVC_TIERS,
+    PLAY_HEVC_PQ_PROBED?PLAY_HEVC_PQ_TIERS:null));
+  next.progressiveHevcSampleEntries=previous.progressiveHevcSampleEntries;
+  next.hlsHevcSampleEntries=previous.hlsHevcSampleEntries;
+  PLAY_CAPS=next;
+  CAPS_Q=capsQuery(PLAY_CAPS);
+  return PLAY_CAPS;
+}
+function watchDisplayDynamicRange(){
+  try{
+    const query=window.matchMedia&&window.matchMedia("(dynamic-range: high)");
+    if(!query||typeof query.addEventListener!=="function") return false;
+    query.addEventListener("change",()=>{
+      if(!!query.matches!==!!PLAY_CAPS.hdrDisplay) rebuildPlayCapsForDisplay();
+    });
+    // The answer may already have changed while MediaCapabilities was probing.
+    if(!!query.matches!==!!PLAY_CAPS.hdrDisplay) rebuildPlayCapsForDisplay();
+    return true;
+  }catch(e){ return false; }
+}
 
 // Manual quality override (player menu), persisted per browser. Auto runs the
 // automatic ladder; Original never transcodes video (direct/remux only); a
@@ -735,9 +795,15 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const beginning=beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent);
   const inputs=capturePlayInputs(fileId,meta,retryIntent);
   const attempt=Object.freeze({...beginning,...inputs,fileContext,fileId,title,resumeMs,knownDurMs,meta});
-  const {modal,playerWasOpen}=attempt;
+  const {modal,video,playerWasOpen}=attempt;
   document.getElementById("playTitle").textContent=title;
   modal.classList.add("open");
+  // WebKit grants media permission to the element, in the user gesture.
+  // Decision/session/readiness can outlast its transient activation window.
+  // Explicitly load the empty persistent element now; prepareForLoad in
+  // WebKit records the gesture even before a source is available. Never load
+  // an incumbent here: a refused replacement must retain its picture/position.
+  if(!video.getAttribute?.("src")&&!video.currentSrc&&!video.srcObject) video.load();
   if(!playerWasOpen){
     const app=document.getElementById("app"); if(app) app.inert=!WATCH;
     const initial=document.getElementById("pbplay"); if(initial) initial.focus({preventScroll:true});
@@ -786,7 +852,8 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
       resumeMs:latest&&wanted.controlSeek?Math.round(wanted.controlSeek.targetMs):resumeMs,
       wantsPlayback:fullIntent.wantsPlayback,
       selection:latest?playbackSelection(wanted,meta.fileContext||fileId):attempt.selection,
-      audioOffsetMs:latest?(wanted.aoffset||0):attempt.sessionAudioOffset};
+      audioOffsetMs:latest?(wanted.aoffset||0):attempt.sessionAudioOffset,
+      peakIncumbent:attempt.peakIncumbent};
     play.failedPreparation=retry;
     if(play.pendingIntent===fullIntent)play.pendingIntent=null;
     // Only a predecessor with a picture can survive a refused replacement.
@@ -869,6 +936,11 @@ function capturePlayInputs(fileId,meta,retryIntent){
         priorKbps:PLAYER.priorKbps})
     : null;
   const continuingPlayback=!!(samePlaybackFile(PLAYER,fileId,meta));
+  // File identity survives Close, but its admitted display peak belongs only
+  // to the open presentation. An explicit retry carries its own snapshot.
+  const peakIncumbent=retryIntent?.peakIncumbent||(continuingPlayback
+    &&document.getElementById("modal")?.classList.contains("open")
+    ?{capsSnapshot:{display:{...(PLAYER.capsSnapshot?.display||{})}}}:null);
   const carriedSeek=retryIntent?.controlSeek||(continuingPlayback&&PLAYER.controlSeek);
   const replacementControlSeek=carriedSeek
     ? Object.assign({},carriedSeek,{executed:false,frameFloor:0,audioPositionMs:null})
@@ -882,7 +954,7 @@ function capturePlayInputs(fileId,meta,retryIntent){
   // The track choice this playback runs with: the detail screen's pickers on a
   // cold start, what is already playing on an internal reopen.
   const selection=retryIntent?.selection??playbackSelection(PLAYER, meta&&meta.fileContext||fileId);
-  const modal=document.getElementById("modal"), video=document.getElementById("video");
+  const modal=document.getElementById("modal"), video=/** @type {HTMLVideoElement} */ (document.getElementById("video"));
   const playerWasOpen=modal.classList.contains("open");
   const playerOpener=playerWasOpen?(PLAYER&&PLAYER._opener):document.activeElement;
   const playerOpenerClick=playerWasOpen?(PLAYER&&PLAYER._openerClick):
@@ -895,7 +967,7 @@ function capturePlayInputs(fileId,meta,retryIntent){
   // waiting actually experiences, and it includes every server round trip
   // this function is about to make.
   const clickedAt=performance.now();
-  return Object.freeze({requestedAttemptReason,skipDefaultSub,sessionAudioOffset,replacementBandwidthSeed,
+  return Object.freeze({requestedAttemptReason,skipDefaultSub,sessionAudioOffset,replacementBandwidthSeed,peakIncumbent,
     replacementControlSeek,replacementControlSequenceFloor,replacementControlIntentGeneration,
     selection,modal,video,playerWasOpen,playerOpener,playerOpenerClick,playerLastFocused,
     watchTicket,clickedAt});
@@ -908,7 +980,7 @@ async function decideForPlay(attempt){
   // play. Asking for the policy default and correcting afterwards is what used
   // to force a remux over a perfectly decodable audio choice.
   let decision;
-  try{ decision=await preparation.run(signal=>askDecision(attempt.fileContext||fileId, qualityForce(), requestSelection,signal));}
+  try{ decision=await preparation.run(signal=>askDecision(attempt.fileContext||fileId, qualityForce(), requestSelection,signal,attempt.peakIncumbent));}
   catch(e){failPreparation(e,attempt);return null;}
   if(!openIsCurrent()) return null;
   let retestDecodeLimit=false;
@@ -943,7 +1015,7 @@ async function decideForPlay(attempt){
         // would hand the learned-limit transcode the policy default audio and
         // silently discard the viewer's choice on exactly the devices that need
         // the transcode most.
-        const d2=await preparation.run(signal=>askDecision(attempt.fileContext||fileId,"transcode",requestSelection,signal));
+        const d2=await preparation.run(signal=>askDecision(attempt.fileContext||fileId,"transcode",requestSelection,signal,{capsSnapshot:decision._capsSnapshot}));
         if(!openIsCurrent()) return null;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
@@ -1096,6 +1168,7 @@ function buildPlayer(attempt,decided,prepared){
     controlPresentedFrames:0,controlHasFrameCallbacks:false,
     wantsPlayback:fullIntent.wantsPlayback,
     mediaPredecessor:outgoing,
+    qualityChrome:samePlaybackFile(outgoing,fileId,meta)?outgoing.qualityChrome:null,
     internalMediaReset:true,pendingOpenAttempt:openAttempt,libraryChannel,
     terminalStop:null, };
 }
@@ -1323,6 +1396,7 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   const {watchTicket,preparation,fullIntent,video,fileId}=attempt;
   const {applied}=prepared;
   if(!openIsAttached()) return;
+  if(applied.textSub!=null) openedPlayer.curSub=applied.textSub;
   openedPlayer.pendingOpenAttempt=null;
   watchAccept(watchTicket,openedPlayer);
   samplePlaybackPresentationClock(video,openedPlayer);
@@ -1331,12 +1405,14 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   if(play.pendingIntent===fullIntent)play.pendingIntent=null;
 
   // A pre-play TEXT subtitle, applied to the stream that just attached. Here
-  // rather than before the route, because setSub() shifts the cues by
+  // rather than before the route, because subtitle attachment shifts cues by
   // `PLAYER.offset` and the route is what sets it. A <track> is not a stream
   // restart, so the choice arrives with the first frames.
-  if(applied.textSub!=null && openIsAttached()) setSub(applied.textSub);
+  if(applied.textSub!=null && openIsAttached()){
+    attachPlaybackSubtitle(video,openedPlayer,applied.textSub);
+  }
 
-  if(!openIsAttached()) return;
+  if(!openIsAttached()||openedPlayer.playPermissionDenied) return;
 
   // Once, per playback, as soon as the element knows what it is decoding.
   probeDecode();
@@ -1469,7 +1545,7 @@ async function executePlaybackMediaChange(p,change){
       if(change.from!=null) recordAutoSwitch(p,change.from,change.height||"transcode Auto",
         change.switchReason||change.reason,pos,p.sessionId);
     }
-    if(subtitle>=0&&p.burnedSub==null) await setSub(subtitle);
+    if(subtitle>=0&&p.burnedSub==null) await attachPlaybackSubtitle(v,p,subtitle);
     return true;
   }catch(e){
     if(!live()) return false;
@@ -1985,6 +2061,12 @@ function armHitchDetector(v){
       prev=null;rateWin.length=0;
       queuePlaybackFrame(v,p,step);return;
     }
+    // Callback delivery is presentation evidence even when its media timestamp
+    // is unusable. Keep the receipt clock independent of the hitch diagnostic
+    // filter; otherwise moving video can look stalled to playbackProgressTick.
+    // Seek settlement below still requires trustworthy timestamped evidence.
+    if(typeof recordFrameDropFrame==="function")recordFrameDropFrame(v,p,now,meta);
+    p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
     if(!v.paused&&!v.seeking&&PlaybackPolicy.frameMetadataAheadOfClock(meta,{
       nowMs:now,currentTime:v.currentTime,playbackRate:v.playbackRate||1,nominalSeconds:nominal()||0
     })){
@@ -1994,11 +2076,12 @@ function armHitchDetector(v){
         current_time:v.currentTime,expected_display_time_ms:meta.expectedDisplayTime??null,
         presented_frames:meta.presentedFrames??null,session_id:p.sessionId||null});
       if(h.metadataFaults.length>16) h.metadataFaults.shift();
-      // Preserve the last trustworthy frame: the next callback still spans
-      // this interval and can reveal a real hold, backward step or late frame.
+      // Preserve the last trustworthy timestamp for hitch comparisons, while
+      // letting the element clock and this receipt prove ordinary playback.
+      // A pending seek still needs a valid target timestamp and cannot use it.
+      sampleStartupPresentation(v,p);
       queuePlaybackFrame(v,p,step);return;
     }
-    p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
     if(epoch===(p.controlPresentationEpoch||0))
       settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames,observation);
     p.hitches.frames++;

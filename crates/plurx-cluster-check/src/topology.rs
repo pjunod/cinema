@@ -795,12 +795,12 @@ async fn observe_corpus(
 /// One node's applied Raft entries broken down by payload kind, with the term
 /// its metrics reported at the sample. Read from local metrics only — no
 /// quorum operation — so sampling it cannot itself append an entry.
-struct PayloadCounts {
-    blank: u64,
-    membership: u64,
-    normal: u64,
-    current_term: u64,
-    class_counts: Vec<u64>,
+pub(crate) struct PayloadCounts {
+    pub(crate) blank: u64,
+    pub(crate) membership: u64,
+    pub(crate) normal: u64,
+    pub(crate) current_term: u64,
+    pub(crate) class_counts: Vec<u64>,
 }
 
 async fn applied_payload_counts(
@@ -840,7 +840,7 @@ async fn applied_payload_counts(
 /// itself appends nothing, which the `watermark-experiment` subcommand
 /// proves. Retried so a background commit landing mid-sample moves the
 /// boundary instead of skewing the breakdown.
-async fn stable_applied_sample(
+pub(crate) async fn stable_applied_sample(
     cluster: &mut ClusterProcesses,
     node_id: u64,
 ) -> Result<(u64, PayloadCounts)> {

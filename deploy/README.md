@@ -1,15 +1,17 @@
 # Deploying plurx
 
-plurx is a single static binary (`plurxd`) plus an embedded web app. Pick the
-path that matches your setup.
+The plurx server is a static binary (`plurxd`) with an embedded web app.
+Native GUI installations also install a separate tray app and controller helpers;
+headless installations keep the server-only dependency closure. Pick the path
+that matches your setup.
 
 Managed offline subtitle setup initially ships its pinned recognizer in the
 Linux Docker image and the native macOS release archive/source installer.
-macOS keeps the verified bundle in `bin/subtitle-engine/` beside `plurxd`;
+macOS keeps the verified bundle in `runtime/subtitle-engine/` beside `plurxd`;
 Docker uses `/usr/local/bin/subtitle-engine/`. The macOS source installer
 builds the engine automatically and needs CMake among its build prerequisites.
 Native Linux `.deb`/`.rpm`, native systemd source installs, Windows, Raspberry
-Pi native installs and binary-only installs do not yet package this managed
+Pi native installs and headless or explicit server-only binary installs do not yet package this managed
 engine and are unqualified for setup without a terminal. Existing advanced
 local-engine configuration remains separate from managed package readiness.
 
@@ -77,6 +79,43 @@ It writes `deploy/.env` (with your uid/gid) and
 `deploy/docker-compose.override.yml` from their examples when they are
 missing, creates the data directory named in `.env`, runs `make docker-up`,
 and then waits for `/readyz` and prints the version the server reports.
+On a Linux laptop's ordinary local graphical login, this also downloads and opens
+an unprivileged **host** tray for that exact Compose deployment. The container
+image stays headless. Headless, SSH-only and root installs skip the GUI; root
+prints a command to run later as the desktop user. To add the tray to an
+already-running checkout without recreating its containers, run:
+
+```sh
+python3 scripts/install-compose-tray --checkout "$PWD" --update-mode source
+# For a deployment made with docker-image-up, select --update-mode published instead.
+```
+
+The host needs Python 3, the GTK4 runtime, `xdg-utils` and access to the selected
+local Docker Unix socket. The installer downloads the latest stable standalone
+tray for amd64 or arm64 from GitHub and verifies its release `SHA256SUMS` before
+staging. It installs runtime packages only; Rust, GTK development headers and a
+host server package are not needed. Initial download verification uses GitHub
+HTTPS/checksums, separately from the native updater's signed manifests.
+Use `--tray-release vX.Y.Z` to select a stable tray release. A release without
+tray artifacts fails before runtime package changes and never falls back to
+compilation. Developers can explicitly choose `--build-tray`; with Make use
+`INSTALL_FLAGS=--build-tray`. This supports the standard two-service project in
+`deploy/docker-compose.yml`, including local overrides that retain the owned restart-policy variable.
+Literal restart overrides are refused before promising persistent startup.
+Refresh preserves the explicit source/published deployment choice. The tray pins Docker
+engine, full container and image identities; after `make docker-up` recreates
+containers, rerun the command to refresh that same selection. It refuses a
+remote engine or ambiguous selection. **Start server automatically** persists
+Docker's `always` / `no` policy in `deploy/.env` and updates both containers;
+Docker itself must start at boot. An existing `unless-stopped` policy remains
+until explicitly changed. Tray login is a separate user preference. Stop and
+Restart request graceful TERM without forced container termination.
+
+Container upgrades continue through `make docker-up` for source or the qualified
+`make docker-image-up` path for published images. The tray explains this when
+checking for updates; it does not apply native GitHub release archives to an
+image. Use `INSTALL_FLAGS=--server-only` to skip host controls explicitly.
+
 Host-specific bits (media mounts, explicit GPU selections, and shared Docker networks) live in
 that untracked override file, so pulling updates never conflicts with local
 edits — put your mounts there and run `make docker-up` again; that is
@@ -533,20 +572,26 @@ for precedence, node-local revision guards, identity replacement and recovery.
 ## Bare metal
 
 ```sh
-# Linux amd64/arm64, macOS, Windows — one binary; ffmpeg is the base runtime dependency.
-make install-binary # builds plurxd from this checkout and puts it on PATH (no service)
-plurxd run          # serves :32400; config via ./plurx.toml or PLURX_* env
+make install-binary # core binaries and, in GUI sessions, system tray binaries
+# On a GUI host use Start in the tray. A fresh server stays stopped and startup stays off.
+# On a headless host the standalone command remains:
+plurxd run
 ```
 
-`make install-binary` also installs `ffmpeg`/`ffprobe` with the platform's
-package manager when they are missing (or point `PLURX_FFMPEG`/`PLURX_FFPROBE`
-at a build such as jellyfin-ffmpeg for the best hardware/tone-mapping
-support). To keep it running across reboots, install it as a service instead —
-`make install` picks the native Windows service, **systemd** on Linux, or
-**launchd** on macOS, each described below. Every target takes
-`INSTALL_FLAGS`: `--binary <path>` installs a prebuilt `plurxd` instead of
-building, `--prefix <dir>` moves the binary, `--dry-run` prints the plan, and
-`make uninstall` removes the service while keeping data and configuration.
+On macOS and supported Linux desktops the target installs the complete managed
+core/controller/companion cohort; closing the tray leaves the server running.
+Existing running and startup preferences survive reinstallation. Headless and
+explicit `INSTALL_FLAGS=--server-only` installs retain the standalone binary
+path and acquire no GTK dependencies. A bare `cargo build` or manual copy of
+`plurxd` installs only the daemon.
+
+`make install` selects the native Windows service, systemd on Linux, or launchd
+on macOS. `--dry-run` prints the plan. `--binary <path>` supplies an exact-source
+prebuilt daemon; desktop companions still require their host build tools.
+Custom `--prefix` is available on the explicit server-only path. Package-managed
+Linux removal uses apt/dnf; the legacy uninstall refuses a native record before
+changing files. The macOS legacy uninstall likewise refuses native runtime
+removal rather than deleting an unrelated prefix binary.
 
 Permanent Dolby Vision Profile 7 → 8.1 conversion additionally needs
 `dovi_tool` and `mkvmerge` 68 or newer. The Docker image includes pinned builds;
@@ -690,7 +735,19 @@ to its data dir. One command from the repository root:
 make install          # or: make install-linux
 ```
 
-It builds `plurxd` from this checkout (`--binary` in `INSTALL_FLAGS` installs a
+In a verified local GUI session on apt/dpkg or dnf/rpm Linux, the installer
+builds the native server/controller and obtains the exact matching prebuilt
+GTK tray, assembles the matching native package cohort and installs it through
+the package manager. The released tray must match both the checkout version and
+source commit; unreleased developer checkouts require
+`INSTALL_FLAGS=--build-tray` to opt into local tray compilation and GTK development
+packages. Ordinary native release packages already contain the prebuilt tray. Known legacy source
+units migrate only after confirmed graceful exit; unknown custom units refuse
+migration. Existing enabled/running choices survive. The current install opens
+the tray/control window, separately from its future login preference. Headless
+and explicit `--server-only` installs use the source service path below.
+
+That server-only path builds `plurxd` from this checkout (`--binary` in `INSTALL_FLAGS` installs a
 prebuilt one instead), installs ffmpeg with apt/dnf/pacman/zypper/apk when it
 is missing, creates the `plurx` user and `/var/lib/plurx`, installs the binary
 and the unit, enables and starts the service, then waits for `/readyz` and

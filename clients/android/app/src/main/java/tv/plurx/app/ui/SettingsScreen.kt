@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.Appearance
+import tv.plurx.app.data.serverSettingsLabel
 import tv.plurx.app.data.HomeGrouping
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.OfflineNetwork
@@ -82,10 +83,10 @@ fun SettingsScreen(
     val offlineBookRecords by vm.offlineBookRecords.collectAsStateWithLifecycle()
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
-    var audio by remember { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
-    var sub by remember { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
-    var confirmingSignOut by remember { mutableStateOf(false) }
-    var diagnosticSignOutConfirmation by remember { mutableStateOf(false) }
+    var audio by rememberEntryPresentation("settings:audio") { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
+    var sub by rememberEntryPresentation("settings:sub") { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
+    var confirmingSignOut by rememberEntryPresentation("settings:confirmingSignOut") { mutableStateOf(false) }
+    var diagnosticSignOutConfirmation by rememberEntryPresentation("settings:diagnosticSignOutConfirmation") { mutableStateOf(false) }
     val diagnosticState by tv.plurx.app.diagnostics.DiagnosticRuntime.state.collectAsStateWithLifecycle()
     if (diagnosticSignOutConfirmation) {
         AlertDialog(onDismissRequest={ diagnosticSignOutConfirmation=false },title={ Text("Clear pending local reports and sign out?") },
@@ -152,6 +153,12 @@ fun SettingsScreen(
                     "subtitles from the first frame; After a short pause builds them the first time you turn them on.",
             ) {
                 ChoicePicker("Quality", preferences.playbackQuality, PlaybackQuality.entries, { it.label }, vm::setPlaybackQuality)
+                ChoicePicker("HDR display peak", preferences.hdrDisplayPeak,
+                    tv.plurx.app.data.HdrDisplayPeak.entries, { it.label }, vm::setHdrDisplayPeak)
+                Text("Auto uses the display's desired maximum luminance when known. " +
+                    "Choose a value to override it on this device. Changes and HDMI display " +
+                    "reports apply to the next playback; the current session keeps its target.",
+                    style = MaterialTheme.typography.bodySmall)
                 ChoicePicker("Audio language", audio, LANGS, { it.second }, onSelect = {
                     audio = it
                     vm.setLanguages(audio.first, sub.first)
@@ -181,6 +188,7 @@ fun SettingsScreen(
         }
         val appearance: @Composable () -> Unit = {
             SettingsSection("Appearance", "Theme and room brightness are independent, matching the web viewer.") {
+                ChoicePicker("Layout", preferences.layout, tv.plurx.app.data.ViewerLayout.entries, { it.label }, vm::setLayout)
                 ChoicePicker("Theme", preferences.theme, ThemeId.entries, { it.label }, vm::setTheme)
                 ChoicePicker("Appearance", preferences.appearance, Appearance.entries, { it.label }, vm::setAppearance)
                 ChoicePicker("Poster size", preferences.posterSize, PosterSize.entries, { it.label }, vm::setPosterSize)
@@ -260,7 +268,7 @@ fun SettingsScreen(
 
             SettingsSection("Account", null) {
                 LabeledValueRow("Signed in as", vm.username ?: "—")
-                LabeledValueRow("Server", vm.serverName ?: vm.origin)
+                LabeledValueRow("Server", serverSettingsLabel(vm.serverName, vm.serverHostname) ?: vm.origin)
                 PreferenceAction("Change server", onClick = vm::changeServer)
                 PreferenceAction(
                     "Sign out",

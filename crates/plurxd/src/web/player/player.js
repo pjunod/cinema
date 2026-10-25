@@ -36,6 +36,7 @@
  * @property {string|null} deliveredRange  the grade on the wire (decision, then each session's report)
  * @property {number|null} deliveredDvProfile
  * @property {any} [effectiveProcessing] the accepted current-generation DV processing report behind HDR10-E, or null
+ * @property {{active:string[],details:{badge:string,active:boolean,text:string}[],requires_effective_processing:boolean}|null} [enhancement] this session's server-computed DV enhancement (FEL / RPU / DYN), or null
  * @property {boolean} [copyHls]           the HLS session copies the video stream
  * @property {boolean} [vod]               the session answered with a VOD (fixed) playlist
  * @property {string|null} [encoder]       the session's encoder, once one reports
@@ -59,6 +60,8 @@
  * @property {number|null} [burnedSub]     the subtitle burned into the picture, if any
  * @property {any} [preplay]               this playback's pre-play track choice, carried across reopens
  * @property {number} [aoffset]            the viewer's audio offset for this session, ms
+ * @property {{kind:"off"}|{kind:"source",index:number}|{kind:"translation",asset_id:string}} [captionIntent] explicit caption owner, independent of numeric source tracks
+ * @property {number} [captionIntentSerial] fences every source and translation caption selection
  * @property {any} [_subOff]               the subtitle-offset control's state
  * @property {number} [_subtitleUnavailableIntent] caption failure notice's selection/seek intent
  * @property {number} [_subtitleUnavailableIndex] caption failure notice's track ordinal
@@ -99,8 +102,11 @@
  * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds
  * @property {boolean} [internalMediaReset] the next media reset is ours, not a fault
  * @property {any} [mediaAttachment]       the current media attachment token
+ * @property {number} [frameDropAuthGeneration] authentication generation that owns frame-drop observations
+ * @property {{count:number,last:number}} [frameDropBudget] current attachment's incident count and cooldown time
  * @property {{sessionId:string|null,attachment:any,reason:string|null,message?:string}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
  * @property {{key:string,sinceMs:number,lastMs:number}|null} [recoveryHealth] contiguous healthy recovery evidence
+ * @property {any} [playPermissionDenied] browser permission refusal retained until a new attachment
  * @property {any} [transportCommand] original transport command awaiting an actual element transition
  * @property {number} [_transportCommandSequence] causal command ordinal within this attempt
  * @property {any} [terminalStop]          the stop that ended this player, once one did
@@ -187,8 +193,11 @@
  * @property {string|null} [waitReportedDetail]
  * @property {number|null} [waitNudgedAt]  the wait began-time a nudge was already spent on
  * @property {any} [surfaceState]          the presenter's shared state (PLAYBACK_SURFACE)
+ * @property {any} [qualityChrome]         last presented dimensions and transient quality notice
  * @property {any} [progressWatch]         the presentation-progress watch ({key, clock, frames, at, startedAt, fired})
  * @property {number|null} [presentationAdvancedAt] performance.now() the presented position last advanced
+ * @property {{attachment:any,element:HTMLMediaElement}|null} [transportPresentation] actual presentation proof for the current attachment and element
+ * @property {{attachment:any,element:HTMLMediaElement,intentGeneration:number,source:string|null,nativeExecution?:number,record:any,settled?:boolean,cancelledReason?:string,previous?:any}|null} [transportPlayInvocation] latest owned play invocation
  * @property {{attachment:any,since:number,done:boolean}|null} [startupEvidence] frame-driven first presentation sample owed to the current attachment
  * @property {number} [stallDeferrals]     times the current wait deferred to the server's verdict
  * @property {number|null} [stallDeferralsAt] the wait began-time those deferrals count against
@@ -199,7 +208,7 @@
  * @property {number} [controlSeekSequence]
  * @property {number} [controlIntentGeneration]
  * @property {number} [controlSequenceFloor]
- * @property {number} [controlPresentedFrames]
+ * @property {number} [controlPresentedFrames] attachment-owned frame callback receipts, independent of timestamp validity
  * @property {boolean} [controlHasFrameCallbacks]
  * @property {any} [controlFrameCancel]    cancels the frame-callback loop
  * @property {()=>void} [controlFrameRearm] renews observation for the current seek
@@ -572,8 +581,52 @@ function configureHlsStartupDeadline(player,graceMs){
   if(episode.transport==='native') armNativeHlsDeadline(player,episode);
   episode.pausedSeek?.armDeadline?.();
 }
+function notePlaybackPlayRejection(player,invocation,error){
+  const video=invocation.element, record=invocation.record;
+  const current=PLAYER===player&&player.transportPlayInvocation===invocation
+    &&player.mediaAttachment===invocation.attachment
+    &&document.getElementById("video")===video
+    &&(player.controlIntentGeneration||0)===invocation.intentGeneration
+    &&player.wantsPlayback===true
+    &&(video.getAttribute?.("src")||video.currentSrc||video.src||null)===invocation.source
+    &&player.hlsStartup?.native?.execution===invocation.nativeExecution;
+  const name=typeof error?.name==='string'&&/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(error.name)?error.name:'Error';
+  const code=Number.isSafeInteger(error?.code)?error.code:null;
+  const status=Number.isSafeInteger(error?.status)&&error.status>=0&&error.status<=999?error.status:null;
+  const cancelled=name==='AbortError'&&!!invocation.cancelledReason;
+  // A changed attachment fences effects; it does not prove why the original
+  // browser command rejected. Keep even late failures visible on their owner.
+  clientLog({level:cancelled?'info':'warn',event:cancelled?'transport_play_cancelled':'transport_play_rejected',
+    message:cancelled?'An owned media command cancelled pending Play.':current?'The browser rejected the requested playback command.':'A retired playback command was rejected.',
+    detail:`${cancelled?'cancelled:'+invocation.cancelledReason:current?'rejected':'late_rejection'}:${name}:code=${code??'none'}:status=${status??'none'}`,code,
+    attempt:record.attempt,session_id:record.session,file_id:record.file_id,title:record.title,
+    method:record.method,vcodec:record.vcodec,
+    transport:record});
+  const episode=player.hlsStartup;
+  if(!cancelled&&current&&episode&&hlsStartupCurrent(player,episode)&&episode.state==='active'){
+    // Keep the command failure separate from decoder evidence and viewer
+    // Pause. Permission refusal stops below; other failures retain the
+    // startup owner's existing absolute diagnosis deadline.
+    episode.playRejection={name,code,status};
+  }
+  if(current&&!invocation.cancelledReason&&name==='NotAllowedError'&&!player.playPermissionDenied){
+    // Permission is a transport refusal, never evidence of missing bytes or a
+    // failed decoder. Retire every automatic owner now, before its stall clock
+    // can spend a reopen on the same unapproved element. Keep the viewer's
+    // intent and destination for an explicit gesture-bound retry.
+    player.playPermissionDenied={attachment:invocation.attachment,element:video};
+    endWait(false);
+    stopPlayerForExhaustion();
+    raisePlaybackSurface("owner_stopped",{player_stopped:true,
+      title:"Your browser needs permission to play.",
+      detail:"Choose Try again to allow playback. Your place and track choices are saved.",
+      actions:["retry","close"]});
+  }
+}
 function diagnoseHlsStartup(player){
   const episode=player&&player.hlsStartup;
+  if(episode?.playRejection) return {title:'The browser could not start playback.',
+    detail:`The browser rejected Play (${episode.playRejection.name}). Retry to issue a new playback request.`};
   const failure=episode&&episode.latestFailure;
   const explained=failure&&PlaybackPolicy.streamFailureOverlay(failure,Date.now());
   if(episode?.transport==='native'&&episode.state==='exhausted'&&failure?.message) return {
@@ -633,7 +686,8 @@ function armHlsStartupRetry(video,player,episode){
     if(episode.retry.intentGeneration!==(player.controlIntentGeneration||0)){
       episode.retry.state='cancelled'; return;
     }
-    if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline');
+    if(episode.state!=='presenting'&&performance.now()>=episode.deadlineMs)
+      return exhaustHlsStartup(player,'deadline');
     const seekLoading=episode.pausedSeek?.pending===player.controlSeek
       &&episode.pausedSeek?.attachment===player.mediaAttachment
       &&episode.pausedSeek?.intentGeneration===(player.controlIntentGeneration||0);
@@ -1625,6 +1679,11 @@ function nativeHlsResourceUrl(uri,parent){
     child.searchParams.set(key,origin.searchParams.get(key));
   return child.href;
 }
+// Readiness consumes the full VOD timeline, including processed two-second
+// windows. Keep a finite media-document budget comparable to the retained
+// rendition manifest (4 MiB), plus the bounded acquisition-start tag. A master
+// or an error response is a different, small document; init has its own bound.
+const NATIVE_HLS_BODY_LIMITS=Object.freeze({playlist:4*1024*1024+72,master:65536,error:65536,init:1048576});
 async function nativeHlsFetch(player,episode,url,{init=false}={}){
   const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
   const current=()=>nativeHlsCurrent(player,episode,execution,intent);
@@ -1646,7 +1705,8 @@ async function nativeHlsFetch(player,episode,url,{init=false}={}){
     return await Promise.race([bound,(async()=>{
       const headers=init?{Range:'bytes=0-1048575'}:{};
       const res=await fetch(url,{signal:ctl.signal,headers,cache:'no-store',redirect:'error'});
-      const max=init?1048576:65536;
+      const max=!res.ok?NATIVE_HLS_BODY_LIMITS.error:
+        init?NATIVE_HLS_BODY_LIMITS.init:NATIVE_HLS_BODY_LIMITS.playlist;
       if(!res.body?.getReader) throw Object.assign(new Error('Native readiness response has no bounded body.'),{terminal:true});
       const reader=res.body.getReader(),chunks=[];bodyReader=reader;let size=0;
       if(ctl.signal.aborted){reader.cancel().catch(()=>{});throw Object.assign(new Error('Native readiness cancelled.'),{cancelled:true});}
@@ -1677,6 +1737,10 @@ async function nativeHlsFetch(player,episode,url,{init=false}={}){
       const text=new TextDecoder().decode(bytes);
       if(!text.trimStart().startsWith('#EXTM3U'))
         throw Object.assign(new Error('The HLS readiness response is not a playlist.'),{terminal:true});
+      // The initial URL can itself be a scalar media playlist. Classify from
+      // its grammar before applying the smaller master budget, not its URL.
+      if(size>NATIVE_HLS_BODY_LIMITS.master&&/^#EXT-X-(?:I-FRAME-)?STREAM-INF:/m.test(text))
+        throw Object.assign(new Error('Native readiness master exceeds its byte limit.'),{terminal:true});
       return {text,url:res.url||url};
     })()]);
   }finally{clearTimeout(timer);ctl.signal.removeEventListener('abort',abortListener);ctl.abort();episode.loaders.delete(loader);}

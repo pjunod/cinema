@@ -9,6 +9,9 @@ struct PlaybackInfoFact: Identifiable {
     var note: String? = nil
     var group: String = "Picture & sound"
     var diagnosticOnly = false
+    /// Neutral secondary lines, each shown on its own line under the value
+    /// (the Dolby Vision enhancement row's per-enhancement explanations).
+    var lines: [String] = []
 }
 
 struct PlaybackInfoPanel: View {
@@ -222,6 +225,9 @@ struct PlaybackInfoPanel: View {
                                 Text(row.label).foregroundStyle(muted)
                                 Text(row.value).monospacedDigit()
                             }
+                        }
+                        ForEach(Array(row.lines.enumerated()), id: \.offset) { _, line in
+                            Text(line).font(.system(size: labelSize)).foregroundStyle(muted)
                         }
                         if let note = row.note, !note.isEmpty {
                             Text(note).font(.system(size: labelSize)).foregroundStyle(muted)

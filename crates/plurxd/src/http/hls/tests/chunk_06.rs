@@ -503,7 +503,7 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
     let row = |height: u32, route: CandidateRoute| {
         let digest = [(height / 8) as u8 ^ route as u8; 32];
         QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route,
@@ -527,14 +527,14 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
         row(480, CandidateRoute::Encode),
     ];
     let mut stale_processed = row(1080, CandidateRoute::Encode);
-    stale_processed.processed_hdr10 = true;
+    stale_processed.processed_dv = true;
     stale_processed.planned_codec = Some("hevc".into());
     stale_processed.grade = plurx_core::transcode::OutputGrade::Hdr10;
     stale_processed.sustainable = false;
     let mut with_description = vec![stale_processed];
     with_description.extend(offered.clone());
     assert!(auto_encode_fallback(&with_description, None, 1080)
-        .is_some_and(|row| !row.processed_hdr10), "stale descriptive identity cannot become ordinary Auto fallback");
+        .is_some_and(|row| !row.processed_dv), "stale descriptive identity cannot become ordinary Auto fallback");
     let now = 10 * NETWORK_PRIOR_STARVED_TTL_MS;
     let prior = NetworkPrior {
         link_worst_rung_height: Some(1080),
@@ -593,7 +593,7 @@ fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collisio
     use plurx_core::playback::candidate::CandidateId;
     let mut candidate = crate::transcode::continuous_test_candidate_context(
         CandidateId::for_recipe_digest([7; 32]), [7; 32], 720).selected_candidate;
-    candidate.processed_hdr10 = true;
+    candidate.processed_dv = true;
     candidate.planned_codec = Some("hevc".into());
     candidate.grade = plurx_core::transcode::OutputGrade::Hdr10;
     candidate.sustainable = false;
@@ -615,7 +615,7 @@ fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collisio
     assert!(initial.iter().any(|row| row.candidate.id == partial_ordinary.candidate.id),
         "stale complete description cannot suppress local partial ordinary Auto fallback");
     assert!(auto_encode_fallback(&initial.iter().map(|row| row.candidate.clone()).collect::<Vec<_>>(), None, 720)
-        .is_some_and(|row| !row.processed_hdr10));
+        .is_some_and(|row| !row.processed_dv));
     for ceiling in [None, Some(720)] {
         let prepared = preparation_catalog_workers(&mixed, "node-a", true, ceiling);
         assert!(prepared.iter().any(|row| row.candidate.id == partial_ordinary.candidate.id),
@@ -2339,6 +2339,12 @@ fn quality_schedule_failures_separate_final_refusals_from_transient_ones() {
     );
 }
 
+fn continuous_candidates_from_workers_at_24(
+    workers: &[crate::media_pool::WorkerQualityCandidate],
+) -> ContinuousCandidatesResponse {
+    continuous_candidates_from_workers(workers, plurx_core::transcode::Rational::new(24, 1))
+}
+
 #[test]
 fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
@@ -2349,7 +2355,7 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
             dispatch_supported: true,
             partial: false,
             candidate: QualityCandidate {
-                processed_hdr10: false,
+                processed_dv: false,
                 id: CandidateId::for_recipe_digest([seed; 32]),
                 recipe_digest: [seed; 32],
                 route: CandidateRoute::Encode,
@@ -2369,7 +2375,7 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     let primary = candidate("one", 1, 1080, 1920, 1080);
     let other_node = candidate("two", 2, 720, 1280, 720);
     let alias = candidate("one", 3, 900, 1920, 1080);
-    assert!(continuous_candidates_from_workers(&[
+    assert!(continuous_candidates_from_workers_at_24(&[
         primary.clone(),
         other_node.clone(),
         alias.clone()
@@ -2380,7 +2386,7 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     let mut hevc = primary.clone();
     hevc.candidate.planned_codec = Some("hevc".into());
     assert!(
-        continuous_candidates_from_workers(&[hevc.clone(), companion.clone()])
+        continuous_candidates_from_workers_at_24(&[hevc.clone(), companion.clone()])
             .pairs
             .is_empty(),
         "HEVC is not offered in an AVC family"
@@ -2388,12 +2394,12 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     let mut avc = primary.clone();
     avc.candidate.planned_codec = Some("h264".into());
     assert!(
-        !continuous_candidates_from_workers(&[avc, companion.clone()])
+        !continuous_candidates_from_workers_at_24(&[avc, companion.clone()])
             .pairs
             .is_empty(),
         "explicit AVC and legacy AVC coexist"
     );
-    let response = continuous_candidates_from_workers(&[
+    let response = continuous_candidates_from_workers_at_24(&[
         primary.clone(),
         other_node,
         alias,
@@ -2408,22 +2414,82 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     let mut unsupported = companion;
     unsupported.candidate.normalized_geometry = false;
     assert!(
-        continuous_candidates_from_workers(&[primary.clone(), unsupported.clone()])
+        continuous_candidates_from_workers_at_24(&[primary.clone(), unsupported.clone()])
             .pairs
             .is_empty()
     );
     unsupported.candidate.normalized_geometry = true;
     unsupported.dispatch_supported = false;
     assert!(
-        continuous_candidates_from_workers(&[primary.clone(), unsupported.clone()])
+        continuous_candidates_from_workers_at_24(&[primary.clone(), unsupported.clone()])
             .pairs
             .is_empty()
     );
     unsupported.dispatch_supported = true;
     unsupported.partial = true;
-    assert!(continuous_candidates_from_workers(&[primary, unsupported])
+    assert!(continuous_candidates_from_workers_at_24(&[primary, unsupported])
         .pairs
         .is_empty());
+}
+
+/// Animals (2160p, 24/1) on a Pixel: the catalog offered a 2160p primary,
+/// which H.264 High@5.0 cannot carry, so the continuous plan was refused at
+/// session creation and the fallback start answered 500. Only rows inside
+/// the envelope at the source's measured cadence form a family.
+#[test]
+fn continuous_catalog_offers_only_rows_inside_the_avc_level_envelope() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::transcode::Rational;
+    let candidate = |seed: u8, target, width, height| crate::media_pool::WorkerQualityCandidate {
+        node_id: "one".into(),
+        binding: None,
+        dispatch_supported: true,
+        partial: false,
+        candidate: QualityCandidate {
+            processed_dv: false,
+            id: CandidateId::for_recipe_digest([seed; 32]),
+            recipe_digest: [seed; 32],
+            route: CandidateRoute::Encode,
+            planned_codec: None,
+            normalized_geometry: true,
+            width,
+            height,
+            target_height: target,
+            average_bps: Some(8_000_000),
+            peak_bps: None,
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        },
+    };
+    let uhd = candidate(1, 2160, 3840, 2160);
+    let hd = candidate(2, 1080, 1920, 1080);
+    let sd = candidate(3, 720, 1280, 720);
+    let at = |rate| continuous_candidates_from_workers(&[uhd.clone(), hd.clone(), sd.clone()], rate);
+    let film = at(Rational::new(24, 1));
+    assert!(!film.candidates.iter().any(|row| row.id == uhd.candidate.id));
+    assert!(film
+        .pairs
+        .iter()
+        .all(|pair| pair.primary_candidate_id != uhd.candidate.id
+            && pair.companion_candidate_id != uhd.candidate.id));
+    assert!(film
+        .pairs
+        .iter()
+        .any(|pair| pair.primary_candidate_id == hd.candidate.id
+            && pair.companion_candidate_id == sd.candidate.id));
+    assert!(at(None).pairs.is_empty(), "an unmeasured rate offers no family");
+    // 1440p fits at 24 fps but not at 60 (macroblock rate).
+    let qhd = candidate(4, 1440, 2560, 1440);
+    let pair = |rate| {
+        continuous_candidates_from_workers(&[qhd.clone(), hd.clone()], rate)
+            .pairs
+            .iter()
+            .any(|pair| pair.primary_candidate_id == qhd.candidate.id)
+    };
+    assert!(pair(Rational::new(24, 1)));
+    assert!(!pair(Rational::new(60, 1)));
 }
 
 #[test]
@@ -3794,6 +3860,7 @@ async fn shipped_shape_primes_an_admitted_candidate() {
     // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
     let source = staging_source(&fixture).await;
     let mut recipe = crate::transcode::SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -4381,7 +4448,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
     );
     let digest = [12; 32];
     let candidate = QualityCandidate {
-        processed_hdr10: false,
+        processed_dv: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Encode,
@@ -4404,6 +4471,8 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
         catalog_query: None,
         prepared_processing: None,
+        display_target: None,
+        display_target_note: None,
         ordinary_request: None,
         planning_snapshot: None,
         retained_output: None,
@@ -4452,7 +4521,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
     };
     for route in [CandidateRoute::Original, CandidateRoute::Remux] {
         let copy_candidate = QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             route,
             ..candidate.clone()
         };
@@ -4697,7 +4766,7 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
     // link receipts are bound to below.
     let incumbent_digest = [7; 32];
     let incumbent = QualityCandidate {
-        processed_hdr10: false,
+        processed_dv: false,
         id: CandidateId::for_recipe_digest(incumbent_digest),
         recipe_digest: incumbent_digest,
         route: CandidateRoute::Encode,
@@ -4821,7 +4890,7 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
     .expect("accepted actor");
     let digest = [12; 32];
     let candidate = QualityCandidate {
-        processed_hdr10: false,
+        processed_dv: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Remux,
@@ -4843,6 +4912,8 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
         catalog_query: None,
         prepared_processing: None,
+        display_target: None,
+        display_target_note: None,
         ordinary_request: None,
         planning_snapshot: None,
         retained_output: None,
@@ -5473,6 +5544,268 @@ fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
     assert_eq!(snapshot.file.mtime, staged_source_file().mtime);
 }
 
+/// Exercise the very helpers resolve_plan uses, then the real qualification
+/// input seam. No fixture installs a copy_contract or processed destination.
+#[tokio::test]
+async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection() {
+    use crate::transcode::{SessionKind, TranscodeManager};
+    use plurx_core::playback::audio::AudioAction;
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::store::keys;
+    use plurx_core::transcode::dv_processing::{DvDestination, DvFallbackReason, DvSelection};
+    let state = resolver_state();
+    let mut file = dolby_vision_p7_file();
+    file.dolby_vision.el_present = Some(true);
+    file.dolby_vision.rpu_present = Some(true);
+    file.audio_streams = vec![plurx_core::domain::AudioStream {
+        index: 2, codec: "eac3".into(), channels: Some(6), sample_rate: Some(48_000),
+        channel_layout: Some("5.1".into()), language: None, title: None, default: true,
+    }];
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","pq"],"max_height":2160}],
+        "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","hls_hevc_sample_entries":["hvc1"],"audio":["aac","eac3"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
+    let candidate = QualityCandidate {
+        id: CandidateId::for_recipe_digest([0x81; 32]), recipe_digest: [0x81; 32],
+        route: CandidateRoute::Encode, planned_codec: Some("hevc".into()),
+        processed_dv: false, normalized_geometry: true, width: 320, height: 180,
+        target_height: 180, average_bps: Some(1_000_000), peak_bps: Some(2_000_000),
+        grade: plurx_core::transcode::OutputGrade::Hdr10, decoder_compatible: true,
+        complete_cache: false, sustainable: true,
+    };
+    let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+        file: file.clone(), probe_json: None, settings: Default::default(),
+        generation: 1, item_title: None,
+    };
+    for hdr in [false, true] {
+        snapshot.settings.insert(keys::DV_HDR_PROCESSING.into(), u8::from(hdr).to_string());
+        snapshot.settings.insert(keys::DV_FEL_REENCODE.into(), "1".into());
+        snapshot.settings.insert(keys::DV_CONVERT.into(), "1".into());
+        let body = || CreateSession {
+            playback_id: "real-ingress-p81".into(), copy: Some(true),
+            preserve_dolby_vision: Some(true), audio: Some(2), audio_offset_ms: Some(175),
+            caps: Some(caps.clone()), ..bare_create()
+        };
+        let review = || review_client_plan(&caps, None, &file, &capable_node(), true, false, NOW_MS);
+        assert!(review().convert_dolby_vision, "actual service conversion verdict");
+        // Same producer as resolve_plan, before geometry/Encode normalization.
+        let query = body().selection_catalog_request(&file, &caps, body().reviewed_copy_scope(Some(&review())));
+        assert_eq!(query.copy_contract, Some((true, true, true)), "nonzero offset requires audio encoding");
+        let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+        let mut request = body().into_request(file.id, 180);
+        let unselected_fingerprint = request.durable_intent_fingerprint(&principal);
+        request.candidate_context = Some(Box::new(TranscodeManager::candidate_context(&candidate)));
+        let fingerprint = request.durable_intent_fingerprint(&principal);
+        assert_ne!(fingerprint, unselected_fingerprint, "selected candidate binds intent");
+        let context = request.candidate_context.as_mut().expect("selected candidate");
+        context.catalog_query = Some(query.clone());
+        context.canonical_caps = Some(caps.clone());
+        context.planning_snapshot = Some(Arc::new(snapshot.clone()));
+        assert_eq!(request.durable_intent_fingerprint(&principal), fingerprint,
+            "catalog provenance does not change original client intent bytes");
+        apply_plan_review(&mut request, review());
+        // Both the original converted Copy and selected Encode must qualify.
+        for encode in [false, true] {
+            let mut selected = request.clone();
+            normalize_catalog_selection(&mut selected, 180, !encode).expect("real normalization");
+            assert!(selected.dv_processing_destination.is_none(), "ordinary fallback stays ordinary");
+            let (trial, projected) = TranscodeManager::processed_qualification_input(&snapshot, &selected, 180)
+                .expect("converted catalog input reaches P81 qualification");
+            assert_eq!(trial.kind, SessionKind::Transcode { height: 180 });
+            assert_eq!(trial.dv_processing_destination, Some(DvDestination::Profile81));
+            assert_eq!(projected.copy_contract, query.copy_contract);
+            assert_eq!(trial.audio_index, Some(2));
+            assert_eq!(trial.audio_offset_ms, 175);
+            assert!(matches!(projected.audio_delivery.as_ref().expect("audio").action,
+                AudioAction::Encode { ref codec, channels: 2, sample_rate: 48_000, .. } if codec == "aac"));
+            assert!(matches!(TranscodeManager::vod_dv_processing_from_snapshot(&snapshot, &trial).expect("preflight"),
+                DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow)));
+        }
+        normalize_catalog_selection(&mut request, 180, false).expect("Encode selection");
+        let mut described = candidate.clone();
+        described.processed_dv = true;
+        let mut remembered = request.clone();
+        let context = remembered.candidate_context.as_mut().expect("context");
+        context.selected_candidate = described.clone();
+        state.transcode.remember_processed_candidate(&remembered);
+        let lookup = body().selection_catalog_request(&file, &caps, body().reviewed_copy_scope(Some(&review())));
+        let descriptions = state.transcode.processed_quality_descriptions(&snapshot, &lookup);
+        let reselected = descriptions.iter().find(|row| row.id == described.id).expect("same P81 description rediscovered");
+        let mut context = TranscodeManager::candidate_context(reselected);
+        context.catalog_query = Some(lookup);
+        context.canonical_caps = Some(caps.clone());
+        request.candidate_context = Some(Box::new(context));
+        normalize_catalog_selection(&mut request, 180, false).expect("reselected Encode");
+        assert_eq!(TranscodeManager::processed_qualification_input(&snapshot, &request, 180)
+            .expect("description re-enters fresh qualification").0.dv_processing_destination,
+            Some(DvDestination::Profile81));
+        assert!(request.candidate_context.as_ref().expect("description only").prepared_processing.is_none());
+
+        for (copy, native, conversion, fel) in [(true, true, true, true), (false, false, true, true),
+            (true, false, false, true), (true, false, true, false)] {
+            let mut current = snapshot.clone();
+            current.settings.insert(keys::DV_CONVERT.into(), u8::from(conversion).to_string());
+            current.settings.insert(keys::DV_FEL_REENCODE.into(), u8::from(fel).to_string());
+            let mut current_caps = caps.clone();
+            if native { current_caps.video[0].dv_profiles.push(7); }
+            let mut node = capable_node();
+            node.dolby_vision_convert = conversion;
+            let body = CreateSession { copy: Some(copy), caps: Some(current_caps.clone()), ..body() };
+            let review = review_client_plan(&current_caps, None, &file, &node, true, hdr, NOW_MS);
+            let query = body.selection_catalog_request(&file, &current_caps, body.reviewed_copy_scope(Some(&review)));
+            let mut ordinary = body.into_request(file.id, 180);
+            let mut context = TranscodeManager::candidate_context(&candidate);
+            context.catalog_query = Some(query);
+            context.canonical_caps = Some(current_caps);
+            ordinary.candidate_context = Some(Box::new(context));
+            apply_plan_review(&mut ordinary, review);
+            normalize_catalog_selection(&mut ordinary, 180, false).expect("ordinary Encode");
+            let outcome = TranscodeManager::processed_qualification_input(&current, &ordinary, 180);
+            assert!(!outcome.as_ref().is_ok_and(|(trial, _)| trial.dv_processing_destination == Some(DvDestination::Profile81)),
+                "native/numeric/disabled conversion or FEL must not acquire P81");
+            if !copy && hdr {
+                assert_eq!(outcome.expect("ordinary HDR10 remains eligible").0.dv_processing_destination,
+                    Some(DvDestination::Hdr10));
+            }
+        }
+    }
+}
+
+/// Compare the ordinary catalog recipe with execution BEFORE admission. Both
+/// inputs come from production ingress; no fixture installs Copy tuple bits.
+#[tokio::test]
+async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
+    use crate::transcode::{copy_candidate_recipe_digest, SessionKind, TranscodeManager};
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::store::keys;
+    #[cfg(target_os = "linux")]
+    let state = resolver_state();
+    let mut file = dolby_vision_p7_file();
+    file.dolby_vision.el_present = Some(true);
+    file.audio_streams = vec![
+        plurx_core::domain::AudioStream {
+            index: 1, codec: "aac".into(), channels: Some(2), sample_rate: Some(48_000),
+            channel_layout: Some("stereo".into()), language: None, title: None, default: true,
+        },
+        plurx_core::domain::AudioStream {
+            index: 7, codec: "eac3".into(), channels: Some(6), sample_rate: Some(48_000),
+            channel_layout: Some("5.1".into()), language: None, title: None, default: false,
+        },
+    ];
+    // Missing/false stale AAC -> encode, true stale AAC -> passthrough,
+    // and nonzero offset -> encode even with a compatible EAC3 sink.
+    for (raw_aac, passthrough, offset, expected_aac) in [
+        (None, false, 0, true), (Some(false), false, 0, true),
+        (Some(true), true, 0, false), (Some(false), true, 175, true),
+    ] {
+        for route in ["native", "dv-declined", "converted-fallback"] {
+            let mut caps_json = serde_json::json!({"v":2,
+                "video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],
+                    "present":["sdr","pq"],"max_height":2160}],
+                "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls",
+                "hls_hevc_sample_entries":["hvc1"],"audio":["aac"],
+                "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]});
+            if passthrough {
+                caps_json["audio"].as_array_mut().expect("codecs").push("eac3".into());
+                caps_json["audio_sinks"].as_array_mut().expect("sinks").push(serde_json::json!({
+                    "codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}));
+            }
+            if route == "native" {
+                caps_json["video"][0]["dv_profiles"].as_array_mut().expect("DV").push(7.into());
+            }
+            let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(caps_json).expect("caps");
+            let review = || review_client_plan(&caps, None, &file, &capable_node(), route != "dv-declined", false, NOW_MS);
+            let mut body = CreateSession { playback_id: "ordinary-copy-audio".into(),
+                copy: Some(true), aac: raw_aac, audio: Some(7), audio_offset_ms: Some(offset),
+                preserve_dolby_vision: Some(route != "dv-declined"), caps: Some(caps.clone()), ..bare_create() };
+            let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+                file: file.clone(), probe_json: None, settings: Default::default(), generation: 1, item_title: None,
+            };
+            snapshot.settings.insert(keys::DV_FEL_REENCODE.into(), "1".into());
+            snapshot.settings.insert(keys::DV_CONVERT.into(), "1".into());
+            // Same ordering as resolve_plan: original video scope, then actual
+            // canonical track selection, then query (not a preselection AAC bit).
+            let scope = body.reviewed_copy_scope(Some(&review()));
+            body.audio = TranscodeManager::candidate_audio_from_snapshot(&snapshot, body.audio);
+            assert_eq!(body.audio, Some(7), "selected nondefault stream index, not vector position");
+            let query = body.selection_catalog_request(&file, &caps, scope);
+            let digest = |audio, offset, subtitle, tuple| copy_candidate_recipe_digest(
+                &file, audio, offset, subtitle, tuple, Some("source-version"),
+                Some("executable"), Some("engine"), (3840, 2160));
+            let catalog_digest = digest(query.audio_index, query.audio_offset_ms, query.subtitle_burn,
+                query.copy_contract.expect("original Copy"));
+            let candidate = QualityCandidate {
+                id: CandidateId::for_recipe_digest(catalog_digest), recipe_digest: catalog_digest,
+                route: CandidateRoute::Remux, planned_codec: None, processed_dv: false,
+                normalized_geometry: true, width: 3840, height: 2160, target_height: 2160,
+                average_bps: None, peak_bps: None, grade: plurx_core::transcode::OutputGrade::Hdr10,
+                decoder_compatible: true, complete_cache: false, sustainable: true,
+            };
+            let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+            let mut request = body.into_request(file.id, 2160);
+            request.audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim");
+            let unselected_fingerprint = request.durable_intent_fingerprint(&principal);
+            request.candidate_context = Some(Box::new(TranscodeManager::candidate_context(&candidate)));
+            let fingerprint = request.durable_intent_fingerprint(&principal);
+            assert_ne!(fingerprint, unselected_fingerprint, "selected candidate binds intent");
+            let context = request.candidate_context.as_mut().expect("selected candidate");
+            context.catalog_query = Some(query.clone());
+            context.canonical_caps = Some(caps.clone());
+            context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+            assert_eq!(request.durable_intent_fingerprint(&principal), fingerprint);
+            apply_plan_review(&mut request, review());
+            normalize_catalog_selection(&mut request, 2160, true).expect("ordinary Remux");
+            reconcile_request_audio(Some(&file), &mut request);
+            let SessionKind::Copy { aac, preserve_dolby_vision, convert_dolby_vision } = request.kind else {
+                panic!("ordinary fallback must remain Copy");
+            };
+            assert_eq!(aac, expected_aac, "selected EAC3/offset determines execution, not raw AAC");
+            assert_eq!((preserve_dolby_vision, convert_dolby_vision), match route {
+                "native" => (true, false), "dv-declined" => (false, false), _ => (true, true),
+            });
+            let actual_tuple = (aac, preserve_dolby_vision, convert_dolby_vision);
+            // The selected old418 sensitivity must fail HERE, after compiling
+            // and executing real canonical reconciliation, not on helper absence.
+            assert_eq!(query.copy_contract, Some(actual_tuple), "catalog Copy audio differs from canonical execution");
+            assert_eq!(catalog_digest, digest(request.audio_index, request.audio_offset_ms, request.subtitle_burn, actual_tuple));
+            assert_eq!(CandidateId::for_recipe_digest(catalog_digest), candidate.id);
+            let before = serde_json::to_value(&request).expect("ordinary snapshot");
+            if route == "converted-fallback" {
+                let (trial, projected) = TranscodeManager::processed_qualification_input(&snapshot, &request, 180)
+                    .expect("converted input still qualifies");
+                assert_eq!(trial.kind, SessionKind::Transcode { height: 180 });
+                assert!(projected.audio_delivery.expect("encoded audio").is_encoded_vod_compatible());
+                // A real preparation error before any producer: binding names
+                // a source not present in this fixture's store. No device work.
+                #[cfg(target_os = "linux")]
+                {
+                    let recovery = crate::transcode::SessionRecoveryIdentity {
+                        principal: principal.clone(), incarnation_id: "copy-audio-failure".into(), recovery_epoch: String::new(),
+                    };
+                    let failure = state.transcode.prepare_processed_hdr10(&request, &recovery, false).await
+                        .expect_err("missing bound source must refuse preparation");
+                    assert!(failure.contains("candidate source missing"), "actual failure: {failure}");
+                }
+            }
+            assert_eq!(serde_json::to_value(&request).expect("fallback"), before,
+                "declined/failed optional processing cannot mutate the ordinary Copy recipe");
+            assert!(request.dv_processing_destination.is_none());
+        }
+    }
+    // No canonical audio claim preserves the old raw Copy contract.
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","present":["hdr10"]}],"audio":["aac"],"transports":["hls"]}"#);
+    for aac in [None, Some(false), Some(true)] {
+        let body = CreateSession { copy: Some(true), aac, ..bare_create() };
+        let query = body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(None));
+        assert!(query.audio_claim.is_none());
+        let mut request = body.into_request(file.id, 2160);
+        let before = request.kind;
+        reconcile_request_audio(Some(&file), &mut request);
+        assert_eq!(request.kind, before);
+        assert_eq!(query.copy_contract.expect("legacy Copy").0, aac == Some(true));
+    }
+}
+
 #[tokio::test]
 async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
     let state = resolver_state();
@@ -5527,7 +5860,7 @@ async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
     state.serving.validation_set_ready(true).await;
     let digest = [0x5a; 32];
     let candidate = QualityCandidate {
-        processed_hdr10: false,
+        processed_dv: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Encode,
@@ -5806,7 +6139,7 @@ fn sharing_resource_validator_accepts_actual_master_and_subtitle_generators() {
 fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
     let avc = QualityCandidate {
-        processed_hdr10: false,
+        processed_dv: false,
         id: CandidateId::for_recipe_digest([1; 32]),
         recipe_digest: [1; 32],
         route: CandidateRoute::Encode,
@@ -5848,7 +6181,7 @@ fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
             5 => {
                 chosen.grade = plurx_core::transcode::OutputGrade::Hdr10;
                 alternative.grade = plurx_core::transcode::OutputGrade::Hdr10;
-                alternative.processed_hdr10 = true;
+                alternative.processed_dv = true;
             }
             _ => alternative.peak_bps = Some(20_000_000),
         };
@@ -5953,7 +6286,7 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
     let row = |node: &str, seed: u8, height, partial| crate::media_pool::WorkerQualityCandidate {
         node_id: node.into(), binding: None, partial, dispatch_supported: true,
-        candidate: QualityCandidate { processed_hdr10: false, id: CandidateId::for_recipe_digest([seed;32]), recipe_digest:[seed;32],
+        candidate: QualityCandidate { processed_dv: false, id: CandidateId::for_recipe_digest([seed;32]), recipe_digest:[seed;32],
             route: CandidateRoute::Encode, planned_codec:None, normalized_geometry:true, width:1280,height,target_height:height,
             average_bps:None,peak_bps:None,grade:plurx_core::transcode::OutputGrade::Sdr,decoder_compatible:true,complete_cache:false,sustainable:true }
     };
@@ -5969,7 +6302,7 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&ordinary_cold), 720).is_some(),
         "ordinary first-window admission needs no fabricated production proof");
     let mut processed_cold = ordinary_cold.clone();
-    processed_cold.processed_hdr10 = true;
+    processed_cold.processed_dv = true;
     processed_cold.grade = plurx_core::transcode::OutputGrade::Hdr10;
     processed_cold.planned_codec = Some("hevc".into());
     assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed_cold), 720).is_none(),
@@ -5978,14 +6311,17 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     processed.sustainable = true;
     assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 720).is_some(),
         "qualified executable processed output can stage within the ceiling");
-    let mut wrong_grade = processed.clone();
-    wrong_grade.grade = plurx_core::transcode::OutputGrade::Sdr;
+    let mut processed_sdr = processed.clone();
+    processed_sdr.grade = plurx_core::transcode::OutputGrade::Sdr;
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed_sdr), 720)
+        .is_some_and(|candidate| candidate.grade == plurx_core::transcode::OutputGrade::Sdr),
+        "qualified processed SDR can stage without acquiring an HDR grade");
     let mut wrong_codec = processed.clone();
     wrong_codec.planned_codec = Some("h264".into());
-    for refused in [processed_cold, wrong_grade, wrong_codec] {
+    for refused in [processed_cold, wrong_codec] {
         assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&refused), 720).is_none());
         let mixed = [refused, ordinary_cold.clone()];
-        assert!(auto_bootstrap_encode_fallback(&mixed, 720).is_some_and(|candidate| !candidate.processed_hdr10),
+        assert!(auto_bootstrap_encode_fallback(&mixed, 720).is_some_and(|candidate| !candidate.processed_dv),
             "stale processed hints cannot replace a usable ordinary bootstrap");
     }
     assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 480).is_none(),
@@ -6051,4 +6387,146 @@ fn acquisition_relay_sends_extension_only_to_proven_peer() {
     assert_eq!(updated["acquisition_start_ms"],296_065);
     assert!(serde_json::from_value::<LegacyResource>(updated.clone()).is_err(),"must never send extension to an old strict peer");
     assert!(matches!(serde_json::from_value::<RelayResource>(updated).expect("updated owner"),RelayResource::Playlist{acquisition_start_ms:Some(296_065),..}));
+}
+
+mod delivered_plan_note_tests {
+    use super::*;
+    use crate::transcode::{SessionRequest, TranscodeManager};
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::playback::caps::DisplayCaps;
+    use plurx_core::scan::dv_title::{
+        DvTitleStats, MasteringPrimaries, TitleConstant, PROBE_FIELD, SCHEMA,
+    };
+
+    fn qualified_request() -> (SessionRequest, SessionRequest, String) {
+        let mut ordinary = staged_candidate_request();
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 2,
+            valid_l1_frames: 2,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+                index: 0,
+                custom_xy: None,
+            }),
+        };
+        let probe = serde_json::json!({PROBE_FIELD: stats}).to_string();
+        let (target, note) = TranscodeManager::display_target_policy(
+            true,
+            Some(&DisplayCaps {
+                hdr: true,
+                max_nits: Some(1600),
+                ..Default::default()
+            }),
+            Some(&probe),
+        )
+        .expect("eligible display policy");
+        assert_eq!(target.expect("frozen target").nits(), 1600);
+        let note = note.expect("target explanation");
+        let candidate = QualityCandidate {
+            id: CandidateId::for_recipe_digest([0x16; 32]),
+            recipe_digest: [0x16; 32],
+            route: CandidateRoute::Encode,
+            planned_codec: Some("hevc".into()),
+            processed_dv: true,
+            normalized_geometry: true,
+            width: 1920,
+            height: 1080,
+            target_height: 1080,
+            average_bps: Some(8_000_000),
+            peak_bps: Some(12_000_000),
+            grade: plurx_core::transcode::OutputGrade::Hdr10,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        };
+        let ordinary_candidate = QualityCandidate {
+            id: CandidateId::for_recipe_digest([0x0a; 32]),
+            recipe_digest: [0x0a; 32],
+            processed_dv: false,
+            ..candidate.clone()
+        };
+        ordinary.candidate_context = Some(Box::new(TranscodeManager::candidate_context(
+            &ordinary_candidate,
+        )));
+        let mut context = TranscodeManager::candidate_context(&candidate);
+        context.display_target = target;
+        context.display_target_note = Some(note.clone());
+        context.ordinary_request = Some(Box::new(ordinary.clone()));
+        let mut processed = ordinary.clone();
+        processed.candidate_context = Some(Box::new(context));
+        (ordinary, processed, note)
+    }
+
+    #[test]
+    fn admission_refusal_does_not_publish_qualified_display_target_notes() {
+        let (ordinary, processed, target_note) = qualified_request();
+        let initial = vec!["ordinary negotiated plan".to_owned()];
+        // Control: the very same qualified request reports targeting when it
+        // is the delivered request, proving this is not blanket suppression.
+        assert_eq!(
+            delivered_plan_notes(initial.clone(), &processed),
+            vec![initial[0].clone(), target_note]
+        );
+        // Recovery/link/catalog admission left the ordinary request selected.
+        let mut declined = initial;
+        declined.push(processing_declined_note(
+            "Auto link evidence rejects the candidate",
+        ));
+        assert_eq!(delivered_plan_notes(declined.clone(), &ordinary), declined);
+        assert!(
+            !ordinary
+                .candidate_context
+                .as_ref()
+                .expect("ordinary candidate")
+                .selected_candidate
+                .processed_dv
+        );
+    }
+
+    #[test]
+    fn dispatch_degradation_does_not_publish_adopted_display_target_notes() {
+        let (_, processed, target_note) = qualified_request();
+        let context = processed
+            .candidate_context
+            .as_ref()
+            .expect("qualified context");
+        let frozen = context.display_target;
+        // Dispatch restores the exact ordinary request retained by qualification.
+        let delivered = context
+            .ordinary_request
+            .as_deref()
+            .expect("ordinary fallback");
+        let declined = vec![processing_declined_note("prepared processing unavailable")];
+        assert_eq!(delivered_plan_notes(declined.clone(), delivered), declined);
+        assert_eq!(
+            delivered_plan_notes(Vec::new(), &processed),
+            vec![target_note]
+        );
+        assert_eq!(
+            context.display_target, frozen,
+            "reporting cannot change the target"
+        );
+    }
+
+    #[test]
+    fn processed_delivery_keeps_master_grade_display_explanations() {
+        let (_, mut processed, _) = qualified_request();
+        let context = processed
+            .candidate_context
+            .as_mut()
+            .expect("qualified context");
+        context.display_target = None;
+        let explanation = "display peak unavailable; the master grade is sent".to_owned();
+        context.display_target_note = Some(explanation.clone());
+        let notes = vec!["ordinary negotiated plan".to_owned()];
+        assert_eq!(
+            delivered_plan_notes(notes.clone(), &processed),
+            vec![notes[0].clone(), explanation]
+        );
+    }
 }

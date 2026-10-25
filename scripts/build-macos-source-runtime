@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Prepare a complete native macOS source runtime without changing an installation.
+
+This local, ad-hoc signed package is deliberately distinct from a verified
+GitHub release. Offline --binary still requires Rust and Swift for the tray
+and controllers. Missing Rust build tools are installed as needed; package
+output stays under the checkout's target directory.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+CONTROLS = ["plurx-control", "plurx-install-helper", "plurx-update-worker", "plurx-service-launch", "plurx-recovery"]
+
+
+def run(argv, **kwargs):
+    return subprocess.run([str(value) for value in argv], check=True, **kwargs)
+
+
+def output(argv, **kwargs):
+    return subprocess.check_output([str(value) for value in argv], text=True, **kwargs).strip()
+
+
+def find_tool(name, candidates):
+    found = shutil.which(name)
+    if found:
+        return found
+    return next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
+
+
+def ensure_rustup():
+    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+    prefixes = [Path("/opt/homebrew"), Path("/usr/local")]
+    rustup = find_tool("rustup", [cargo_home / "bin/rustup", *(
+        prefix / "opt/rustup/bin/rustup" for prefix in prefixes)])
+    if rustup:
+        return rustup
+    brew = find_tool("brew", [prefix / "bin/brew" for prefix in prefixes])
+    if not brew:
+        print("source runtime: installing Homebrew for rustup (may request your administrator password)", flush=True)
+        with tempfile.TemporaryDirectory(prefix="plurx-homebrew-") as work:
+            installer = Path(work) / "install.sh"
+            run(["/usr/bin/curl", "--fail", "--show-error", "--silent", "--location", "--proto", "=https",
+                 "--tlsv1.2", "--output", installer,
+                 "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"])
+            run(["/bin/bash", installer])
+        brew = find_tool("brew", [prefix / "bin/brew" for prefix in prefixes])
+        if not brew:
+            raise ValueError("Homebrew installation finished but brew cannot be found; follow its shellenv instructions and retry")
+    print("source runtime: installing rustup through Homebrew", flush=True)
+    run([brew, "install", "rustup"])
+    rustup = Path(output([brew, "--prefix", "rustup"])) / "bin/rustup"
+    if not rustup.is_file() or not os.access(rustup, os.X_OK):
+        raise ValueError("Homebrew installed rustup but its executable cannot be found")
+    return str(rustup)
+
+
+def ensure_rust_toolchain():
+    channel = re.search(r'^channel\s*=\s*"([^"]+)"', (ROOT / "rust-toolchain.toml").read_text(), re.M).group(1)
+    rustup = ensure_rustup()
+    lookup = [rustup, "which", "--toolchain", channel, "rustc"]
+    env = {**os.environ, "RUSTUP_AUTO_INSTALL": "0"}
+    try:
+        rustc = Path(output(lookup, env=env, stderr=subprocess.DEVNULL))
+    except subprocess.CalledProcessError:
+        print(f"source runtime: installing pinned Rust {channel}", flush=True)
+        run([rustup, "toolchain", "install", channel, "--profile", "minimal", "--no-self-update"])
+        try:
+            rustc = Path(output(lookup, env=env))
+        except subprocess.CalledProcessError as error:
+            raise ValueError(f"rustup installed Rust {channel} but cannot locate its rustc") from error
+    if output([rustc, "--version"]).split()[1] != channel:
+        raise ValueError("installed Rust compiler differs from rust-toolchain.toml")
+    return rustc
+
+
+def load_recipe(name):
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(ROOT / "scripts" / name))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def digest(path):
+    result = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            result.update(chunk)
+    return result.hexdigest()
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+
+
+def unpack_media(archive, destination):
+    # The checksum is verified by the pinned recipe before reaching here.
+    with tarfile.open(archive) as source:
+        for member in source.getmembers():
+            relative = Path(member.name)
+            if relative.is_absolute() or ".." in relative.parts or not (member.isdir() or member.isfile()):
+                raise ValueError("unsafe member in pinned media archive")
+        source.extractall(destination)
+    for name in ["ffmpeg", "ffprobe"]:
+        path = destination / name
+        if not path.is_file() or path.is_symlink() or not os.access(path, os.X_OK):
+            raise ValueError(f"pinned media archive lacks executable {name}")
+
+
+def validate_media_package(package, machine):
+    """A stock upstream archive is not the Plurx native processing runtime."""
+    load_recipe("package-macos").validate_native_package(package)
+    media = load_recipe("build-macos-video-ffmpeg")
+    manifest = json.loads((package / "provenance/manifest.json").read_text())
+    if manifest.get("mode") != "compiled-pinned-jellyfin":
+        raise ValueError("macOS source runtime requires the patched Jellyfin FFmpeg package")
+    expected = {path.name: digest(path) for path in sorted((ROOT / "scripts/macos-video-ffmpeg-patches").glob("*.patch"))}
+    if not expected or manifest.get("compiled_source", {}).get("local_patches") != expected:
+        raise ValueError("media package does not contain the current Plurx FFmpeg patches")
+    for name in ["ffmpeg", "ffprobe"]:
+        if manifest["binaries"][name].get("architecture") != machine:
+            raise ValueError("media package architecture differs from this native source runtime")
+        if not os.access(package / name, os.X_OK):
+            raise ValueError(f"media package lacks executable {name}")
+    media.validate_font_tools(package, manifest.get("font_tools"))
+    executable = package / "ffmpeg"
+    filters = output([executable, "-hide_banner", "-filters"], stderr=subprocess.STDOUT)
+    declared = set(re.findall(r"^\s*[.A-Z|]{2,}\s+(\w+)\s", filters, re.M))
+    required = set(media.REQUIRED["filters"]) | {"libplacebo", "tonemap_opencl", "subtitles_vt_images", "overlay_videotoolbox", "bwdif_videotoolbox"}
+    if missing := required - declared:
+        raise ValueError("media package lacks required filters: " + ", ".join(sorted(missing)))
+    hwaccels = output([executable, "-hide_banner", "-hwaccels"], stderr=subprocess.STDOUT).splitlines()
+    if not {"videotoolbox", "vulkan"}.issubset(line.strip() for line in hwaccels):
+        raise ValueError("media package requires VideoToolbox and Vulkan support")
+    with tempfile.TemporaryDirectory(prefix="plurx-media-contract-") as work:
+        evidence = Path(work)
+        (evidence / "full-help.txt").write_text(output([executable, "-hide_banner", "-h", "full"], stderr=subprocess.STDOUT))
+        media.verify_strict_options(executable, evidence)
+        if not media.verify_prepared_hable_white(executable, evidence, expected):
+            raise ValueError("media package lacks the Metal Hable reference-white contract")
+        if not media.verify_prepared_subtitle_options(executable, evidence, expected):
+            raise ValueError("media package lacks the native subtitle contract")
+
+
+def stage_media_package(package, destination, machine):
+    validate_media_package(package, machine)
+    # Keep the parser, fonts, licenses and inspectable build provenance beside
+    # their exact binaries. Copy only the media closure when reusing an
+    # installed runtime, never its old daemon or subtitle engine.
+    for name in ["ffmpeg", "ffprobe", "fc-list", "fc-conflist", "fontconfig", "provenance", "plurx-source-parser.wasm"]:
+        source = package / name
+        if source.is_dir():
+            shutil.copytree(source, destination / name)
+        else:
+            shutil.copyfile(source, destination / name)
+            (destination / name).chmod(source.stat().st_mode & 0o777)
+
+
+def select_media_package(explicit, cache, machine):
+    configured = explicit or os.environ.get("PLURX_MACOS_FFMPEG_PACKAGE")
+    if configured:
+        package = Path(configured).absolute()
+        validate_media_package(package, machine)
+        return package
+    inputs = [ROOT / "scripts" / name for name in ["build-macos-source-media", "build-macos-video-ffmpeg", "prepare-macos-video-ffmpeg", "build-macos-vulkan", "macos-vulkan-sources.json", "ffmpeg-support-matrix.json"]]
+    key = hashlib.sha256("".join(digest(path) for path in inputs).encode()).hexdigest()
+    cached = cache / ("ffmpeg-" + key)
+    candidates = [cached, Path.home() / "Library/Application Support/plurx/runtime/current/runtime"]
+    for package in candidates:
+        if not (package / "provenance/manifest.json").is_file():
+            continue
+        try:
+            validate_media_package(package, machine)
+            return package
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            continue
+    print("source runtime: building complete patched Jellyfin FFmpeg with Metal, Vulkan/libplacebo, fonts and parser; the first build takes longer", flush=True)
+    if cached.exists():
+        raise ValueError("cached media package failed verification; retain/remove it explicitly before rebuilding: " + str(cached))
+    run([sys.executable, ROOT / "scripts/build-macos-source-media", "--output", cached, "--jobs", "4"])
+    validate_media_package(cached, machine)
+    return cached
+
+
+def verify_identity(binary, source_commit):
+    if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
+        raise ValueError("daemon must be an executable regular file")
+    if output([binary, "--source-commit"], timeout=30) != source_commit:
+        raise ValueError("daemon source identity differs from this checkout; rebuild plurxd before installing")
+
+
+def seal(package, version, source_commit, architecture):
+    marker = {"schema_version": 1, "source_commit": source_commit, "architecture": architecture}
+    write_json(package / "source-install-v1.json", marker)
+    write_json(package / "release.json", {**marker, "repository": "pjunod/cinema", "version": version})
+    files = []
+    for path in sorted(package.rglob("*")):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise ValueError("source runtime contains a link or special file")
+        if path.is_file():
+            files.append({"path": path.relative_to(package).as_posix(), "size": path.stat().st_size,
+                          "sha256": digest(path), "executable": bool(path.stat().st_mode & 0o111)})
+    write_json(package / "runtime-closure-v1.json", {"schema_version": 1, "version": version, "files": files})
+
+
+def build(args):
+    if platform.system() != "Darwin":
+        raise ValueError("the source tray runtime must be built on macOS")
+    machine = platform.machine()
+    if machine not in ["arm64", "x86_64"]:
+        raise ValueError(f"unsupported native architecture: {machine}")
+    target = ROOT / "target"
+    destination = args.output.absolute()
+    # Never write host install paths or follow an output parent out of target/.
+    if not destination.resolve().is_relative_to(target.resolve()) or destination.exists() or destination.is_symlink():
+        raise ValueError("--output must be a new directory under this checkout's target/")
+    source_commit = output(["git", "-C", ROOT, "rev-parse", "HEAD"])
+    if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        raise ValueError("source runtime requires an exact committed checkout")
+    if output(["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=no"]):
+        raise ValueError("commit tracked source changes before building an exact source runtime")
+    if not shutil.which("swift"):
+        raise ValueError("source tray installation requires Swift/Xcode command line tools, including with --binary")
+    rustc = ensure_rust_toolchain()
+    env = {**os.environ, "PATH": str(rustc.parent) + os.pathsep + os.environ.get("PATH", ""),
+           "RUSTC": str(rustc), "PLURX_BUILD_SHA": source_commit}
+    cargo = rustc.parent / "cargo"
+    run([cargo, "build", "--locked", "--release", "-p", "plurx-desktop-control", "--bins"], cwd=ROOT, env=env)
+    build_target = Path(os.environ.get("CARGO_TARGET_DIR", target))
+    if not build_target.is_absolute():
+        build_target = ROOT / build_target
+    binary = args.binary.absolute() if args.binary else build_target / "release/plurxd"
+    if not args.binary:
+        run([cargo, "build", "--locked", "--release", "-p", "plurxd"], cwd=ROOT, env=env)
+    verify_identity(binary, source_commit)
+    version = re.search(r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    cache = target / "macos-source-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".macos-source-runtime-", dir=destination.parent) as work:
+        temporary = Path(work)
+        package = temporary / "package"
+        runtime = package / "runtime"
+        runtime.mkdir(parents=True)
+        if args.ffmpeg_archive:
+            raise ValueError("--ffmpeg-archive contains unpatched upstream binaries; use --ffmpeg-package for the complete native runtime")
+        media_package = select_media_package(args.ffmpeg_package, cache, machine)
+        stage_media_package(media_package, runtime, machine)
+        parser = args.source_parser
+        if parser is not None and digest(parser) != digest(runtime / "plurx-source-parser.wasm"):
+            raise ValueError("--source-parser must match the verified media package companion")
+        if parser is None:
+            parser = runtime / "plurx-source-parser.wasm"
+        if parser.is_symlink() or not parser.is_file() or parser.read_bytes()[:8] != b"\0asm\1\0\0\0":
+            raise ValueError("source parser must be a regular WebAssembly module")
+        if parser != runtime / "plurx-source-parser.wasm":
+            shutil.copyfile(parser, runtime / "plurx-source-parser.wasm")
+        engine = args.subtitle_engine_package
+        if engine is None:
+            engine_builder = ROOT / "scripts/build-subtitle-engine"
+            engine_key = digest(engine_builder) + digest(ROOT / "scripts/subtitle-engine-manifest.json")
+            engine = cache / ("subtitle-" + hashlib.sha256(engine_key.encode()).hexdigest())
+            cached = False
+            if engine.is_dir() and not engine.is_symlink():
+                try:
+                    run(["bash", ROOT / "deploy/verify-subtitle-engine", engine])
+                    cached = True
+                except subprocess.CalledProcessError:
+                    pass
+            if not cached:
+                built_engine = temporary / "subtitle-engine"
+                run([sys.executable, engine_builder, "--output", built_engine, "--jobs", "2"])
+                run(["bash", ROOT / "deploy/verify-subtitle-engine", built_engine])
+                if engine.exists():
+                    shutil.rmtree(engine)
+                built_engine.rename(engine)
+        run(["bash", ROOT / "deploy/verify-subtitle-engine", engine])
+        shutil.copytree(engine, runtime / "subtitle-engine")
+        shutil.copyfile(binary, runtime / "plurxd")
+        (runtime / "plurxd").chmod(0o755)
+        run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp=none", "--sign", "-",
+             "--entitlements", ROOT / "scripts/macos-source-parser.entitlements", runtime / "plurxd"])
+        controls = package / "control"
+        controls.mkdir()
+        for name in CONTROLS:
+            path = controls / name
+            shutil.copyfile(build_target / "release" / name, path)
+            path.chmod(0o755)
+            run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp=none", "--sign", "-", path])
+            run(["/usr/bin/codesign", "--verify", "--strict", path])
+        run([ROOT / "clients/server-tray/macos/build", "--configuration", "release", "--arch", machine,
+             "--version", version, "--build-id", source_commit, "--controller", controls / "plurx-control",
+             "--scratch", target / "macos-source-swift", "--output", package / "Plurx Server.app"])
+        run(["/usr/bin/codesign", "--verify", "--strict", runtime / "plurxd"])
+        seal(package, version, source_commit, "arm64" if machine == "arm64" else "amd64")
+        package.rename(destination)
+    return destination
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--ffmpeg-archive", type=Path)
+    parser.add_argument("--ffmpeg-package", type=Path, help="verified patched Jellyfin package with Metal, Vulkan/libplacebo, fonts and parser; otherwise reuse a complete cached/installed package")
+    parser.add_argument("--source-parser", type=Path)
+    parser.add_argument("--subtitle-engine-package", type=Path)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if args.dry_run:
+        print(f"would prepare pinned Rust (install missing Homebrew/rustup if needed), build native Rust controllers and Swift tray, verify matching daemon and pinned media/subtitle runtime, and stage {args.output}")
+        return 0
+    try:
+        print(build(args))
+        return 0
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f"source runtime: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

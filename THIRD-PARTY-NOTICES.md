@@ -14,8 +14,8 @@ license notices are identified below. ffmpeg is invoked rather than linked
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 563 source-bearing crates in the root workspace · license fields
-verified 2026-10-12; the graph itself re-checked against `Cargo.lock`
+the work. 626 source-bearing crates in the root workspace · license fields
+verified 2026-10-19; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
 resolution, and on 2026-09-24, when `ring` became the only rustls provider
@@ -27,7 +27,9 @@ on 2026-09-25 and 2026-10-03, when the sharing transport added
 `tests/operations/test_license_notices.py` holds the summary,
 the counts and the full list to one another. The graph and declared SPDX
 expressions were rechecked with pinned, locked `cargo metadata` on 2026-10-12
-for the independent support service dependencies.
+for the independent support service dependencies. The desktop controller and
+Linux GTK tray dependencies were rechecked against the combined locked
+workspace metadata on 2026-10-19.
 
 ---
 
@@ -117,19 +119,22 @@ changed — only which file to open.
 
 ## 3. Vendored Rust crates — upstream sources, locally modified
 
-Six crates are vendored under `vendor/` rather than pulled from crates.io.
+Eight crates are vendored under `vendor/` rather than pulled from crates.io.
 Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 
 | Crate | Version | License | Upstream | Changes |
 |---|---|---|---|---|
+| `gemm-common` | 0.19.0 | MIT | Sarah Ek · [sarah-ek/gemm](https://github.com/sarah-ek/gemm) | [four function-local ARM FP16 requirements](vendor/gemm-common/PLURX-PATCH.md) |
 | `hiqlite` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [23 clustering patches](vendor/hiqlite/PLURX-PATCH.md) |
 | `hiqlite-wal` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [3 restart-recovery patches and 1 K-06 startup patch](vendor/hiqlite-wal/PLURX-PATCH.md) |
 | `s3-simple` | 0.8.0 | Apache-2.0 | Sebastian Dobe · [sebadob/s3-simple](https://github.com/sebadob/s3-simple) | [quick-xml bump for RUSTSEC-2026-0194/0195 and four unreferenced edges dropped](vendor/s3-simple/PLURX-PATCH.md) |
 | `rust_decimal` | 1.42.1 | MIT | Paul Mason · [paupino/rust-decimal](https://github.com/paupino/rust-decimal) | [rkyv 0.7 removal for RUSTSEC-2026-0235](vendor/rust_decimal/PLURX-PATCH.md) |
 | `dolby_vision` | 3.4.0 | MIT | quietvoid · [quietvoid/dovi_tool](https://github.com/quietvoid/dovi_tool/tree/main/dolby_vision) | [five refusals where a malformed RPU allocated or panicked](vendor/dolby_vision/PLURX-PATCH.md) |
 | `bitvec_helpers` | 4.0.2 | MIT | quietvoid · [quietvoid/bitvec_helpers](https://github.com/quietvoid/bitvec_helpers) | [two Exp-Golomb overflows refused](vendor/bitvec_helpers/PLURX-PATCH.md) |
+| `ksni` | 0.3.6 | Unlicense | iovxw · [iovxw/ksni](https://github.com/iovxw/ksni) | [consistent D-Bus menu item IDs](vendor/ksni/PLURX-PATCH.md) |
 
-Each directory carries its upstream license at `vendor/<crate>/LICENSE`.
+Each directory retains its upstream license text; `ksni` uses
+[UNLICENSE](vendor/ksni/UNLICENSE).
 
 `s3-simple` is vendored but is not part of the default resolution: plurx
 builds hiqlite without `backup`/`s3`, so it reaches no shipped binary and
@@ -147,18 +152,26 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-563 source-bearing crates resolve into a plurx build, excluding the eight
+626 source-bearing crates resolve into a plurx build, excluding the ten
 first-party crates and the vendored ones above (`s3-simple` resolves only in
 the fork's optional backup graph, never in this one). The independently built support service adds five MPL-2.0 libraries for
 passkey validation; the other selected license terms are permissive:
 
+`plurx-desktop-control` and `plurx-tray` are first-party Apache-2.0 crates.
+The Linux tray's gtk-rs Rust bindings, including `gtk4`, `glib` and `gio`,
+appear below under their declared crate licenses. The native desktop
+package depends on the host's GTK4 and GLib shared libraries, supplied by
+distribution packages; those system libraries are distinct from the Rust
+binding crates and are not bundled in `plurx-desktop`. See the
+[desktop package manifest](deploy/packaging/desktop-nfpm.yaml).
+
 | License expression | Crates |
 |---|---:|
-| `MIT OR Apache-2.0` | 279 |
-| `MIT` | 116 |
-| `Apache-2.0 OR MIT` | 28 |
-| `Apache-2.0 WITH LLVM-exception` | 27 |
-| `MIT/Apache-2.0` | 21 |
+| `MIT OR Apache-2.0` | 295 |
+| `MIT` | 147 |
+| `Apache-2.0 OR MIT` | 42 |
+| `Apache-2.0 WITH LLVM-exception` | 28 |
+| `MIT/Apache-2.0` | 22 |
 | `Unicode-3.0` | 18 |
 | `Apache-2.0` | 12 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 12 |
@@ -227,7 +240,7 @@ workspaces ships in any artifact, so they are out of scope for distribution,
 but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (563)</summary>
+<summary>Full crate list (626)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -254,8 +267,17 @@ but they are not covered by the table above.
 | `asn1-rs-derive` | 0.5.1 | MIT OR Apache-2.0 |
 | `asn1-rs-derive` | 0.6.0 | MIT OR Apache-2.0 |
 | `asn1-rs-impl` | 0.2.0 | MIT/Apache-2.0 |
+| `async-broadcast` | 0.7.2 | MIT OR Apache-2.0 |
+| `async-channel` | 2.5.0 | Apache-2.0 OR MIT |
+| `async-executor` | 1.14.0 | Apache-2.0 OR MIT |
+| `async-io` | 2.6.0 | Apache-2.0 OR MIT |
+| `async-lock` | 3.4.2 | Apache-2.0 OR MIT |
+| `async-process` | 2.5.0 | Apache-2.0 OR MIT |
+| `async-recursion` | 1.2.0 | MIT OR Apache-2.0 |
+| `async-signal` | 0.2.14 | Apache-2.0 OR MIT |
 | `async-stream` | 0.3.6 | MIT |
 | `async-stream-impl` | 0.3.6 | MIT |
+| `async-task` | 4.7.1 | Apache-2.0 OR MIT |
 | `async-trait` | 0.1.91 | MIT OR Apache-2.0 |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT |
 | `autocfg` | 1.5.1 | Apache-2.0 OR MIT |
@@ -278,6 +300,7 @@ but they are not covered by the table above.
 | `blake2` | 0.10.6 | MIT OR Apache-2.0 |
 | `block-buffer` | 0.10.4 | MIT OR Apache-2.0 |
 | `block-buffer` | 0.12.1 | MIT OR Apache-2.0 |
+| `blocking` | 1.7.0 | Apache-2.0 OR MIT |
 | `borrow-or-share` | 0.2.4 | MIT-0 |
 | `borsh` | 1.8.0 | MIT OR Apache-2.0 |
 | `borsh-derive` | 1.8.0 | Apache-2.0 |
@@ -288,11 +311,14 @@ but they are not covered by the table above.
 | `bytemuck_derive` | 1.12.1 | Zlib OR Apache-2.0 OR MIT |
 | `byteorder` | 1.5.0 | Unlicense OR MIT |
 | `bytes` | 1.12.1 | MIT |
+| `cairo-rs` | 0.22.9 | MIT |
+| `cairo-sys-rs` | 0.22.9 | MIT |
 | `candle-core` | 0.11.0 | MIT OR Apache-2.0 |
 | `candle-nn` | 0.11.0 | MIT OR Apache-2.0 |
 | `candle-transformers` | 0.11.0 | MIT OR Apache-2.0 |
 | `castaway` | 0.2.4 | MIT |
 | `cc` | 1.4.0 | MIT OR Apache-2.0 |
+| `cfg-expr` | 0.17.2 | MIT OR Apache-2.0 |
 | `cfg-if` | 1.0.4 | MIT OR Apache-2.0 |
 | `cfg_aliases` | 0.2.2 | MIT |
 | `chacha20` | 0.10.2 | MIT OR Apache-2.0 |
@@ -308,6 +334,7 @@ but they are not covered by the table above.
 | `colorchoice` | 1.0.5 | MIT OR Apache-2.0 |
 | `combine` | 4.6.7 | MIT |
 | `compact_str` | 0.9.1 | MIT |
+| `concurrent-queue` | 2.5.0 | Apache-2.0 OR MIT |
 | `const-oid` | 0.10.2 | Apache-2.0 OR MIT |
 | `core-foundation` | 0.10.1 | MIT OR Apache-2.0 |
 | `core-foundation-sys` | 0.8.7 | MIT OR Apache-2.0 |
@@ -370,16 +397,23 @@ but they are not covered by the table above.
 | `embedded-io` | 0.4.0 | MIT OR Apache-2.0 |
 | `embedded-io` | 0.6.1 | MIT OR Apache-2.0 |
 | `encoding_rs` | 0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause |
+| `endi` | 1.1.1 | MIT |
 | `enum-as-inner` | 0.6.1 | MIT/Apache-2.0 |
+| `enumflags2` | 0.7.12 | MIT OR Apache-2.0 |
+| `enumflags2_derive` | 0.7.12 | MIT OR Apache-2.0 |
 | `equivalent` | 1.0.2 | Apache-2.0 OR MIT |
 | `errno` | 0.3.14 | MIT OR Apache-2.0 |
 | `esaxx-rs` | 0.1.10 | Apache-2.0 |
+| `event-listener` | 5.4.1 | Apache-2.0 OR MIT |
+| `event-listener-strategy` | 0.5.4 | Apache-2.0 OR MIT |
 | `fallible-iterator` | 0.3.0 | MIT/Apache-2.0 |
 | `fallible-streaming-iterator` | 0.1.9 | MIT/Apache-2.0 |
 | `fancy-regex` | 0.18.0 | MIT |
 | `fancy-regex` | 0.19.0 | MIT |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT |
 | `fastwebsockets` | 0.10.0 | Apache-2.0 |
+| `field-offset` | 0.3.6 | MIT OR Apache-2.0 |
+| `filetime` | 0.2.29 | MIT/Apache-2.0 |
 | `find-msvc-tools` | 0.1.9 | MIT OR Apache-2.0 |
 | `flate2` | 1.1.9 | MIT OR Apache-2.0 |
 | `float8` | 0.7.0 | MIT |
@@ -399,14 +433,18 @@ but they are not covered by the table above.
 | `futures-core` | 0.3.33 | MIT OR Apache-2.0 |
 | `futures-executor` | 0.3.33 | MIT OR Apache-2.0 |
 | `futures-io` | 0.3.33 | MIT OR Apache-2.0 |
+| `futures-lite` | 2.6.1 | Apache-2.0 OR MIT |
 | `futures-macro` | 0.3.33 | MIT OR Apache-2.0 |
 | `futures-sink` | 0.3.33 | MIT OR Apache-2.0 |
 | `futures-task` | 0.3.33 | MIT OR Apache-2.0 |
 | `futures-util` | 0.3.33 | MIT OR Apache-2.0 |
+| `gdk-pixbuf` | 0.22.0 | MIT |
+| `gdk-pixbuf-sys` | 0.22.9 | MIT |
+| `gdk4` | 0.11.5 | MIT |
+| `gdk4-sys` | 0.11.5 | MIT |
 | `gemm` | 0.19.0 | MIT |
 | `gemm-c32` | 0.19.0 | MIT |
 | `gemm-c64` | 0.19.0 | MIT |
-| `gemm-common` | 0.19.0 | MIT |
 | `gemm-f16` | 0.19.0 | MIT |
 | `gemm-f32` | 0.19.0 | MIT |
 | `gemm-f64` | 0.19.0 | MIT |
@@ -415,6 +453,19 @@ but they are not covered by the table above.
 | `getrandom` | 0.3.4 | MIT OR Apache-2.0 |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 |
 | `gimli` | 0.33.0 | MIT OR Apache-2.0 |
+| `gio` | 0.22.10 | MIT |
+| `gio-sys` | 0.22.9 | MIT |
+| `glib` | 0.22.10 | MIT |
+| `glib-macros` | 0.22.9 | MIT |
+| `glib-sys` | 0.22.9 | MIT |
+| `gobject-sys` | 0.22.9 | MIT |
+| `graphene-rs` | 0.22.8 | MIT |
+| `graphene-sys` | 0.22.9 | MIT |
+| `gsk4` | 0.11.5 | MIT |
+| `gsk4-sys` | 0.11.5 | MIT |
+| `gtk4` | 0.11.5 | MIT |
+| `gtk4-macros` | 0.11.5 | MIT |
+| `gtk4-sys` | 0.11.5 | MIT |
 | `h2` | 0.4.16 | MIT |
 | `half` | 2.7.1 | MIT OR Apache-2.0 |
 | `hashbrown` | 0.16.1 | MIT OR Apache-2.0 |
@@ -487,6 +538,7 @@ but they are not covered by the table above.
 | `memchr` | 2.8.3 | Unlicense OR MIT |
 | `memfd` | 0.6.6 | MIT OR Apache-2.0 |
 | `memmap2` | 0.9.11 | MIT OR Apache-2.0 |
+| `memoffset` | 0.9.1 | MIT |
 | `micromap` | 0.3.0 | MIT |
 | `mime` | 0.3.17 | MIT OR Apache-2.0 |
 | `mime_guess` | 2.0.5 | MIT |
@@ -523,7 +575,11 @@ but they are not covered by the table above.
 | `openssl-macros` | 0.1.1 | MIT/Apache-2.0 |
 | `openssl-probe` | 0.2.1 | MIT OR Apache-2.0 |
 | `openssl-sys` | 0.9.117 | MIT |
+| `ordered-stream` | 0.2.0 | MIT OR Apache-2.0 |
 | `outref` | 0.5.2 | MIT |
+| `pango` | 0.22.9 | MIT |
+| `pango-sys` | 0.22.9 | MIT |
+| `parking` | 2.2.1 | Apache-2.0 OR MIT |
 | `parking_lot` | 0.12.5 | MIT OR Apache-2.0 |
 | `parking_lot_core` | 0.9.12 | MIT OR Apache-2.0 |
 | `password-hash` | 0.5.0 | MIT OR Apache-2.0 |
@@ -535,7 +591,9 @@ but they are not covered by the table above.
 | `pin-project` | 1.1.13 | Apache-2.0 OR MIT |
 | `pin-project-internal` | 1.1.13 | Apache-2.0 OR MIT |
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT |
-| `pkg-config` | 0.3.33 | MIT OR Apache-2.0 |
+| `piper` | 0.2.5 | MIT OR Apache-2.0 |
+| `pkg-config` | 0.3.34 | MIT OR Apache-2.0 |
+| `polling` | 3.11.0 | Apache-2.0 OR MIT |
 | `poly1305` | 0.8.0 | Apache-2.0 OR MIT |
 | `portable-atomic` | 1.15.0 | Apache-2.0 OR MIT |
 | `postcard` | 1.1.3 | MIT OR Apache-2.0 |
@@ -618,8 +676,10 @@ but they are not covered by the table above.
 | `serde_json` | 1.0.151 | MIT OR Apache-2.0 |
 | `serde_path_to_error` | 0.1.20 | MIT OR Apache-2.0 |
 | `serde_plain` | 1.0.2 | MIT/Apache-2.0 |
+| `serde_repr` | 0.1.20 | MIT OR Apache-2.0 |
 | `serde_rusqlite` | 0.43.0 | MIT OR Apache-2.0 |
 | `serde_spanned` | 0.6.9 | MIT OR Apache-2.0 |
+| `serde_spanned` | 1.1.1 | MIT OR Apache-2.0 |
 | `serde_urlencoded` | 0.7.1 | MIT/Apache-2.0 |
 | `sha1` | 0.10.7 | MIT OR Apache-2.0 |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 |
@@ -648,8 +708,12 @@ but they are not covered by the table above.
 | `sync_wrapper` | 1.0.2 | Apache-2.0 |
 | `synstructure` | 0.13.2 | MIT |
 | `sysctl` | 0.6.0 | MIT |
+| `system-deps` | 9.0.0 | MIT OR Apache-2.0 |
 | `tap` | 1.0.1 | MIT |
+| `tar` | 0.4.46 | MIT OR Apache-2.0 |
+| `target-lexicon` | 0.12.16 | Apache-2.0 WITH LLVM-exception |
 | `target-lexicon` | 0.13.5 | Apache-2.0 WITH LLVM-exception |
+| `task-local` | 0.1.1 | MIT OR Apache-2.0 |
 | `tempfile` | 3.27.0 | MIT OR Apache-2.0 |
 | `termcolor` | 1.4.1 | Unlicense OR MIT |
 | `thiserror` | 1.0.69 | MIT OR Apache-2.0 |
@@ -670,12 +734,14 @@ but they are not covered by the table above.
 | `tokio-rustls` | 0.26.4 | MIT OR Apache-2.0 |
 | `tokio-util` | 0.7.18 | MIT |
 | `toml` | 0.8.23 | MIT OR Apache-2.0 |
+| `toml` | 1.1.4+spec-1.1.0 | MIT OR Apache-2.0 |
 | `toml_datetime` | 0.6.11 | MIT OR Apache-2.0 |
 | `toml_datetime` | 1.1.1+spec-1.1.0 | MIT OR Apache-2.0 |
 | `toml_edit` | 0.22.27 | MIT OR Apache-2.0 |
 | `toml_edit` | 0.25.13+spec-1.1.0 | MIT OR Apache-2.0 |
 | `toml_parser` | 1.1.3+spec-1.1.0 | MIT OR Apache-2.0 |
 | `toml_write` | 0.1.2 | MIT OR Apache-2.0 |
+| `toml_writer` | 1.1.2+spec-1.1.0 | MIT OR Apache-2.0 |
 | `tower` | 0.5.3 | MIT |
 | `tower-http` | 0.6.11 | MIT |
 | `tower-layer` | 0.3.3 | MIT |
@@ -690,6 +756,7 @@ but they are not covered by the table above.
 | `try-lock` | 0.2.5 | MIT |
 | `typed-path` | 0.12.3 | MIT OR Apache-2.0 |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 |
+| `uds_windows` | 1.2.1 | MIT |
 | `unicase` | 2.9.0 | MIT OR Apache-2.0 |
 | `unicode-general-category` | 1.1.0 | Apache-2.0 |
 | `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 |
@@ -711,6 +778,7 @@ but they are not covered by the table above.
 | `validit` | 0.2.6 | MIT OR Apache-2.0 |
 | `valuable` | 0.1.1 | MIT |
 | `vcpkg` | 0.2.15 | MIT/Apache-2.0 |
+| `version-compare` | 0.2.1 | MIT |
 | `version_check` | 0.9.5 | MIT/Apache-2.0 |
 | `virtue` | 0.0.18 | MIT |
 | `vsimd` | 0.8.0 | MIT |
@@ -781,9 +849,14 @@ but they are not covered by the table above.
 | `wyz` | 0.5.1 | MIT |
 | `x509-parser` | 0.16.0 | MIT OR Apache-2.0 |
 | `x509-parser` | 0.18.1 | MIT OR Apache-2.0 |
+| `xattr` | 1.6.1 | MIT OR Apache-2.0 |
 | `yasna` | 0.6.0 | MIT OR Apache-2.0 |
 | `yoke` | 0.8.3 | Unicode-3.0 |
 | `yoke-derive` | 0.8.2 | Unicode-3.0 |
+| `zbus` | 5.19.0 | MIT |
+| `zbus_macros` | 5.19.0 | MIT |
+| `zbus_names` | 4.3.5 | MIT |
+| `zcheapstr` | 1.1.0 | MIT |
 | `zerocopy` | 0.8.56 | BSD-2-Clause OR Apache-2.0 OR MIT |
 | `zerocopy-derive` | 0.8.56 | BSD-2-Clause OR Apache-2.0 OR MIT |
 | `zerofrom` | 0.1.8 | Unicode-3.0 |
@@ -794,6 +867,9 @@ but they are not covered by the table above.
 | `zerovec-derive` | 0.11.3 | Unicode-3.0 |
 | `zip` | 8.6.0 | MIT |
 | `zmij` | 1.0.23 | MIT |
+| `zvariant` | 5.15.1 | MIT |
+| `zvariant_derive` | 5.15.1 | MIT |
+| `zvariant_utils` | 4.2.0 | MIT |
 
 </details>
 
@@ -860,6 +936,7 @@ the tree, so it is redistributed with every clone the way the Gradle wrapper in
 |---|---|---|---|---|
 | [acorn](https://github.com/acornjs/acorn) | 8.18.0 | `tests/vendor/acorn.js` | MIT — [full text](licenses/acorn-MIT.txt) | Copyright (c) 2012-2022 by various contributors |
 | [Google FLEURS](https://huggingface.co/datasets/google/fleurs) | `70bb2e84b976b7e960aa89f1c648e09c59f894dd` | `tests/fixtures/subtitle-recognition/fleurs-de.wav` and publisher reference text | CC BY 4.0 — [full text](licenses/CC-BY-4.0.txt) | Conneau, Ma, Khanuja, Zhang, Axelrod, Dalmia, Riesa, Rivera and Bapna (2022), Google |
+| [Google FLEURS · translation inputs and self-test](https://huggingface.co/datasets/google/fleurs) | `70bb2e84b976b7e960aa89f1c648e09c59f894dd` | `tests/fixtures/subtitle-translation/audio/`, compiled German runtime self-test, and publisher source/English reference text | CC BY 4.0 — [full text](licenses/CC-BY-4.0.txt) | Conneau, Ma, Khanuja, Zhang, Axelrod, Dalmia, Riesa, Rivera and Bapna (2022), Google |
 | [Tears of Steel](https://mango.blender.org/) | 2012 official short film | `tests/fixtures/subtitle-recognition/TOS-en.srt` and derived `base-film.raw.vtt` | CC BY 3.0 — [full text](licenses/CC-BY-3.0.txt) | (CC) Blender Foundation \| mango.blender.org |
 
 The speech fixture directory carries adjacent `LICENSE.txt` attribution,
@@ -872,6 +949,17 @@ executables can embed the small raw-VTT timing regression input. The Kafka
 book excerpt is public domain in the USA; its joined-line extraction is
 identified separately in that notice. No external movie or audiobook file
 is redistributed with the repository.
+
+The translation P0 FLEURS samples and publisher source/English reference text
+are extracted without alteration. Their per-sentence reference records retain
+the pinned archive/member, exact sentence ID, source/reference hashes and
+CC BY 4.0 attribution. A controlled sequence concatenates decoded German
+samples only for the stated window experiment; it is not natural dialogue.
+German sentence1586 is also embedded in the daemon for its production
+foreign-speech-to-English self-test. The macOS package and container image
+carry the attribution and full CC BY 4.0 license; runtime decoding/resampling occurs
+only in an owned private attempt. No local bilingual listening or general
+translation-quality verdict is claimed.
 
 `tests/web/asset-order.test.js` needs a real JavaScript parser: it refuses a
 web-asset order in which a file runs something at load that names a binding
@@ -922,6 +1010,23 @@ and package identity contracts together.
 
 ---
 
+## 9. Embedded representative media
+
+The daemon embeds three ten-second adaptations of *Sol Levante* (2020), by
+Netflix and Production I.G, from the [official Netflix Open Content collection](https://opencontent.netflix.com/).
+The content is available under [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/);
+the complete terms are in [licenses/CC-BY-4.0.txt](licenses/CC-BY-4.0.txt).
+No endorsement is implied.
+
+The adaptations select source frames 1440–1679, remove audio, re-encode HEVC,
+and derive BT.709 SDR/H.264 versions using zscale/Hable tone mapping and
+resizing. They are throughput fixtures, not unmodified HDR masters. Exact
+source, attribution, changes, frame metadata and SHA-256 hashes are recorded in
+the [fixture manifest](crates/plurxd/src/transcoder_optimization/fixtures/manifest.json)
+and the [preparation recipe](crates/plurxd/src/transcoder_optimization/fixtures/README.md).
+
+---
+
 ## Keeping this file honest
 
 This document is a claim about what is in the dependency graph, so it goes
@@ -932,5 +1037,5 @@ allow-list, so a new copyleft dependency cannot land quietly. Run it with
 
 `cargo deny` cannot see the parts that are not crates — the web UI bundle,
 the fonts, the client dependencies, the Dockerfile's ffmpeg, the source checked
-into the tree. Update §1, §2, §5, §6, §7 and §8 by hand when those move, in the
+into the tree. Update §1, §2, §5, §6, §7, §8 and §9 by hand when those move, in the
 same commit that moves them.

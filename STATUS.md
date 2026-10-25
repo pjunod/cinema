@@ -1,22 +1,40 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-17 · Kept current by the working agent in the same
-commit as the work it describes; a stale entry here is a bug. Newest effort
-first.
-
+**Updated:** 2026-10-25 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+- **2026-10-25 · CM v2.9 near-black chroma and target black:** [build plan, phase 2](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). #1278 (deca1e1e) keeps near-black colours neutral as the reference does (intensity ratio capped at 2, measured near-black gain). #1281 (b9eb0466) measures CM v2.9 at the 0.005-nit target black plurx renders with and fixes the gain (absolute intensity) and the PQ cube clip (at 0): Godfather II at 600 nits mean ΔE_ITP 0.33 → 0.25, p99.9 6.7 → 2.0. The near-black hue residual was measured but not shipped (it depends on chroma); CM v4 100-nit outliers do not reproduce on helper-master frames. Owner Claude; each merged after an adversarial review and one green fast lane. Not deployed: Paul deploys them with #1275 and #1276.
+- **2026-10-25 · Display-targeted DV creative trims (Phase E finish):** [build plan, phase 2](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). PR #1276 serves the CM v4 L8 and CM v2.9 L2 trims (L2 interpolated linearly in target PQ, measured on the reference), accepted by pixel comparison on eight real titles: CM v4 mean ΔE_ITP ≤ 0.011, CM v2.9 0.14–0.46 (untrimmed was 4.9–14). Playback reports `creative_trims_applied` per session; Apple 275, Android 181. Owner Claude; merged as 072d0f65 after two review rounds and one green fast lane. Not deployed: Paul deploys #1275 and #1276 together, then a GPT physical-display check.
+- **2026-10-25 · Display-targeted DV Phase E (closed-form Dolby display management):** [build plan, phase 2](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). PR #1275 replaces the Annex B.2 curve with our own CM v4 / CM v2.9 equations, checked privately against the licensed reference (CM v4 real P8 title mean ≤ 0.007 at 100 nits, ≤ 0.001 at 300–1600). Merged as 489e86e4 with served trims off; the trims PR #1276 turns them on. Paul deploys.
+- **2026-10-23 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner direct GPT/root; #1216 and batched#1269 merged into the effort, latest3cc264068; main unchanged. Compile-only gate5889 all8 PASS, Rust382/C384/trim393 compile passes; earlier behavior/media/client evidence retains source attribution. Final integrated adoption, completed-candidate review and qualification remain. Root delivery decision covers HDR/SDR with E explicitly unfinished and truthful L1-only reporting; no full A–F completion. Promotion-test policy awaits user reconciliation; physical acceptance and the excluded full-app FEL EOF lane remain separate.
+- **2026-10-22 · Rust admission refinement:** [live ledger](docs/cluster/RUST-ADMISSION-REFINEMENT-STATUS.md); production controller and exact-body harnesses built; Fable final review delivered, amendments implemented and five affected runtime schedules passed. Qualification and landing are tracked in the PR. Owner: Codex coordinator; [PR #1260](http://forge.lan:3000/noirr/plurx/pulls/1260).
+- **2026-10-21 · Playback cache disk safety:** [shared budget contract](docs/streaming/PLAYBACK-CACHE-BUDGET.md); aggregate accounting, owner eviction and write admission built. Astra review addressed; focused qualification in progress; deployment acceptance remains open. Owner: Codex.
+- **2026-10-21 · Worker refinement:** [live ledger](docs/cluster/WORKER-REFINEMENT-STATUS.md); seven Rust schedules pass; two complete workers, reviewed correspondence and observation projection built. Qualification and landing receipt: [PR #1251](http://forge.lan:3000/noirr/plurx/pulls/1251). Owner: Codex coordinator.
+- **2026-10-21 · Avatar Dolby Vision:** [live diagnosis and evidence](docs/clients/AVATAR-WEB-PLAYBACK-STATUS.md); Intel repair #1250 deployed and Apple TV confirmed. Follow-up corrects shared capability/timeline contracts; Astra approved, Rust regression and 38 web tests passed; injected Safari reports FEL/RPU/DYN and 3,010 frames / zero drops. [Automatic frame-drop capture](docs/clients/FRAME-DROP-RECORDER.md) is built; production acceptance, slow startup and original display-drop trigger remain open. Paul owns deployment.
+- **2026-10-21 · Operation progress:** [live ledger](docs/cluster/OPERATION-PROGRESS-STATUS.md); wait map/model/checker built and qualified; Fable approved; live promotion and landing are in PR #1249. Owner: Codex coordinator.
+- **2026-10-20 · System settings:** [approved layout and comparison ledger](docs/clients/SYSTEM-SETTINGS-STATUS.md); built and independently rendered; native macOS comparison passes, Linux hardware acceptance open.
+- **2026-10-20 · Safari resume:** [reviewed fix and 108 passing tests](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md); physical Safari/HEVC acceptance pending.
 
-## Agent efficiency: smaller searches, a docs router, paperwork first
+## Processed VOD successor root reuse
 
-**Merged to `main` as #1147 (`9de49f37`) and #1151 (`3103d0d9`), 2026-10-17; tooling and docs only, nothing to deploy.** Sessions that push should run `make hooks` once per clone — it installs the paperwork hook and Ripwire.
+Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.lan:3000/noirr/plurx/pulls/1225), not deployed. Exact `a857f488b` passed pinned fmt/all-target Clippy and fresh test linkage; fifteen focused contracts have valid passes (eight current, seven retained). Independent review and bounded closures are approved. Exact-root reuse preserves identity, owner and reservation fences; serialized requests grant no authority. The PR records the main gate and landing.
 
-- Round two (#1151): Ripwire is the default navigator; the ten largest docs open with `## At a glance`; docs over 40 KB sit on a shrink-only allowlist (`tests/operations/doc-size-allowlist.txt`); agent-tooling-only diffs skip the cargo gate.
-- Giant-file split: inline test modules moved into their own files — step one (#1157) for `playback_control.rs`, `media_sessions.rs` and `cluster/migration.rs`, step two (#1158) for the other 38 crate files over 150 KB (65 modules); `PlayerController.swift` split into the controller, `PlayerControllerSupport.swift` and `SharedPlayerController.swift` (Apple build 254). No code change; the commits are in `.git-blame-ignore-revs`.
+B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). The [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair) separates local qualification from Paul's deployment and live verification.
 
-- `docs/README.md` is a 10 KB router to one index per subject folder (was 131 KB); this page keeps five efforts and moved the rest to folder histories.
-- A root `.ignore` keeps evidence, archives, vendored and minified files out of searches; `.gitattributes` keeps large JSON out of diffs.
-- `scripts/paperwork` checks the bookkeeping rules in about ten seconds with the fix printed under each failure. It runs from `make paperwork`, the pre-push hook, and as the first job of every pull request (drafts included), and no other job starts until it passes ([PAPERWORK.md](docs/ci/PAPERWORK.md)).
-- `scripts/outline`, `scripts/quiet` and `scripts/ci-failures` keep file reads, build output and CI logs small; AGENTS.md opens with how to work efficiently.
+
+- **2026-10-19 · desktop Compose host controls:** native installer correction is
+  recorded in PR #1226. Linux Docker companion builds only the host tray,
+  pins the selected local deployment, and controls graceful lifecycle and
+  durable startup policy; source/published-image upgrades retain their existing
+  deployment paths. Focused fixture validation is recorded in its PR; real
+  desktop/engine acceptance and custom Pi ownership migration remain open.
+
+## macOS source installation and the missing tray
+
+**Source correction built; PR review pending.** The first tray promotion packaged the companion for release archives but left `make install-macos` on the daemon-only path. Source installation now stages a complete native runtime and companion before migration; the explicit server-only path retains legacy prefix installs. [Desktop controls](docs/server/DESKTOP-CONTROL.md) explains installation, opening the app and separate login preferences. The focused controller/migration and installer regressions pass; independent PR review remains pending.
+
+## Native server tray, startup policy and release upgrades
+
+**Source built and reviewed on `effort/desktop-tray`; [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213) records main promotion; not deployed.** The [implementation ledger](docs/features/DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra completed the PR #1220 review; root addresses all eight findings and owns passing unit tests and merge gates. Controller, daemon, native UI and packaging source is built in cohort PR #1220. The [qualification ledger](docs/features/DESKTOP-TRAY-QUALIFICATION.md) distinguishes passing review regressions, repository merge evidence and remaining native distribution acceptance.
 
 ## Playback startup path: the per-read stall and the web scrim
 
@@ -24,8 +42,7 @@ first.
 
 ## Startup and tone-map: fewer create-path reads, a tone-map census, lab arms
 
-**Branch `effort/startup-tone-map`.** Executes
-[STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](docs/streaming/STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)
+**Branch `effort/startup-tone-map`.** Executes [STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](docs/streaming/STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)
 rev 6.
 
 - **Part B is built.** The create read-budget line had its authority and local labels swapped; that is corrected, and the line now carries `store_ms` and a per-phase split. Seven read reductions follow, none of which moves a read across a fence or changes its consistency.
@@ -84,31 +101,14 @@ addressed (scheme respelled for Coil, Android failure backoff, Apple lock
 kept off suspension points, grid headers keep their width without artwork,
 wiring pinned by source tests). Not yet on hardware.
 
-## A leader restart no longer ends progressive or Live TV playback
-
-**[PR #807](http://forge.lan:3000/noirr/plurx/pulls/807), branch `fix/progressive-fence-grace`; not deployed.**
-Paul's standing rule is that a quorum leader restart must not interrupt
-playback. #798 gave the rolling registry a 5 s serving-fence grace; two more
-owners of running playback still treated any fence generation bump as final,
-even after authority came back. The progressive `stream.mp4` remux owner
-killed ffmpeg and ended the response, with no respawn, on every node. On the
-Live TV owner, the session observer, tuner fan-out, lease loop and request
-fence ended every session, shared transport and recording, and requests
-during the blip answered 410. Both now use #798's policy, moved beside the
-fence as `serving_fence::SessionGrace`. Brief losses keep the work, and
-nothing is published while authority is lost. Live TV requests answer a
-retryable 503. Sustained losses end the work within one grace, as before.
-RCA: `docs/streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md` finding 6.
-Still owed: the GPT leader-restart check under live progressive, rolling and
-Live TV playback, before and after deploy.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28,
-2026-10-04 and 2026-10-17 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17 and 2026-10-19 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-10-17 | Agent efficiency: smaller searches, a docs router, paperwork first | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
+| 2026-10-04 | A leader restart no longer ends progressive or Live TV playback | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-05 | Main-merge defects D1–D7 and the red gates: one batched PR | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-10-04 | The architecture effort is on `main`; the close-out is a draft PR | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-04 | Jellyfin facade: both pinned clients can now finish a play (J5) | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |

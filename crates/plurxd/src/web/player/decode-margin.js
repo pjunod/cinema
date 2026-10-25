@@ -369,13 +369,15 @@ function teardownHls(){
   // reopened a second time.
   supersedeDirectedChange(PLAYER);
   cancelPreparedFirstFrame(PLAYER);
-  if(PLAYER&&PLAYER.hls){
+  if(PLAYER){
     const video=document.getElementById("video");
     rememberPlaybackTransportIntent(video,PLAYER);
     PLAYER.internalMediaReset=true;
     pausePlaybackInternally(video,"source_teardown");
-    destroyHlsInstance(PLAYER,PLAYER.hls,video);
-    PLAYER.hls=null;
+    if(PLAYER.hls){
+      destroyHlsInstance(PLAYER,PLAYER.hls,video);
+      PLAYER.hls=null;
+    }
   }
 }
 function resetMediaSource(v){
@@ -397,23 +399,29 @@ function playbackTransportEvents(v){
   return v._plurxTransportEvents||(v._plurxTransportEvents={play:[],pause:[]});
 }
 function setPlaybackMediaSource(v,url){
+  cancelPlaybackPlayInvocation(v,"source_replaced");
   v.src=url;
   resetPlaybackTransportEvents(v);
 }
-function retirePlaybackPredecessor(p){
+function retirePlaybackPredecessor(p,release=releaseSession){
   if(!p?.mediaPredecessor) return;
   const predecessor=p.mediaPredecessor;
   // Its generation stops being about anything the moment it is retired, and so
   // does every fault that was about it (contract §3.4).
   playbackSurfaceStep({retire:playbackSurfaceGeneration(predecessor)});
   PLAYER=predecessor;stopPlayerTimers();teardownHls();
-  if(predecessor.sessionId)releaseSession(predecessor.sessionId);
-  if(predecessor.sharedDirect)releaseSharedDirect(predecessor);
+  if(predecessor.sessionId)release(predecessor.sessionId);
+  if(predecessor.sharedDirect){
+    const direct=predecessor.sharedDirect;predecessor.sharedDirect=null;
+    release(direct.session_id);
+  }
   PLAYER=p;p.mediaPredecessor=null;
 }
 // Attachment ownership is not command ownership: a native seek or Pause can
 // change the current command while this same decoder is still loading.
 function beginPlaybackMediaAttachment(p){
+  if(typeof stopFrameDropRecorder==="function")stopFrameDropRecorder(p,"replaced");
+  if(typeof translationRetire==="function")translationRetire("attachment changed");
   clearEffectiveProcessing(p);
   // A Shared direct session is read by exactly one attachment; any new one on
   // this player, whatever its route, ends it.
@@ -425,6 +433,7 @@ function beginPlaybackMediaAttachment(p){
   // A deliberate reopen mints a new attachment. Clear the retired attempt
   // only after the old attachment can no longer pass its identity closure.
   p.terminalStop=null;
+  p.playPermissionDenied=null;
   p.sessionTerminal=null;
   p.recoveryHealth=null;
   // Where this attempt's generation takes the picture: every attach on every
@@ -455,7 +464,7 @@ function logPlaybackTransportRecord(record,matched,v){
   if(!record)return;
   if(matched&&v)record=Object.assign({},record,{media_paused:!!v.paused,media_ended:!!v.ended});
   if(typeof clientLog==="function")clientLog({level:"info",event:matched?"transport_event":"transport_command",
-    message:matched?"media event matched transport provenance":"playback transport intent",
+    message:matched?"media event matched transport provenance":"playback transport intent",detail:record.reason,
     attempt:record.attempt,session_id:record.session,file_id:record.file_id,
     title:record.title,method:record.method,vcodec:record.vcodec,transport:record});
 }
@@ -472,8 +481,31 @@ function playbackTransportMarker(v,p,action,reason){
   logPlaybackTransportRecord(record,false);
   return record;
 }
+function prunePlaybackPlayInvocations(p){
+  if(!p) return;
+  let previous=null;
+  for(let invocation=p.transportPlayInvocation;invocation;){
+    const next=invocation.previous;
+    if(invocation.settled||invocation.cancelledReason){
+      if(previous)previous.previous=next;else p.transportPlayInvocation=next;
+      invocation.previous=null;
+    }else previous=invocation;
+    invocation=next;
+  }
+}
+function cancelPlaybackPlayInvocation(v,reason){
+  for(const owner of [PLAYER,PLAYER?.mediaPredecessor]){
+    for(let invocation=owner?.transportPlayInvocation;invocation;invocation=invocation.previous){
+      if(!invocation.settled&&invocation.element===v
+        &&invocation.source===(v.getAttribute?.("src")||v.currentSrc||v.src||null))
+        invocation.cancelledReason=reason;
+    }
+    prunePlaybackPlayInvocations(owner);
+  }
+}
 function pausePlaybackInternally(v,reason="transport_intent"){
   if(!v) return;
+  cancelPlaybackPlayInvocation(v,reason);
   // pause dispatches its event later, possibly after PLAYER was replaced.
   // Tag the actual transition on the persistent element, not the old player.
   if(!v.paused) playbackTransportEvents(v).pause.push(playbackTransportMarker(v,PLAYER,"pause",reason));
@@ -483,17 +515,28 @@ function rememberPlaybackTransportIntent(v,p){
   if(p&&typeof p.wantsPlayback!=="boolean") p.wantsPlayback=!!v&&!v.paused&&!v.ended;
 }
 function applyPlaybackTransportIntent(v,p){
-  if(!v||!p||PLAYER!==p) return;
+  if(!v||!p||PLAYER!==p||p.playPermissionDenied) return;
   rememberPlaybackTransportIntent(v,p);
   const proof=p.preparedCommitting;
   if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
   if(p.wantsPlayback){
     const events=playbackTransportEvents(v), token=playbackTransportMarker(v,p,"play","attach_or_resume");
+    prunePlaybackPlayInvocations(p);
+    const previous=p.transportPlayInvocation||null;
+    const invocation={attachment:p.mediaAttachment,element:v,intentGeneration:p.controlIntentGeneration||0,
+      source:v.getAttribute?.("src")||v.currentSrc||v.src||null,nativeExecution:p.hlsStartup?.native?.execution,record:token,previous};
+    p.transportPlayInvocation=invocation;
+    if(p.hlsStartup) p.hlsStartup.playRejection=null;
     if(v.paused) events.play.push(token);
-    v.play().catch(()=>{
+    const rejected=error=>{
+      invocation.settled=true;
       const index=events.play.indexOf(token);
       if(index>=0) events.play.splice(index,1);
-    });
+      if(typeof notePlaybackPlayRejection==='function')
+        notePlaybackPlayRejection(p,invocation,error);
+      prunePlaybackPlayInvocations(p);
+    };
+    try{Promise.resolve(v.play()).then(()=>{invocation.settled=true;prunePlaybackPlayInvocations(p);},rejected);}catch(error){rejected(error);}
   }else pausePlaybackInternally(v);
 }
 function handlePlaybackTransportEvent(v,p,event){
@@ -501,9 +544,18 @@ function handlePlaybackTransportEvent(v,p,event){
   if(event==="pause"){
     const record=playbackTransportEvents(v).pause.shift();
     if(record){logPlaybackTransportRecord(record,true,v);return;}
-    logPlaybackTransportRecord(playbackTransportRecord(v,p,"pause","native_unknown","unmatched_media_event"),true,v);
-    if(!v.paused) return; // queued native edge superseded by a newer Play
-    if(v.ended||v.error) return;
+    const observed=playbackTransportRecord(v,p,"pause","native_unknown","unmatched_media_event");
+    const presented=p.transportPresentation;
+    const presenting=!!p.mediaAttachment&&presented?.attachment===p.mediaAttachment&&presented.element===v
+      &&document.getElementById("video")===v;
+    const accepted=presenting&&v.paused&&!v.ended&&!v.error;
+    observed.reason=accepted?"native_control_after_presentation":presenting?"native_observation_superseded":"native_observation_before_presentation";
+    if(!accepted) observed.desired_after=p.wantsPlayback??null;
+    logPlaybackTransportRecord(observed,true,v);
+    // An unowned load/autoplay edge does not withdraw a viewer's request.
+    // Explicit controls already own intent before any frame; native controls
+    // gain that compatibility only after this attachment actually presents.
+    if(!accepted) return;
     p.wantsPlayback=false;
     const proof=p.preparedCommitting;
     if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
@@ -526,8 +578,15 @@ function handlePlaybackTransportEvent(v,p,event){
   }else if(event==="play"){
     const record=playbackTransportEvents(v).play.shift();
     if(record){logPlaybackTransportRecord(record,true,v);return;}
-    logPlaybackTransportRecord(playbackTransportRecord(v,p,"play","native_unknown","unmatched_media_event"),true,v);
-    if(v.paused) return; // queued native edge superseded by a newer Pause
+    const observed=playbackTransportRecord(v,p,"play","native_unknown","unmatched_media_event");
+    const presented=p.transportPresentation;
+    const presenting=!!p.mediaAttachment&&presented?.attachment===p.mediaAttachment&&presented.element===v
+      &&document.getElementById("video")===v;
+    const accepted=presenting&&!v.paused&&!v.ended&&!v.error;
+    observed.reason=accepted?"native_control_after_presentation":presenting?"native_observation_superseded":"native_observation_before_presentation";
+    if(!accepted) observed.desired_after=p.wantsPlayback??null;
+    logPlaybackTransportRecord(observed,true,v);
+    if(!accepted) return;
     p.wantsPlayback=true;
     const proof=p.preparedCommitting;
     if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
@@ -547,6 +606,7 @@ function stopPlayerTimers(){
   if(!PLAYER) return;
   if(PLAYER.preparedRetiring)
     retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
+  if(typeof stopFrameDropRecorder==="function")stopFrameDropRecorder(PLAYER);
   stopPlaybackControl(PLAYER);
   clearPendingSeekTimer();
   clearInterval(PLAYER.timer); PLAYER.timer=null;
@@ -568,7 +628,8 @@ function stopPlayerTimers(){
 // a presenter with no evidence, and neither would come back until the next
 // full open.
 function armPlaybackSampling(v,p){
-  if(!v||!p) return;
+  if(!v||!p||p.playPermissionDenied) return;
+  if(typeof startFrameDropRecorder==="function")startFrameDropRecorder(v,p);
   clearInterval(p.progressTimer);
   p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
   clearInterval(p.autoTimer);

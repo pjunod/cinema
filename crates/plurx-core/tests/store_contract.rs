@@ -21,6 +21,10 @@ use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/dv_title_jobs.rs"]
+mod dv_title_jobs;
+#[path = "store_contract/formal_publication.rs"]
+mod formal_publication;
 #[path = "store_contract/invitations.rs"]
 mod invitations;
 #[path = "store_contract/jellyfin_catalog.rs"]
@@ -515,6 +519,14 @@ const READING_METHODS: &[&str] = &[
     "put_reading_state",
     "delete_reading_state",
 ];
+const ANNOTATION_METHODS: &[&str] = &[
+    "item_ratings",
+    "put_item_ratings",
+    "set_item_listed",
+    "item_list_flags",
+    "listed_items",
+    "items_on_list",
+];
 const TRAKT_METHODS: &[&str] = &[
     "get_trakt_auth",
     "list_trakt_auth",
@@ -575,6 +587,15 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    // Progressive translation's actual source-bind/publication/Stop/read-lease
+    // contract below exercises these on every backend, including three voters.
+    "maintain_translation_cache",
+    "write_translation_settings",
+    "read_subtitle_translation",
+    "acquire_translation_lease",
+    "mutate_subtitle_translation",
+    "bind_translation_source",
+    "publish_translation_segment",
     // Managed configuration CAS and node-bounded model publication/observation
     // run on both backends in the managed_subtitle_configuration_* and
     // managed_subtitle_model_operations_* contracts in background_jobs.rs.
@@ -12616,6 +12637,109 @@ async fn assert_unactivated_contract_baseline(client: &Client) {
 // columns/tables that forward migration would add a second time. These fixtures
 // seed no extension rows; remove the later schema and retain the full background
 // trigger inventory as proof that actual migration restores it.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_shapes_atomically() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect rewind refusal client");
+    let current = HiqliteAuthStore::bootstrap(
+        client.clone(),
+        CONTRACT_INSTANCE_ID,
+        &cluster._root.path().join("rewind-refusal.db"),
+    )
+    .await
+    .expect("current extension fixture");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty owned fixture");
+    async fn snapshot(
+        client: &Client,
+    ) -> (
+        i64,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+    ) {
+        async fn rows(client: &Client, sql: &str) -> Vec<String> {
+            client
+                .query_consistent(sql.to_owned(), hiqlite::params!())
+                .await
+                .expect("snapshot rows")
+                .iter_mut()
+                .map(|row| row.get::<String>("payload"))
+                .collect()
+        }
+        (replicated_schema_marker(client).await,
+         rows(client, "SELECT json_object('name',name,'type',type,'sql',sql) AS payload FROM sqlite_master ORDER BY name,type,sql").await,
+         rows(client, "SELECT json_array(node_id,model_id,profile_id,receipt_json) AS payload FROM subtitle_translation_capabilities ORDER BY node_id,model_id,profile_id").await,
+         rows(client, "SELECT json_array(node_id,model_id,receipt_json) AS payload FROM subtitle_model_receipts ORDER BY node_id,model_id").await,
+         rows(client, "SELECT json_array(id,kind,payload_version,payload_json,dedupe_key,priority,state,target_node_id,owner_node_id,owner_boot_id,claim_id,fence,revision,lease_expires_ms,failure_policy,failed_attempts,attempt_limit,retry_deadline_ms,attempt_errors,index_diagnostic_json,yield_count,abandoned_count,not_before_ms,checkpoint_json,result_ref,last_error_code,created_at_ms,updated_at_ms) AS payload FROM background_jobs ORDER BY id").await,
+         rows(client, "SELECT json_array('translation',singleton,version) AS payload FROM subtitle_translation_schema UNION ALL SELECT json_array('managed',singleton,version) AS payload FROM subtitle_managed_schema ORDER BY payload").await)
+    }
+    for scenario in [
+        "translation-job",
+        "translation-data",
+        "translation-shape",
+        "managed-data",
+        "managed-marker",
+        "managed-shape",
+    ] {
+        let (inject, restore) = match scenario {
+            "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
+            "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
+            "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,1)".to_owned()),
+            "translation-shape" | "managed-shape" => {
+                let trigger = if scenario == "translation-shape" {"subtitle_translation_source_changed"} else {"subtitle_managed_source_changed"};
+                let mut rows = client.query_consistent("SELECT sql FROM sqlite_master WHERE name=$1", hiqlite::params!(trigger)).await.expect("original trigger definition");
+                assert_eq!(rows.len(), 1);
+                (format!("DROP TRIGGER {trigger}"), rows[0].get::<String>("sql"))
+            }
+            _ => unreachable!(),
+        };
+        client
+            .txn([(inject, hiqlite::params!())])
+            .await
+            .expect("inject only owned refusal fixture")
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture injection applied");
+        let before = snapshot(&client).await;
+        let owned = client.clone();
+        let refusal = tokio::spawn(async move {
+            rewind_empty_managed_subtitle_extension(&owned).await;
+        })
+        .await
+        .expect_err("unsafe historical rewind must refuse");
+        assert!(refusal.is_panic(), "fixture guard refused {scenario}");
+        assert_eq!(
+            before,
+            snapshot(&client).await,
+            "{scenario} refusal preserves complete DDL, schema marker and owned payloads"
+        );
+        client
+            .txn([(restore, hiqlite::params!())])
+            .await
+            .expect("restore only injected refusal fixture")
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture restored");
+    }
+}
+
 /// A historical queue fixture cannot retain half of the independent managed
 /// extension after removing its background objects. Rewind only an empty,
 /// unactivated current extension, then let ordinary open reinstall it.
@@ -12649,6 +12773,45 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         rows[0].value, 6,
         "partial managed fixtures cannot be rewound"
     );
+    // The historical queue teardown also removes translation triggers that
+    // reference background_jobs. Remove the entire exact empty extension,
+    // never leave its marker/tables advertising a partial current shape.
+    let shape = {
+        let mut objects = client
+            .query_consistent(
+                queue_fixture::TRANSLATION_FIXTURE_SHAPE_SQL,
+                hiqlite::params!(),
+            )
+            .await
+            .expect("translation fixture shape");
+        objects
+            .iter_mut()
+            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        shape,
+        queue_fixture::translation_fixture_shape(),
+        "only exact current translation fixtures may be rewound"
+    );
+    let mut counts = Vec::new();
+    for (name, sql) in &shape {
+        if sql.starts_with("CREATE TABLE") {
+            let rows: Vec<I64Value> = client
+                .query_consistent_map(
+                    format!("SELECT count(*) AS value FROM {name}"),
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("translation data inventory");
+            assert_eq!(rows.len(), 1);
+            counts.push((name.clone(), rows[0].value));
+        }
+    }
+    let jobs: Vec<I64Value> = client.query_consistent_map("SELECT count(*) AS value FROM background_jobs WHERE kind IN ('subtitle_translation_prepare','subtitle_translation_range')", hiqlite::params!()).await.expect("accepted translation job inventory");
+    assert_eq!(jobs.len(), 1);
+    let translation_drops =
+        queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
     let old_view = include_str!("../src/store/background_jobs_probe.sql")
         .split("-- next statement")
         .find(|sql| {
@@ -12656,17 +12819,22 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
                 .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
         })
         .expect("published predecessor resource view");
-    let mut statements = [
-        "DROP TRIGGER subtitle_managed_config_write",
-        "DROP TRIGGER subtitle_managed_source_deleted",
-        "DROP TRIGGER subtitle_managed_source_changed",
-        "DROP VIEW background_job_required_resources",
-        "DROP TABLE subtitle_model_receipts",
-        "DROP TABLE subtitle_managed_schema",
-    ]
-    .into_iter()
-    .map(|sql| (sql.to_owned(), hiqlite::params!()))
-    .collect::<Vec<_>>();
+    let mut statements: Vec<_> = translation_drops
+        .into_iter()
+        .map(|sql| (sql, hiqlite::params!()))
+        .collect();
+    statements.extend(
+        [
+            "DROP TRIGGER subtitle_managed_config_write",
+            "DROP TRIGGER subtitle_managed_source_deleted",
+            "DROP TRIGGER subtitle_managed_source_changed",
+            "DROP VIEW background_job_required_resources",
+            "DROP TABLE subtitle_model_receipts",
+            "DROP TABLE subtitle_managed_schema",
+        ]
+        .into_iter()
+        .map(|sql| (sql.to_owned(), hiqlite::params!())),
+    );
     statements.push((old_view.to_owned(), hiqlite::params!()));
     client
         .txn(statements)
@@ -16597,6 +16765,7 @@ mod managed_bootstrap_regressions {
             .enqueue_job(EnqueueJob {
                 id: job_id.clone(),
                 payload: JobPayload::SubtitleModelOperation {
+                    translation_profile: None,
                     action: ModelAction::Verify,
                     model_id: "bootstrap-model".into(),
                     catalog_revision: "catalog-v1".into(),
@@ -18401,6 +18570,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // wire identities, compatibility logins and bounded negotiations
     // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
     // v102–v103).
+    // Plus the item ratings and per-person lists (SQLite v113).
     let mut imported_tables = report
         .tables
         .iter()
@@ -18452,6 +18622,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "jellyfin_plays",
             "job_leases",
             "libraries",
+            "library_annotations_lists",
+            "library_annotations_rating_fetches",
+            "library_annotations_ratings",
             "library_channel_entries",
             "library_channel_favourites",
             "library_channel_generations",
@@ -20346,6 +20519,7 @@ fn contract_inventory_matches_every_store_method() {
         CLASSIFICATION_METHODS,
         WATCH_METHODS,
         READING_METHODS,
+        ANNOTATION_METHODS,
         TRAKT_METHODS,
         API_KEY_METHODS,
         OUTBOX_METHODS,
@@ -20495,7 +20669,16 @@ fn contract_inventory_matches_every_store_method() {
     // +4: managed subtitle configuration CAS, fenced phase observation,
     // model receipt publication and receipt reads, covered on both backends
     // by the managed configuration/model-operation contracts named above.
-    assert_eq!(declared.len(), 490, "review the Store method count");
+    // +7: bounded progressive translation settings, mutation, source binding,
+    // immutable publication, lease/read observations and cache maintenance.
+    // All are exercised by progressive_translation_source_bind_publication_* .
+    //
+    // 497 -> 503 for `AnnotationStore`, a new supertrait of `Store` with six
+    // methods: item ratings (read and replace) and per-person item lists
+    // (set, flags, a page of a list, membership of a batch). All six are named
+    // in `ANNOTATION_METHODS` and covered on both backends by
+    // `annotation_contract_runs_through_dyn_store`.
+    assert_eq!(declared.len(), 503, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -29418,6 +29601,19 @@ async fn scan_identity_repair_contract() {
             .put_progress(copy_user.id, second.2, 4_000, Some(10_000))
             .await
             .expect("copy-source watch");
+        {
+            use plurx_core::annotations::ItemList;
+            for (show, list, at) in [
+                (first.0, ItemList::Favorite, 5),
+                (second.0, ItemList::Watchlist, 7),
+                (second.0, ItemList::Favorite, 9),
+            ] {
+                store
+                    .set_item_listed(copy_user.id, show, list, true, at)
+                    .await
+                    .expect("list membership before repair");
+            }
+        }
         let snapshot = store
             .identity_repair_snapshot(library.id, &[first.0, second.0])
             .await
@@ -29508,6 +29704,25 @@ async fn scan_identity_repair_contract() {
                 .expect("idempotent repair retry"),
             IdentityRepairOutcome::AlreadyApplied
         );
+        {
+            // Memberships of the retired duplicate follow it onto the
+            // survivor; the later add time wins where both were listed.
+            use plurx_core::annotations::ItemList;
+            for (list, at) in [(ItemList::Watchlist, 7), (ItemList::Favorite, 9)] {
+                let entries = store
+                    .listed_items(copy_user.id, list, 10, 0)
+                    .await
+                    .expect("lists after repair");
+                assert_eq!(
+                    entries
+                        .iter()
+                        .map(|e| (e.item_id, e.added_at_ms))
+                        .collect::<Vec<_>>(),
+                    vec![(first.0, at)],
+                    "{backend}: {list:?} survives the repair on the surviving show"
+                );
+            }
+        }
 
         let third = tree(
             store.as_ref(),
@@ -31702,6 +31917,227 @@ async fn home_preview_contract_runs_through_dyn_store() {
             BTreeSet::from(["book", "audiobook"]),
             "book roots drifted on {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn annotation_contract_runs_through_dyn_store() {
+    use plurx_core::annotations::{ItemList, ItemRatings, Rating, RatingSource};
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("annotation-contract", "hash", false)
+            .await
+            .expect("user");
+        let other = store
+            .create_user("annotation-other", "hash", false)
+            .await
+            .expect("other user");
+        let movies = store
+            .create_library(&NewLibrary {
+                name: "Annotation Contract Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/annotation/movies")],
+                anime: false,
+            })
+            .await
+            .expect("movies");
+        let mut ids = Vec::new();
+        for title in ["Harbor Lights", "Night Tide", "Salt Harvest"] {
+            ids.push(
+                store
+                    .insert_item(&NewItem {
+                        library_id: movies.id,
+                        kind: ItemKind::Movie,
+                        parent_id: None,
+                        title: title.into(),
+                        year: Some(2024),
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .expect("movie"),
+            );
+        }
+        let (harbor, tide, salt) = (ids[0], ids[1], ids[2]);
+
+        // Ratings: absent until fetched, then replaced whole by each fetch.
+        assert_eq!(
+            store.item_ratings(harbor).await.expect("none"),
+            None,
+            "{backend}"
+        );
+        let first = ItemRatings {
+            fetched_at_ms: 1_000,
+            omdb_consulted: true,
+            ratings: vec![
+                Rating {
+                    source: RatingSource::Tmdb,
+                    value: 78.0,
+                    scale: 100,
+                    votes: Some(3_900),
+                },
+                Rating {
+                    source: RatingSource::Imdb,
+                    value: 8.1,
+                    scale: 10,
+                    votes: Some(214_000),
+                },
+                Rating {
+                    source: RatingSource::RottenTomatoes,
+                    value: 94.0,
+                    scale: 100,
+                    votes: None,
+                },
+            ],
+        };
+        store
+            .put_item_ratings(harbor, &first)
+            .await
+            .expect("put ratings");
+        let read = store
+            .item_ratings(harbor)
+            .await
+            .expect("read")
+            .expect("stored");
+        assert_eq!(read.fetched_at_ms, 1_000, "{backend}");
+        assert!(read.omdb_consulted, "{backend}");
+        assert_eq!(
+            read.ratings.iter().map(|r| r.source).collect::<Vec<_>>(),
+            vec![
+                RatingSource::Imdb,
+                RatingSource::RottenTomatoes,
+                RatingSource::Tmdb
+            ],
+            "ratings come back in display order on {backend}"
+        );
+        assert_eq!(read.ratings[0].votes, Some(214_000), "{backend}");
+        let second = ItemRatings {
+            fetched_at_ms: 2_000,
+            omdb_consulted: false,
+            ratings: vec![Rating {
+                source: RatingSource::Tmdb,
+                value: 80.0,
+                scale: 100,
+                votes: None,
+            }],
+        };
+        store
+            .put_item_ratings(harbor, &second)
+            .await
+            .expect("replace ratings");
+        assert_eq!(
+            store.item_ratings(harbor).await.expect("read"),
+            Some(second),
+            "{backend}"
+        );
+        // An item that does not exist gets nothing written, and no error.
+        store
+            .put_item_ratings(9_999_999, &first)
+            .await
+            .expect("missing item is a no-op");
+        assert_eq!(
+            store.item_ratings(9_999_999).await.expect("read"),
+            None,
+            "{backend}"
+        );
+
+        // Lists: per person, newest first, idempotent, re-adding moves to front.
+        for (item, at) in [(harbor, 10), (tide, 20), (salt, 30)] {
+            store
+                .set_item_listed(user.id, item, ItemList::Watchlist, true, at)
+                .await
+                .expect("list");
+        }
+        store
+            .set_item_listed(user.id, harbor, ItemList::Watchlist, true, 40)
+            .await
+            .expect("re-add");
+        store
+            .set_item_listed(user.id, tide, ItemList::Favorite, true, 50)
+            .await
+            .expect("favorite");
+        store
+            .set_item_listed(user.id, 9_999_999, ItemList::Favorite, true, 60)
+            .await
+            .expect("missing item is a no-op");
+        let page = store
+            .listed_items(user.id, ItemList::Watchlist, 10, 0)
+            .await
+            .expect("watchlist");
+        assert_eq!(
+            page.iter().map(|e| e.item_id).collect::<Vec<_>>(),
+            vec![harbor, salt, tide],
+            "newest first on {backend}"
+        );
+        assert_eq!(page[0].added_at_ms, 40, "{backend}");
+        assert_eq!(
+            store
+                .listed_items(user.id, ItemList::Watchlist, 1, 1)
+                .await
+                .expect("second page")
+                .iter()
+                .map(|e| e.item_id)
+                .collect::<Vec<_>>(),
+            vec![salt],
+            "{backend}"
+        );
+        let flags = store.item_list_flags(user.id, tide).await.expect("flags");
+        assert!(flags.watchlist && flags.favorite, "{backend}");
+        assert_eq!(
+            flags.watchlist_added_at_ms,
+            Some(20),
+            "the membership carries its own time on {backend}"
+        );
+        let flags = store
+            .item_list_flags(other.id, tide)
+            .await
+            .expect("other flags");
+        assert!(
+            !flags.watchlist && !flags.favorite,
+            "lists are per person on {backend}"
+        );
+        assert_eq!(
+            store
+                .items_on_list(user.id, ItemList::Favorite, &[harbor, tide, salt])
+                .await
+                .expect("batch"),
+            vec![tide],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .items_on_list(user.id, ItemList::Favorite, &[])
+                .await
+                .expect("empty batch"),
+            Vec::<i64>::new(),
+            "{backend}"
+        );
+        store
+            .set_item_listed(user.id, salt, ItemList::Watchlist, false, 70)
+            .await
+            .expect("remove");
+        store
+            .set_item_listed(user.id, salt, ItemList::Watchlist, false, 80)
+            .await
+            .expect("remove again");
+        assert_eq!(
+            store
+                .listed_items(user.id, ItemList::Watchlist, 10, 0)
+                .await
+                .expect("after removal")
+                .len(),
+            2,
+            "{backend}"
+        );
+
+        // A person's lists go with them.
+        assert!(store.delete_user(user.id).await.expect("delete user"));
+        assert!(store
+            .listed_items(user.id, ItemList::Watchlist, 10, 0)
+            .await
+            .expect("after delete")
+            .is_empty());
     })
     .await;
 }

@@ -1,6 +1,7 @@
 package tv.plurx.app.ui
 
 import tv.plurx.app.remote.*
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.CompositionLocalProvider
@@ -10,6 +11,7 @@ import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -36,7 +38,11 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -67,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import tv.plurx.app.data.ItemAnnotations
 import tv.plurx.app.data.Item
 import tv.plurx.app.data.ItemDetail
 import tv.plurx.app.data.MediaFileDto
@@ -186,22 +193,31 @@ private fun DetailContent(
     onWatchedChanged: () -> Unit,
     onBack: () -> Unit,
 ) {
+    val preferences by vm.preferences.collectAsStateWithLifecycle()
+    val meridian = preferences.layout == tv.plurx.app.data.ViewerLayout.Meridian
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
     val item = detail.item
     val scope = rememberCoroutineScope()
     var startingEpisodeId by remember(item.id) { mutableStateOf<Long?>(null) }
+    // Scores and list flags arrive beside the item, never holding the page.
+    var annotations by remember(item.id) { mutableStateOf<ItemAnnotations?>(null) }
+    LaunchedEffect(item.id) {
+        if (item.kind == "movie" || item.kind == "show") {
+            annotations = catchingUnlessCancelled { vm.annotations(item.id) }.getOrNull()
+        }
+    }
     // The viewer's pre-play track choice, per file, for this item only. Keyed
     // on the item so opening the next one starts from the server's defaults
     // again — the choice belongs to one playback and is never written back as
     // a Playback setting.
-    var trackChoices by remember(item.id) { mutableStateOf(emptyMap<Long, PreplayTracks>()) }
+    var trackChoices by rememberEntryPresentation("detail:trackChoices", item.id) { mutableStateOf(emptyMap<Long, PreplayTracks>()) }
     val resumeMs = item.watch?.position_ms ?: 0L
     val resumeFile = playbackFile(item, detail.files, resumeMs)
     val durationMs = if (item.isAudiobook) item.runtime_ms ?: resumeFile?.duration_ms else resumeFile?.duration_ms ?: item.runtime_ms
     val nearlyDone = durationMs != null && durationMs > 0 && resumeMs > durationMs * 0.95
     val canResume = resumeMs > 3_000 && !nearlyDone
-    var selectedVersion by remember(item.id) { mutableStateOf<Long?>(null) }
+    var selectedVersion by rememberEntryPresentation("detail:selectedVersion", item.id) { mutableStateOf<Long?>(null) }
     val best = detail.files.find { it.id == selectedVersion } ?: playbackFile(item, detail.files, if (canResume) resumeMs else 0L)
     val remoteNavigation = LocalRemoteNavigation.current
     val remoteScope = LocalRemoteScope.current
@@ -222,6 +238,7 @@ private fun DetailContent(
         add("detail:back")
         if (seriesPlayback != null || best != null && item.isPlayable) add("detail:play")
         if (canResume && best != null && item.isPlayable) add("detail:start-over")
+        if (annotations != null && (item.kind == "movie" || item.kind == "show")) { add("detail:watchlist"); add("detail:favorite") }
         if (item.isPlayableVideo && detail.files.size > 1 && best != null) add("choice:Version")
         if (item.isPlayableVideo && best != null) { add("choice:Audio"); add("choice:Subtitles") }
         addAll(detail.editions.map { "detail-edition:${it.id}" })
@@ -244,7 +261,13 @@ private fun DetailContent(
     }
     LazyColumn(Modifier.fillMaxSize().navigationBarsPadding(), state = remoteList) {
         item {
-            Box(Modifier.fillMaxWidth().height(70.dp)) { DetailBackButton(onBack) }
+            if (meridian && item.backdrop != null) {
+                Box(Modifier.fillMaxWidth().height(if (formFactor == FormFactor.Compact) 180.dp else 260.dp)) {
+                    NetworkImage(imageUrl(item.backdrop), Modifier.fillMaxSize())
+                    Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(MaterialTheme.colorScheme.background.copy(alpha = .3f), MaterialTheme.colorScheme.background))))
+                    DetailBackButton(onBack)
+                }
+            } else Box(Modifier.fillMaxWidth().height(70.dp)) { DetailBackButton(onBack) }
             Column(Modifier.fillMaxWidth().padding(horizontal = side), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 if (detail.ancestors.isNotEmpty()) AncestorBreadcrumb(detail.ancestors, onOpenItem)
                 Row(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.Top) {
@@ -258,10 +281,24 @@ private fun DetailContent(
                             }
                             if (item.isPlayableVideo) Text(englishAvailability(file), color = Muted, style = MaterialTheme.typography.bodySmall)
                         }
+                        annotations?.ratings?.takeIf { it.isNotEmpty() }?.let { ratings ->
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                ratings.forEach { RatingChip(it) }
+                            }
+                        }
                     }
                 }
                 item.overview?.takeIf { it.isNotBlank() }?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodyMedium) }
-                Actions(vm = vm, item = item, files = if (item.isPlayableVideo && best != null) listOf(best) else detail.files,
+                Actions(vm = vm, item = item, annotations = annotations, onAnnotations = { annotations = it },
+                    onAnnotationsRevert = { list, attempted ->
+                        annotations = annotations?.let { now ->
+                            when {
+                                list == "watchlist" && now.watchlist == attempted -> now.copy(watchlist = !attempted)
+                                list == "favorite" && now.favorite == attempted -> now.copy(favorite = !attempted)
+                                else -> now
+                            }
+                        }
+                    }, files = if (item.isPlayableVideo && best != null) listOf(best) else detail.files,
                     seriesPlayback = seriesPlayback, resumeMs = resumeMs, canResume = canResume,
                     trackChoices = trackChoices, requestInitialFocus = formFactor == FormFactor.Television,
                     reading = detail.reading, onPlay = onPlay, onViewPhoto = onViewPhoto,
@@ -356,8 +393,8 @@ private fun DetailContent(
                         if (startingEpisodeId == null) {
                             startingEpisodeId = child.id
                             scope.launch {
-                                val result = catchingUnlessCancelled { vm.episodePlayback(child) }.getOrNull()
-                                startingEpisodeId = null
+                                val result = try { catchingUnlessCancelled { vm.episodePlayback(child) }.getOrNull() }
+                                finally { startingEpisodeId = null }
                                 if (result != null) {
                                     val target = result.playback
                                     // A different item: its own defaults apply.
@@ -438,6 +475,9 @@ internal fun AncestorBreadcrumb(
 private fun Actions(
     vm: AppViewModel,
     item: Item,
+    annotations: ItemAnnotations?,
+    onAnnotations: (ItemAnnotations) -> Unit,
+    onAnnotationsRevert: (list: String, attempted: Boolean) -> Unit,
     files: List<MediaFileDto>,
     seriesPlayback: EpisodePlaybackTarget?,
     resumeMs: Long,
@@ -453,6 +493,7 @@ private fun Actions(
     onWatchedChanged: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    var listBusy by remember(item.id) { mutableStateOf(emptySet<String>()) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val formFactor = currentFormFactor()
     val offlineRecords by vm.offlineRecords.collectAsStateWithLifecycle()
@@ -659,6 +700,40 @@ private fun Actions(
             item {
                 TvOutlinedButton(onClick = { onMakeChannel(item) }) {
                     Text("Make channel")
+                }
+            }
+        }
+
+        annotations?.let { a ->
+            // One write per list at a time; a failure undoes only its own
+            // field, and only while that field still shows its change.
+            fun toggle(list: String) {
+                if (list in listBusy) return
+                listBusy = listBusy + list
+                val target = if (list == "watchlist") !a.watchlist else !a.favorite
+                onAnnotations(if (list == "watchlist") a.copy(watchlist = target) else a.copy(favorite = target))
+                scope.launch {
+                    val ok = catchingUnlessCancelled { vm.setListed(item.id, list, target) }.isSuccess
+                    if (ok) vm.refreshLists() else onAnnotationsRevert(list, target)
+                    listBusy = listBusy - list
+                }
+            }
+            item {
+                TvOutlinedButton(
+                    modifier = Modifier.remoteAction("detail:watchlist", if (a.watchlist) "On watchlist" else "Watchlist") { toggle("watchlist"); RemoteOutcome.Applied },
+                    onClick = { toggle("watchlist") },
+                ) {
+                    Icon(if (a.watchlist) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Text(if (a.watchlist) "  On watchlist" else "  Watchlist")
+                }
+            }
+            item {
+                TvOutlinedButton(
+                    modifier = Modifier.remoteAction("detail:favorite", if (a.favorite) "Favorited" else "Favorite") { toggle("favorite"); RemoteOutcome.Applied },
+                    onClick = { toggle("favorite") },
+                ) {
+                    Icon(if (a.favorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Text(if (a.favorite) "  Favorited" else "  Favorite")
                 }
             }
         }

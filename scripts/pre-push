@@ -10,4 +10,9 @@
 set -e
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
+# Git exports repository-local paths to hooks, including a linked worktree's
+# GIT_DIR and index. Paperwork creates disposable Git fixtures: let each child
+# discover its repository from its own cwd instead of mutating this one.
+git_local_env=$(git rev-parse --local-env-vars)
+unset $git_local_env
 exec python3 scripts/paperwork --hook

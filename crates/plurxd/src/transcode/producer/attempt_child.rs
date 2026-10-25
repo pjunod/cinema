@@ -180,14 +180,28 @@ pub(super) fn encoded_vod_presentation_file(
     file.hdr = (grade == OutputGrade::Hdr10).then(|| "hdr10".to_owned());
     file.hdr_format = (grade == OutputGrade::Hdr10).then(|| "HDR10".to_owned());
     file.dolby_vision = Default::default();
-    file.bit_depth = Some(if grade == OutputGrade::Hdr10 { 10 } else { 8 });
+    // Transfer/gamut and coded representation are independent. In particular,
+    // completed SDR reconstruction retains the carrier's HEVC/Main10 encoder.
+    file.bit_depth = Some(contract.map_or_else(
+        || if grade == OutputGrade::Hdr10 { 10 } else { 8 },
+        |contract| match contract.output_pixel_format() {
+            "yuv420p10le" | "p010le" => 10,
+            _ => 8,
+        },
+    ));
     file.video_codec = Some(
-        if grade == OutputGrade::Hdr10 {
-            "hevc"
-        } else {
-            "h264"
-        }
-        .to_owned(),
+        contract
+            .map_or_else(
+                || {
+                    if grade == OutputGrade::Hdr10 {
+                        "hevc"
+                    } else {
+                        "h264"
+                    }
+                },
+                |contract| contract.output_codec(),
+            )
+            .to_owned(),
     );
     file
 }

@@ -189,29 +189,18 @@
         ("prepared_link.rs", include_str!("../prepared_link.rs")),
     ];
 
+    mod source_inventory {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support/rust_source_inventory.rs"));
+    }
+
     fn hls_product_source() -> String {
         let hls = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http/hls");
-        let mut on_disk = std::collections::BTreeSet::new();
-        let mut directories = vec![hls.clone()];
-        while let Some(directory) = directories.pop() {
-            for entry in std::fs::read_dir(&directory).expect("an hls module directory") {
-                let path = entry.expect("a directory entry").path();
-                if path.file_stem().and_then(|stem| stem.to_str()) == Some("tests") {
-                    continue;
-                }
-                if path.is_dir() {
-                    directories.push(path);
-                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-                    on_disk.insert(
-                        path.strip_prefix(&hls)
-                            .expect("a module under http/hls/")
-                            .to_str()
-                            .expect("a UTF-8 module path")
-                            .replace('\\', "/"),
-                    );
-                }
-            }
-        }
+        let parent = hls.with_extension("rs");
+        let on_disk: std::collections::BTreeSet<String> =
+            source_inventory::production_files(&hls, &[&parent]).into_iter()
+                .map(|path| path.strip_prefix(&hls).expect("module under http/hls")
+                    .to_str().expect("UTF-8 module path").replace('\\', "/"))
+                .collect();
         let listed: std::collections::BTreeSet<String> = HLS_PRODUCT_SOURCES[1..]
             .iter()
             .map(|(name, _)| (*name).to_owned())
@@ -281,7 +270,7 @@
             .split_once("let recovery = crate::transcode::SessionRecoveryIdentity {")
             .expect("processed qualification identity")
             .1
-            .split_once(".qualify_processed_hdr10_auto(")
+            .split_once(".prepare_processed_hdr10(")
             .expect("processed qualification call")
             .0;
         assert!(qualification.contains("recovery_epoch: recovery_epoch.clone(),"));
@@ -316,7 +305,7 @@
     fn a_processed_candidate_that_cannot_be_adopted_or_consumed_degrades_with_its_reason() {
         let source = hls_product_source();
         let qualification = source
-            .split_once(".qualify_processed_hdr10_auto(")
+            .split_once(".prepare_processed_hdr10(")
             .expect("processed qualification call")
             .1
             .split_once("crate::media_pool::mark_create_phase(\"processed_qualification\");")
@@ -995,7 +984,8 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
-                sdr_master_codecs: None,
+                dv_processing_destination: None,
+        sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
@@ -1023,6 +1013,7 @@
             },
         };
         let start = StartResponse {
+            enhancement: None,
             effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
@@ -1883,6 +1874,7 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+            enhancement: None,
             effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
@@ -2179,7 +2171,8 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
-                sdr_master_codecs: None,
+                dv_processing_destination: None,
+        sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
@@ -2207,6 +2200,7 @@
             },
         };
         let start = StartResponse {
+            enhancement: None,
             effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
@@ -2458,7 +2452,8 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
-                    sdr_master_codecs: None,
+                    dv_processing_destination: None,
+        sdr_master_codecs: None,
                     continuous_media: None,
                     quality_catalog: None,
                     candidate_context: None,
@@ -2486,6 +2481,7 @@
                 },
             };
             let start = StartResponse {
+            enhancement: None,
             effective_processing: None,
                 delivered_audio: None,
         quality_catalog_status: None,

@@ -2030,14 +2030,25 @@ fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
     );
 }
 
+mod source_inventory {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/rust_source_inventory.rs"
+    ));
+}
+
 #[test]
 fn sqlite_module_list_matches_the_directory() {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store/sqlite");
-    let mut present = std::fs::read_dir(&directory)
-        .expect("the SQLite module directory is readable from the source tree")
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.ends_with(".rs"))
+
+    let mut present = source_inventory::production_files(&directory, &[&directory.join("mod.rs")])
+        .into_iter()
+        .map(|path| {
+            path.strip_prefix(&directory)
+                .expect("SQLite source file")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
         .collect::<Vec<_>>();
     present.sort();
     let mut censused = SQLITE_SOURCES

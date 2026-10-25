@@ -1,5 +1,6 @@
 import AVKit
 import Combine
+import CryptoKit
 import Foundation
 import MediaPlayer
 
@@ -47,8 +48,10 @@ final class PlayerController: ObservableObject {
         var ready: @MainActor (AVPlayerItem, PlayerItemReadiness.Context) async throws -> Void = {
             try await PlayerController.awaitItemReady($0, context: $1)
         }
-        var seek: @MainActor (AVPlayer, Int) async -> Void = { player, ms in
-            _ = await player.seek(
+        // AVPlayer can complete an interrupted seek without reaching the
+        // resume point. Preserve its result so preparation cannot accept it.
+        var seek: @MainActor (AVPlayer, Int) async -> Bool = { player, ms in
+            await player.seek(
                 to: CMTime(seconds: Double(ms) / 1000.0, preferredTimescale: 600),
                 toleranceBefore: .zero, toleranceAfter: .zero
             )
@@ -528,6 +531,13 @@ final class PlayerController: ObservableObject {
     /// on it (MEDIA-BADGES-PLAN.md §9).
     @Published private(set) var effectiveProcessing: EffectiveProcessingReport?
     @Published private(set) var effectiveProcessingGeneration: String?
+    /// The server's Dolby Vision enhancement answer for the current HLS
+    /// session (FEL / RPU / DYN). Held for the session and cleared wherever
+    /// the session's delivery answer is — but not on a seek: a seek clears
+    /// `effectiveProcessing`, and `PlaybackEnhancement.presented` hides a
+    /// report-gated answer until the next generation's report returns, while
+    /// a native Dolby Vision answer stays true across the seek.
+    @Published private(set) var playbackEnhancement: PlaybackEnhancement?
     @Published private(set) var deliveredRange: String?
     /// Take a delivery answer, both halves at once.
     ///
@@ -550,6 +560,7 @@ final class PlayerController: ObservableObject {
         } else {
             effectiveProcessing = nil
             effectiveProcessingGeneration = nil
+            playbackEnhancement = nil
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
         }
@@ -1122,6 +1133,9 @@ final class PlayerController: ObservableObject {
     /// The last position the surface's evidence sampler saw, so "the clock
     /// moved" is a delta rather than a guess.
     private var lastSurfaceSampleMs: Int?
+    /// When the sampler last ran, on the controller's monotonic clock, so the
+    /// presenter's clock knows whether AVPlayer's observer has gone quiet.
+    private var lastSurfaceSampleAtMs: Int?
     /// The create-retry sequence in flight (M5). `createRetryEpoch` names it;
     /// `createRetryExpiredEpoch` is the epoch whose absolute deadline has
     /// passed, rather than a shared flag two sequences could write.
@@ -1488,10 +1502,37 @@ final class PlayerController: ObservableObject {
             return "Offline\(quality) · H.264 · AAC"
         }
         #endif
-        if activeBurnedSubtitle != nil { return "Transcode · subtitle burn-in" }
-        if selectedHeight != nil { return "Transcode · \(selectedHeight!)p" }
-        let mode = decision.map(Self.playbackMode) ?? "transcode"
-        let overlay = pgsOverlayIsActive ? " · PGS overlay" : ""
+        return Self.onlinePlaybackMethodLabel(selectedHeight: selectedHeight,
+            subtitleBurned: activeBurnedSubtitle != nil,
+            fallbackMode: decision.map(Self.playbackMode) ?? "transcode",
+            isVOD: isVOD, pgsOverlay: pgsOverlayIsActive,
+            activeCandidateId: autoActiveCandidateId,
+            candidates: autoRouteProtocol == "route-v1" ? decision?.qualityCandidates : nil,
+            sessionHeight: sessionHeight, isDirectPlayback: isDirectPlayback)
+    }
+
+    /// Auto keeps its selection nil while the installed session changes rungs.
+    /// Report that session's validated route and height instead of the initial
+    /// decision, which may still describe its original remux incumbent.
+    nonisolated static func onlinePlaybackMethodLabel(
+        selectedHeight: Int?, subtitleBurned: Bool, fallbackMode: String,
+        isVOD: Bool, pgsOverlay: Bool, activeCandidateId: String?,
+        candidates: [QualityCandidate]?, sessionHeight: Int?, isDirectPlayback: Bool
+    ) -> String {
+        if subtitleBurned { return "Transcode · subtitle burn-in" }
+        if let selectedHeight { return "Transcode · \(selectedHeight)p" }
+        let installed = candidates?.first { $0.id == activeCandidateId && $0.hasValidIdentity }
+        let mode: String
+        switch installed?.route {
+        case "encode": mode = "transcode"
+        case "remux": mode = "remux"
+        case "original": mode = isDirectPlayback ? "direct" : "remux"
+        default: mode = fallbackMode
+        }
+        let overlay = pgsOverlay ? " · PGS overlay" : ""
+        if installed?.route == "encode", let sessionHeight, sessionHeight > 0 {
+            return "Transcode · \(sessionHeight)p\(overlay)"
+        }
         switch mode {
         case "direct": return "Direct play\(overlay)"
         case "remux": return "Remux · HLS\(overlay)"
@@ -1792,6 +1833,7 @@ final class PlayerController: ObservableObject {
         selectedSubtitle = offline.subtitleIndex == nil ? nil : 0
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        playbackEnhancement = nil
         deliveredRange = "sdr"
         encoder = "offline"
         isVOD = true
@@ -2644,6 +2686,8 @@ final class PlayerController: ObservableObject {
         viewerBoundary: Bool = false
     ) {
         // Relative jumps and manual/automatic markers all enter here too.
+        // `playbackEnhancement` is deliberately kept: clearing the report is
+        // what hides its report-gated pills (see its declaration).
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
         let actionEpoch = owningActionEpoch ?? beginViewerAction()
@@ -3321,6 +3365,12 @@ final class PlayerController: ObservableObject {
         return isChangingStream || player.currentItem == nil ? currentMs : realPositionMs()
     }
 
+    /// Closing during preparation must retain the requested position rather
+    /// than publish the zero (or brief lead-in) of an unprepared item.
+    func positionForPlaybackStop() -> Int {
+        currentPausedRetirement?.positionMs ?? positionForPlaybackIntent()
+    }
+
     /// Report the final position and hand any encoder back immediately.
     private func startAudioSessionObservation() {
         audioSessionObserver.start(
@@ -3418,6 +3468,7 @@ final class PlayerController: ObservableObject {
     }
 
     func stop(deactivateAudioSession: Bool = true) {
+        let position = positionForPlaybackStop()
         recordDiagnosticPlayback("terminal", action: "stop")
         diagnosticAuthorizationGeneration = nil
         cancelAutoCostCatalogRefresh()
@@ -3425,6 +3476,7 @@ final class PlayerController: ObservableObject {
         lastPreparedAccessLogSequence = nil
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        playbackEnhancement = nil
         retireAutoTransferMetrics()
         abandonSeekMeasurement()
         requestedSeekGeneration = nil
@@ -3513,9 +3565,6 @@ final class PlayerController: ObservableObject {
         deliveryStarvation.reset()
         ttffMeasurement.reset()
         seekState.clear()
-        // A dead item reads 0:00; closing a parked player must not save that
-        // over the viewer's place in the film.
-        let position = currentPausedRetirement?.positionMs ?? realPositionMs()
         pausedRetirement = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
@@ -3808,7 +3857,8 @@ final class PlayerController: ObservableObject {
         } catch {
             guard isCurrentLifecycle(lifecycle) else { return }
             reopenQueue.clear()
-            if player.currentItem != nil {
+            if player.currentItem != nil,
+               !(error is PlaybackPreparationError && seekState.pendingMs != nil) {
                 seekState.clear()
                 currentMs = realPositionMs()
             }
@@ -3967,6 +4017,7 @@ final class PlayerController: ObservableObject {
             // it, for the reason `adoptSessionDelivery` gives.
             effectiveProcessing = nil
             effectiveProcessingGeneration = nil
+            playbackEnhancement = nil
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
             let deliveryPath = try contextForFile(fileId).translatedDeliveryPath(decision.delivery?.url ?? decision.playUrl)
@@ -5533,6 +5584,7 @@ final class PlayerController: ObservableObject {
     private func fail(_ error: Error) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        playbackEnhancement = nil
         isChangingStream = false
         ttffMeasurement.reset()
         // M5: the create-retry owner has already stopped the player and raised
@@ -5614,6 +5666,7 @@ final class PlayerController: ObservableObject {
     private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        playbackEnhancement = nil
         abandonSeekMeasurement()
         player.pause()
         isPlaying = false
@@ -5826,6 +5879,7 @@ final class PlayerController: ObservableObject {
         surfaceHistory = PlaybackSurfaceHistory()
         surfaceEpoch = ContinuousClock.now
         lastSurfaceSampleMs = nil
+        lastSurfaceSampleAtMs = nil
         surfaceHasPresented = false
         streamChangePreparingIntent = nil
         surfaceLogOnlyReasons.removeAll()
@@ -6185,14 +6239,49 @@ final class PlayerController: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(Self.surfaceClockIntervalMs))
                 guard !Task.isCancelled, let self, self.started else { return }
-                self.refreshWaitDetail()
-                self.noteMediaWaiting()
-                self.present(.tick)
+                self.surfaceClockTick(nowMs: PlaybackControlSession.monotonicMs())
             }
         }
     }
 
-    static let surfaceClockIntervalMs = 500
+    /// One beat of the presenter's clock. AVPlayer's periodic observer is
+    /// the evidence sampler while the film clock runs, and it stops firing
+    /// the moment the clock stops — which is exactly when the model needs to
+    /// hear that the picture is no longer moving. Its last sample was taken
+    /// over a still-moving clock, so the model kept saying `presenting`, and
+    /// every `media_waiting` raised below was retired in the same step by
+    /// that stale evidence: twelve seconds of frozen picture, thirty
+    /// raise/clear pairs a millisecond apart, and no spinner. Once the
+    /// observer has been silent for one clock interval this clock takes the
+    /// same sample through the same sampler: the position delta over a
+    /// stationary clock is "not presenting", which is the evidence the
+    /// contract asks for (§3.4) and no transport status. Evidence first,
+    /// then the wait, so the raise is weighed against the stopped clock.
+    func surfaceClockTick(nowMs: Int) {
+        refreshWaitDetail()
+        if Self.surfaceClockSamplesPresentation(lastSampleAtMs: lastSurfaceSampleAtMs, nowMs: nowMs),
+           !isChangingStream, player.currentItem != nil {
+            sampleSurfacePresentation(at: realPositionMs(), evidence: currentLocalVideoEvidence())
+        }
+        noteMediaWaiting()
+        present(.tick)
+    }
+
+    nonisolated static let surfaceClockIntervalMs = 500
+
+    /// Whether the presenter's clock owes the model a presentation sample:
+    /// only once the periodic observer has been silent for a whole clock
+    /// interval. While the film clock runs the observer samples on its own
+    /// cadence and this clock adds nothing, so a healthy picture is never
+    /// sampled twice in one turn and never reads as stationary by accident.
+    nonisolated static func surfaceClockSamplesPresentation(
+        lastSampleAtMs: Int?,
+        nowMs: Int,
+        intervalMs: Int = surfaceClockIntervalMs
+    ) -> Bool {
+        guard let lastSampleAtMs else { return true }
+        return nowMs - lastSampleAtMs >= intervalMs
+    }
 
     /// Resample the wait sentence. Published only on change, so a steady
     /// reading does not redraw the player twice a second.
@@ -6265,10 +6354,34 @@ final class PlayerController: ObservableObject {
             picture: picture
         )
         lastSurfaceSampleMs = observedPosition
+        lastSurfaceSampleAtMs = PlaybackControlSession.monotonicMs()
         if presenting { surfaceHasPresented = true }
         present(.presenting(presenting, attached: attached))
         endSystemHoldIfPlaying()
     }
+
+    #if DEBUG
+    /// Test seam, Debug-only: an attached playback with a surface model to
+    /// sample into, so the presenter's clock can be driven on a controller
+    /// without a server. It sets the three facts the clock reads — started,
+    /// an attached generation and a current item — and decides nothing.
+    func attachSurfaceForTesting(_ item: AVPlayerItem, generation: Int) {
+        started = true
+        player.replaceCurrentItem(with: item)
+        _ = present(.attach(generation))
+    }
+
+    /// Test seam, Debug-only: the periodic observer's sample, taken through
+    /// the real sampler at a position and rate the test names, so a test can
+    /// stand where AVPlayer's observer last stood before the film clock
+    /// stopped. `atMs` is when the observer ran on the controller's clock.
+    func sampleObserverPresentationForTesting(positionMs: Int, atMs: Int, evidence: LocalVideoEvidence) {
+        sampleSurfacePresentation(at: positionMs, evidence: evidence)
+        lastSurfaceSampleAtMs = atMs
+    }
+
+    var surfaceLastSampleAtMsForTesting: Int? { lastSurfaceSampleAtMs }
+    #endif
 
     /// Film actually playing is the system's hold over, whether or not iOS
     /// ever says so: retire the banner and give the stall monitor back. Kept
@@ -7955,8 +8068,9 @@ final class PlayerController: ObservableObject {
     func seekWhenReady(_ item: AVPlayerItem, ms: Int, owner: SeekPreparationOwner) async throws {
         let generation = openGeneration
         let lifecycle = lifecycleGeneration
-        let ownsSeek = {
-            self.isCurrentLifecycle(lifecycle) && !self.isSuperseded(generation)
+        let ownsSeek = { [weak self] in
+            guard let self else { return false }
+            return self.isCurrentLifecycle(lifecycle) && !self.isSuperseded(generation)
                 && self.player.currentItem === item
                 // Pause changes transport authority, not the resume point.
                 // A newer same-position selection also still needs this seek.
@@ -7976,8 +8090,14 @@ final class PlayerController: ObservableObject {
         guard ownsSeek() else { return }
         let outcome = await PlayerSeekCompletion.run(
             operation: { [player, prepare = itemPreparation.seek] in
-                await prepare(player, ms)
-                return true
+                // A native interruption need not replace the stream. Retry
+                // once while this same destination still owns the item; both
+                // attempts share the existing preparation deadline.
+                for _ in 0..<2 {
+                    guard ownsSeek() else { return false }
+                    if await prepare(player, ms) { return true }
+                }
+                return false
             },
             waitForDeadline: waitNativeSeekDeadline
         )
@@ -7985,11 +8105,15 @@ final class PlayerController: ObservableObject {
         switch outcome {
         case .finished(true), .cancelled:
             return
-        case .finished(false):
-            throw PlaybackPreparationError.failed
-        case .timedOut:
-            item.cancelPendingSeeks()
-            throw PlaybackPreparationError.timedOut
+        case .finished(false), .timedOut:
+            if outcome == .timedOut { item.cancelPendingSeeks() }
+            // The item's clock may still be at zero. Keep the requested film
+            // position for Retry and progress reporting, and stop before the
+            // caller surfaces the preparation failure.
+            let destination = seekState.absolute(owner.targetMs, durationMs: knownDurationMs)
+            currentMs = destination.target
+            stopForBlockingSurface()
+            throw outcome == .timedOut ? PlaybackPreparationError.timedOut : PlaybackPreparationError.failed
         }
     }
 
@@ -8897,6 +9021,9 @@ extension PlayerController {
     func adoptEffectiveProcessing(_ hls: HlsStart) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        // The enhancement answer belongs to this response, controllable or
+        // not; a report-gated one stays hidden without a matching report.
+        playbackEnhancement = hls.enhancement
         guard let bootstrap = hls.control, bootstrap.isValid else { return }
         effectiveProcessingGeneration = bootstrap.generation
         if let report = hls.effectiveProcessing,
@@ -9116,8 +9243,9 @@ extension PlayerController {
             quality: manualQualityRetention.retained?.incumbent ?? selectedHeight.map { .manual(height: $0) }
                 ?? (selectedQualityIsOriginal ? .original :
                     (model?.displayAwareAuto == true &&
-                     model?.displayAwareAutoProtocol == "route-v1" && autoRouteProtocol == "route-v1" ? autoDesiredCandidate : nil)
-                        .map { .autoCandidate(height: (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains($0.targetHeight) ? $0.targetHeight : nil, candidateId: $0.id) } ?? .auto),
+                     model?.displayAwareAutoProtocol == "route-v1" && autoRouteProtocol == "route-v1"
+                        ? autoControlQualitySelection(desired: autoDesiredCandidate,
+                            installedId: autoActiveCandidateId, candidates: decision?.qualityCandidates) : .auto)),
             audioTrack: selectedAudio,
             subtitle: SubtitleSelection(
                 mode: mode,
@@ -9202,7 +9330,7 @@ extension PlayerController {
 
     /// Refresh advisory full-output measurements without restarting Auto or
     /// replacing the installed identity. One bounded fetch may run per 30s.
-    private func refreshMissingAutoCosts(now: Int) {
+    private func refreshUnmeasuredAutoCosts(now: Int) {
         guard autoCostRefreshTask == nil, now >= autoCostRefreshNextMs,
               !autoPreparing, preparedPlayer == nil,
               let model, model.displayAwareAuto, model.autoAbr,
@@ -9253,13 +9381,7 @@ extension PlayerController {
     }
 
     private func measuredCostCatalog(_ offered: [QualityCandidate]) -> [QualityCandidate] {
-        offered.map { candidate in
-            var measured = candidate
-            let outputs = decision?.measuredCandidateOutputs
-            measured.peakBps = measuredCandidatePeak(candidate, outputs: outputs)
-            measured.averageBps = measured.peakBps == nil ? nil : outputs?.first(where: { $0.matches(candidate) })?.averageBps
-            return measured
-        }
+        autoCostedCatalog(offered, outputs: decision?.measuredCandidateOutputs)
     }
 
     private func autoBoundaryIsCurrent(_ boundary: AutoBoundaryAttempt) -> Bool {
@@ -9289,13 +9411,9 @@ extension PlayerController {
         if let cost = autoDownsideCostBps(current, sample: sample, sessionId: sessionId, nowMs: now), link < cost {
             return nil
         }
-        let originals = offered.filter {
-            $0.id != current.id && $0.hasValidIdentity && $0.decoderCompatible && $0.route == "remux" &&
-                !autoDecoderRejected.contains($0.id) && (autoBlockedUntil[$0.id] ?? 0) <= now &&
-                (measuredCandidatePeak($0, outputs: decision?.measuredCandidateOutputs).map { link >= Double($0) * 1.8 }
-                    ?? autoUnknownOriginalTrial($0, outputs: decision?.measuredCandidateOutputs))
-        }
-        return originals.max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) })
+        return autoBoundaryOriginalCandidate(measuredCostCatalog(offered), current: current, link: link,
+            outputs: decision?.measuredCandidateOutputs, rejected: autoDecoderRejected,
+            blockedUntil: autoBlockedUntil, nowMs: now)
     }
 
     /// Ask for the boundary's original candidate through the same accepted
@@ -9347,31 +9465,26 @@ extension PlayerController {
         else { return }
         let now = PlaybackControlSession.monotonicMs()
         autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId, nowMs: now)
-        let link: Double? = {
-            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
-                  !transfer.fromLocalCache, transfer.producerPaced == false,
-                  transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
-                  autoTransferOriginCurrent(transfer),
-                  transfer.installedSessionId == sessionId, transfer.installedCandidateId == autoActiveCandidateId,
-                  transfer.ageMs(nowMs: now) <= 10_000, let duration = transfer.bodyDurationSeconds,
-                  duration > 0, transfer.bodyBytes > 0 else { return nil }
-            return Double(transfer.bodyBytes) * 8 / duration
-        }()
-        let downsideCost = autoDownsideCostBps(current, sample: latestAutoCompletedTransfer, sessionId: sessionId, nowMs: now)
-        let severe = link.map { bps in downsideCost.map { bps < $0 * 0.7 } ?? false } ?? false
-        if severe, let transfer = latestAutoCompletedTransfer {
+        autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
+        let transfer = latestAutoCompletedTransfer
+        guard let verdict = autoStallRecoveryVerdict(current: current, candidates: candidates,
+            transfer: transfer,
+            transferCurrent: autoTransferPressureOwnerCurrent && transfer.map(autoTransferOriginCurrent) == true,
+            sessionId: sessionId, candidateId: autoActiveCandidateId,
+            mildSamples: autoTransferPressure.mildSamples(nowMs: now),
+            producerPressure: autoActiveProductionPressure(status: sessionStatus,
+                observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
+                sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds()),
+            rejected: autoDecoderRejected,
+            switchBudgetOpen: autoSwitchTimes.count < 6 && (autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true),
+            nowMs: now)
+        else { return }
+        let severe = verdict.severe
+        let producer = verdict.producer
+        if severe, let transfer {
             autoUpgradeEvidence.cliff(completedAtMs: transfer.completedAtMs, nowMs: now)
         }
-        let mild = autoTransferPressure.mildSamples(nowMs: now) >= 2 && link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } == true
-        let producer = autoActiveProductionPressure(status: sessionStatus,
-            observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
-            sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds())
-        guard severe || producer || mild else { return }
-        autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
-        guard severe || (autoSwitchTimes.count < 6 && (autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true)) else { return }
-        let next = autoRecoveryCandidate(candidates, current: current, rejected: autoDecoderRejected,
-            linkCeiling: severe || mild ? link : nil, currentCost: downsideCost)
-        if let next {
+        if let next = verdict.next {
             if !producer {
                 guard let deadline, let sample = latestAutoCompletedTransfer,
                       let receipt = sample.receipt, let incumbent = player.currentItem,
@@ -9472,15 +9585,18 @@ extension PlayerController {
                 && sample.producerPaced == false && sample.ageMs(nowMs: now) <= 15_000
                 && (sample.bodyDurationSeconds ?? 0) > 0 && sample.bodyBytes > 0
         }
-        if let offered = decision?.qualityCandidates?.first(where: { $0.id == desired.id && $0.recipeDigest == desired.recipeDigest }),
-           autoUnknownOriginalTrial(offered, outputs: decision?.measuredCandidateOutputs) {
+        let costed = measuredCostCatalog(decision?.qualityCandidates ?? [])
+            .first(where: { $0.id == desired.id && $0.recipeDigest == desired.recipeDigest }) ?? desired
+        if autoUnknownOriginalTrial(costed, outputs: decision?.measuredCandidateOutputs) {
             guard let intervals = observation.intervals else { return false }
             return autoVODEmpiricalMargin(samples, intervals: intervals, scope: observation.scope,
                 sessionId: observation.sessionId, candidateId: observation.candidateId,
                 nowMs: now, deadlineMs: observation.deadlineMs)
         }
-        guard let peak = measuredCandidatePeak(desired, outputs: decision?.measuredCandidateOutputs) else { return false }
-        return samples.contains { Double($0.bodyBytes) * 8 / ($0.bodyDurationSeconds ?? 1) >= Double(peak) * 1.8 }
+        // The staged successor must itself prove the headroom its cost needs
+        // — measured or declared, the same figure that admitted it.
+        guard let cost = autoDeclaredCostBps(costed) else { return false }
+        return samples.contains { Double($0.bodyBytes) * 8 / ($0.bodyDurationSeconds ?? 1) >= cost * 1.8 }
     }
 
     private func autoStagedProductionAllowsCommit(_ action: PreparedReplacementAction) -> Bool {
@@ -9509,7 +9625,7 @@ extension PlayerController {
         if !pressureOnly {
             guard now >= autoNextTickMs else { return }
             autoNextTickMs = now + 5_000
-            refreshMissingAutoCosts(now: now)
+            refreshUnmeasuredAutoCosts(now: now)
         }
         guard model?.displayAwareAuto == true, model?.autoAbr == true,
               model?.displayAwareAutoProtocol == "route-v1",
@@ -9534,18 +9650,6 @@ extension PlayerController {
            beginAutoBoundaryPreparation(chosen, target: target) {
             return
         }
-        let link: Double? = {
-            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
-                  !transfer.fromLocalCache, transfer.producerPaced == false,
-                  transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
-                  autoTransferOriginCurrent(transfer),
-                  transfer.installedSessionId == sessionId, transfer.installedCandidateId == autoActiveCandidateId,
-                  transfer.ageMs(nowMs: now) <= 10_000,
-                  let duration = transfer.bodyDurationSeconds, duration > 0,
-                  transfer.bodyBytes > 0 else { return nil }
-            let bps = Double(transfer.bodyBytes) * 8 / duration
-            return bps.isFinite && bps > 0 ? bps : nil
-        }()
         autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
         let eligible = candidates.filter {
             $0.hasValidIdentity && !autoDecoderRejected.contains($0.id) &&
@@ -9553,40 +9657,40 @@ extension PlayerController {
             ($0.route != "encode" || $0.grade == current.grade) &&
             (autoBlockedUntil[$0.id] ?? 0) <= now
         }
-        let downsideCost = autoDownsideCostBps(current, sample: latestAutoCompletedTransfer, sessionId: sessionId, nowMs: now)
-        let severe = link.map { bps in downsideCost.map { bps < $0 * 0.7 } ?? false } ?? false
-        if severe, let transfer = latestAutoCompletedTransfer {
+        autoMildSamples = autoTransferPressure.mildSamples(nowMs: now)
+        let transfer = latestAutoCompletedTransfer
+        // The whole pressure decision — link, cost, severity and the rung a
+        // link cause moves to — is `autoLinkPressureVerdict`, decided from
+        // evidence alone. Link pressure on a costed incumbent is pressure
+        // whatever the runway: an original is costed by its declared source
+        // rate, and a link below it is draining the buffer whether or not it
+        // has reached ten seconds yet.
+        guard let verdict = autoLinkPressureVerdict(current: current, eligible: eligible,
+            transfer: transfer,
+            transferCurrent: autoTransferPressureOwnerCurrent && transfer.map(autoTransferOriginCurrent) == true,
+            sessionId: sessionId, candidateId: autoActiveCandidateId, mildSamples: autoMildSamples,
+            producerPressure: autoActiveProductionPressure(status: sessionStatus,
+                observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
+                sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds()),
+            runwaySeconds: bufferedRunwaySeconds(), playbackRate: Double(player.rate),
+            rejected: autoDecoderRejected, pressureOnly: pressureOnly, nowMs: now)
+        else { return }
+        let severe = verdict.severe
+        let pressure = verdict.pressure
+        if severe, let transfer {
             autoUpgradeEvidence.cliff(completedAtMs: transfer.completedAtMs, nowMs: now)
         }
         let currentArea = Int64(current.width) * Int64(current.height)
-        let mild = link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } ?? false
-        autoMildSamples = autoTransferPressure.mildSamples(nowMs: now)
-        let producerPressure = autoActiveProductionPressure(status: sessionStatus,
-            observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
-            sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds())
-        let pressure = ((severe || (mild && autoMildSamples >= 2)) &&
-            (current.peakBps != nil || (bufferedRunwaySeconds() ?? 0) < 10)) || producerPressure
-        if pressureOnly && !pressure { return }
         let aspect = Double(current.width) / Double(current.height)
         let neededWidth = min(Double(target.widthPx), Double(target.heightPx) * aspect)
         let neededHeight = min(Double(target.heightPx), Double(target.widthPx) / aspect)
         let chosen: QualityCandidate?
         if pressure {
-            chosen = autoRecoveryCandidate(eligible, current: current, rejected: autoDecoderRejected,
-                linkCeiling: severe || autoMildSamples >= 2 ? link : nil, currentCost: downsideCost,
-                minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
-                    severe: severe, runwaySeconds: bufferedRunwaySeconds(),
-                    playbackRate: Double(player.rate)))
+            chosen = verdict.chosen
             autoUpgradeSinceMs = nil
         } else {
-            let fitting = eligible.filter { candidate in
-                link.map { bps in
-                    candidate.peakBps.map { bps >= Double($0) * 1.8 } ??
-                        offered.first(where: { $0.id == candidate.id && $0.recipeDigest == candidate.recipeDigest })
-                            .map { autoUnknownOriginalTrial($0, outputs: decision?.measuredCandidateOutputs) && bps > 0 } ?? false
-                } == true
-            }
-            chosen = autoPreferredDisplayCandidate(fitting, neededWidth: neededWidth, neededHeight: neededHeight)
+            chosen = autoUpgradeCandidate(eligible, link: verdict.link, outputs: decision?.measuredCandidateOutputs,
+                                          neededWidth: neededWidth, neededHeight: neededHeight)
             guard let chosen,
                   Int64(chosen.width) * Int64(chosen.height) > currentArea ||
                     (current.route == "encode" && chosen.route != "encode"),
@@ -9701,12 +9805,37 @@ extension PlayerController {
 /// failing to prime a successor is an error branch produces a stuck player on
 /// the first device that has one slot.
 extension PlayerController: PreparedSuccessorHost {
+    func acceptsPreparedSuccessor(_ action: PreparedReplacementAction) -> Bool {
+        let matches = autoPreparedCandidateMatches(selection: playbackControlSelection().quality,
+            effective: action.effectiveSelection)
+        let safeCandidate = { (id: String?) -> String in
+            guard let id, let candidate = self.decision?.qualityCandidates?.first(where: {
+                $0.hasValidIdentity && $0.id == id
+            }) else { return "unknown" }
+            return candidate.id
+        }
+        let fingerprint = { (value: String) in
+            SHA256.hash(data: Data(value.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        }
+        let response = decision?.qualityCandidates?.first {
+            $0.hasValidIdentity && $0.id == action.effectiveSelection.candidateId
+        }
+        let recipe = response?.recipeDigest.map { String(format: "%02x", $0) }.joined() ?? "unknown"
+        noteSurfaceLogOnly("prepared_acquisition_binding:accepted=\(matches):action=\(fingerprint(action.actionId))"
+            + ":session=\(fingerprint(action.sessionId)):desired=\(safeCandidate(autoDesiredCandidate?.id))"
+            + ":installed=\(safeCandidate(autoActiveCandidateId)):response=\(safeCandidate(action.effectiveSelection.candidateId))"
+            + ":recipe=\(recipe)")
+        return matches
+    }
+
     /// Build the muted second pipeline on its staging layer and prime it to the film
     /// position the viewer is watching.
     func startPreparedSuccessor(
         _ action: PreparedReplacementAction,
         filmPositionMs: Int
     ) -> Bool {
+        guard autoPreparedCandidateMatches(selection: playbackControlSelection().quality,
+            effective: action.effectiveSelection) else { return false }
         discardPreparedSuccessor()
         let capturedFilmPositionMs = max(0, filmPositionMs)
         guard let incumbentItem = player.currentItem else { return false }
@@ -9806,6 +9935,7 @@ extension PlayerController: PreparedSuccessorHost {
     /// session and its pointer are exactly as they were — so this raises the
     /// one source that maps to no class and draws nothing.
     func notePreparedSuccessorAbandoned(_ reason: PreparedReplacementAbandonment) {
+        let wasAutomatic = autoPreparing
         if !autoPreparing { retainManualQualityFailure() }
         // A boundary preparation that was superseded or refused (`aborted`)
         // is withdrawn without backoff; one that failed is an ordinary Auto
@@ -9825,10 +9955,31 @@ extension PlayerController: PreparedSuccessorHost {
         if reason == .failed {
             let itemError = preparedSuccessorErrorDetail(preparedItem?.error as NSError?)
             let phase = String(describing: preparedReplacement.phase)
-            let readiness = preparedReplacement.readinessRemainingMs().map(String.init) ?? "unknown"
+            let remaining = preparedReplacement.readinessRemainingMs()
+            let readiness = remaining.map(String.init) ?? "unknown"
+            let itemStatus = preparedItem?.status.rawValue.description ?? "missing"
+            let playerStatus = preparedPlayer?.status.rawValue.description ?? "missing"
+            let candidate = decision?.qualityCandidates?.first {
+                $0.hasValidIdentity && $0.id == preparedReplacement.activeAction?.effectiveSelection.candidateId
+            }
+            let route = candidate.map { ["original", "remux", "encode"].contains($0.route) ? $0.route : "unknown" } ?? "unknown"
+            let elapsed = preparedOverlapStartedAtMs.map {
+                max(0, Int(ProcessInfo.processInfo.systemUptime * 1_000) - $0)
+            }.map(String.init) ?? "unknown"
+            let cause = preparedItem?.status == .failed ? "item_failed"
+                : preparedOverlapStartedAtMs != nil && preparedOverlapRemainingMs == 0 ? "overlap_deadline"
+                : remaining == 0 ? (preparedReplacement.phase == .building ? "metadata_deadline" : "readiness_deadline")
+                : "unclassified"
+            // Capture acquisition failures before disposal; after exposure,
+            // missing prepared state is unknown, not an expired overlap.
+            // Never log media URLs,
+            // request headers or error descriptions, which may carry credentials.
             noteSurfaceLogOnly(
                 "prepared_successor_failure:stage=\(phase):item=\(itemError)"
                     + ":ready_ms=\(readiness):overlap_ms=\(preparedOverlapRemainingMs)"
+                    + ":cause=\(cause):elapsed_ms=\(elapsed):item_status=\(itemStatus):player_status=\(playerStatus)"
+                    + ":candidate=\(candidate?.id ?? "unknown"):route=\(route):height=\(candidate?.height ?? 0)"
+                    + ":automatic=\(wasAutomatic):voluntary=\(autoVoluntary)"
             )
         }
         noteSurfaceLogOnly(
@@ -10449,6 +10600,10 @@ extension PlayerController: PreparedSuccessorHost {
         unprovenPreparedItem = item
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        // The successor's own answer, as its prepare action carries it (nil
+        // when the server sent none). A report-gated one still stays hidden
+        // until a current effective-processing report is held.
+        playbackEnhancement = action.enhancement
         adoptWarmPlayer(successor)
         player.volume = incumbentVolume
         player.isMuted = incumbentMuted
@@ -10921,7 +11076,9 @@ extension PlayerController: PreparedSuccessorHost {
         if retainManualQualityFailure() { return }
         if action.effectiveSelection.qualityAuto, action.effectiveSelection.candidateId != nil,
            selectedHeight == nil, !selectedQualityIsOriginal, !autoExposed {
-            notePreparedSuccessorAbandoned(.failed)
+            // The coordinator recorded abandonment before discarding the
+            // successor. Repeating it here loses the item and its deadline
+            // and makes one failed preparation appear to be two.
             playbackControl.reportEvidence()
             return
         }

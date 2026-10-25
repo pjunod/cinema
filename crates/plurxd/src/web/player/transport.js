@@ -344,8 +344,8 @@ function playbackProgressTick(v,p,frameSample=false){
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
     if(p.controlHasFrameCallbacks){
-      // Callback support is itself the observation contract. Zero presented
-      // callbacks is real evidence and must not fall through to a decoded-frame
+      // Count delivered callbacks independently of their timestamp quality.
+      // Zero callbacks is real evidence and must not fall through to a decoded-frame
       // counter that can advance while the compositor remains frozen.
       frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
     }else try{
@@ -355,8 +355,8 @@ function playbackProgressTick(v,p,frameSample=false){
   }
   const key=`${p._seekToken||0}:${p.controlIntentGeneration||0}:${pending?.sequence||0}:${frameSource}`;
   let watch=p.progressWatch;
-  if(!watch||watch.key!==key){
-    watch=p.progressWatch={key,clock,frames,at:now,startedAt:now,fired:false};
+  if(!watch||watch.key!==key||watch.attachment!==p.mediaAttachment||watch.element!==v){
+    watch=p.progressWatch={key,attachment:p.mediaAttachment,element:v,clock,frames,at:now,startedAt:now,fired:false};
   }
   const moved=clock>watch.clock+0.01 && (frames==null||frames>watch.frames);
   if(frameSample){
@@ -384,6 +384,7 @@ function playbackProgressTick(v,p,frameSample=false){
   // decoder emits both and can still present nothing.
   playbackSurfaceStep({presenting:moved,attached:playbackSurfaceGeneration(p)});
   if(moved){
+    p.transportPresentation={attachment:p.mediaAttachment,element:v};
     watch.clock=clock; watch.frames=frames; watch.at=now;
     p.presentationAdvancedAt=now;
     // The assigned element clock and cumulative callback count cannot prove
@@ -521,7 +522,7 @@ function pbTick(){
   if(sk){ sk.setAttribute("aria-valuenow", Math.round(f*100)); sk.setAttribute("aria-valuetext", clockFromSec(pos)+(tot>0?" of "+clockFromSec(tot):"")); }
   // Seeking a transcode restarts the session at a new offset, which moves the
   // whole subtitle timeline — re-shift the cues whenever that happens.
-  if(playbackOwnsAttachedMedia(PLAYER)&&!PLAYER.controlSeek&&PLAYER.curSub>=0 && PLAYER._subOff!=null && PLAYER._subOff!==(PLAYER.offset||0)) setSub(PLAYER.curSub);
+  if(playbackOwnsAttachedMedia(PLAYER)&&!PLAYER.controlSeek&&PLAYER.curSub>=0 && PLAYER._subOff!=null && PLAYER._subOff!==(PLAYER.offset||0)) attachPlaybackSubtitle(v,PLAYER,PLAYER.curSub);
 }
 function pbSyncPlayIcon(){ const v=document.getElementById("video"), b=document.getElementById("pbplay");
   if(b&&v){ const paused=(v.paused||v.ended),following=!!(PLAYER&&PLAYER.libraryChannel); b.textContent=paused?"▶":"❚❚"; b.setAttribute("aria-label", paused&&following?"Resume live":paused?"Play":"Pause"); b.title=paused&&following?"Resume live":"Play / Pause (space)"; } }
@@ -580,11 +581,20 @@ async function resumeQualityBoundary(p){
 function setPlayerPlaying(playing){
   const v=document.getElementById("video");
   if(!v||typeof playing!=="boolean") return false;
+  if(PLAYER?.playPermissionDenied&&!hasPendingPlaybackOpen(PLAYER)){
+    PLAYER.wantsPlayback=playing;
+    if(playing) togglePlay();
+    return true;
+  }
   if(playerWantsPlayback(v)!==playing) togglePlay();
   return true;
 }
 function togglePlay(origin="viewer_control"){
   const v=document.getElementById("video"); if(!v) return;
+  if(PLAYER?.playPermissionDenied&&!hasPendingPlaybackOpen(PLAYER)){
+    PLAYER.wantsPlayback=true;
+    return playbackSurfaceAction("retry");
+  }
   if(PLAYER&&PLAYER.libraryChannel&&v.paused
     &&LIBRARY_CHANNEL_CLOCK.now()>=Number(PLAYER.libraryChannel.ends_at_ms||0)){
     libraryChannelBoundary().catch(()=>{}); return;
@@ -782,11 +792,25 @@ function handlePlaybackPlaying(v,p){
   playerActivity(); settlePlaybackControlSeek(v,p); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl();
   if(first&&!hlsStartupIncomplete(p)) reportTtff();
 }
+// A reload or tab close does not pass through the player's Close button.
+// End even a page entering bfcache: restoring it restores the closed modal,
+// rather than a decoder whose server session was retired while it was frozen.
+function closeVodForPageHide(){
+  const p=PLAYER;
+  const preparation=/** @type {typeof beginPlaybackPreparation & {active?:unknown}} */ (beginPlaybackPreparation);
+  if(!(document.getElementById("modal")?.classList.contains("open")
+    ||p?.sessionId||p?.sharedDirect||p?.mediaPredecessor
+    ||hasPendingPlaybackOpen(p)||preparation.active)) return;
+  // Close tears down every decoder synchronously, before its keepalive
+  // DELETEs. Its progress/detail refresh must not delay unload cleanup.
+  closePlayer({routeLeave:true}).catch(()=>{});
+}
 // Attach the persistent listeners once; they read live PLAYER state each fire.
 function wirePlayer(){
   if(PLAYER_WIRED) return; PLAYER_WIRED=true;
   const p=document.getElementById("player"), v=document.getElementById("video");
   if(!p||!v) return;
+  window.addEventListener("pagehide",closeVodForPageHide);
   // Deliberately no "keydown": a second listener that reveals the chrome is a
   // second answer to what a key does, and it made every `ignore` row in the
   // routing table have an effect anyway. The adapter reveals where the

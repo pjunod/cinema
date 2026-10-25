@@ -303,7 +303,7 @@ const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration = Duration::from_millis(899);
 const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
-const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
+pub(super) const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
     "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";
 const CREDENTIAL_MUTATION_INTENT_END_SQL: &str =
@@ -481,6 +481,10 @@ pub struct HiqliteAuthStore {
     cache_touches: Arc<ReplaceableWriteGate<CacheTouchKey>>,
     watch_fences: Arc<super::watch_fence::WatchWriteFences>,
     pub(super) media_session_projection: Arc<std::sync::atomic::AtomicU8>,
+    /// Conformance observation slot for the chosen fenced insertion; shared
+    /// by clones of this handle, private to it. Contract-test builds only.
+    #[cfg(feature = "hiqlite-contract-tests")]
+    pub(super) insertion_seam: super::hiqlite_publication::conformance::InsertionSeamSlot,
 }
 
 /// Cache activity is advisory recency, not ownership or completion. One
@@ -2041,6 +2045,9 @@ impl HiqliteAuthStore {
         store.install_remote_schema(None).await?;
         store.install_invitation_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
+        store.install_subtitle_translation_schema(None).await?;
+        store.install_library_annotations_schema(None).await?;
+        store.install_dv_title_jobs_schema(None).await?;
         Ok(store)
     }
 
@@ -2224,7 +2231,10 @@ impl HiqliteAuthStore {
                 SchemaMigrationAction::Current => {
                     self.install_remote_schema(admission).await?;
                     self.install_invitation_schema(admission).await?;
-                    return self.install_subtitle_managed_schema(admission).await;
+                    self.install_subtitle_managed_schema(admission).await?;
+                    self.install_subtitle_translation_schema(admission).await?;
+                    self.install_library_annotations_schema(admission).await?;
+                    return self.install_dv_title_jobs_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -3983,6 +3993,162 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn subtitle_translation_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed translation shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::subtitle_translation_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::subtitle_translation_schema::version(&shape)?;
+        if version == Some(1) {
+            // authority: admission must observe the committed singleton marker paired with the extension shape.
+            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
+            if !matches!(rows.as_slice(),[row] if row.count==1) {
+                return Err(StoreError::Migration(
+                    "progressive translation subtitle schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+    async fn install_subtitle_translation_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.subtitle_translation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::subtitle_translation_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.subtitle_translation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "progressive translation subtitle schema install did not settle".into(),
+        ))
+    }
+
+    async fn dv_title_jobs_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        // authority: committed extension shape and marker fence title-job migration.
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::dv_title_jobs_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::dv_title_jobs_schema::version(&shape)?;
+        if version == Some(1) {
+            // authority: exact committed extension marker, not a local cache.
+            let rows = self
+                .client()
+                .query_consistent_map::<CountRow, _>(
+                    super::dv_title_jobs_schema::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration("title jobs marker missing".into()));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_dv_title_jobs_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.dv_title_jobs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::dv_title_jobs_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.dv_title_jobs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "title jobs schema install did not settle".into(),
+        ))
+    }
+
+    async fn library_annotations_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed annotations shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::library_annotations_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::library_annotations_schema::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    super::library_annotations_schema::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "library annotations schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_library_annotations_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.library_annotations_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::library_annotations_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.library_annotations_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "library annotations schema install did not settle".into(),
+        ))
+    }
+
     async fn invitation_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
@@ -4796,6 +4962,18 @@ impl HiqliteAuthStore {
             ("DELETE FROM trakt_auth".to_owned(), params!()),
             ("DELETE FROM watch_state".to_owned(), params!()),
             ("DELETE FROM reading_state".to_owned(), params!()),
+            (
+                "DELETE FROM library_annotations_lists".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM library_annotations_ratings".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM library_annotations_rating_fetches".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM scan_reconcile_items".to_owned(), params!()),
             ("DELETE FROM scan_reconcile_guards".to_owned(), params!()),
             ("DELETE FROM library_roots".to_owned(), params!()),
@@ -5032,6 +5210,8 @@ impl HiqliteAuthStore {
             cache_touches: Arc::new(ReplaceableWriteGate::default()),
             watch_fences: Arc::new(super::watch_fence::WatchWriteFences::default()),
             media_session_projection: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            #[cfg(feature = "hiqlite-contract-tests")]
+            insertion_seam: Default::default(),
         }
     }
 

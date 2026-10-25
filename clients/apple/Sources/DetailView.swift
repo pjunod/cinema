@@ -679,6 +679,10 @@ struct DetailView: View {
     #endif
     let itemId: Int
     @State private var detail: ItemDetail?
+    /// Scores and list flags, loaded beside the item and never holding it.
+    @State private var annotations: ItemAnnotations?
+    /// Lists with a write in flight; a second tap waits for the first.
+    @State private var listBusy: Set<String> = []
     @State private var play: PlayContext?
     @State private var episodePlayAttempt = EpisodePlayAttempt()
     private var startingEpisodeID: Int? { episodePlayAttempt.itemID }
@@ -782,6 +786,12 @@ struct DetailView: View {
                 let loaded = try await model.itemDetail(itemId)
                 detail = loaded
                 loadError = nil
+                if loaded.item.kind == "movie" || loaded.item.kind == "show" {
+                    let id = loaded.item.id
+                    Task { annotations = try? await model.requireAPI().annotations(itemId: id) }
+                } else {
+                    annotations = nil
+                }
                 if loaded.item.kind == "show" || loaded.item.kind == "season" {
                     resolvingSeries = true
                     seriesPlayback = await model.seriesPlayback(loaded)
@@ -959,6 +969,9 @@ struct DetailView: View {
             if (detail.files ?? []).count > 1 { keys.append("detail:version") }
             #endif
         }
+        if annotations != nil, detail.item.kind == "movie" || detail.item.kind == "show" {
+            keys += ["detail:watchlist", "detail:favorite"]
+        }
         #if os(tvOS)
         if let overview = detail.item.overview, !overview.isEmpty { keys.append("detail:about") }
         keys += (detail.children ?? []).flatMap { item in
@@ -1127,6 +1140,7 @@ struct DetailView: View {
                         .frame(width: 90, height: 128).clipped().cornerRadius(8)
                     VStack(alignment: .leading, spacing: 10) {
                         Text(item.title).font(.title.bold()).fixedSize(horizontal: false, vertical: true)
+                        ratingsRow
                         ItemMetadataBadgeRow(badges: Self.itemMetadataBadges(item, file: file, durationMs: duration, includeSeries: true))
                         if let file { Text(CalmTrackList.englishAvailability(file)).font(.caption).foregroundStyle(Palette.muted) }
                     }
@@ -1138,6 +1152,7 @@ struct DetailView: View {
                     #else
                     playbackActions(item: item, file: file, durationMs: duration, resumeMs: resume, canResume: resume > 3000)
                     watchButton(detail)
+                    listButtons(detail.item)
                     #endif
                 }
                 if let actionError { Text(actionError).foregroundStyle(Palette.accent) }
@@ -1220,6 +1235,7 @@ struct DetailView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .shadow(color: .black.opacity(0.7), radius: 10, y: 3)
 
+                        ratingsRow
                         ItemMetadataBadgeRow(badges: Self.itemMetadataBadges(
                             item,
                             file: file,
@@ -1401,6 +1417,7 @@ struct DetailView: View {
                         .lineLimit(nil)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    ratingsRow
                     ItemMetadataBadgeRow(badges: Self.itemMetadataBadges(
                         item,
                         file: file,
@@ -1433,6 +1450,7 @@ struct DetailView: View {
                     }
 
                     watchButton(detail)
+                    listButtons(detail.item)
                     #endif
 
                     trackChoiceRow(item: item, file: file)
@@ -1534,6 +1552,7 @@ struct DetailView: View {
                         .shadow(color: .black.opacity(0.72), radius: 14, y: 5)
 
                     tvMetadataLine(item, file: file, durationMs: durationMs)
+                    ratingsRow
 
                     if let overview = item.overview, !overview.isEmpty {
                         Text(overview)
@@ -1563,6 +1582,7 @@ struct DetailView: View {
 
                         if !item.isBook {
                             watchButton(detail)
+                            listButtons(detail.item)
                         }
                         if let overview = item.overview, !overview.isEmpty { aboutButton }
                     }
@@ -1793,6 +1813,7 @@ struct DetailView: View {
                                     .fixedSize()
                             }
                             watchButton(detail)
+                            listButtons(detail.item)
                             if let overview = item.overview, !overview.isEmpty { aboutButton }
                         }
 
@@ -2293,6 +2314,84 @@ struct DetailView: View {
         }
     }
 
+    /// The item's review-site scores, when it has any.
+    @ViewBuilder
+    private var ratingsRow: some View {
+        if let ratings = annotations?.ratings, !ratings.isEmpty {
+            HStack(spacing: 14) {
+                ForEach(ratings, id: \.source) { rating in
+                    #if os(tvOS)
+                    RatingChip(rating: rating, showsName: false)
+                    #else
+                    RatingChip(rating: rating)
+                    #endif
+                }
+            }
+        }
+    }
+
+    /// Watchlist and favorite toggles for a movie or show, once its flags are in.
+    @ViewBuilder
+    private func listButtons(_ item: Item) -> some View {
+        if let current = annotations, item.kind == "movie" || item.kind == "show" {
+            listButton(item, list: "watchlist", on: current.watchlist == true,
+                       label: current.watchlist == true ? "On watchlist" : "Watchlist",
+                       symbol: current.watchlist == true ? "bookmark.fill" : "bookmark")
+            listButton(item, list: "favorite", on: current.favorite == true,
+                       label: current.favorite == true ? "Favorited" : "Favorite",
+                       symbol: current.favorite == true ? "heart.fill" : "heart")
+        }
+    }
+
+    private func listButton(_ item: Item, list: String, on: Bool, label: String, symbol: String) -> some View {
+        Button {
+            // One write per list at a time; a failure undoes only its own
+            // field, and only while that field still shows its change.
+            guard !listBusy.contains(list) else { return }
+            listBusy.insert(list)
+            if list == "watchlist" { annotations?.watchlist = !on } else { annotations?.favorite = !on }
+            Task {
+                do {
+                    try await model.requireAPI().setListed(itemId: item.id, list: list, listed: !on)
+                    await model.refreshLists()
+                } catch {
+                    if list == "watchlist", annotations?.watchlist == !on { annotations?.watchlist = on }
+                    if list == "favorite", annotations?.favorite == !on { annotations?.favorite = on }
+                }
+                listBusy.remove(list)
+            }
+        } label: {
+            Label(label, systemImage: symbol)
+            #if os(tvOS)
+            .font(.system(.body, design: .monospaced))
+            #else
+            .font(.subheadline.weight(.semibold))
+            .lineLimit(1)
+            #endif
+        }
+        .remoteControl("detail:\(list)", label: label) {
+            guard !listBusy.contains(list) else { return }
+            listBusy.insert(list)
+            if list == "watchlist" { annotations?.watchlist = !on } else { annotations?.favorite = !on }
+            Task {
+                do {
+                    try await model.requireAPI().setListed(itemId: item.id, list: list, listed: !on)
+                    await model.refreshLists()
+                } catch {
+                    if list == "watchlist", annotations?.watchlist == !on { annotations?.watchlist = on }
+                    if list == "favorite", annotations?.favorite == !on { annotations?.favorite = on }
+                }
+                listBusy.remove(list)
+            }
+        }
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: on))
+        .fixedSize()
+        #else
+        .buttonStyle(IOSDetailSecondaryActionButtonStyle(selected: on))
+        #endif
+    }
+
     private func watchButton(_ detail: ItemDetail) -> some View {
         let watched = isWatched(detail.item)
         return Button {
@@ -2393,6 +2492,7 @@ struct DetailView: View {
                     mobileDownloadButton(detail: detail, file: file)
                 }
                 if !item.isBook { watchButton(detail) }
+                listButtons(item)
                 if HomeTab.libraryChannels.isVisible(model.features), ["movie", "show", "episode"].contains(item.kind) {
                     makeChannelButton(item)
                 }

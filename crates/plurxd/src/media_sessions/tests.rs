@@ -315,6 +315,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         typeless_playlist: true,
         library_channel: None,
         request: SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
@@ -544,6 +545,7 @@ fn remote_prepare_names_only_an_exact_reserved_identity() {
 fn valid_start_response() -> RemoteStartResponse {
     let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
     RemoteStartResponse {
+        processed_fel: None,
         processed_dv_profile: None,
         retained_output: None,
         audio_delivery: None,
@@ -1430,7 +1432,7 @@ fn auto_candidate_parser_floor_remote_context_is_retained_but_not_executed() {
         }))
         .expect("retained capabilities"),
         candidate: plurx_core::playback::candidate::QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: candidate_id,
             recipe_digest,
             route: plurx_core::playback::candidate::CandidateRoute::Encode,
@@ -1618,6 +1620,7 @@ fn a_route_the_takeover_path_can_never_accept_is_unrecoverable() {
     let mut vod = base.clone();
     vod.recipe_json = serde_json::to_string(&RemoteStartRequest {
         request: SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
@@ -1774,6 +1777,7 @@ fn the_takeover_recipe_validator_refuses_vod() {
 
     let vod = RemoteStartRequest {
         request: SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,

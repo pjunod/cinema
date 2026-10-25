@@ -34,7 +34,14 @@ extension HomeTab {
 
 struct HomeView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var playback: RemotePlaybackAdapter
+    @EnvironmentObject private var client: RemoteClientModel
+    @EnvironmentObject private var invitations: InvitationClientModel
+    @State private var navigationExpanded = false
+    @State private var navigationPanelIdentity: UUID?
+    @State private var destinationRootVisible: [HomeTab: Bool] = [:]
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     private var selectedTab: HomeTab {
         get { remoteNavigation.selectedTab }
@@ -54,12 +61,24 @@ struct HomeView: View {
                 if !initializedShell { selectedTab = initialTab; initializedShell = true }
                 keepSelectionVisible()
                 remoteNavigation.synchronizeRoute()
+                remoteNavigation.setViewerNavigationAvailable(model.layout == .meridian)
             }
             .onChange(of: remoteNavigation.selectedTab) { _, _ in
                 keepSelectionVisible()
                 remoteNavigation.synchronizeRoute()
             }
+            .onChange(of: model.layout) { _, layout in
+                if navigationExpanded { remoteNavigation.closeModal() }
+                remoteNavigation.setViewerNavigationAvailable(layout == .meridian)
+            }
             .onChange(of: model.features) { _, _ in keepSelectionVisible() }
+            .onChange(of: model.libraryCollections(grouping: .share)) { _, sources in
+                if case .collection(let old) = remoteNavigation.paths[.libraries]?.first,
+                   old.id.hasPrefix("share:"), !sources.contains(where: { $0.id == old.id }) {
+                    remoteNavigation.paths[.libraries] = []
+                    remoteNavigation.synchronizeRoute()
+                }
+            }
             .onChange(of: remoteNavigation.paths) { _, _ in remoteNavigation.synchronizeRoute() }
     }
 
@@ -76,191 +95,126 @@ struct HomeView: View {
         selectedTab = tab
     }
 
-    @ViewBuilder
     private var shell: some View {
-        #if os(iOS)
-        if #available(iOS 18.0, *) {
-            iOSTabs.tabViewStyle(.sidebarAdaptable)
-        } else {
-            iOSTabs
-        }
-        #else
-        // Detail destinations replace the entire tab shell on television.
-        // That keeps the Home tab from remaining visibly selected while an
-        // episode or movie detail is on screen.
-        NavigationStack(path: pathBinding(remoteNavigation.selectedTab)) {
-            tvTabs
-                .appDestinations()
-        }
-        #endif
-    }
-
-    #if os(iOS)
-    private var iOSTabs: some View {
-        TabView(selection: $remoteNavigation.selectedTab) {
-            NavigationStack(path: pathBinding(.home)) {
-                if model.phase == .loading {
-                    ProgressView().tint(Palette.accent)
-                } else if model.phase == .reconnectFailed {
-                    ReconnectView()
-                } else {
-                    HomeDashboard()
-                        .appDestinations()
-                }
-            }
-            .tabItem { Label("Home", systemImage: "house") }
-            .tag(HomeTab.home)
-
-            NavigationStack(path: pathBinding(.libraries)) {
-                LibrariesDashboard()
-                    .appDestinations()
-            }
-            .tabItem { Label("Libraries", systemImage: "rectangle.stack") }
-            .tag(HomeTab.libraries)
-
-            if HomeTab.liveTv.isVisible(model.features) {
-                NavigationStack { LiveTvView(onLeave: { selectedTab = .home }) }
-                    .tabItem { Label("Live TV", systemImage: "tv") }
-                    .tag(HomeTab.liveTv)
-            }
-
-            if HomeTab.recordings.isVisible(model.features) {
-                NavigationStack { DvrRecordingsRootView().appDestinations() }
-                    .tabItem { Label("Recordings", systemImage: "record.circle") }
-                    .badge(dvr.overview?.counts.attention ?? 0)
-                    .tag(HomeTab.recordings)
-            }
-
-            if HomeTab.libraryChannels.isVisible(model.features) {
-                NavigationStack { LibraryChannelsView().appDestinations() }
-                    .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
-                    .tag(HomeTab.libraryChannels)
-            }
-
-            NavigationStack(path: pathBinding(.search)) {
-                SearchView()
-                    .appDestinations()
-            }
-            .tabItem { Label("Search", systemImage: "magnifyingglass") }
-            .tag(HomeTab.search)
-
-            NavigationStack {
-                DownloadsView()
-            }
-            .tabItem { Label("Downloads", systemImage: "arrow.down.circle") }
-            .tag(HomeTab.downloads)
-
-            NavigationStack {
-                SettingsView()
-            }
-            .tabItem { Label("Settings", systemImage: "gearshape") }
-            .tag(HomeTab.settings)
-        }
-        .tint(Palette.accent)
+        ViewerDestinationHost(
+            selection: selectedTab, layout: model.layout, expanded: navigationExpanded,
+            chromeFocusRequested: viewerNavigationFocusRequested,
+            accessibilityNavigation: dynamicTypeSize.isAccessibilitySize,
+            visibleTabs: HomeTab.viewerTabs.filter { $0.isVisible(model.features) },
+            recordingsAttention: model.features.recordings ? (dvr.overview?.counts.attention ?? 0) : 0,
+            selectionChanged: select,
+            standardNavigationIsPushed: !(remoteNavigation.paths[selectedTab] ?? []).isEmpty || destinationRootVisible[selectedTab] == false,
+            panelDismissed: { [identity = navigationPanelIdentity] in remoteNavigation.modalPresentationDismissed(scope: RemoteNavigationCoordinator.viewerNavigationScope, identity: identity) },
+            root: { tab in AnyView(destinationRoot(tab)
+                .environmentObject(model).environmentObject(remoteNavigation)
+                .environmentObject(playback).environmentObject(client).environmentObject(invitations)
+                .dynamicTypeSize(dynamicTypeSize)) },
+            chrome: AnyView(ViewerNavigationChrome(
+                expanded: navigationExpanded, recordingsAttention: dvr.overview?.counts.attention ?? 0,
+                togglePanel: toggleNavigation,
+                select: selectFromNavigation,
+                selectSource: selectSource
+            ).environmentObject(model).environmentObject(remoteNavigation).dynamicTypeSize(dynamicTypeSize)),
+            header: AnyView(ViewerNavigationHeader(search: { select(.search) }, settings: { select(.settings) }))
+        )
+        .id(model.diagnosticNamespace)
+        .background(Palette.bg.ignoresSafeArea())
         .task(id: dvrObservationIdentity) {
             guard scenePhase == .active, model.phase == .ready else { return }
             await dvr.observe(origin: model.origin, token: Session.shared.credentials.token,
                               highFrequency: selectedTab == .liveTv || selectedTab == .recordings)
         }
-        .task {
-            if model.phase == .ready && model.homeLoading {
-                await model.loadHome()
-            }
-        }
-        .onChange(of: model.phase) { _, phase in
-            guard phase == .ready else { return }
-            selectedTab = .home
-            if model.homeLoading {
-                Task { await model.loadHome() }
-            }
-        }
+        .task { if model.phase == .ready && model.homeLoading { await model.loadHome() } }
         .onChange(of: scenePhase) { _, phase in
-            // Coming back to a foregrounded app should not show yesterday's
-            // Continue Watching. An Apple TV in particular is suspended rather
-            // than quit, so before this the tvOS dashboard only ever refreshed
-            // by relaunching the app. `loadHome` coalesces overlapping refreshes
-            // and no longer raises a spinner over content, so this is free.
             guard phase == .active, model.phase == .ready else { return }
             Task { await model.loadHome() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .makeLibraryChannelFromItem)) { _ in
-            select(.libraryChannels)
-        }
-        // A reminder's *Watch* action names a channel; Live TV is the only tab
-        // that can tune one, and it reads the channel from the same notice.
-        .onReceive(NotificationCenter.default.publisher(for: .plurxReminderWatch)) { _ in
-            select(.liveTv)
-        }
+        .onReceive(NotificationCenter.default.publisher(for: .makeLibraryChannelFromItem)) { _ in select(.libraryChannels) }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: .plurxReminderWatch)) { _ in select(.liveTv) }
+        #endif
     }
-    #else
-    private var tvTabs: some View {
-        TabView(selection: $remoteNavigation.selectedTab) {
-            HomeDashboard()
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("root-screen-Home")
-                .tabItem { Label("Home", systemImage: "house") }
-                .tag(HomeTab.home)
 
-            LibrariesDashboard()
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("root-screen-Libraries")
-                .tabItem { Label("Libraries", systemImage: "rectangle.stack") }
-                .tag(HomeTab.libraries)
-
-            if HomeTab.liveTv.isVisible(model.features) {
-                LiveTvView(onLeave: { selectedTab = .home })
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("root-screen-Live TV")
-                    .tabItem { Label("Live TV", systemImage: "tv") }
-                    .tag(HomeTab.liveTv)
+    @ViewBuilder
+    private func destinationRoot(_ tab: HomeTab) -> some View {
+        // A common stack exists in both layouts, including Settings' implicit
+        // destination-based links and all DVR, reader and shared presenters.
+        NavigationStack(path: pathBinding(tab)) {
+            Group {
+                switch tab {
+                case .home:
+                    if model.phase == .loading { ProgressView().tint(Palette.accent) }
+                    else if model.phase == .reconnectFailed { ReconnectView() }
+                    else { HomeDashboard() }
+                case .libraries: LibrariesDashboard()
+                case .search: SearchView()
+                case .liveTv: LiveTvView(onLeave: { select(.home) })
+                case .recordings: DvrRecordingsRootView()
+                case .libraryChannels: LibraryChannelsView()
+                case .settings: SettingsView()
+                case .downloads:
+                    #if os(iOS)
+                    DownloadsView()
+                    #else
+                    EmptyView()
+                    #endif
+                }
             }
-
-            if HomeTab.recordings.isVisible(model.features) {
-                DvrRecordingsRootView()
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("root-screen-Recordings")
-                    .tabItem { Label(recordingsTabLabel, systemImage: "record.circle") }
-                    .tag(HomeTab.recordings)
+            .appDestinations()
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("root-screen-" + tab.title)
+            #if os(tvOS)
+            .onAppear { destinationRootVisible[tab] = true }
+            .onDisappear {
+                // A tab switch is not a push. Only the selected root can
+                // hide Standard's tabs while its implicit destination is up.
+                if selectedTab == tab { destinationRootVisible[tab] = false }
             }
-
-            if HomeTab.libraryChannels.isVisible(model.features) {
-                LibraryChannelsView()
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("root-screen-Channels")
-                    .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
-                    .tag(HomeTab.libraryChannels)
-            }
-
-            SearchView()
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("root-screen-Search")
-                .tabItem { Label("Search", systemImage: "magnifyingglass") }
-                .tag(HomeTab.search)
-
-            SettingsView()
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("root-screen-Settings")
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(HomeTab.settings)
+            #endif
         }
+        .preferredColorScheme(model.appearance.preferredColorScheme)
+        .fontDesign(model.theme.fontDesign)
         .tint(Palette.accent)
-        .task(id: dvrObservationIdentity) {
-            guard scenePhase == .active else { return }
-            await dvr.observe(origin: model.origin, token: Session.shared.credentials.token,
-                              highFrequency: selectedTab == .liveTv || selectedTab == .recordings)
-        }
-        .task { if model.homeLoading { await model.loadHome() } }
-        .onChange(of: scenePhase) { _, phase in
-            // Coming back to a foregrounded app should not show yesterday's
-            // Continue Watching. An Apple TV in particular is suspended rather
-            // than quit, so before this the tvOS dashboard only ever refreshed
-            // by relaunching the app. `loadHome` coalesces overlapping refreshes
-            // and no longer raises a spinner over content, so this is free.
-            guard phase == .active else { return }
-            Task { await model.loadHome() }
+    }
+
+    private var viewerNavigationFocusRequested: Bool {
+        #if os(tvOS)
+        return model.layout == .meridian
+            && remoteNavigation.activeScope == remoteNavigation.rootScope
+            && remoteNavigation.requestedFocus == RemoteNavigationCoordinator.viewerNavigationOpener
+        #else
+        return false
+        #endif
+    }
+
+    private func toggleNavigation() {
+        if navigationExpanded { remoteNavigation.closeModal() }
+        else {
+            remoteNavigation.openModal(scope: RemoteNavigationCoordinator.viewerNavigationScope,
+                opener: RemoteNavigationCoordinator.viewerNavigationOpener) { navigationExpanded = false }
+            navigationPanelIdentity = remoteNavigation.ownedModalIdentity
+            navigationExpanded = true
         }
     }
-    #endif
+
+    private func selectFromNavigation(_ tab: HomeTab) {
+        let changed = tab != selectedTab
+        if navigationExpanded { remoteNavigation.closeModal() }
+        select(tab)
+        if changed { remoteNavigation.realizeSelectedDestination() }
+    }
+
+    private func selectSource(_ source: LibraryCollection) {
+        var changedSource = false
+        if case .collection(let current) = remoteNavigation.paths[.libraries]?.first, current.id == source.id {
+            // Selecting the same semantic source retains every nested push.
+        } else {
+            remoteNavigation.paths[.libraries] = [.collection(source)]
+            changedSource = true
+        }
+        selectFromNavigation(.libraries)
+        if changedSource { remoteNavigation.realizeSelectedDestination() }
+    }
 
     private func pathBinding(_ tab: HomeTab) -> Binding<[Route]> {
         Binding(get: { remoteNavigation.paths[tab] ?? [] }, set: { remoteNavigation.paths[tab] = $0; remoteNavigation.synchronizeRoute() })
@@ -279,13 +233,20 @@ struct HomeView: View {
 private struct AppDestinations: ViewModifier {
     func body(content: Content) -> some View {
         content.navigationDestination(for: Route.self) { route in
-            switch route {
-            case .collection(let collection): LibraryView(collection: collection).remoteScope(RemoteNavigationCoordinator.routeScope(route))
-            case .item(let id): DetailView(itemId: id).remoteScope(RemoteNavigationCoordinator.routeScope(route))
-            case .sharedLibraries: SharedLibrariesView().remoteScope(RemoteNavigationCoordinator.routeScope(route))
-            case .sharedLibrary(let library, let parent, let title): SharedLibraryItemsView(library: library, parent: parent, title: title).remoteScope(RemoteNavigationCoordinator.routeScope(route))
-            case .sharedItem(let reference, let library): SharedLibraryDetailView(reference: reference, library: library).remoteScope(RemoteNavigationCoordinator.routeScope(route))
+            // A different route at the same depth is a different screen. A
+            // replaced path entry otherwise updates the existing destination in
+            // place, keeping its state and its remote scope. The route scope is
+            // the screen's stable identity, so refreshed route data never remounts.
+            Group {
+                switch route {
+                case .collection(let collection): LibraryView(collection: collection).remoteScope(RemoteNavigationCoordinator.routeScope(route))
+                case .item(let id): DetailView(itemId: id).remoteScope(RemoteNavigationCoordinator.routeScope(route))
+                case .sharedLibraries: SharedLibrariesView().remoteScope(RemoteNavigationCoordinator.routeScope(route))
+                case .sharedLibrary(let library, let parent, let title): SharedLibraryItemsView(library: library, parent: parent, title: title).remoteScope(RemoteNavigationCoordinator.routeScope(route))
+                case .sharedItem(let reference, let library): SharedLibraryDetailView(reference: reference, library: library).remoteScope(RemoteNavigationCoordinator.routeScope(route))
+                }
             }
+            .id(RemoteNavigationCoordinator.routeScope(route))
         }
     }
 }
@@ -328,17 +289,21 @@ private struct HomeDashboard: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    #if os(tvOS)
+    @StateObject private var featurePresentation = HomeFeaturePresentation()
     @AppStorage("plurx.tvHomeLayout") private var tvHomeLayoutRaw = TvHomeLayout.classic.rawValue
 
     private var theaterFeature: TvTheaterFeature? {
-        TvHomeLayoutPolicy.feature(
-            layout: TvHomeLayout(rawValue: tvHomeLayoutRaw) ?? .classic,
+        #if os(tvOS)
+        let activeLayout = model.layout == .meridian ? TvHomeLayout.theater : (TvHomeLayout(rawValue: tvHomeLayoutRaw) ?? .classic)
+        #else
+        let activeLayout = model.layout == .meridian ? TvHomeLayout.theater : .classic
+        #endif
+        return TvHomeLayoutPolicy.feature(
+            layout: activeLayout,
             continueWatching: model.hubs.continueWatching ?? [],
             recentlyAdded: model.hubs.recentlyAdded ?? []
         )
     }
-    #endif
 
     private var featured: Item? {
         (model.hubs.continueWatching ?? []).first
@@ -354,6 +319,7 @@ private struct HomeDashboard: View {
                 homeHeader
                 #endif
                 #if os(tvOS)
+                if model.layout == .standard {
                 HStack {
                     Button("Libraries") { remoteNavigation.selectedTab = .libraries; remoteNavigation.synchronizeRoute() }
                         .remoteControl("tab:libraries", label: "Libraries") { remoteNavigation.selectedTab = .libraries; remoteNavigation.synchronizeRoute() }
@@ -362,6 +328,7 @@ private struct HomeDashboard: View {
                 }
                 .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                 .padding(.horizontal, screenHPad)
+                }
                 #endif
                 if let error = model.homeError {
                     HomeRecoveryRow(error: error, scope: "home", returnFocus: remoteKeys.first { $0.hasPrefix("shelf:") } ?? "tab:libraries")
@@ -376,6 +343,32 @@ private struct HomeDashboard: View {
             .padding(.bottom, 36)
         }
         .background(Palette.bg.ignoresSafeArea())
+        .task(id: featurePresentation.requestedItemID) {
+            guard let id = featurePresentation.requestedItemID else { return }
+            defer { featurePresentation.requestedItemID = nil }
+            do {
+                let detail = try await model.itemDetail(id)
+                guard !Task.isCancelled else { return }
+                if let context = TvHomeLayoutPolicy.playbackContext(detail) { featurePresentation.play = context }
+                else { featurePresentation.error = "This title has no playable video file." }
+            } catch {
+                if !Task.isCancelled { featurePresentation.error = error.localizedDescription }
+            }
+        }
+        .alert("Unable to play", isPresented: Binding(
+            get: { featurePresentation.error != nil }, set: { if !$0 { featurePresentation.error = nil } }
+        )) { Button("OK", role: .cancel) { featurePresentation.error = nil } }
+        message: { Text(featurePresentation.error ?? "") }
+        .fullScreenCover(item: $featurePresentation.play, onDismiss: {
+            Task { await model.loadHome() }
+        }) { context in
+            PlayerView(
+                itemId: context.itemId, fileId: context.fileId, startMs: context.startMs,
+                durationMs: context.durationMs, title: context.title, subtitle: context.subtitle,
+                year: context.year, airDate: context.airDate, overview: context.overview,
+                onPlayNext: { featurePresentation.play = $0 }
+            ).id(context.id).environmentObject(model)
+        }
         .remoteScope("home")
         .onAppear { updateRemoteOrder() }
         .onChange(of: remoteKeys) { _, _ in updateRemoteOrder() }
@@ -393,13 +386,18 @@ private struct HomeDashboard: View {
     }
 
     private var remoteKeys: [String] {
-        let shelves = [HomeLayoutPolicy.continueWatchingShelfItems(model.hubs.continueWatching ?? []), model.hubs.nextUp ?? [], model.hubs.recentlyAdded ?? []]
+        // Shelf ids are stable names, not positions: the list rows sit after
+        // Next Up on screen but keep their own ids so Coming Soon stays shelf 3.
+        let shelves: [(Int, [Item])] = [(0, HomeLayoutPolicy.continueWatchingShelfItems(model.hubs.continueWatching ?? [])),
+                                       (1, model.hubs.nextUp ?? []), (4, model.watchlist), (5, model.favorites),
+                                       (2, model.hubs.recentlyAdded ?? [])]
         #if os(tvOS)
-        let tabs = ["tab:libraries", "tab:search"]
+        let tabs = model.layout == .standard ? ["tab:libraries", "tab:search"] : []
         #else
         let tabs: [String] = []
         #endif
-        return tabs + (model.homeError == nil ? [] : ["home:retry"]) + shelves.enumerated().flatMap { index, items in
+        let featureKeys = theaterFeature == nil ? [] : ["home-feature:play", "home-feature:details"]
+        return tabs + featureKeys + (model.homeError == nil ? [] : ["home:retry"]) + shelves.flatMap { index, items in
             items.map { "shelf:\(index):item:\($0.id)" }
         } + model.comingSoon.filter { $0.itemId != nil }.map { "shelf:3:comingsoon:" + $0.id }
     }
@@ -432,13 +430,11 @@ private struct HomeDashboard: View {
 
     @ViewBuilder
     private var homeContent: some View {
-        #if os(tvOS)
         if let theaterFeature {
-            TvTheaterHero(feature: theaterFeature)
+            TvTheaterHero(feature: theaterFeature, presentation: featurePresentation)
                 .padding(.bottom, 12)
         }
-        #endif
-        if HomeLayoutPolicy.usesFeaturedHero, let featured {
+        if model.layout == .standard && HomeLayoutPolicy.usesFeaturedHero, let featured {
             FeaturedHero(item: featured, compact: horizontalSizeClass == .compact)
                 #if os(tvOS)
                 .padding(.horizontal, screenHPad)
@@ -461,6 +457,18 @@ private struct HomeDashboard: View {
             style: .landscape
         )
         .id("shelf:1")
+        MediaRow(
+            title: "Watchlist",
+            remoteShelf: "shelf:4",
+            items: model.watchlist
+        )
+        .id("shelf:4")
+        MediaRow(
+            title: "Favorites",
+            remoteShelf: "shelf:5",
+            items: model.favorites
+        )
+        .id("shelf:5")
         MediaRow(
             title: "Recently Added",
             remoteShelf: "shelf:2",

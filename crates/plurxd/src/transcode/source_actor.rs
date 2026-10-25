@@ -98,6 +98,18 @@ impl SourceProducerAuthority {
 }
 
 impl TranscodeManager {
+    #[cfg(test)]
+    pub(crate) async fn source_fixture_body_budget() -> tokio::sync::OwnedSemaphorePermit {
+        static BUDGET: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        std::sync::Arc::clone(
+            BUDGET.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4))),
+        )
+        .acquire_owned()
+        .await
+        .expect("Source fixture body budget stays open")
+    }
+
     async fn source_start_budget_for_request(
         &self,
         request: &SessionRequest,
@@ -1861,7 +1873,7 @@ fn source_native_presentation(
         let file = encoded_vod_presentation_file(
             facts.file,
             encoding.options.target_height,
-            encoding.options.pipeline.output_grade(),
+            encoding.delivered_output_grade(),
             Some(encoding.plan.output_contract()),
         );
         let mut codecs = super::ladder::transcoded_hls_codecs_for_plan(&encoding.plan);

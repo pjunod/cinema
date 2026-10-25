@@ -473,7 +473,8 @@ test("cockpit Settings makes the active tab and long System values distinct", as
   assert.match(SHIPPED_UI, /\.kvgrid dd\{[\s\S]*?text-transform:none;word-break:normal/);
   assert.match(SHIPPED_UI, /\.storage-table\{grid-template-columns:minmax\(0,1fr\) max-content/);
   assert.match(shippedSource("storageHtml"), /class="stgtable storage-table"/);
-  assert.match(shippedSource("systemPanel"), /class="kvgrid system-grid"/);
+  assert.match(shippedSource("systemVersionsCard"), /system-kv/);
+  assert.match(SHIPPED_UI, /\.system-kv>\*\{min-width:0\}/);
   // Watch-state durability is reported once, on the Cluster tab, and nowhere
   // else. Two readings of the same projection on two screens is how an
   // operator ends up comparing a stale copy against a fresh one.
@@ -612,7 +613,7 @@ test("Home render generations refuse out-of-order route completions", async () =
   const phases = [];
   const api = (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject }));
   const harness = new Function(
-    "document", "location", "api", "homeGroup", "buildHomeSections", "layoutChrome", "layoutView", "wireRails", "restoreScroll", "setPagePhase",
+    "document", "location", "api", "homeGroup", "buildHomeSections", "layoutChrome", "layoutView", "wireRails", "restoreScroll", "setPagePhase", "registerLayoutPresentation",
     `let PAGE_RENDER_GENERATION=0,PHOTO_SET=[],LB_AT=-1;
      ${shippedTopLevelSource("viewHome")};
      return {viewHome,navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;}};`,
@@ -620,13 +621,13 @@ test("Home render generations refuse out-of-order route completions", async () =
     document, location, api, () => "share",
     (batch, group) => ({ libs: batch.libraries.map((row) => row.library), group, sections: batch.libraries }),
     (_, inner) => { main.innerHTML = inner; }, (_, page) => JSON.stringify(page),
-    () => {}, () => {}, (_, generation, phase) => phases.push({ generation, phase }),
+    () => {}, () => {}, (_, generation, phase) => phases.push({ generation, phase }), () => {},
   );
 
   const current = harness.viewHome();
   assert.deepEqual(phases, [{ generation: 1, phase: "shell" }],
     "the shell phase commits before any delayed endpoint resolves");
-  assert.deepEqual(requests.map((request) => request.url), ["/hubs", "/home/previews", "/coming-soon"]);
+  assert.deepEqual(requests.map((request) => request.url), ["/hubs", "/home/previews", "/coming-soon", "/lists/watchlist?limit=20", "/lists/favorite?limit=20"]);
   requests[1].resolve({ libraries: [{ library: { id: 7 }, items: [], total: 0 }] });
   await nextTurn();
   assert.match(main.innerHTML, /\"id\":7/);
@@ -636,6 +637,8 @@ test("Home render generations refuse out-of-order route completions", async () =
   assert.match(main.innerHTML, /\"id\":9/,
     "a later region commit preserves the preview region already received");
   requests[2].reject(new Error("optional dependency unavailable"));
+  requests[3].resolve({ items: [] });
+  requests[4].resolve({ items: [] });
   await current;
   assert.deepEqual(phases, [
     { generation: 1, phase: "shell" },
@@ -648,17 +651,19 @@ test("Home render generations refuse out-of-order route completions", async () =
   harness.navigate("#/settings");
   harness.navigate("#/");
   const latest = harness.viewHome();
-  requests.slice(6, 9).forEach((request) => request.resolve(
+  requests.slice(10, 15).forEach((request) => request.resolve(
     request.url === "/home/previews" ? { libraries: [{ library: { id: 42 }, items: [], total: 0 }] }
       : request.url === "/hubs" ? { continue_watching: [{ id: 43 }], next_up: [], recently_added: [] }
-        : { configured: false, entries: [] },
+        : request.url.startsWith("/lists/") ? { items: [] }
+          : { configured: false, entries: [] },
   ));
   await latest;
   const latestHtml = main.innerHTML;
-  requests.slice(3).forEach((request) => request.resolve(
+  requests.slice(5).forEach((request) => request.resolve(
     request.url === "/home/previews" ? { libraries: [] }
       : request.url === "/hubs" ? { continue_watching: [], next_up: [], recently_added: [] }
-        : { configured: false, entries: [] },
+        : request.url.startsWith("/lists/") ? { items: [] }
+          : { configured: false, entries: [] },
   ));
   await stale;
   assert.equal(main.innerHTML, latestHtml,
@@ -669,12 +674,13 @@ test("Home render generations refuse out-of-order route completions", async () =
   requests.slice(before).forEach((request) => request.resolve(
     request.url === "/home/previews" ? {libraries:cohort}
       : request.url === "/hubs" ? {continue_watching:[],next_up:[],recently_added:[]}
-        : {configured:false,entries:[]},
+        : request.url.startsWith("/lists/") ? {items:[]}
+          : {configured:false,entries:[]},
   ));
   await fifty;
   assert.deepEqual(requests.slice(before).map((request)=>request.url),
-    ["/hubs","/home/previews","/coming-soon"],
-    "fifty libraries retain the same three-request Home budget as one library");
+    ["/hubs","/home/previews","/coming-soon","/lists/watchlist?limit=20","/lists/favorite?limit=20"],
+    "fifty libraries retain the same fixed Home budget as one library (the two list reads are per person, not per library)");
 });
 
 test("Live TV issues exactly two authoritative reads, and the guide never gates the first", async () => {
@@ -864,7 +870,7 @@ test("Settings loads only the active tab manifest", () => {
     analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
-    system: { required: ["sys"], secondary: ["playbackEvents"] },
+    system: { required: ["sys"], secondary: [] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
     sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
@@ -1689,7 +1695,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
-    system:{required:["/system"],secondary:["playback-events","system-log"]},
+    system:{required:["/system"],secondary:[]},
     // The cluster settings cards fill their own mount when /settings lands; the
     // health board never waits for it.
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},

@@ -31,6 +31,8 @@ pub(crate) struct RestartDrainStatus {
 pub(crate) enum PlannedOutageFenceOwner {
     Restart,
     Maintenance,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    DesktopShutdown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -44,6 +46,8 @@ impl PlannedOutageFenceToken {
         let owner = match self.owner {
             PlannedOutageFenceOwner::Restart => "restart",
             PlannedOutageFenceOwner::Maintenance => "maintenance",
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            PlannedOutageFenceOwner::DesktopShutdown => "desktop-shutdown",
         };
         format!("{owner}:{}", self.generation)
     }
@@ -54,6 +58,7 @@ struct RestartDrainState {
     expires_at: Option<tokio::time::Instant>,
     expires_at_unix_ms: Option<u64>,
     token: Option<PlannedOutageFenceToken>,
+    committed: bool,
 }
 
 #[derive(Default)]
@@ -100,6 +105,7 @@ pub(crate) struct ServingAuthority {
     loss_generation: Arc<AtomicU64>,
     loss_transitions_pending: Arc<AtomicU64>,
     transition: Arc<tokio::sync::RwLock<()>>,
+    restart_drain: Arc<RestartDrain>,
 }
 
 impl ServingAuthority {
@@ -109,7 +115,28 @@ impl ServingAuthority {
             loss_generation: Arc::new(AtomicU64::new(0)),
             loss_transitions_pending: Arc::new(AtomicU64::new(0)),
             transition: Arc::new(tokio::sync::RwLock::new(())),
+            restart_drain: Arc::new(RestartDrain::default()),
         }
+    }
+
+    pub(crate) async fn try_restart_admission(&self) -> Option<RestartAdmission> {
+        let mut state = self.restart_drain.state.lock().await;
+        expire_restart_drain(&mut state);
+        if state.committed
+            || state.token.is_some()
+            || !self
+                .restart_drain
+                .unresolved_releases
+                .lock()
+                .expect("planned-outage release set")
+                .is_empty()
+        {
+            return None;
+        }
+        self.restart_drain.admissions.fetch_add(1, Ordering::AcqRel);
+        Some(RestartAdmission {
+            drain: Arc::clone(&self.restart_drain),
+        })
     }
 
     pub(crate) fn state(&self) -> ServingState {
@@ -350,6 +377,7 @@ impl ServingFence {
             loss_generation: Arc::clone(&self.loss_generation),
             loss_transitions_pending: Arc::clone(&self.loss_transitions_pending),
             transition: Arc::clone(&self.transition),
+            restart_drain: Arc::clone(&self.restart_drain),
         }
     }
 
@@ -415,11 +443,40 @@ impl ServingFence {
                     || path == "/photo/:/transcode"))
     }
 
+    /// Native shutdown accounts for every HTTP body (including proxy and
+    /// internal relay paths) before its handler runs. Legacy rolling drains
+    /// retain their existing read/control policy; only a desktop owner rejects
+    /// all new ordinary HTTP work while preparing an exact process shutdown.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn try_desktop_http_admission(&self) -> Option<RestartAdmission> {
+        let mut state = self.restart_drain.state.lock().await;
+        expire_restart_drain(&mut state);
+        if state.committed
+            || state
+                .token
+                .is_some_and(|token| token.owner == PlannedOutageFenceOwner::DesktopShutdown)
+            || self
+                .restart_drain
+                .unresolved_releases
+                .lock()
+                .expect("planned-outage release set")
+                .iter()
+                .any(|token| token.owner == PlannedOutageFenceOwner::DesktopShutdown)
+        {
+            return None;
+        }
+        self.restart_drain.admissions.fetch_add(1, Ordering::AcqRel);
+        Some(RestartAdmission {
+            drain: Arc::clone(&self.restart_drain),
+        })
+    }
+
     /// Linearize one new admission against restart preparation.
     pub(crate) async fn try_restart_admission(&self) -> Option<RestartAdmission> {
         let mut state = self.restart_drain.state.lock().await;
         expire_restart_drain(&mut state);
-        if state.expires_at.is_some()
+        if state.committed
+            || state.expires_at.is_some()
             || !self
                 .restart_drain
                 .unresolved_releases
@@ -497,6 +554,49 @@ impl ServingFence {
         .await
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn begin_desktop_preparation_until(
+        &self,
+        expires_at_unix_ms: u64,
+    ) -> Option<PlannedOutageFenceToken> {
+        self.begin_planned_outage_preparation_until(
+            expires_at_unix_ms,
+            PlannedOutageFenceOwner::DesktopShutdown,
+        )
+        .await
+    }
+
+    /// The same mutex linearizes all admissions, expiry, cancellation and commit.
+    /// A committed owner is deliberately not represented by a far-future timer.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn commit_desktop_shutdown(
+        &self,
+        token: PlannedOutageFenceToken,
+        active_sessions: usize,
+    ) -> bool {
+        // Serialize this final ready observation with authority publication,
+        // as publication commits elsewhere do. A fresh preflight is not
+        // permission to commit after an intervening local quorum loss.
+        let _authority = self.transition.read().await;
+        if !self.is_ready() {
+            return false;
+        }
+        let mut state = self.restart_drain.state.lock().await;
+        expire_restart_drain(&mut state);
+        if state.committed
+            || state.token != Some(token)
+            || token.owner != PlannedOutageFenceOwner::DesktopShutdown
+            || active_sessions != 0
+            || self.restart_drain.admissions.load(Ordering::Acquire) != 0
+        {
+            return false;
+        }
+        state.committed = true;
+        state.expires_at = None;
+        state.expires_at_unix_ms = None;
+        true
+    }
+
     pub(crate) async fn begin_maintenance_preparation_until(
         &self,
         expires_at_unix_ms: u64,
@@ -521,6 +621,7 @@ impl ServingFence {
             .lock()
             .expect("planned-outage release set")
             .is_empty()
+            || state.committed
             || state.expires_at.is_some()
         {
             return None;
@@ -649,7 +750,7 @@ impl ServingFence {
         active_sessions: usize,
     ) -> RestartDrainStatus {
         let mut state = self.restart_drain.state.lock().await;
-        if state.token == Some(token) {
+        if !state.committed && state.token == Some(token) {
             state.expires_at = None;
             state.expires_at_unix_ms = None;
             state.token = None;
@@ -957,12 +1058,14 @@ impl ServingFence {
 }
 
 fn expire_restart_drain(state: &mut RestartDrainState) {
-    if state.expires_at.is_some_and(|expires_at| {
-        expires_at <= tokio::time::Instant::now()
-            || state
-                .expires_at_unix_ms
-                .is_some_and(|expires_at_unix_ms| expires_at_unix_ms <= unix_ms())
-    }) {
+    if !state.committed
+        && state.expires_at.is_some_and(|expires_at| {
+            expires_at <= tokio::time::Instant::now()
+                || state
+                    .expires_at_unix_ms
+                    .is_some_and(|expires_at_unix_ms| expires_at_unix_ms <= unix_ms())
+        })
+    {
         state.expires_at = None;
         state.expires_at_unix_ms = None;
         state.token = None;
@@ -976,7 +1079,8 @@ fn restart_drain_status(
 ) -> RestartDrainStatus {
     let admissions_in_flight = drain.admissions.load(Ordering::Acquire);
     RestartDrainStatus {
-        new_admissions_blocked: state.expires_at.is_some()
+        new_admissions_blocked: state.committed
+            || state.expires_at.is_some()
             || !drain
                 .unresolved_releases
                 .lock()
@@ -1522,5 +1626,95 @@ mod tests {
         drop(commit);
         loss.await.expect("loss publisher");
         assert_eq!(fence.authority().state().loss_generation, 1);
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod desktop_shutdown_tests {
+    use super::*;
+    use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+    #[tokio::test]
+    async fn desktop_commit_is_nonexpiring_and_cancellation_cannot_reopen_it() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let token = fence
+            .begin_desktop_preparation_until(unix_ms() + 100)
+            .await
+            .expect("desktop fence fixture admission");
+        assert!(fence.commit_desktop_shutdown(token, 0).await);
+        // The original bounded preparation is now owned by daemon shutdown.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        fence.cancel_planned_outage_preparation(token, 0).await;
+        let cancellation = fence.retain_restart_cancellation();
+        fence
+            .cancel_current_restart_preparation(cancellation, 0)
+            .await;
+        fence.cancel_current_maintenance_preparation(0).await;
+        let status = fence.restart_drain_status(0).await;
+        assert!(status.new_admissions_blocked);
+        assert_eq!(status.expires_at_unix_ms, None);
+        assert!(fence.try_restart_admission().await.is_none());
+        assert!(fence.authority().try_restart_admission().await.is_none());
+        assert_eq!(fence.current_planned_outage().await, Some(token));
+        assert!(fence
+            .begin_restart_preparation_until(unix_ms() + 1000)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn desktop_commit_refuses_an_intervening_local_authority_loss() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let token = fence
+            .begin_desktop_preparation_until(unix_ms() + 10_000)
+            .await
+            .expect("desktop token");
+        fence.validation_set_ready(false).await;
+        assert!(!fence.commit_desktop_shutdown(token, 0).await);
+        assert!(fence.restart_drain_status(0).await.new_admissions_blocked);
+    }
+
+    #[tokio::test]
+    async fn direct_read_and_background_recording_admission_races_block_commit() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let read = fence
+            .try_restart_admission()
+            .await
+            .expect("desktop fence fixture admission");
+        let recording = fence
+            .authority()
+            .try_restart_admission()
+            .await
+            .expect("desktop fence fixture admission");
+        let token = fence
+            .begin_desktop_preparation_until(unix_ms() + 10_000)
+            .await
+            .expect("desktop fence fixture admission");
+        assert!(!fence.commit_desktop_shutdown(token, 0).await);
+        assert!(fence.authority().try_restart_admission().await.is_none());
+        drop(read);
+        assert!(!fence.commit_desktop_shutdown(token, 0).await);
+        drop(recording);
+        assert!(!fence.commit_desktop_shutdown(token, 1).await);
+        assert!(fence.commit_desktop_shutdown(token, 0).await);
+    }
+
+    #[tokio::test]
+    async fn abandoned_preparation_expires_but_delayed_commit_never_succeeds() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let token = fence
+            .begin_desktop_preparation_until(unix_ms() + 30)
+            .await
+            .expect("desktop fence fixture admission");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(!fence.commit_desktop_shutdown(token, 0).await);
+        assert!(fence.try_restart_admission().await.is_some());
+        let successor = fence
+            .begin_desktop_preparation_until(unix_ms() + 1000)
+            .await
+            .expect("desktop fence fixture admission");
+        fence.cancel_planned_outage_preparation(token, 0).await;
+        assert!(fence.try_restart_admission().await.is_none());
+        assert!(fence.commit_desktop_shutdown(successor, 0).await);
     }
 }

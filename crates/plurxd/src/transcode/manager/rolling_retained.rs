@@ -194,6 +194,7 @@ impl TranscodeManager {
         }
         Some(StartInfo {
             processed_dv_profile: None,
+            processed_fel: None,
             degraded_processing: None,
             retained_output: None,
             audio_delivery: audio,

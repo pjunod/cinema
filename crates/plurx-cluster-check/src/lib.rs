@@ -3813,17 +3813,14 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::ItemId { item_id } => item_id,
         response => bail!("unexpected cross-item fence fixture response: {response:?}"),
     };
-    let (before_repair, initial_term) = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics {
-            applied_index,
-            current_term,
-            ..
-        } => (
-            applied_index.context("repair budget missing initial applied index")?,
-            current_term,
-        ),
-        response => bail!("unexpected pre-repair metrics: {response:?}"),
-    };
+    // Every entry count in this proof is taken between commit-bracketed
+    // boundaries, never from a raw `last_applied` metric: the leader answers a
+    // write once it is applied but publishes `last_applied` to its metrics only
+    // on the next Raft core loop iteration, so a raw sample taken right after
+    // the fixture seeds above can still lag the last seed and charge it to
+    // this window.
+    let before_repair = topology::stable_applied_sample(&mut cluster, leader).await?;
+    let initial_term = before_repair.1.current_term;
     let mut first_winners = Vec::new();
     let mut initial_fence = None;
     for node_id in 1..=3 {
@@ -3867,19 +3864,13 @@ async fn run_membership_lifecycle_case() -> Result<()> {
              leader raft: {raft:?}; durable repair row: {row:?}"
         );
     }
-    let after_repair = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
-            applied_index.context("repair budget missing final applied index")?
-        }
-        response => bail!("unexpected post-repair metrics: {response:?}"),
-    };
-    if after_repair.saturating_sub(before_repair) != 1 {
-        bail!(
-            "one artwork repair contention round consumed {} Raft entries instead of one",
-            after_repair.saturating_sub(before_repair)
-        );
-    }
-    let held_index = after_repair;
+    let after_repair = topology::stable_applied_sample(&mut cluster, leader).await?;
+    require_exact_window_entries(
+        "one artwork repair contention round",
+        &before_repair,
+        &after_repair,
+        1,
+    )?;
     for node_id in 1..=3 {
         match cluster
             .request(
@@ -3895,15 +3886,13 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             response => bail!("an active repair lease was reclaimed: {response:?}"),
         }
     }
-    let held_after = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
-            applied_index.context("held repair lease missing applied index")?
-        }
-        response => bail!("unexpected held-lease metrics: {response:?}"),
-    };
-    if held_after != held_index {
-        bail!("failed repair retries wrote inside the active lease");
-    }
+    let held_after = topology::stable_applied_sample(&mut cluster, leader).await?;
+    require_exact_window_entries(
+        "failed repair retries inside the active lease",
+        &after_repair,
+        &held_after,
+        0,
+    )?;
     tokio::time::sleep(Duration::from_millis(repair_lease_ms + 30)).await;
     let initial_term = u64::try_from(
         initial_fence
@@ -3962,26 +3951,24 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    let same_term_after = match cluster.request(leader, Request::Metrics).await? {
+    match cluster.request(leader, Request::Metrics).await? {
         Response::Metrics {
-            applied_index,
             leader: Some(current_leader),
             current_term,
             ..
-        } if current_leader == leader && current_term == initial_term => {
-            applied_index.context("stable-term repair reuse missing applied index")?
-        }
+        } if current_leader == leader && current_term == initial_term => {}
         Response::Metrics { .. } => {
             bail!("artwork repair topology changed during the stable-term generation CAS")
         }
         response => bail!("unexpected stable-term repair metrics: {response:?}"),
-    };
-    if same_term_after.saturating_sub(held_index) != 1 {
-        bail!(
-            "stable-term artwork re-repair consumed {} Raft entries instead of one fenced generation",
-            same_term_after.saturating_sub(held_index)
-        );
     }
+    let same_term_after = topology::stable_applied_sample(&mut cluster, leader).await?;
+    require_exact_window_entries(
+        "stable-term artwork re-repair (one fenced generation)",
+        &held_after,
+        &same_term_after,
+        1,
+    )?;
     match cluster
         .request(
             leader,
@@ -5148,6 +5135,48 @@ fn require_artwork_repair_cas_topology(
         ),
         response => bail!("unexpected post-CAS successor metrics response: {response:?}"),
     }
+}
+
+/// Require that the window between two commit-bracketed boundaries
+/// (`topology::stable_applied_sample`) applied exactly `expected` entries, all
+/// of them the drill's own normal writes, in one leader term. The artwork
+/// repair windows this guards run before the lifecycle starts any heartbeat
+/// loop and while no node holds a cluster-job lease, so every registered
+/// background class, blank (election) and membership entry is contamination;
+/// the failure names which kind it was instead of only counting it.
+fn require_exact_window_entries(
+    window: &str,
+    before: &(u64, topology::PayloadCounts),
+    after: &(u64, topology::PayloadCounts),
+    expected: u64,
+) -> Result<()> {
+    let (before_index, before) = before;
+    let (after_index, after) = after;
+    let entries = after_index.saturating_sub(*before_index);
+    let blank = after.blank.saturating_sub(before.blank);
+    let membership = after.membership.saturating_sub(before.membership);
+    let normal = after.normal.saturating_sub(before.normal);
+    let account = window_account(&before.class_counts, &after.class_counts, &[], normal);
+    if entries != expected
+        || blank != 0
+        || membership != 0
+        || account.foreign != 0
+        || account.unclassified != expected
+        || after.current_term != before.current_term
+    {
+        bail!(
+            "{window} consumed {entries} Raft entries instead of {expected} \
+             ({before_index} -> {after_index}): {blank} blank, {membership} membership, \
+             {normal} normal (background [{}]; {} background, {} unclassified); \
+             term {} -> {}",
+            account.report,
+            account.foreign,
+            account.unclassified,
+            before.current_term,
+            after.current_term
+        );
+    }
+    Ok(())
 }
 
 /// Claim the artwork repair fence on the node the drill expects to win,

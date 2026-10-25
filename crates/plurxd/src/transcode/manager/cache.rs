@@ -1035,6 +1035,7 @@ impl TranscodeManager {
         .await;
         Some(StartInfo {
             processed_dv_profile: None,
+            processed_fel: None,
             degraded_processing: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),

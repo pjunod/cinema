@@ -8,6 +8,7 @@
 //! Implementation is split by domain area: `users`, `library`, `media`,
 //! `watch` — this file owns open/migrate, shared row mappers, and settings.
 
+mod annotations;
 mod apikeys;
 mod background_jobs;
 mod cache;
@@ -1307,6 +1308,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::invitations::MIGRATION_V4,
     // v111: managed subtitle jobs and media-independent model reservations.
     super::subtitle_managed_schema::SCHEMA,
+    // v112: independently recognized progressive translation operations and cues.
+    super::subtitle_translation_schema::SCHEMA,
+    // v113: item ratings and per-person item lists (watchlist, favorites).
+    super::library_annotations_schema::SCHEMA,
+    // v114: source-revision title acquisition, independent of ordinary probes.
+    super::dv_title_jobs::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1843,6 +1850,9 @@ impl SqliteStore {
         }
 
         super::subtitle_managed_schema::verify_sqlite(conn)?;
+        super::subtitle_translation_schema::verify_sqlite(conn)?;
+        super::library_annotations_schema::verify_sqlite(conn)?;
+        super::dv_title_jobs_schema::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

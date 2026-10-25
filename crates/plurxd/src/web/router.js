@@ -55,6 +55,8 @@ function setPageTimer(fn,ms,generation=PAGE_RENDER_GENERATION){
   PAGE_TIMER=timer;
 }
 async function render(){
+  LAYOUT_PRESENTATION=null;
+  if(typeof meridianClosePanel==="function")meridianClosePanel(false);
   cancelNextEpisodePreparation(PLAYER);
   if(AUTOPLAY_NEXT_PREPARED&&location.hash!==`#/item/${AUTOPLAY_NEXT_PREPARED.page.id}`)
     clearAutoplayNextPreparation();
@@ -101,6 +103,7 @@ async function render(){
     else if(h==="#/shared"||h.startsWith("#/shared/")) await viewSharedCatalogue(generation);
     else if(h.startsWith("#/item/")) await viewItem(h.split("/")[2]);
     else if(h.startsWith("#/library/")) await viewLibrary(h.split("/")[2]);
+    else if(h.startsWith("#/list/")) await viewList(h.split("/")[2]);
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
     else if(h==="#/remote") await viewRemote(generation);

@@ -31,17 +31,18 @@ mod vod;
 
 pub use avc_qualification::QualifiedSdrAvc;
 pub use decode::{
-    plan_can_name_decoder, resolve_transcode, ArtifactQualification, AttemptRestrictions,
-    AutoQualityRateProfile, CapabilityStatus, CompletedReconstructedOutputPlan, DecodeBackend,
-    DecodeCacheIdentity, DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity,
-    DecodeCatalogMetadata, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
-    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, Deinterlace, DynamicRangeClass,
-    FrameDomain, FrameRate, FrameRateProvenance, InterlaceVerdict, NormalizedGeometry,
-    OutputBandwidth, OutputMetadataPolicy, OutputWidthRule, PlanError, PlanSourceBinding,
-    PresentationContract, Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder,
-    StreamSelectionProvenance, SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions,
-    TranscodeRequest, VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
-    RESOLVED_TRANSCODE_PLAN_VERSION, UNQUALIFIED_ARTIFACT_NAMESPACE,
+    continuous_avc_envelope_accepts, plan_can_name_decoder, resolve_transcode,
+    ArtifactQualification, AttemptRestrictions, AutoQualityRateProfile, CapabilityStatus,
+    CompletedReconstructedOutputPlan, DecodeBackend, DecodeCacheIdentity, DecodeCapabilities,
+    DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence,
+    DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
+    DecodeSurfaceContract, Deinterlace, DynamicRangeClass, FrameDomain, FrameRate,
+    FrameRateProvenance, InterlaceVerdict, NormalizedGeometry, OutputBandwidth,
+    OutputMetadataPolicy, OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract,
+    Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
+    SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
+    VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
+    UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use dolby::{
     LinuxDolbyContext, LinuxDolbyExecutionBinding, LinuxDolbyIdentity, LinuxDolbyObservation,
@@ -49,11 +50,11 @@ pub use dolby::{
     StrictDolbyImplementation, StrictDolbyPolicy,
 };
 pub use encoder::{
-    benchmark_encoder, detect_encoders, detect_video_decoders, vaapi_device,
+    benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for, vaapi_device,
     validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
     vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
-    EncoderCaps, OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc,
-    RateMode, VaapiHdrPolicy, VideoCodec,
+    EncoderCaps, EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
+    QualityRateControlValidation, QualityRc, RateMode, VaapiHdrPolicy, VideoCodec,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,

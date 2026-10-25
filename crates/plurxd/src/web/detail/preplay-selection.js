@@ -60,9 +60,9 @@ async function askDecision(fileId, force, sel, signal=null, incumbent=null){
   if(context.source_ref.kind!=="local"){
     const selected={force,...playbackFileQueryFromLegacy(query)};
     for(const field of ["audio","subtitle","audio_offset_ms"])if(Object.hasOwn(selected,field))selected[field]=Number(selected[field]);
-    return SHARED_DECISION.decision(context,selected,signal);
+    return SHARED_DECISION.decision(context,selected,signal,incumbent);
   }
-  const caps=currentCapsDocument();
+  const caps=currentCapsDocument(incumbent);
   const linkReceipt=force==='auto'&&typeof candidateLinkReceipt==='function'
     ? candidateLinkReceipt(incumbent,fileId):null;
   try{
@@ -686,14 +686,17 @@ function chapterList(p){
 async function viewItem(id,isCurrent=()=>true){
   const generation=PAGE_RENDER_GENERATION;
   const prepared=takeAutoplayNextPreparation(id);
+  let page=null;
+  registerLayoutPresentation(()=>recomposeItemPresentation(page),()=>!!page);
   layoutChrome("home",`<div class="empty">Loading…</div>`);
-  const page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`,prepared?.page);
+  page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`,prepared?.page);
   if(!page)return;
   if(!isCurrent()||generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
   WATCH_ITEM_PAGE=page;
   document.getElementById("main").innerHTML=layoutView("item",page);
   DV_FILE_PAGE_FILES=page.files||[];
   pollDvFileActions(DV_FILE_PAGE_FILES,generation,true);
+  paintItemAnnotations(id,generation);
   restoreScroll();
   // One-click play from an episode list lands here and starts immediately.
   if(AUTOPLAY===String(id)){
@@ -824,6 +827,7 @@ function classicItemBody(p){
       <div class="poster">${artHtml(it)}</div>
       <div class="dhead">${crumbs}<h1>${esc(it.title)}${editable?` <button class="ghost sm" title="Edit details" aria-label="Edit details" onclick='openEdit(${esc(JSON.stringify(it))})'>✎ Edit</button>`:''}${artBtn}</h1>${bookByline(it)}
         <div class="chips">${chips.join("")}</div>
+        ${ratingsSlot(it)}
         ${(it.tags&&it.tags.length)?`<div class="chips">${it.tags.map(t=>`<span>${esc(t)}</span>`).join("")}</div>`:''}
         ${heroBadges?`<div class="vbadges" style="margin-top:10px">${heroBadges}</div>`:''}
         ${it.overview?`<p class="overview">${esc(it.overview)}</p>`:''}

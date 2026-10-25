@@ -3460,10 +3460,18 @@ final class AppleClientTests: XCTestCase {
             source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex)
         )
         let body = String(source[start.upperBound..<end.lowerBound])
-        XCTAssertTrue(body.contains("self.present(.tick)"), "it feeds the reducer's clock")
-        // Pure: the presenter's clock may not touch the player.
+        XCTAssertTrue(body.contains("Task.sleep(for: .milliseconds(Self.surfaceClockIntervalMs))"))
+        XCTAssertTrue(body.contains("self.surfaceClockTick(nowMs: PlaybackControlSession.monotonicMs())"),
+                      "the wall clock delegates even when AVPlayer's film clock stops")
+        let tickStart = try XCTUnwrap(source.range(of: "func surfaceClockTick(nowMs: Int) {"))
+        let tickEnd = try XCTUnwrap(source.range(of: "\n    }\n", range: tickStart.upperBound..<source.endIndex))
+        let tick = String(source[tickStart.upperBound..<tickEnd.lowerBound])
+        XCTAssertTrue(tick.contains("present(.tick)"), "the delegated heartbeat feeds the reducer's clock")
+        XCTAssertTrue(tick.contains("sampleSurfacePresentation(at: realPositionMs(), evidence: currentLocalVideoEvidence())"))
+        // Both the timer and its delegated callback observe the player without
+        // changing playback as an effect of the presenter's clock.
         for forbidden in ["player.pause()", "player.play()", "reopen(", "seek(", "prepare("] {
-            XCTAssertFalse(body.contains(forbidden), "the presenter's clock does not \(forbidden)")
+            XCTAssertFalse((body + tick).contains(forbidden), "the presenter's clock does not \(forbidden)")
         }
     }
 
@@ -7573,7 +7581,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testNativeAppearanceChoicesMatchTheOtherNativeViewer() {
-        XCTAssertEqual(ViewerTheme.allCases.map(\.label), ["Classic", "Terminal", "noirr"])
+        XCTAssertEqual(ViewerTheme.allCases.map(\.label), ["Classic", "Terminal", "noirr", "Meridian"])
         XCTAssertEqual(
             ViewerAppearance.allCases.map(\.label),
             ["Auto (system)", "Light", "Dark"]
@@ -11249,12 +11257,11 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(AppModel.homeErrorMessage(for: mapped, hasCachedContent: false))
     }
 
-    func testTransientRefreshFailureKeepsCachedHomeContentVisible() {
+    func testTransientRefreshFailureExposesRetryAlongsideCachedHome() {
         let failure = APIError.transport("The request timed out.")
 
-        XCTAssertEqual(AppModel.homeErrorMessage(for: failure, hasCachedContent: true),
-                       AppModel.homeErrorMessage(for: failure, hasCachedContent: false),
-                       "Cached titles survive, but failure must still expose inline Retry")
+        XCTAssertEqual(AppModel.homeErrorMessage(for: failure, hasCachedContent: true), "The request timed out.")
+        XCTAssertNil(AppModel.homeErrorMessage(for: CancellationError(), hasCachedContent: true))
         XCTAssertEqual(
             AppModel.homeErrorMessage(for: failure, hasCachedContent: false),
             "The request timed out."
@@ -12591,4 +12598,48 @@ private struct PGSOverlayCasesFixture: Decodable {
     let seekCases: [SeekCase]
     let tickCases: [TickCase]
     let manifestResponses: [ManifestResponse]
+}
+
+final class RatingFormatTests: XCTestCase {
+    func testAnnotationsDecodeAndEachSourceReadsOnItsOwnScale() throws {
+        let json = #"{"ratings":[{"source":"imdb","value":8.1,"scale":10,"votes":214000},{"source":"rotten_tomatoes","value":94,"scale":100},{"source":"metacritic","value":81,"scale":100},{"source":"tmdb","value":78,"scale":100,"votes":3900}],"watchlist":true,"favorite":false}"#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let a = try decoder.decode(ItemAnnotations.self, from: Data(json.utf8))
+        XCTAssertEqual(a.watchlist, true)
+        XCTAssertEqual(a.favorite, false)
+        XCTAssertEqual((a.ratings ?? []).map(RatingFormat.text), ["8.1", "94%", "81", "78%"])
+        XCTAssertEqual(RatingFormat.accessibility(a.ratings![0]), "IMDb 8.1, from 214000 votes")
+    }
+
+    func testRottenTomatoesTurnsPositiveAtSixty() {
+        XCTAssertFalse(RatingFormat.rottenTomatoesPositive(59))
+        XCTAssertTrue(RatingFormat.rottenTomatoesPositive(60))
+    }
+}
+
+final class ServerLabelTests: XCTestCase {
+    private func decode(_ json: String) throws -> ServerNode {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ServerNode.self, from: Data(json.utf8))
+    }
+
+    func testTheServerNodeCarriesTheMachineNameAndTheServersLabel() throws {
+        let node = try decode(#"{"hostname":"lab6","display_name":"lab6"}"#)
+        XCTAssertEqual(node.displayName, "lab6")
+        XCTAssertEqual(serverSettingsLabel(name: node.displayName, hostname: node.hostname), "lab6")
+    }
+
+    func testANodeWithoutAMachineNameShowsTheLabelAlone() throws {
+        let node = try decode(#"{"display_name":"plurx"}"#)
+        XCTAssertNil(node.hostname)
+        XCTAssertEqual(serverSettingsLabel(name: node.displayName, hostname: node.hostname), "plurx")
+    }
+
+    func testAChosenNameKeepsTheAnsweringNodeVisible() {
+        XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: "lab6"), "Living Room · lab6")
+        XCTAssertEqual(serverSettingsLabel(name: nil, hostname: "lab6"), "lab6")
+        XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: nil), "Living Room")
+    }
 }

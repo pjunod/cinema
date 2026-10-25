@@ -1447,7 +1447,7 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
 }
 
 fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) -> bool {
-    request
+    request.dv_processing_route().is_ok() && request
         .continuous_media
         .as_ref()
         .is_none_or(|media| media.valid_for(request))
@@ -1477,7 +1477,8 @@ fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) 
         && (-15_000..=15_000).contains(&request.audio_offset_ms)
         && match &request.kind {
             SessionKind::Transcode { height } => {
-                (crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT).contains(height)
+                let minimum = if request.dv_processing_destination.is_some() { 32 } else { crate::transcode::MIN_HEIGHT };
+                (minimum..=crate::transcode::MAX_HEIGHT).contains(height)
             }
             SessionKind::Copy { .. } => true,
         }
@@ -1504,6 +1505,11 @@ pub(crate) struct RemoteStartResponse {
     /// Owner answer carried separately from the strict legacy JSON body.
     #[serde(skip)]
     pub processed_dv_profile: Option<u8>,
+    /// Whether the selected processing plan reconstructs the FEL. Local to
+    /// the node that holds the plan: an ingress for a remote owner falls back
+    /// to the owner's effective-processing report for the indicator.
+    #[serde(skip)]
+    pub processed_fel: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1688,6 +1694,7 @@ impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
             processed_dv_profile: info.processed_dv_profile,
+            processed_fel: info.processed_fel,
             retained_output: info.retained_output,
             audio_delivery: info.audio_delivery,
             session_id: info.session_id,
@@ -6362,6 +6369,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         },
         typeless_playlist: true,
         request: SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,

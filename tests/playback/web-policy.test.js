@@ -65,7 +65,7 @@ function shippedSource(name) {
   return sliceDeclaration(start);
 }
 function transportTelemetrySources(){
-  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker"].map(shippedSource).join("\n");
+  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker","prunePlaybackPlayInvocations","cancelPlaybackPlayInvocation"].map(shippedSource).join("\n");
 }
 
 
@@ -374,12 +374,13 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
     "renderPlaybackSurface", "playbackWaitLiveDetail", "playbackProgressTick",
     // The same half-second tick carries the MediaSession position (F-web-13);
     // the plan forbids a second timer for it, so it has to be visible here.
-    "updatePlayerMediaSession",
+    "updatePlaybackQualityChrome", "updatePlayerMediaSession",
     `${shippedSource("playbackSamplingTick")}\nreturn playbackSamplingTick;`,
   )(
     render,
     () => { order.push("sample"); return "1.5 s client loaded · 1 server HTTP wait"; },
     () => { order.push(`paint:${render.waitDetail}`); },
+    () => {},
     (v, p) => { order.push(["mediasession", v, p]); },
   );
   const sampled = {}, sampledPlayer = {};
@@ -488,7 +489,8 @@ const CAPS_DOCUMENT_PRELUDE = [
   `function capsDocument(){return ${JSON.stringify(USABLE_CAPS_DOCUMENT)};}`,
   "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
   "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
-      shippedSource("currentCapsDocument"),
+  shippedSource("hdrDisplayPeakCaps"),
+  shippedSource("currentCapsDocument"),
   shippedSource("capsDocumentIsUsable"),
 ].join("\n");
 function buildOpenSession(overrides) {
@@ -519,6 +521,7 @@ function buildOpenSession(overrides) {
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;} function qualityForce(){return 'auto';}",
       "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
+      shippedSource("hdrDisplayPeakCaps"),
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -628,6 +631,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
+      shippedSource("hdrDisplayPeakCaps"),
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("askDecision"),
@@ -675,6 +679,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
+      shippedSource("hdrDisplayPeakCaps"),
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -4086,7 +4091,8 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
     "probePlaybackSource", "finishStallRecovery", "clientLog", "toast",
     "stopPlayerForExhaustion", "raisePlaybackSurface", "playbackOwnsAttachedMedia",
     "hlsStartupIncomplete", "diagnoseHlsStartup", "abortHlsStartupLoaders", "performance",
-    [shippedSource("playbackStallActions"), shippedSource("stallDiagnose"), "return stallDiagnose;"].join("\n"),
+    [shippedSource("playbackStallActions"), shippedSource("playbackAttemptTerminallyStopped"),
+      shippedSource("stallDiagnose"), "return stallDiagnose;"].join("\n"),
   );
   const player = { method: "remux", probeUrl: null, started: false };
   await diagnose(
@@ -5934,6 +5940,7 @@ test("a session that lands on a different range repaints the badge", () => {
     [shippedSource("markPlaybackControlSeekExecuted"),
       shippedSource("samplePlaybackPresentationClock"),
       shippedSource("effectiveHdrProcessing"), shippedSource("clearEffectiveProcessing"),
+      shippedSource("playbackEnhancementFromWire"),
       shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
   const player = { deliveredRange: "hdr10" };

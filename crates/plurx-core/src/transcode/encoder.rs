@@ -139,7 +139,7 @@ pub struct CompletedReconstructedOutputContract {
 }
 impl CompletedReconstructedOutputContract {
     pub(super) fn resolve(encoder: Encoder) -> Option<Self> {
-        let input = super::pipeline::ReconstructedPqInput::Rgb48Bt2020Pq;
+        let input = super::pipeline::ReconstructedPqInput::Yuv420p10Bt2020NclPq;
         input.pairs_with(encoder).then_some(Self { encoder, input })
     }
     pub fn encoder(self) -> Encoder {
@@ -155,8 +155,15 @@ impl CompletedReconstructedOutputContract {
     pub fn input_contract(self) -> super::pipeline::ReconstructedPqInput {
         self.input
     }
+    pub(super) fn with_sdr(mut self) -> Self {
+        self.input = super::pipeline::ReconstructedPqInput::Yuv420p10Bt709Gamma24;
+        self
+    }
     pub fn grade(self) -> OutputGrade {
-        OutputGrade::Hdr10
+        match self.input {
+            super::pipeline::ReconstructedPqInput::Yuv420p10Bt709Gamma24 => OutputGrade::Sdr,
+            _ => OutputGrade::Hdr10,
+        }
     }
     pub fn codec(self) -> VideoCodec {
         VideoCodec::Hevc
@@ -175,6 +182,18 @@ impl CompletedReconstructedOutputContract {
         }
     }
     pub fn encode_args(
+        self,
+        bitrate_kbps: u32,
+        force_idr: bool,
+        software_threads: Option<u32>,
+    ) -> Vec<String> {
+        let mut args = self.pq_encode_args(bitrate_kbps, force_idr, software_threads);
+        if self.grade() == OutputGrade::Sdr {
+            normalize_reconstructed_sdr_args(&mut args);
+        }
+        args
+    }
+    fn pq_encode_args(
         self,
         bitrate_kbps: u32,
         force_idr: bool,
@@ -224,6 +243,37 @@ impl CompletedReconstructedOutputContract {
     }
 }
 
+/// Normalize both inherited recipe flags and the actual completed encoder.
+pub(super) fn normalize_reconstructed_sdr_args(args: &mut [String]) {
+    for index in 0..args.len().saturating_sub(1) {
+        match args[index].as_str() {
+            "-color_primaries" | "-color_trc" | "-colorspace" => args[index + 1] = "bt709".into(),
+            "-x265-params" => {
+                let mut params: Vec<_> = args[index + 1]
+                    .split(':')
+                    .filter(|p| {
+                        !p.starts_with("hdr10=")
+                            && !p.starts_with("master-display=")
+                            && !p.starts_with("max-cll=")
+                            && !p.starts_with("transfer=")
+                            && !p.starts_with("colorprim=")
+                            && !p.starts_with("colormatrix=")
+                    })
+                    .map(str::to_owned)
+                    .collect();
+                params.extend([
+                    "hdr10=0".into(),
+                    "transfer=bt709".into(),
+                    "colorprim=bt709".into(),
+                    "colormatrix=bt709".into(),
+                ]);
+                args[index + 1] = params.join(":");
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod output_codec_contract_tests {
     use super::*;
@@ -237,6 +287,28 @@ mod output_codec_contract_tests {
         Encoder::VideoToolbox,
     ];
 
+    #[test]
+    fn reconstructed_sdr_encoders_declare_main10_bt709_without_hdr_hints() {
+        for encoder in [Encoder::Software, Encoder::Nvenc, Encoder::Vaapi] {
+            let output = CompletedReconstructedOutputContract::resolve(encoder)
+                .expect("supported encoder")
+                .with_sdr();
+            assert_eq!(output.grade(), OutputGrade::Sdr);
+            assert_eq!(output.bit_depth(), 10);
+            assert_eq!(output.input_contract().transfer(), "bt709");
+            let args = output.encode_args(4000, true, Some(1));
+            assert!(!args.iter().any(|arg| arg.contains("smpte2084")
+                || arg.contains("hdr10=1")
+                || arg.contains("bt2020")));
+            for field in ["-color_primaries", "-color_trc", "-colorspace"] {
+                let at = args
+                    .iter()
+                    .position(|arg| arg == field)
+                    .expect("explicit color field");
+                assert_eq!(args[at + 1], "bt709");
+            }
+        }
+    }
     #[test]
     fn reconstructed_nvenc_contract_preserves_ordinary_hdr_refusal_and_bounds() {
         assert!(OutputCodecContract::resolve(
@@ -253,7 +325,7 @@ mod output_codec_contract_tests {
         .is_none());
         let contract = CompletedReconstructedOutputContract::resolve(Encoder::Nvenc)
             .expect("reconstructed NVENC");
-        assert_eq!(contract.input_contract().pixel_format(), "rgb48le");
+        assert_eq!(contract.input_contract().pixel_format(), "yuv420p10le");
         let args = contract.encode_args(4000, true, Some(1));
         for pair in [
             ["-c:v", "hevc_nvenc"],
@@ -458,7 +530,8 @@ mod output_codec_contract_tests {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputGrade {
-    /// BT.709 8-bit, the only grade that existed before M5.
+    /// BT.709 SDR. Ordinary encoders use 8-bit output; the separately proved
+    /// completed reconstruction contract can deliver SDR as HEVC Main10.
     #[default]
     Sdr,
     /// HEVC Main10, PQ transfer, BT.2020 primaries, limited range. The rung
@@ -1063,6 +1136,32 @@ impl Encoder {
 }
 
 /// The DRI render node for VAAPI, overridable via `PLURX_VAAPI_DEVICE`.
+/// The lowest HEVC level (ITU-T H.265 Table A.8) whose picture size and
+/// luma sample rate admit `width`x`height` at `fps_num/fps_den`. Hardware
+/// encoders write the level they are given, so it must describe the raster.
+pub fn hevc_level_for(width: u32, height: u32, fps_num: u32, fps_den: u32) -> Option<&'static str> {
+    const LEVELS: [(&str, u64, u64); 7] = [
+        ("4", 2_228_224, 66_846_720),
+        ("4.1", 2_228_224, 133_693_440),
+        ("5", 8_912_896, 267_386_880),
+        ("5.1", 8_912_896, 534_773_760),
+        ("5.2", 8_912_896, 1_069_547_520),
+        ("6", 35_651_584, 1_069_547_520),
+        ("6.1", 35_651_584, 2_139_095_040),
+    ];
+    if fps_den == 0 || width == 0 || height == 0 {
+        return None;
+    }
+    let picture = u64::from(width) * u64::from(height);
+    // Ceiling of the per-second sample rate so a fractional cadence never
+    // rounds below its true rate.
+    let rate = (picture * u64::from(fps_num)).div_ceil(u64::from(fps_den));
+    LEVELS
+        .iter()
+        .find(|(_, size, samples)| picture <= *size && rate <= *samples)
+        .map(|(level, _, _)| *level)
+}
+
 pub fn vaapi_device() -> String {
     std::env::var("PLURX_VAAPI_DEVICE")
         .ok()
@@ -1222,9 +1321,175 @@ impl VaapiHdrPolicy {
     }
 }
 
+/// Physical inventory, independent of whether an encoder initialized successfully.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GraphicsDevice {
+    /// Stable PCI address (or a platform identity), never a synthesized GPU index.
+    pub id: String,
+    pub vendor: String,
+    pub vendor_id: String,
+    pub device_id: String,
+    pub model: Option<String>,
+    pub render_node: Option<String>,
+}
+
+/// What production arguments bind. Inventory alone never proves a default device.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EncoderDeviceBinding {
+    pub backend: String,
+    pub device_ids: Vec<String>,
+    pub binding: String,
+    pub detail: String,
+}
+
+fn pci_model(database: &str, vendor: &str, device: &str) -> Option<String> {
+    let mut in_vendor = false;
+    for line in database.lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if !line.starts_with(char::is_whitespace) {
+            in_vendor = line.split_whitespace().next() == Some(vendor);
+        } else if in_vendor && line.starts_with('\t') && !line.starts_with("\t\t") {
+            let line = line.trim();
+            if line.split_whitespace().next() == Some(device) {
+                return Some(line.get(device.len()..)?.trim().to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn linux_graphics_devices(pci_root: &std::path::Path, database: &str) -> Vec<GraphicsDevice> {
+    let Ok(entries) = std::fs::read_dir(pci_root) else {
+        return Vec::new();
+    };
+    let mut devices = Vec::new();
+    for entry in entries.take(4096).flatten() {
+        let path = entry.path();
+        if !std::fs::read_to_string(path.join("class")).is_ok_and(|class| class.starts_with("0x03"))
+        {
+            continue;
+        }
+        let read = |name: &str| {
+            std::fs::read_to_string(path.join(name))
+                .ok()
+                .map(|value| value.trim().to_ascii_lowercase())
+        };
+        let (Some(vendor_id), Some(device_id)) = (read("vendor"), read("device")) else {
+            continue;
+        };
+        let vendor = match vendor_id.as_str() {
+            "0x8086" => "Intel",
+            "0x10de" => "NVIDIA",
+            "0x1002" => "AMD",
+            "0x106b" => "Apple",
+            _ => "Unknown vendor",
+        }
+        .to_owned();
+        let model = std::fs::read_to_string(path.join("label"))
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                pci_model(
+                    database,
+                    vendor_id.trim_start_matches("0x"),
+                    device_id.trim_start_matches("0x"),
+                )
+            });
+        let render_node = std::fs::read_dir(path.join("drm"))
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        name.starts_with("renderD")
+                            .then(|| format!("/dev/dri/{name}"))
+                    })
+                    .min()
+            });
+        devices.push(GraphicsDevice {
+            id: entry.file_name().to_string_lossy().into_owned(),
+            vendor,
+            vendor_id,
+            device_id,
+            model,
+            render_node,
+        });
+    }
+    devices.sort_by(|left, right| left.id.cmp(&right.id));
+    devices
+}
+
+fn graphics_devices() -> Vec<GraphicsDevice> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let database = ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"]
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    linux_graphics_devices(std::path::Path::new("/sys/bus/pci/devices"), &database)
+}
+
+fn encoder_device_bindings(
+    devices: &[GraphicsDevice],
+    caps: &EncoderCaps,
+    vaapi: &str,
+) -> Vec<EncoderDeviceBinding> {
+    [
+        Encoder::Nvenc,
+        Encoder::Qsv,
+        Encoder::Vaapi,
+        Encoder::VideoToolbox,
+    ]
+    .into_iter()
+    .filter(|encoder| caps.available(*encoder))
+    .map(|encoder| {
+        let device_ids: Vec<String> = if encoder == Encoder::Vaapi {
+            devices
+                .iter()
+                .filter(|device| device.render_node.as_deref() == Some(vaapi))
+                .map(|device| device.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let bound = device_ids.len() == 1;
+        EncoderDeviceBinding {
+            backend: encoder.family_name().to_owned(),
+            device_ids,
+            binding: if bound { "configured" } else { "unresolved" }.to_owned(),
+            detail: if encoder == Encoder::Vaapi {
+                format!(
+                    "VA-API render node: {vaapi}{}",
+                    if bound {
+                        ""
+                    } else {
+                        "; physical device identity unavailable"
+                    }
+                )
+            } else if encoder == Encoder::VideoToolbox {
+                "VideoToolbox selects Apple video hardware; no physical device index is bound"
+                    .to_owned()
+            } else {
+                format!(
+                    "{} uses the driver's default device; physical device binding is unverified",
+                    encoder.label()
+                )
+            },
+        }
+    })
+    .collect()
+}
+
 /// Which encoders this ffmpeg build exposes.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EncoderCaps {
+    pub graphics_devices: Vec<GraphicsDevice>,
+    pub device_bindings: Vec<EncoderDeviceBinding>,
     pub nvenc: bool,
     pub qsv: bool,
     pub vaapi: bool,
@@ -1292,6 +1557,8 @@ impl EncoderCaps {
 /// *compiled into* this build (not whether the hardware actually works).
 pub fn parse_encoder_list(output: &str) -> EncoderCaps {
     EncoderCaps {
+        graphics_devices: Vec::new(),
+        device_bindings: Vec::new(),
         nvenc: output.contains("h264_nvenc"),
         qsv: output.contains("h264_qsv"),
         vaapi: output.contains("h264_vaapi"),
@@ -1841,16 +2108,23 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         crate::process::ChildWork::background("ffmpeg encoder list"),
     )
     .await;
+    let devices = graphics_devices();
     let compiled = match output {
         Ok(out) => parse_encoder_list(&String::from_utf8_lossy(&out.stdout)),
         Err(e) => {
             tracing::warn!(error = %e, "could not run ffmpeg -encoders; software only");
-            return EncoderCaps::default();
+            return EncoderCaps {
+                graphics_devices: devices,
+                ..EncoderCaps::default()
+            };
         }
     };
 
     // Validate each compiled-in hardware encoder against real hardware.
-    let mut caps = EncoderCaps::default();
+    let mut caps = EncoderCaps {
+        graphics_devices: devices,
+        ..EncoderCaps::default()
+    };
     for (compiled_in, encoder) in [
         (compiled.nvenc, Encoder::Nvenc),
         (compiled.qsv, Encoder::Qsv),
@@ -1888,6 +2162,7 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         validate_quality_rate_control(ffmpeg_bin, Encoder::Software, software_quality, false).await;
     caps.quality_rc
         .set_supported(Encoder::Software, software_quality_rc);
+    caps.device_bindings = encoder_device_bindings(&caps.graphics_devices, &caps, &vaapi_device());
     caps.sdr_avc = super::avc_qualification::qualify(ffmpeg_bin, &caps).await;
     tracing::info!(
         nvenc = caps.nvenc,
@@ -1906,6 +2181,66 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inventory_keeps_actual_pci_identity_and_never_binds_implicit_defaults() {
+        let temporary = tempfile::tempdir().expect("PCI fixture");
+        for (id, vendor, device, render) in [
+            ("0000:01:00.0", "0x10de", "0x1234", "renderD129"),
+            ("0000:00:02.0", "0x8086", "0x5678", "renderD128"),
+        ] {
+            let path = temporary.path().join(id);
+            std::fs::create_dir_all(path.join("drm").join(render)).expect("render node");
+            for (name, value) in [
+                ("class", "0x030000"),
+                ("vendor", vendor),
+                ("device", device),
+            ] {
+                std::fs::write(path.join(name), value).expect("PCI fact");
+            }
+        }
+        let devices = linux_graphics_devices(temporary.path(), "10de  NVIDIA\n\t1234  Actual model from PCI database\n8086  Intel\n\t5678  Integrated fixture\n");
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].id, "0000:00:02.0");
+        assert_eq!(devices[0].vendor, "Intel");
+        assert_eq!(
+            devices[1].model.as_deref(),
+            Some("Actual model from PCI database")
+        );
+        let caps = EncoderCaps {
+            nvenc: true,
+            qsv: true,
+            vaapi: true,
+            ..EncoderCaps::default()
+        };
+        let bindings = encoder_device_bindings(&devices, &caps, "/dev/dri/renderD128");
+        let vaapi = bindings
+            .iter()
+            .find(|binding| binding.backend == "vaapi")
+            .expect("VAAPI");
+        assert_eq!(vaapi.device_ids, vec!["0000:00:02.0"]);
+        assert_eq!(vaapi.binding, "configured");
+        for backend in ["nvenc", "qsv"] {
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.backend == backend)
+                .expect("binding");
+            assert_eq!(binding.binding, "unresolved");
+            assert!(binding.device_ids.is_empty());
+        }
+        let unknown = encoder_device_bindings(&devices, &caps, "/dev/dri/renderD999");
+        assert!(unknown.iter().all(|binding| binding.device_ids.is_empty()));
+    }
+
+    #[test]
+    fn pci_model_lookup_respects_vendor_and_unknown_devices_remain_unnamed() {
+        let database = "10de  NVIDIA\n\t1234  NVIDIA fixture\n8086  Intel\n\t1234  Intel fixture\n";
+        assert_eq!(
+            pci_model(database, "8086", "1234").as_deref(),
+            Some("Intel fixture")
+        );
+        assert!(pci_model(database, "8086", "9999").is_none());
+    }
+
     use super::*;
 
     #[test]
@@ -2803,6 +3138,19 @@ mod tests {
             frames >= 10,
             "{frames} frames is not enough for a lookahead"
         );
+    }
+
+    #[test]
+    fn hevc_level_follows_raster_and_cadence() {
+        use super::hevc_level_for;
+        assert_eq!(hevc_level_for(1280, 720, 24000, 1001), Some("4"));
+        assert_eq!(hevc_level_for(1920, 1080, 30, 1), Some("4"));
+        assert_eq!(hevc_level_for(1920, 1080, 60, 1), Some("4.1"));
+        assert_eq!(hevc_level_for(3840, 2160, 24000, 1001), Some("5"));
+        assert_eq!(hevc_level_for(3840, 2160, 30, 1), Some("5"));
+        assert_eq!(hevc_level_for(3840, 2160, 60, 1), Some("5.1"));
+        assert_eq!(hevc_level_for(4096, 2160, 24, 1), Some("5"));
+        assert_eq!(hevc_level_for(3840, 2160, 0, 0), None);
     }
 
     #[test]

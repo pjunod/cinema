@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Build a pinned static Vulkan closure inside an existing prepared macOS root.
+
+The companion JSON pins all sources and the official MoltenVK static archive.
+No host runtime libraries, global installs, or service changes are performed.
+Build tools must already be on PATH. Jinja2 is a build-time Python requirement.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import tarfile
+import urllib.request
+
+FRAMEWORKS = ["Metal", "Foundation", "QuartzCore", "IOSurface", "IOKit", "CoreGraphics", "AppKit"]
+FFMPEG_FLAGS = ["--enable-vulkan", "--enable-vulkan-static", "--enable-libshaderc", "--enable-libplacebo"]
+
+
+def digest(path):
+    checksum = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            checksum.update(block)
+    return checksum.hexdigest()
+
+
+def checked_jobs(value):
+    if not 1 <= value <= 8:
+        raise ValueError("jobs must be between 1 and 8")
+    return value
+
+
+def acquire(fact, destination, cache=None):
+    if destination.is_symlink():
+        raise ValueError("archive destination must be regular")
+    if not destination.exists():
+        cached = cache / fact["archive"] if cache else None
+        if cached is not None and cached.is_file() and not cached.is_symlink():
+            shutil.copyfile(cached, destination)
+        else:
+            with urllib.request.urlopen(fact["url"], timeout=120) as response:
+                with destination.open("xb") as output:
+                    shutil.copyfileobj(response, output)
+    if digest(destination) != fact["sha256"]:
+        raise ValueError("source checksum mismatch: " + fact["role"])
+
+
+def extract(archive, destination, strip_first=True):
+    stamp = destination / ".archive-sha256"
+    if stamp.is_file() and stamp.read_text().strip() == digest(archive):
+        return
+    if destination.exists():
+        raise ValueError("refusing unstamped extraction directory")
+    destination.mkdir(parents=True)
+    with tarfile.open(archive) as contents:
+        for member in contents:
+            original = Path(member.name)
+            if original.is_absolute() or ".." in original.parts:
+                raise ValueError("unsafe archive member")
+            relative = Path(*original.parts[1:]) if strip_first else original
+            if member.isfile():
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with contents.extractfile(member) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                target.chmod(member.mode & 0o777)
+            elif not member.isdir() and not member.issym():
+                raise ValueError("unsupported archive member")
+            # Optional symbolic convenience links are unnecessary for the
+            # selected static macOS archive; preserve only regular bytes.
+    stamp.write_text(digest(archive) + "\n")
+
+
+def run(argv, log, env=None, cwd=None):
+    with log.open("a") as stream:
+        stream.write(json.dumps([str(value) for value in argv]) + "\n")
+        stream.flush()
+        subprocess.run([str(value) for value in argv], check=True, stdout=stream,
+                       stderr=subprocess.STDOUT, env=env, cwd=cwd)
+
+
+def pkgconfig(prefix, name, version, libraries, description):
+    directory = prefix / "lib/pkgconfig"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / (name + ".pc")).write_text(
+        f"prefix={prefix}\nlibdir=${{prefix}}/lib\nincludedir=${{prefix}}/include\n"
+        f"Name: {name}\nDescription: {description}\nVersion: {version}\n"
+        f"Libs: -L${{libdir}} {libraries}\nCflags: -I${{includedir}}\n")
+
+
+def build(prepared, jobs, cache=None):
+    checked_jobs(jobs)
+    if platform.system() != "Darwin" or platform.machine() not in ["arm64", "x86_64"]:
+        raise ValueError("native macOS build required")
+    if not prepared.is_absolute() or not (prepared / "prepared-source.json").is_file():
+        raise ValueError("explicit prepared source root required")
+    for name in ["cmake", "ninja", "meson", "pkg-config", "patch"]:
+        if not shutil.which(name):
+            raise ValueError("missing build tool: " + name)
+    work = prepared / "native-vulkan"
+    archives, source, logs = [work / name for name in ["source-archives", "sources", "logs"]]
+    for directory in [archives, source, logs]:
+        directory.mkdir(parents=True, exist_ok=True)
+    lock_path = Path(__file__).with_name("macos-vulkan-sources.json")
+    facts = json.loads(lock_path.read_text())["sources"]
+    identities = {fact["role"]: fact for fact in facts}
+    for fact in facts:
+        acquire(fact, archives / fact["archive"], cache)
+        if fact["role"] != "moltenvk-binary":
+            extract(archives / fact["archive"], source / fact["role"])
+    extract(archives / identities["moltenvk-binary"]["archive"], source / "moltenvk-binary", False)
+    shaderc = source / "shaderc"
+    for role, destination in [("glslang", "glslang"), ("spirv-tools", "spirv-tools"), ("spirv-headers", "spirv-headers")]:
+        shutil.copytree(source / role, shaderc / "third_party" / destination, dirs_exist_ok=True)
+    prefix = prepared / "prefix"
+    (prefix / "lib").mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source / "vulkan-headers/include", prefix / "include", dirs_exist_ok=True)
+    shutil.copytree(source / "vulkan-headers/registry", prefix / "share/vulkan/registry", dirs_exist_ok=True)
+    shutil.copyfile(source / "moltenvk-binary/MoltenVK/MoltenVK/static/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a", prefix / "lib/libvulkan.a")
+    frameworks = " ".join("-framework " + name for name in FRAMEWORKS)
+    pkgconfig(prefix, "vulkan", "1.4.355", "-lvulkan " + frameworks + " -lc++", "Pinned static MoltenVK 1.4.0")
+    shaderc_build = work / "shaderc-build"
+    run(["cmake", "-S", shaderc, "-B", shaderc_build, "-GNinja", "-DCMAKE_BUILD_TYPE=Release",
+         "-DCMAKE_INSTALL_PREFIX=" + str(prefix), "-DSHADERC_SKIP_TESTS=ON", "-DSHADERC_SKIP_EXAMPLES=ON",
+         "-DSHADERC_SKIP_COPYRIGHT_CHECK=ON", "-DENABLE_EXCEPTIONS=ON", "-DENABLE_GLSLANG_BINARIES=OFF",
+         "-DSPIRV_SKIP_EXECUTABLES=ON", "-DSPIRV_TOOLS_BUILD_STATIC=ON", "-DBUILD_SHARED_LIBS=OFF"], logs / "shaderc.log")
+    run(["ninja", "-C", shaderc_build, "-j" + str(jobs), "shaderc_combined"], logs / "shaderc.log")
+    shutil.copytree(shaderc / "libshaderc/include", prefix / "include", dirs_exist_ok=True)
+    shutil.copyfile(shaderc_build / "libshaderc/libshaderc_combined.a", prefix / "lib/libshaderc_combined.a")
+    match = re.search(r"^v([0-9.]+) ", (shaderc / "CHANGES").read_text(), re.MULTILINE)
+    if not match:
+        raise ValueError("shaderc version declaration missing")
+    pkgconfig(prefix, "shaderc", match.group(1) + ".1", "-lshaderc_combined -lc++", "Pinned static shaderc")
+    placebo = source / "libplacebo"
+    marker = placebo / ".jellyfin-patch-sha256"
+    patch = prepared / "source/builder/patches/libplacebo/0001-libav-utils-fix-non-multiplane-fmt-bit_shift-in-pl_m.patch"
+    if not marker.exists():
+        run(["patch", "-p1", "--batch", "--forward", "-i", patch], logs / "libplacebo.log", cwd=placebo)
+        marker.write_text(digest(patch) + "\n")
+    elif marker.read_text().strip() != digest(patch):
+        raise ValueError("libplacebo patch changed")
+    env = {**os.environ, "PKG_CONFIG_PATH": str(prefix / "lib/pkgconfig"), "PKG_CONFIG_LIBDIR": str(prefix / "lib/pkgconfig")}
+    placebo_build = work / "libplacebo-build"
+    if not (placebo_build / "build.ninja").exists():
+        run(["meson", "setup", placebo_build, placebo, "--prefix=" + str(prefix), "--buildtype=release",
+             "--default-library=static", "--wrap-mode=nodownload", "-Dvulkan=enabled", "-Dvk-proc-addr=enabled",
+             "-Dvulkan-registry=" + str(prefix / "share/vulkan/registry/vk.xml"), "-Dshaderc=enabled",
+             "-Dglslang=disabled", "-Dopengl=disabled", "-Dlcms=disabled", "-Ddemos=false", "-Dtests=false",
+             "-Dbench=false", "-Dfuzz=false", "-Dunwind=disabled", "-Dxxhash=disabled"], logs / "libplacebo.log", env)
+    run(["ninja", "-C", placebo_build, "-j" + str(jobs), "install"], logs / "libplacebo.log", env)
+    manifest = {"schema_version": 1, "sources": facts, "jobs": jobs,
+                "ffmpeg_configure": FFMPEG_FLAGS, "jellyfin_libplacebo_patch_sha256": digest(patch),
+                "static_libraries": {name: digest(prefix / "lib" / name) for name in
+                                     ["libvulkan.a", "libshaderc_combined.a", "libplacebo.a"]},
+                "frameworks": FRAMEWORKS, "runtime_libraries": "system frameworks and libc++ only",
+                "qualification": "build and source identity; runtime graph qualification remains separate"}
+    shutil.copyfile(lock_path, work / "source-lock.json")
+    (work / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prepared-build", type=Path, required=True)
+    parser.add_argument("--source-cache", type=Path)
+    parser.add_argument("--jobs", type=int, default=4)
+    args = parser.parse_args()
+    manifest = build(args.prepared_build, args.jobs, args.source_cache)
+    print(json.dumps({"manifest": str(args.prepared_build / "native-vulkan/manifest.json"),
+                      "static_libraries": manifest["static_libraries"]}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

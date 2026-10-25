@@ -2154,6 +2154,7 @@ async fn staged_successor_action(
             start.height,
             start.delivered_dynamic_range,
         ),
+        enhancement: start.enhancement,
     };
     if !crate::playback_control::prepared_payload_is_valid(
         None,

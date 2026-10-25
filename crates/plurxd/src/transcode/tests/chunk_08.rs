@@ -16,6 +16,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -46,6 +47,7 @@ quality_catalog: None,
         // these guards have to name. Asserting against anything else lets a
         // field silently leave the real key while the test stays green.
         let shifted = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -70,6 +72,7 @@ quality_catalog: None,
             "one request id reused by two users must not collide"
         );
         let other_player = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -127,6 +130,7 @@ quality_catalog: None,
         // The same key asking for something else is a mistake worth naming,
         // not a quiet second stream.
         let different = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -145,6 +149,7 @@ quality_catalog: None,
 
         // A fresh key from the same player supersedes, as any restart does.
         let next = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -190,6 +195,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -273,6 +279,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -302,6 +309,7 @@ quality_catalog: None,
         assert!(mgr.create_session(&request, "paul").await.is_err());
 
         let retry = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -341,6 +349,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let original = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -389,6 +398,7 @@ quality_catalog: None,
         // body is still Auto, so its initial pre-claim numeric answer is not
         // allowed to create a conflict or become a second ladder step.
         let replay = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -509,6 +519,7 @@ quality_catalog: None,
         .await;
 
         let lower = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -853,6 +864,7 @@ quality_catalog: None,
         drop(claim);
 
         let foreign = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -1272,6 +1284,7 @@ quality_catalog: None,
         .await;
 
         let request = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -1296,6 +1309,7 @@ quality_catalog: None,
         drop(stall_claim);
 
         let track_change = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -1525,6 +1539,7 @@ quality_catalog: None,
         drop(claim);
 
         let device_b = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -1551,6 +1566,7 @@ quality_catalog: None,
         drop(device_b_claim);
 
         let foreign_user = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
@@ -2792,6 +2808,7 @@ scope = "test"
     #[test]
     fn continuous_media_roles_have_strict_wire_and_distinct_request_identity() {
         let mut request = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             quality_catalog: None,
             continuous_media: None,

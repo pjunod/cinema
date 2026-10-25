@@ -1367,6 +1367,10 @@ impl VodServe {
             .root_admission
             .as_ref()
             .and_then(|root| root.reuse_scope);
+        let attachment_owner = fences
+            .release_fence
+            .as_ref()
+            .and_then(|fence| fence.attachment_owner);
         let mut reused_parent = None;
         let root_admission = prepared
             .root_admission
@@ -1467,7 +1471,8 @@ impl VodServe {
             children: Vec::new(),
             root_admission,
             processed_reuse_scope,
-            processed_probes: Vec::new(),
+            processed_reuse_seed: processed_reuse_scope
+                .and_then(|_| ProcessedReuseSeed::from_request(req)),
             preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
                 req.start_seconds,
                 duration_ms,
@@ -1598,29 +1603,11 @@ impl VodServe {
                     .as_ref()
                     .is_some_and(|permit| reuse.matches(previous, permit))
             });
-            #[cfg(any(target_os = "linux", test))]
-            let production_current = replacement.root_admission.as_ref().is_some_and(|permit| {
-                rendition
-                    .recipe
-                    .encoding
-                    .as_ref()
-                    .and_then(|encoding| reuse.production_evidence(encoding, permit))
-                    .is_some_and(|proof| {
-                        proof.milli_realtime >= 1150
-                            && proof.active_ms >= 2000
-                            && proof.completed_segments >= 2
-                    })
-            });
-            #[cfg(not(any(target_os = "linux", test)))]
-            let production_current = false;
-            if !valid || !production_current {
+            if !valid {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_preparation_changed",
                     "the exact processing predecessor ended or changed",
                 ));
-            }
-            if let Some(lease) = reuse.probe.as_ref() {
-                lease.probe.revoke();
             }
         }
         if let Some(previous_readers) = previous_readers.as_mut() {
@@ -1707,6 +1694,9 @@ impl VodServe {
             .get_mut(&session_id)
             .map(|session| std::mem::take(&mut session.children))
             .unwrap_or_default();
+        if let Some(sink) = attachment_owner {
+            *sink.lock().expect("first preparation owner") = Some(replacement.response_owner());
+        }
         sessions.insert(session_id.clone(), replacement);
         {
             let mut observation = self
@@ -1880,6 +1870,12 @@ impl ReservedSourceVodRendition {
                     .as_ref()
                     .filter(|encoding| encoding.preserves_processed_dv())
                     .map(|_| 8),
+                processed_fel: self
+                    .rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
                 session_id: session_id.into(),
                 playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -1907,7 +1903,7 @@ impl ReservedSourceVodRendition {
                     .encoding
                     .as_ref()
                     .map_or(plurx_core::transcode::OutputGrade::Sdr, |encoding| {
-                        encoding.options.pipeline.output_grade()
+                        encoding.delivered_output_grade()
                     }),
                 vod: true,
                 retained_output: None,
@@ -2318,7 +2314,7 @@ impl VodServe {
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
-            processed_probes: Vec::new(),
+            processed_reuse_seed: None,
             preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
                 req.start_seconds,
                 duration_ms,
@@ -2993,6 +2989,7 @@ mod principal_demand_tests {
             finite_bitrate_limit_bps: None,
             audio_claim: None,
             audio_delivery: None,
+            dv_processing_destination: None,
             sdr_master_codecs: None,
         };
         let initial_cap = serve.shared.pool.global_cap();

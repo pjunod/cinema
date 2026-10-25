@@ -1,6 +1,174 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1276 review repairs: the trims label says all, some or none of the served frames.
+[[fixes]]
+id = "android.dv-creative-trims-partial-label"
+commits = ["d3db2f0f95c58114f4b215a5f58083f708954d48"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = 'else if (creativeTrimsPartial) "creative trims on some shots"'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun sdrReceiptRequiresItsGradeAndExportOperations()"
+
+[[fixes]]
+id = "apple.dv-creative-trims-partial-label"
+commits = []
+supplements = "android.dv-creative-trims-partial-label"
+source = "clients/apple/Sources/Models.swift"
+source_anchor = 'creativeTrimsPartial ? "creative trims on some shots"'
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "func testSdrReceiptRequiresItsGradeAndProducesSdrMark() throws"
+
+# PR #1271 review repairs: source/test anchors only; execution receipts remain separate.
+[[fixes]]
+id = "android.processed-sdr-candidate-identity"
+commits = ["0e1e4224dfa0fce7cdca9a192d145dfd79d226c1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = 'grade !in listOf("sdr", "hdr10") || processed_hdr10 &&'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "processedSdrIdentityIsAdmittedOnlyForEncodedHevcCandidates"
+
+[[fixes]]
+id = "apple.processed-sdr-candidate-identity"
+commits = []
+supplements = "android.processed-sdr-candidate-identity"
+source = "clients/apple/Sources/Models.swift"
+source_anchor = 'processedHdr10 != true || (route == "encode" && plannedCodec == "hevc")'
+test = "clients/apple/Tests/AutoPreparedCandidateBindingTests.swift"
+test_anchor = "testProcessedSdrIdentityResolvesAutoWhileInvalidRouteCodecAndGradeDoNot"
+
+# PR #1274: restore the portrait iPhone guide despite the legacy schedule preference.
+[[fixes]]
+id = "apple.iphone-live-guide-grid"
+commits = ["0eec6b8e1e9eb6380a122c101aa7f7602dc52ef6"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".frame(width: geometry.size.width, height: headerHeight, alignment: .topLeading)"
+test = "clients/apple/UITests/LibraryRowsNavigationTests.swift"
+test_anchor = "testPortraitLiveGuideShowsMultipleChannelsDespiteLegacySchedulePreference"
+
+# PR #1265: physical Select commits the native tvOS timeline preview.
+[[fixes]]
+id = "apple.tv-timeline-native-select"
+commits = ["3cf3d19948eccf2efb459adbbdc9f765d6f92db2"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "Button { dispatch(.select) } label: { content }"
+test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
+test_anchor = "testLocalMovieTimelineSelectCommitsForwardAndBackwardPreview"
+
+# PR #1235 passed these existing regressions; its landed macOS commit needs current anchors.
+[[fixes]]
+id = "desktop.macos-error-details-and-menu-completion"
+commits = ["a544a3fa40da66297b6f59dc6aae0c0b2da2b66a"]
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/TrayController.swift"
+source_anchor = "case .showErrorDetails:"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testErrorDetailsShowFullFailureWithoutControllerCalls"
+
+[[fixes]]
+id = "desktop.macos-compact-menu-rows"
+commits = []
+supplements = "desktop.macos-error-details-and-menu-completion"
+source = "clients/server-tray/macos/Sources/PlurxTrayUI/MenuRenderer.swift"
+source_anchor = "public static let maximumTitleWidth: CGFloat = 320"
+test = "clients/server-tray/macos/Tests/PlurxTrayUITests/AppKitTests.swift"
+test_anchor = "testLongMenuRowsStayCompactAndKeepFullDetails"
+
+[[fixes]]
+id = "desktop.macos-quiet-upgrade-results"
+commits = []
+supplements = "desktop.macos-error-details-and-menu-completion"
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/TrayController.swift"
+source_anchor = "if update.state == .failed || update.state == .recoveryRequired { environment?.showUpgrade(update) }"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testUpgradeResultsOnlyRequestAttentionForFailures"
+
+# PR #1220 remediation keeps the upgrade confirmation consistent with recovery.
+[[fixes]]
+id = "desktop.native-upgrade-recovery-clarity"
+commits = ["0d128961b46659388dc488439775741125aabe29"]
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/TrayController.swift"
+source_anchor = "If installation or readiness checks fail, plurx reports Recovery required"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testUpgradePreparesConfirmsNamedVersionThenApplies"
+
+# Native desktop companion: failed observations retain Unknown, never a second-server Start.
+[[fixes]]
+id = "desktop.native-tray-observed-state"
+commits = ["49eb0d3c5820123e48df6a2b56a78e4d81ca9029"]
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/MenuModel.swift"
+source_anchor = "guard statusFailure == nil, let status else { return .unknown }"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testFailedStatusIsUnknownNeverStopped"
+
+# Resume repair: current source/test anchors; execution evidence is in PR #1182.
+[[fixes]]
+id = "apple.resume-preserves-native-seek-completion"
+commits = ["2899fd60c5"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if await prepare(player, ms) { return true }"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testPreparedResumeRetriesAnInterruptedNativeSeekAtTheSavedPosition"
+
+[[fixes]]
+id = "apple.resume-failure-retains-saved-position"
+commits = []
+supplements = "apple.resume-preserves-native-seek-completion"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func positionForPlaybackStop() -> Int"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testFailedVODResumeStopsAndRetainsTheSavedPosition"
+
+# Historical Meridian source/test mappings; execution receipts are separate.
+[[fixes]]
+id = "android.meridian-retained-primary-graph"
+commits = []
+supplements = "android.meridian-retain-query-and-menu-owners"
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = 'navigation(startDestination = "home", route = "viewer") {'
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/MeridianProductionHostTest.kt"
+test_anchor = "actualHostRestoresSearchBranchReplacesSourceAndRetiresProfile"
+
+[[fixes]]
+id = "apple.standard-native-adaptive-ipad-restoration"
+commits = ["2b9b537017cee617de6e86518767bff19db48351"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "tabs.tabViewStyle(.sidebarAdaptable)"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
+
+[[fixes]]
+id = "apple.standard-native-tv-push-back-restoration"
+commits = ["339f4b0563389de774b287437a49ea8fe8522665"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "hideBar: layout == .meridian || hidesStandardBar"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardTVNativeTabsDisappearForPushedRoutes"
+
+[[fixes]]
+id = "apple.standard-meridian-framework-owned-tabview"
+commits = ["5e6bb62a58cd7026bb199fd58739cf637c4eff2b"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "TabView(selection: Binding(get: { selection }, set: selectionChanged)) {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardNativeTabFullscreenRetainsContentAfterAnotherTabsPushedChoice"
+
+[[fixes]]
+id = "apple.native-tab-chrome-review-fixes"
+commits = ["0304492bc58167d1f1fd0c85e1c15d004d923e73"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "if appliedLayout == .standard || !capturedSidebar {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
+
+[[fixes]]
+id = "apple.standard-tv-theater-geometry-restoration"
+commits = []
+supplements = "apple.standard-native-tv-push-back-restoration"
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "minHeight: standardTheater ? 540 : 360"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testTheaterHeroKeepsLongCopyWithinTelevisionViewport"
+
 [[fixes]]
 id = "android.shared-library-fixture-platform-ownership"
 commits = ["937bfc7000269015cde95c18130694a5c862ffe7"]
@@ -150,10 +318,12 @@ test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "a05 genuine completed body carries the response receipt without cache promotion"
 
 [[fixes]]
+# Qualified measured sidecars remain bound by Models.matches; declared-cost
+# admission intentionally supersedes measured-only Auto margin and has separate rows.
 id = "apple.a05-qualified-full-output-margin"
 commits = ["05f8b90c11eb2aa1e894a54be1d85b66a6ca62cc"]
-source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "measuredCandidatePeak(desired, outputs: decision?.measuredCandidateOutputs)"
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "&& qualification == \"complete_full_mux_rfc8216_v1\""
 test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "a05 qualified full-output sidecar is required for positive candidate margin"
 
@@ -227,7 +397,7 @@ test_anchor = "test_removed_height_controller_does_not_reappear"
 id = "apple.physical-acceptance-proxy-origin"
 commits = ["31a5a4697"]
 source = "clients/apple/Sources/AppModel.swift"
-source_anchor = "let acceptance = PlaybackAcceptanceLaunch.current()"
+source_anchor = "let acceptance = testAcceptanceLaunch ?? PlaybackAcceptanceLaunch.current()"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testPhysicalDeviceAcceptanceLaunchReadsOnlyExplicitDebugDefaults"
 
@@ -3560,7 +3730,7 @@ commits = ["3d1fd53f"]
 source = "clients/apple/Sources/PlayerControllerSupport.swift"
 source_anchor = "func autoDownsideCostBps("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
-test_anchor = "testOriginalAverageIsDownsideOnlyAndNeedsFreshUnpacedSessionEvidence"
+test_anchor = "testOriginalDeclaredRateIsItsDownsideCostWhateverTheBodyEvidence"
 
 # A05 prepared HTTP observations: these are source-to-current-contract
 # bridges to the new once-passed web regressions, not claims that native unit
@@ -3804,7 +3974,7 @@ test_anchor = "refuses"
 id = "sharing.isolate-presenter-fixtures-from-account-bootstrap"
 commits = ["741f8764"]
 source = "clients/apple/Sources/AppModel.swift"
-source_anchor = 'init(startServices: Bool = true) {'
+source_anchor = "init(startServices: Bool = true, settings: SettingsStore = SettingsStore(),"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testTheRowEighteenSitesLogOnceAndDrawNothing"
 
@@ -6942,7 +7112,7 @@ test_anchor = "func testTabMovementDefersContentFocusWhileSameTabBackRestoresBoo
 id = "apple.tv-recovery-visible-during-discovery"
 commits = ["b1067e120b2b24ee56ab277f6468d66f35ed70b1"]
 source = "clients/apple/Sources/AppModel.swift"
-source_anchor = "guard recoveryAttempt == attempt, phase == .reconnectFailed else { return }"
+source_anchor = "guard generation == authenticationGeneration, phase == .reconnectFailed else { return }"
 test = "clients/apple/UITests/TVConnectionNavigationTests.swift"
 test_anchor = "func testSavedConnectionRecoveryReportAndRetryKeepCredentials()"
 
@@ -7203,3 +7373,278 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "private func realizeFocusDestination(in channelId: String)"
 test = "clients/apple/UITests/TVLiveNavigationTests.swift"
 test_anchor = "func testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive()"
+
+[[fixes]]
+id = "apple.tv-library-toolbar-back-and-down-return"
+commits = ["3c507ce8f0601ffbd55ab87507e41d6fd83577fb"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "func remoteContentReturn(to target: String?, consumed: @escaping () -> Void = {}) -> some View"
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "One Back from deep content reaches the toolbar"
+
+[[fixes]]
+id = "apple.tv-choice-cards-house-style"
+commits = ["dc73a03f53ce56876cbe21c8af5552b12e229895"]
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "enum RemoteChoiceBackdrop { case page, video }"
+test = "clients/apple/UITests/TVSharedPlaybackNavigationTests.swift"
+test_anchor = "func testSharedPlaybackRevealQualityReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-choice-row-ios-touch-style"
+commits = ["4dfc68ae09107a1b85a7083290551cf82b064f69"]
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "// iPhone/iPad keep a plain touch row; the TV house style is tvOS-only."
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "func testViewModalOwnsFocusAndBackRestoresOpener416()"
+
+
+[[fixes]]
+id = "apple.auto-retain-declared-catalog-costs"
+commits = ["6a8939ace967d40716f1a132e0a0b025946507c1"]
+source = "clients/apple/Sources/PlayerControllerSupport.swift"
+source_anchor = "func autoCostedCatalog("
+test = "clients/apple/Tests/AutoDeclaredCostTests.swift"
+test_anchor = "testDeclaredCatalogCostsStandUntilAMeasuredOutputReplacesThem"
+
+[[fixes]]
+id = "apple.auto-act-on-costed-original-pressure"
+commits = ["06689244575a1ccf2896fd7f27839dd9675e6d4c"]
+source = "clients/apple/Sources/PlayerControllerSupport.swift"
+source_anchor = "func autoLinkPressureVerdict("
+test = "clients/apple/Tests/AutoDeclaredCostTests.swift"
+test_anchor = "testLinkPressureOnACostedOriginalDoesNotWaitForTheRunwayToDrain"
+
+[[fixes]]
+id = "apple.auto-completed-body-evidence-lifetime"
+commits = ["80b85c28dbd18b36c62b5feacebb6f217bc12a3b"]
+source = "clients/apple/Sources/PlayerControllerSupport.swift"
+source_anchor = "func autoCompletedTransferValidityMs("
+test = "clients/apple/Tests/AutoDeclaredCostTests.swift"
+test_anchor = "testACompletedBodyStaysLinkEvidenceForAsLongAsItTookToArrive"
+
+[[fixes]]
+id = "apple.auto-resample-stopped-surface-clock"
+commits = ["539ca0dc432a1a9d6f20cdd51200fa21b04d30ce"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func surfaceClockTick(nowMs: Int)"
+test = "clients/apple/Tests/AutoDeclaredCostTests.swift"
+test_anchor = "testThePresenterClockRecordsAStoppedFilmClockAsNotPresenting"
+
+[[fixes]]
+id = "apple.auto-use-one-cost-for-voluntary-upgrades"
+commits = ["28c926a14e6db4190e54fa6b99f61455c312fb43"]
+source = "clients/apple/Sources/PlayerControllerSupport.swift"
+source_anchor = "func autoUpgradeCandidate("
+test = "clients/apple/Tests/AutoDeclaredCostTests.swift"
+test_anchor = "testAutoDoesNotClimbBackIntoADeclaredOriginalWithoutHeadroom"
+
+[[fixes]]
+id = "apple.auto-admit-cheaper-same-geometry-encode"
+commits = ["8dca143d2715bd62726e24b6790c20101d8fff37"]
+source = "clients/apple/Sources/PlayerControllerSupport.swift"
+source_anchor = "let cheaperSameArea = candidates.filter"
+test = "clients/apple/Tests/AutoDeclaredCostTests.swift"
+test_anchor = "testAnOriginalMayRecoverToTheCheaperEncodeOfItsOwnGeometry"
+
+[[fixes]]
+id = "apple.auto-label-installed-rung"
+commits = ["06235b181dd14c76a10389f4db8af4799dd19507"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "nonisolated static func onlinePlaybackMethodLabel("
+test = "clients/apple/Tests/AutoDeclaredCostTests.swift"
+test_anchor = "testAutoMethodLabelFollowsInstalledRemuxEncodeAndOriginalRoutes"
+
+[[fixes]]
+id = "android.meridian-retain-query-and-menu-owners"
+commits = ["1c7ec8b1849ab2929c7453889f965235b1021259"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedLibrariesScreen.kt"
+source_anchor = "if (generation == expected && q == requestedQuery)"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/MeridianProductionHostTest.kt"
+test_anchor = "populatedSharedQueriesAndNestedCompanionMenuKeepTheirActualOwners"
+
+[[fixes]]
+id = "apple.meridian-tv-native-panel-labels"
+commits = ["975ade812b85a1411a0d563a60392567de6a0076"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = ".font(.system(size: 22, weight: .semibold))"
+test = "clients/apple/UITests/TVMeridianNavigationTests.swift"
+test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
+
+[[fixes]]
+id = "apple.meridian-retain-native-destination-hosts"
+commits = ["3d0c045f7599271ca3257029e6164fdc525d5c9a"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "private(set) var hosts: [HomeTab: UIHostingController<AnyView>] = [:]"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testPersistentHostRetainsImplicitStackAndStateAcrossGeometryAndLayout"
+
+[[fixes]]
+id = "android.meridian-retain-native-navigation-controller"
+commits = ["734c3d292149ecbf72918131363bbda48d5313fe"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = "val nav = controller ?: rememberNavController()"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/MeridianProductionHostTest.kt"
+test_anchor = "actualHostCapturesHomeAndPreservesNestedSettingsEntryAcrossLayoutAndPalette"
+
+[[fixes]]
+id = "apple.meridian-compact-recording-attention"
+commits = ["c3f59d528de60e2fc06610ebd4fca2feb1b25e1d"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "RecordingAttentionBadge(count: attention).frame(width: 24, height: 20)"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testCompactMoreRendersNativeRecordingAttentionBadge"
+
+[[fixes]]
+id = "apple.meridian-native-opener-host-preference"
+commits = ["32a99cde5b0275d70cf5a106cb407090b59e7173"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "if expanded || (layout == .meridian && chromeFocusRequested), let chrome"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testMeridianOpenerFocusPrefersChromeUntilContentIsRequested"
+
+[[fixes]]
+id = "apple.meridian-opener-capability-survives-account-reset"
+commits = ["3534fec330286ac63aa9a7e1d1eba5e1e6296deb"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func resetIdentity() {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testIdentityResetKeepsCurrentMeridianOpenerAndClearsAccountActions"
+
+[[fixes]]
+id = "apple.navigation-destination-route-identity"
+commits = ["1f05563dabe6741ce31f18d3968859f17ed51fc6"]
+source = "clients/apple/Sources/HomeView.swift"
+source_anchor = ".id(RemoteNavigationCoordinator.routeScope(route))"
+test = "clients/apple/UITests/TVMeridianNavigationTests.swift"
+test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
+
+# Dolby Vision enhancement indicator (FEL / RPU / DYN) and its successor adoption.
+[[fixes]]
+id = "apple.dv-enhancement-pills"
+commits = ["3c4931f9faca91d0a50a97df390550274763babf"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = 'case .enhancement: return "plus.circle"'
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "testEnhancementPillsFollowTheRangeBadgeOnlyForActiveEnhancements"
+
+[[fixes]]
+id = "apple.prepared-successor-keeps-enhancement"
+commits = ["8a5672b3159e9f912d1826c23951d071124365c7"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "playbackEnhancement = action.enhancement"
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "testCommitAdoptsTheSuccessorsEnhancementInsteadOfClearingIt"
+
+[[fixes]]
+id = "android.enhancement-row-summary-and-successor"
+commits = ["6cc97b247465dad486a0e15cbe25b38ab2990fe7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "enhancement = tv.plurx.app.data.PlaybackEnhancement.fromJson(action.enhancement)"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "aPreparedSuccessorCarriesItsOwnEnhancementParsedLikeTheCreateResponse"
+
+# Settings names the server by the node hostname (PR #1207).
+[[fixes]]
+id = "apple.settings-server-label-names-the-node"
+commits = []
+supplements = "android.settings-server-label-names-the-node"
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = "serverName = node.displayName ?? info.name"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testAChosenNameKeepsTheAnsweringNodeVisible"
+
+[[fixes]]
+id = "android.settings-server-label-names-the-node"
+commits = ["0d5af614d", "10cc3b92e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "serverName = node?.display_name ?: info.name"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/ServerLabelTest.kt"
+test_anchor = "aChosenNameKeepsTheAnsweringNodeVisible"
+
+# PR #1215: focus assertions retain their coverage; success capture is optional.
+[[fixes]]
+id = "apple.tv-live-focus-stress-capture-budget"
+commits = ["ba9c5e535ce75d3adabc6203f963c5759a5a2f42", "52cb4a7b0e50c6a3c0d20c9b1489b09aff05b1e7"]
+source = "clients/apple/UITests/TVNavigationTestCase.swift"
+source_anchor = "if result != .completed || captureOnSuccess {"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"
+
+# Issue #1245: keep focused Apple TV library posters fully visible.
+[[fixes]]
+id = "apple.tvos-library-row-clipping-medium-movie"
+commits = ["b14ce22dc62705e9da5cf9eb971bc6b250031843"]
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = "Keep the preamble in the results scroll."
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "testRowsKeepWholeCardsVisibleAtMediumSize"
+
+[[fixes]]
+id = "apple.tvos-library-row-clipping-xl-movie"
+commits = []
+supplements = "apple.tvos-library-row-clipping-medium-movie"
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = "Keep the preamble in the results scroll."
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "testRowsKeepWholeCardsVisibleAtExtraLargeSize"
+
+[[fixes]]
+id = "apple.tvos-library-row-clipping-xl-show"
+commits = []
+supplements = "apple.tvos-library-row-clipping-medium-movie"
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = "Keep the preamble in the results scroll."
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "testShowRowsKeepWholeCardsVisibleAtExtraLargeSize"
+
+
+# Direct-GPT DV client corrective commits: source/test anchors only.
+# Execution evidence remains bound to its recorded source.
+[[fixes]]
+id = "direct-gpt.dv-sdr-creative-trim-report"
+commits = ["4135eedb6d863eb1fa4a17c1e456618053f56f9e"]
+source = "crates/plurx-core/src/transcode/dv_processing.rs"
+source_anchor = "|| wire.creative_trims_applied"
+test = "crates/plurx-core/src/transcode/dv_processing/tests.rs"
+test_anchor = "fn sdr_owner_report_requires_its_grade_target_and_conversion_receipt()"
+
+[[fixes]]
+id = "direct-gpt.dv-sdr-client-receipt"
+commits = ["de82d36e7af11900a2dc9fe796d806ac34a629bd"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "!hdr10Enhanced && sdrProcessed && delivered == \"sdr\""
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun sdrReceiptRequiresItsGradeAndExportOperations()"
+
+[[fixes]]
+id = "direct-gpt.dv-typed-display-target-android"
+commits = ["9cec95b5b752b2df355e479c37a2bcac322562ef"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "\"DisplayTargetMapping:$nits\""
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun displayTargetOperationObjectRetainsTheCurrentReport()"
+
+[[fixes]]
+id = "direct-gpt.dv-typed-display-target-apple"
+commits = ["696bc531f50c5c6b4d5b89d4ce5549a190eaa0e5"]
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "if appliedOperations.contains(where: { $0.hasPrefix(\"DisplayTargetMapping:\")"
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "func testDisplayTargetOperationObjectRetainsCurrentReport() throws"
+
+[[fixes]]
+id = "direct-gpt.android-display-peak-provenance"
+commits = ["8be9a51a87e5308b20272ce9bda202513a8142bf"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "peak_source = peak?.source,"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "fun peakWireIsExplicitAndSnapshotDoesNotFollowLaterPreferences()"
+
+[[fixes]]
+id = "claude.web-hdr-display-claim-follows-browser"
+commits = ["f97e0bbed618b875959b3a31e06a11720d115016", "36f9d46d77152c2cfdf5a54138e9249500d501e6"]
+source = "crates/plurxd/src/web/player/decode-tiers.js"
+source_anchor = "function watchDisplayDynamicRange(){"
+test = "tests/web/hdr-display-change.test.js"
+test_anchor = "test(\"a display that turns HDR after boot is claimed for the next session\""

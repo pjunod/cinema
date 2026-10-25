@@ -2,10 +2,30 @@
 #define PLURX_DV_TRACE_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
 #include <libplacebo/vulkan.h>
+
+// GPU-decoded surfaces that the Vulkan device cannot import (another GPU,
+// a software Vulkan, a driver without dma-buf import) are copied to host
+// memory instead. Sticky for the window; the helper reports it in its
+// decoder trace as "vaapi-host-copy".
+static bool dv_hw_host_copy;
+// The caller's planar ten-bit packer for a host copy of a decoded surface.
+static uint16_t *(*dv_host_pack)(const AVFrame *);
+static AVFrame *dv_host_frame(const AVFrame *surface) {
+  AVFrame *host = av_frame_alloc();
+  if (!host || av_hwframe_transfer_data(host, surface, 0) < 0 ||
+      av_frame_copy_props(host, surface) < 0) {
+    av_frame_free(&host);
+    return NULL;
+  }
+  return host;
+}
 
 // Full pixel digests are quality diagnostics, not independent serving evidence.
 static bool dv_frame_hashes(void) {

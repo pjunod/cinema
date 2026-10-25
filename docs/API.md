@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-15, plurx has 369 routes declared by the ordinary listener's
+As of 2026-10-25, plurx has 388 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 additional HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 369 routes across the registered routers.
+plurx has 388 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -357,6 +357,7 @@ families. No `/api/v1/cluster/*` path matches either.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/server` | public | Identity, version, and whether first-run setup is required |
+| GET | `/api/v1/server/node` | bearer | The answering node's `hostname` and the `display_name` clients show for this server |
 | POST | `/api/v1/setup` | public, only while zero users exist | Creates the first admin and returns a token |
 | POST | `/api/v1/auth/login` | public | Verifies credentials, mints a token |
 | POST | `/api/v1/auth/logout` | bearer | Deletes this token's digest, cluster-wide |
@@ -389,6 +390,12 @@ switch; missing storage is `false`). Also `decoder_compaction_contract`,
 `display_aware_auto_protocol` (always `"route-v1"` on this build) and
 `playback_display_aware_auto` (the Developer switch; missing storage is
 `false`) — see §7.4.
+
+`GET /api/v1/server/node` (signed in) names the machine: `hostname` (the
+answering node's short hostname, the name the cluster roster shows; absent
+when it has none) and `display_name` — the operator's chosen name, else the
+hostname, else `name`. It is a separate route because a hostname is not for
+an unauthenticated caller. `GET /api/v1/system` (admin) carries both too.
 
 ### 4.2 `POST /api/v1/setup`
 
@@ -520,7 +527,16 @@ native Mac processing and negotiated HEVC output for new plans. Saving either
 choice is accepted on every platform regardless of advisory readiness;
 existing sessions retain their captured plan. `macos_video_processing` is the
 read-only runtime report, including `hevc_output_enabled` and per-graph
-observations. The Developer readiness item `macos_hevc_output` reports
+observations.
+The independent `dolby_vision_display_target` boolean defaults
+false and saves regardless of readiness. Its Developer item reports helper and
+HDR10-E preference, active processed-root peak reports, title-scan eligibility
+counts and per-bucket live media versus retained-cache bytes. Display caps accept
+optional integer `display.max_nits` and optional `display.peak_source` (`platform`
+or `viewer`); no display minimum is collected. Unknown/out-of-range peaks keep
+the master grade. See [the targeting contract](streaming/DISPLAY-TARGETED-DV-BUILD.md#server-phase-1).
+
+The Developer readiness item `macos_hevc_output` reports
 `hevc_effective_encoder`, `hevc_sdr`, `hevc_hdr10` and
 `hevc_delivery_qualification` requirements. Missing
 observations mean unobserved, not supported; a pending probe means unknown.
@@ -589,6 +605,24 @@ applied at startup; `encoder_selected` and `tone_map` report what its probes
 actually selected. `hwaccel_requested` is the saved node preference, and
 `hwaccel_restart_required` distinguishes a pending change from active state.
 
+`ffmpeg_support` reports `executable`, optional `expected_executable`,
+`required_package`, `expected_version`, `executable_version`,
+`source_revision` (the required source pin), `package_verification`,
+`package_verified`, `package_problems`, `checked_at` (Unix seconds), and
+`rows`. Each row carries `id`, `label`, `required_for`, `applicable`,
+`required`, `included`, `missing`, `runtime` and optional `runtime_detail`.
+The shared hardware contract is
+[`ffmpeg-support-matrix.json`](../scripts/ffmpeg-support-matrix.json): Mac
+requires VideoToolbox and Metal; detected Intel, AMD and NVIDIA nodes require
+their applicable Quick Sync, VA-API and NVENC/CUDA surfaces. GPU nodes also
+require Vulkan/libplacebo. Inventory is collected once at startup, separately
+from the selected encoder. Mac package checks bind source, patches, binaries,
+parser and font authority; Metal and Vulkan execute independent synthetic HDR
+graphs. `included` alone proves no execution. `not_tested` is not a pass, and
+synthetic completion does not qualify real-source playback or picture quality.
+Settings prominently warns on package problems, missing required support, or
+failed required probes; unrelated hardware requirements remain advisory.
+
 `PUT /api/v1/system/transcoder` accepts `{"node_id":"…","preference":"qsv"}`.
 The preference is one of `auto`, `nvenc`, `qsv`, `vaapi`, `videotoolbox` or
 `software`. The response contains `node_id`, `preference` and
@@ -600,21 +634,53 @@ the legacy cluster preference on that node after restart. Saving does not
 change active sessions. Restart selects the encoder and probes its HDR graph
 together; unavailable preferred hardware uses the existing encoder fallback.
 
+`platform`, `application_executable` and `runtime_location` identify the
+running application and its containing directory. `graphics_devices` lists
+observed PCI identities, vendor/device IDs, optional model and render node.
+`encoder_device_bindings` distinguishes configured bindings, driver defaults
+and unresolved physical identity. Inventory alone never proves a backend used
+that card. Missing model names remain unknown.
+
+`transcoding_facts` contains six rows (`hardware_decoding`,
+`hardware_encoding`, `tone_mapping`, `hardware_scaling`, `subtitle_burn_in`,
+`deinterlacing`) with `label`, `enabled`, `hardware`, `backend`, `device_ids`
+and terse `detail`. Enabled combines current configuration and detected
+support; it does not describe a running session or require external acceptance.
+`additional_media_support` lists `ac4`, `dolby_vision`, `vulkan` and `opencl`
+with `support_available` and `detail`. Available alternative backends are not
+claimed as selected. Linux package integrity remains separately unverified;
+Mac package verification is not evidence for Linux.
+
 `transcoder_optimization` contains `running`, `error`, `restart_required`, and
-`report`. A report has `measured_at` (Unix seconds) and `results`, ordered
-fastest first. Each result has `backend`, `fps`, and `relative_to_cpu` (CPU is
-1.0). Startup creates a fresh measurement after capability detection; Auto
-selects its fastest supported backend before probing the active HDR graph.
-Results are stored under `node.<node_id>.transcode.benchmark` for diagnostics;
-previous-boot measurements are never used as capability evidence.
+`report`. Its versioned `comparison` measures identical real-media frame
+ranges through decode → processing → H.264 encoding against a software
+baseline. Results compare production-default backend pipelines rather than
+physical devices. Cases cover 1080p H.264 SDR → 720p SDR, 4K HEVC SDR → 1080p SDR and
+4K HEVC HDR10 → 1080p SDR. Results contain `case_id`, `backend`, optional
+`device_id`, `pipeline`, `decoder`, sanitized `command`, `completion`,
+`fallback`, `median_seconds`, optional
+`cpu_percent`, `realtime_ratio`, `relative_to_cpu`, `runs` and `error`.
+`fixture_source` carries the title, attribution, public source page and
+license link from the versioned fixture manifest. Missing measurements remain
+null. FFmpeg process CPU excludes operating-system
+and driver services; it does not rank Auto or measure total system energy.
+
+Auto prefers working hardware and ranks eligible hardware using representative
+playback speed. An explicit preference is preserved. CPU remains the fallback
+when hardware is unavailable or rejects the workload. Legacy synthetic encode
+rates remain diagnostic and cannot select CPU over working hardware. Partial,
+aborted, fallback or stale results cannot become Auto evidence. Reading System
+uses cached facts and never starts probing or FFmpeg.
 
 `POST /api/v1/system/transcoder` accepts `{"node_id":"…"}` and returns
 `{"running":true}`. Only an administrator may start it. A different node,
 active playback, or an already running optimization returns 409. Poll
 `GET /api/v1/system` for completion; disconnecting does not cancel the job.
-Background admission contention, playback preemption and timeouts appear in
-`error`; the last complete report remains visible. A changed Auto winner
-requires restart so the active encoder and HDR graph stay paired.
+The bounded idle-node lifecycle yields to playback. A changed Auto winner
+requires restart so the active encoder and HDR graph stay paired. The source
+fixtures are versioned and hash-checked; source acquisition and preparation
+are excluded from measurement. See the
+[System settings ledger](clients/SYSTEM-SETTINGS-STATUS.md) for qualification.
 
 Two of its sub-objects are shaped by a diagnostic argument rather than by
 convenience.
@@ -748,7 +814,11 @@ A poisoned limiter mutex fails *open*, because a lock bug must not silence
 diagnostics.
 
 `event` is one of `playback_failed`, `stream_rejected`, `hls_fatal`, `stall`,
-`stall_end`, `stall_recovery`. `stall_end` closes a `stall` that was reported
+`stall_end`, `stall_recovery`, or `frame_drop`. A `frame_drop` report may carry
+the bounded, typed version 1 `frame_drop` object retained in playback-event
+`extra.frame_drop`; see the [recorder contract](clients/FRAME-DROP-RECORDER.md)
+for numeric columns, retention, admin retrieval and attribution limits.
+`stall_end` closes a `stall` that was reported
 while it was still going (the web's persistent wait): its `ms` is the time
 after that report, and it adds to `plurx_stalled_seconds_total` without
 counting a second stall. `decode_hw` is an optional hardware observation for
@@ -1724,7 +1794,7 @@ and they are reported by `GET /api/v1/system`.
 The response carries `session_id`, `playlist_url`, `duration_ms`,
 `start_seconds`, `media_origin_ms`, `height`, `encoder`, `vod`, `ladder`,
 `prior_kbps`, `delivered_dynamic_range`, `delivered_dolby_vision_profile`,
-`control`, `plan_notes`.
+`control`, `plan_notes`, `enhancement`.
 
 - `media_origin_ms` is the source-timeline timestamp represented by
   player-local zero. A copy session can start on the keyframe *before*
@@ -1744,6 +1814,24 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
 - `plan_notes` says why this session's plan is not the one the client asked
   for — a named override, or a `plan_mismatch:` line naming the field, the
   client's value and the server's. Empty and omitted on every agreeing create.
+- `enhancement` is the server-computed Dolby Vision enhancement the
+  delivered picture carries (`crates/plurx-core/src/playback/enhancement.rs`):
+  `{active: ["FEL","RPU","DYN"], details: [{badge, active, text}],
+  requires_effective_processing?: true}`. `active` lists the badges of the
+  active enhancements only, in display order; `details` has one plain sentence
+  per enhancement that applies to the source — what it is when active, why it
+  is unused when not. Clients render it rather than reconstructing the route:
+  one pill per `active` badge after the dynamic-range badge, and an
+  `Enhancement` info row listing each `details[].text` (neutral styling).
+  `requires_effective_processing` (omitted when false) marks a processed-HDR10
+  delivery whose pills and row are shown only while the client holds a
+  current, generation-matching `effective_processing` report; they clear with
+  it on seek, fallback or replacement. Omitted for non-Dolby-Vision sources. A
+  tone-mapped SDR play has no `active` badges, but its `details` still say what
+  the source carries and that none of it reaches an SDR picture. A replacement session never inherits its predecessor's; it
+  carries its own, in its create response and in the `prepare` control action
+  that announces it. The route comes from the selected processing plan, so a
+  processed-HDR10 play is described as one before its first window report.
 
 | Status | Code | When |
 |---|---|---|
@@ -1992,6 +2080,10 @@ the same completed-processing report as Start. Its `generation` is the current
 playback incarnation, and the report applies only to the delivered HDR10
 selection. Clients clear a previous report when an accepted response omits it;
 saved Developer preferences alone do not establish applied processing.
+`gpu_decoded: true` says the window's source pictures were decoded on the GPU
+(VA-API); it is omitted for a software decode, including the helper's own
+fallback when the node's device cannot decode HEVC Main10 or the renderer
+cannot import its surfaces.
 The owner relays this optional report in a bounded private response header
 (4096 bytes), keeping the internal control JSON body compatible with older
 peers. The ingress validates the incarnation and HDR10 selection before public
@@ -2044,7 +2136,7 @@ an `effective_selection`, and one `action`:
 | `hold` | Production is deliberately not advancing, and this is **not** a failure. `revisit_after_ms` is 5000 for every reason except `no_room`, which is 20 000, because nothing the client does clears node capacity. It is a revisit contract, not an expiry: a hold never escalates to a terminal |
 | `terminal` | Production stopped for a reason retrying cannot change. Ends the failed production attempt; a 404 or a 410 alone does not authorize discarding a usable buffered player |
 | `retry_resource` | Stopped for a reason that may not recur; retry on the server's cadence |
-| `prepare` | A successor session is staged, addressed exactly as its own create response would address it. The only action that is a transaction rather than a report, so it is recorded and replayed exactly rather than recomputed |
+| `prepare` | A successor session is staged, addressed exactly as its own create response would address it, including its `enhancement` (omitted when the staged successor has none) so a switch keeps the FEL / RPU / DYN indicator. The only action that is a transaction rather than a report, so it is recorded and replayed exactly rather than recomputed |
 
 Production holds do not veto bounded client presentation repair. An active
 client explicitly reporting `render_state: stalled` with substantial loaded
@@ -2264,6 +2356,49 @@ codeless 503 on `overlay.json` as a wait, for older servers.
 
 ---
 
+### Progressive English translation
+
+The initial experimental route uses the attached web direct player with one
+unambiguous source audio stream. Spoken-language confirmation may correct the
+metadata tag. Small multilingual produces independent 30-second cores with
+five seconds of left/right context; clipped boundary repetition and grammar or
+meaning errors remain possible. Native, encoded and multi-audio playback are
+not qualified by this route.
+
+| Method | Path | Credential | Meaning |
+|---|---|---|---|
+| GET, PUT | `/api/v1/subtitle-translation` | admin bearer | Saved enable/model/profile/language preferences with opaque revision CAS. Readiness never rejects Save. |
+| GET | `/api/v1/subtitle-translation/models` | admin bearer | Immutable profile, bounds and distinct English-translation worker qualification. |
+| GET | `/api/v1/files/{id}/subtitle-translation/options` | bearer | Current source revision, supported profile and bounded cached asset list; no work. |
+| POST | `/api/v1/files/{id}/subtitle-translation` | admin bearer | Durable operation and expiring playback demand before source hashing; exact request replay. |
+| GET | `/api/v1/files/{id}/subtitle-translation/assets` | bearer | Explicit cursor page of cached assets. |
+| GET | `/api/v1/subtitle-translation/operations/{id}` | bearer | Closed live operation, source-check and current-job observation. |
+| PUT, DELETE | `/api/v1/subtitle-translation/operations/{id}/demands/{demand}` | admin bearer | Renew or release one viewer's versioned interest. |
+| POST | `/api/v1/subtitle-translation/operations/{id}/stop` | admin bearer | Durable global Stop advances the epoch and fences preparation, ranges and publication. |
+| POST | `/api/v1/subtitle-translation/operations/{id}/retry` | admin bearer | Explicit observed-state/epoch or failed-range revision CAS; heartbeats cannot undo Stop. |
+| GET | `/api/v1/subtitle-translation/operations/{id}/failed-ranges` | bearer | Bounded current-view failures under a read lease and scoped cursor. |
+| GET | `/api/v1/subtitle-translation/assets/{id}/manifest` | bearer | Windowed coverage/segment descriptors and a 30-second read lease. |
+| GET | `/api/v1/subtitle-translation/assets/{id}/segments` | bearer | Scoped cursor page inside the requested playback window. |
+| GET | `/api/v1/subtitle-translation/assets/{id}/coverage` | bearer | Scoped cursor page of accepted overlapping core intervals. |
+| GET | `/api/v1/subtitle-translation/assets/{id}/segments/{segment}` | bearer | Exact bounded canonical UTF-8 JSON bytes; verify the manifest digest before decoding. |
+
+Existing model Install/Test routes also accept strict version 2 translation
+requests with request UUID, intent expiry, purpose, profile ID and named workers.
+Translation qualification does not imply that the ordinary generation self-test
+ran. Work mutations require current administrator authority and an unexpired
+first-use intent; retained exact receipts replay without starting fresh work.
+Responses carry a fresh `X-Translation-Server-Now-Ms` even when receipt bodies
+retain their original clock.
+
+Page and segment requests use `X-Translation-Read-Lease`. A matching ETag/304
+does not renew that lease. Expired leases or moved cursors require resynchronizing
+the manifest; playback position and effective operation state participate in its
+ETag. Idle caches retire only after demands and leases expire. Core bytes stay
+immutable while retained; retirement is an explicit snapshot boundary, and a
+fresh lease may observe recomputed bytes with a newly verified digest. Root
+Stop and request identities are independent of cache eviction.
+
+
 ## 12. Offline packages
 
 ```
@@ -2425,6 +2560,10 @@ valid URL, the only way forward is to release and start over.
 | GET | `/api/v1/items/{id}/reading-state?file_id=` | bearer | `{state, stale}` |
 | PUT | `/api/v1/items/{id}/reading-state` | bearer | Saves a revision-bound locator; body ≤ 64 KiB |
 | DELETE | `/api/v1/items/{id}/reading-state?file_id=` | bearer | Clears it. 204 |
+| GET | `/api/v1/items/{id}/annotations` | bearer | `{ratings, watchlist, favorite}`. `ratings` holds `{source, value, scale, votes?}` per source with a score (`imdb` /10, `rotten_tomatoes`, `metacritic`, `tmdb` /100), in that order, movies and shows only. It is fetched from TMDB and OMDb on first read and kept 14 days. `watchlist` is false once a listed movie is watched (or every episode of a listed show is) |
+| PUT / DELETE | `/api/v1/items/{id}/watchlist` | bearer | Put a movie or show on, or take it off, the reader's watchlist. 204; 400 for other kinds |
+| PUT / DELETE | `/api/v1/items/{id}/favorite` | bearer | The same for the reader's favorites |
+| GET | `/api/v1/lists/{list}` | bearer | `{items}` (optional `limit`): the reader's list, newest first, at most 500. Finished watchlist entries are left out |
 
 `POST …/publication` requires a `book` item and a `.epub` file, then parses
 synchronously: verify the file's size and mtime still match the row, then walk

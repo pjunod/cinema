@@ -439,7 +439,13 @@ and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
 - **Manual quality override:** the player's **◆ Quality** menu — *Auto*
   (the automatic ladder), *Original* (never transcode video: direct/remux, with
   the error-path rescuing an undecodable pick), or a forced *1080p / 720p / 480p*
-  transcode. Persists per browser; switching restarts at the current position.
+  transcode. Persists per browser; switches preserve the current position,
+  using a prepared replacement when available.
+- **Current playback quality:** the Quality control shows Auto, Original or
+  Manual together with the resolution of the presented picture. Cropped
+  frames show their exact dimensions. A brief notice inside the fullscreen
+  player announces completed video-quality changes; initial playback,
+  ordinary seeks and failed prepared switches stay quiet.
 - **Resume everywhere:** client-seek for direct play, server fast-seek for remux,
   offset-based session for transcode. Multipart audiobooks map every physical
   part onto one item-level resume/progress timeline and continue at part ends.
@@ -541,6 +547,11 @@ recordings library.
   never stops the stream and never refetches — it is a re-render of the browse
   region. A protected channel is dimmed rather than hidden, with a
   `Hide protected` filter for a lineup that is mostly DRM.
+- **The iPhone Guide shows the time grid.** In portrait and landscape, stations
+  occupy separate rows with logos and pinned channel labels, while programme
+  widths follow their durations. The old single-channel schedule preference
+  no longer changes Guide into a dropdown list; the current Live TV player and
+  programme/DVR actions stay in place.
 - **Station artwork comes from the guide.** Every client — the web list, grid
   and current-programme details; the Apple and Android list rows, grid
   headers, programme details, picture badge and fullscreen identity — draws

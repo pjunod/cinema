@@ -70,6 +70,11 @@ pub use invitations::InvitationStore;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_invitations;
 pub mod remote;
+pub mod subtitle_translation;
+pub mod subtitle_translation_mutation;
+pub mod subtitle_translation_publication;
+pub mod subtitle_translation_read;
+pub mod subtitle_translation_settings;
 pub use remote::RemoteStore;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_remote;
@@ -167,6 +172,8 @@ pub(crate) fn replicated_media_sessions_schema() -> &'static str {
 #[doc(hidden)]
 pub use hiqlite::validation_time_http_store_operation;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_annotations;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_background_jobs;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
@@ -192,6 +199,11 @@ mod hiqlite_media;
 mod hiqlite_pretranscode;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_publication;
+/// Formal-verification conformance seam for the chosen replicated insertion;
+/// compiled only for the three-voter Store contract suite.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub use hiqlite_publication::conformance as publication_conformance;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_reading;
 #[cfg(feature = "hiqlite-store")]
@@ -242,10 +254,14 @@ mod background_jobs_tests;
 pub mod background_jobs_transcode;
 pub mod background_jobs_transcription;
 pub mod classification_schedule;
+pub mod dv_title_jobs;
+mod dv_title_jobs_schema;
+mod library_annotations_schema;
 pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
 mod subtitle_managed_schema;
+mod subtitle_translation_schema;
 pub mod watched_drain;
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -2006,6 +2022,7 @@ pub mod keys {
     pub const DV_CONVERT: &str = "playback.dolby_vision_convert";
     /// Opt-in preference for qualified DV rendering to HDR output. Missing is
     /// off. Saving the preference does not establish a worker capability.
+    pub const DV_DISPLAY_TARGET: &str = "playback.dolby_vision_display_target";
     pub const DV_HDR_PROCESSING: &str = "playback.dolby_vision_hdr_processing";
     /// Opt-in preference for qualified FEL reconstruction and P8.1 encoding.
     /// Missing is off; this never overrides the separate DV_CONVERT permission.
@@ -3685,6 +3702,57 @@ pub trait WatchStore: Send + Sync + 'static {
         duration_ms: Option<i64>,
         updated_at: i64,
     ) -> Result<(), StoreError>;
+}
+
+/// Review-site scores per item, and the lists (watchlist, favorites) each
+/// person keeps. Neither is catalogue metadata: scores are a provider cache
+/// refetched on their own clock, and lists belong to one person.
+#[async_trait]
+pub trait AnnotationStore: Send + Sync + 'static {
+    /// The scores stored for an item, or `None` when none were ever fetched.
+    async fn item_ratings(
+        &self,
+        item_id: i64,
+    ) -> Result<Option<crate::annotations::ItemRatings>, StoreError>;
+    /// Replace an item's scores with one fetch's answer: a source missing from
+    /// `ratings` is gone. Writes nothing for an item deleted meanwhile.
+    async fn put_item_ratings(
+        &self,
+        item_id: i64,
+        ratings: &crate::annotations::ItemRatings,
+    ) -> Result<(), StoreError>;
+    /// Put an item on, or take it off, one of a person's lists. Idempotent;
+    /// putting it on again moves it to the front. Writes nothing for an item
+    /// that does not exist.
+    async fn set_item_listed(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        list: crate::annotations::ItemList,
+        listed: bool,
+        at_ms: i64,
+    ) -> Result<(), StoreError>;
+    /// Which of a person's lists one item is on.
+    async fn item_list_flags(
+        &self,
+        user_id: i64,
+        item_id: i64,
+    ) -> Result<crate::annotations::ItemListFlags, StoreError>;
+    /// One of a person's lists, most recently added first.
+    async fn listed_items(
+        &self,
+        user_id: i64,
+        list: crate::annotations::ItemList,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::annotations::ListedItem>, StoreError>;
+    /// Which of `item_ids` are on a person's list, ascending.
+    async fn items_on_list(
+        &self,
+        user_id: i64,
+        list: crate::annotations::ItemList,
+        item_ids: &[i64],
+    ) -> Result<Vec<i64>, StoreError>;
 }
 
 /// Per-user text-publication state. It is separate from [`WatchStore`]
@@ -5737,6 +5805,7 @@ pub trait Store:
     + ClassificationStore
     + WatchStore
     + ReadingStore
+    + AnnotationStore
     + TraktStore
     + WatchedOutboxStore
     + TranscodeCacheStore
@@ -5796,6 +5865,7 @@ impl<T> Store for T where
         + ClassificationStore
         + WatchStore
         + ReadingStore
+        + AnnotationStore
         + TraktStore
         + WatchedOutboxStore
         + TranscodeCacheStore

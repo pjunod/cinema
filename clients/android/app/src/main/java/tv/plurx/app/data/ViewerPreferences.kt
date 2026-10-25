@@ -3,12 +3,20 @@ package tv.plurx.app.data
 enum class ThemeId(val storageValue: String, val label: String) {
     Classic("classic", "Classic"),
     Terminal("terminal", "Terminal"),
-    Noirr("noirr", "noirr");
+    Noirr("noirr", "noirr"),
+    Meridian("meridian", "Meridian");
 
     companion object {
         fun fromStorage(value: String?): ThemeId = entries.firstOrNull {
             it.storageValue == value
         } ?: Classic
+    }
+}
+
+enum class ViewerLayout(val storageValue: String, val label: String) {
+    Standard("standard", "Standard"), Meridian("meridian", "Meridian");
+    companion object {
+        fun fromStorage(value: String?): ViewerLayout = entries.firstOrNull { it.storageValue == value } ?: Standard
     }
 }
 
@@ -45,6 +53,19 @@ enum class HomeGrouping(val storageValue: String, val label: String) {
         fun fromStorage(value: String?): HomeGrouping = entries.firstOrNull {
             it.storageValue == value
         } ?: Category
+    }
+}
+
+enum class HdrDisplayPeak(val storageValue: String, val label: String, val nits: Int?) {
+    Auto("auto", "Auto (display report or unknown)", null),
+    N400("400", "400 nits", 400), N600("600", "600 nits", 600),
+    N1000("1000", "1000 nits", 1000), N1600("1600", "1600 nits", 1600),
+    N2000("2000", "2000 nits", 2000), N4000("4000", "4000 nits", 4000);
+
+    companion object {
+        fun fromStorage(value: String?): HdrDisplayPeak = entries.firstOrNull {
+            it.storageValue == value
+        } ?: Auto
     }
 }
 
@@ -126,11 +147,13 @@ enum class LibraryPresentation(val storageValue: String, val label: String) {
 
 data class ViewerPreferences(
     val theme: ThemeId = ThemeId.Classic,
+    val layout: ViewerLayout = ViewerLayout.Standard,
     val appearance: Appearance = Appearance.System,
     val posterSize: PosterSize = PosterSize.Medium,
     val libraryPresentation: LibraryPresentation = LibraryPresentation.Rows,
     val homeGrouping: HomeGrouping = HomeGrouping.Category,
     val playbackQuality: PlaybackQuality = PlaybackQuality.Auto,
+    val hdrDisplayPeak: HdrDisplayPeak = HdrDisplayPeak.Auto,
     val subtitleReadiness: SubtitleReadiness = SubtitleReadiness.OnDemand,
     val autoSkip: Boolean = false,
     val autoplayNext: Boolean = true,

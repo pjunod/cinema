@@ -1690,7 +1690,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # it must not mint a second recovery allowance before worker creation.
         qualification = production.split(
             "let recovery = crate::transcode::SessionRecoveryIdentity {", 1
-        )[1].split(".qualify_processed_hdr10_auto(", 1)[0]
+        )[1].split(".prepare_processed_hdr10(", 1)[0]
         self.assertIn("recovery_epoch: recovery_epoch.clone(),", qualification)
         self.assertNotIn("recovery_epoch_for(", qualification)
         self.assertIn(

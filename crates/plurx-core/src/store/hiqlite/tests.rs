@@ -655,6 +655,8 @@ async fn takeover_authority_attribution_settings_pair_reaches_timed_client_retri
             activity_refreshes: Arc::new(ActivityRefreshGate::default()),
             cache_touches: Arc::new(ReplaceableWriteGate::default()),
             watch_fences: Arc::new(super::super::watch_fence::WatchWriteFences::default()),
+            #[cfg(feature = "hiqlite-contract-tests")]
+            insertion_seam: Default::default(),
         };
         let started = tokio::time::Instant::now();
         assert_eq!(
@@ -1667,7 +1669,7 @@ fn protocol_range_governs_every_upgrade_and_activation_transition() {
 #[test]
 fn bootstrap_writes_the_unactivated_floor_and_never_widens_it() {
     let production = include_str!("../hiqlite.rs")
-        .split_once("\n#[cfg(test)]\nmod tests {")
+        .split_once("\n#[cfg(test)]\nmod tests;")
         .expect("test module boundary")
         .0;
     let bootstrap = production

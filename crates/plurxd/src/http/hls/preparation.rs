@@ -2398,6 +2398,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // 00:01:30 out to 00:02:30.
     let resume_ms = accepted_film_time_ms;
     let staged_request = crate::transcode::SessionRequest {
+        dv_processing_destination: candidate.dv_processing_destination,
         sdr_master_codecs: None,
         continuous_media: None,
         candidate_context: candidate.candidate_context.clone(),
@@ -2450,7 +2451,39 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // `response_json` parses it as one — and `control_start_response` filters
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
+    // The successor's indicator from what it was staged to deliver: a copy is
+    // read off the source, a transcode off its selected candidate. Without a
+    // candidate a transcode's outcome is not known yet, so it has none.
+    let selected = staged_request
+        .candidate_context
+        .as_ref()
+        .map(|context| &context.selected_candidate);
+    let grade = match (&staged_request.kind, selected) {
+        (_, Some(candidate)) => Some(candidate.grade),
+        (crate::transcode::SessionKind::Copy { .. }, None) => {
+            Some(plurx_core::transcode::OutputGrade::Sdr)
+        }
+        (crate::transcode::SessionKind::Transcode { .. }, None) => None,
+    };
+    let enhancement = grade.and_then(|grade| {
+        super::create::session_enhancement(
+            Some(source),
+            &staged_request.kind,
+            grade,
+            None,
+            selected
+                .filter(|candidate| candidate.processed_dv)
+                .map(|_| {
+                    source.dolby_vision.profile == Some(7)
+                        && source.dolby_vision.el_present != Some(false)
+                }),
+            None,
+            None,
+            None,
+        )
+    });
     let response = StartResponse {
+        enhancement,
         effective_processing: None,
         measured_candidate_outputs: None,
         delivered_audio: staged_request.audio_delivery.clone(),

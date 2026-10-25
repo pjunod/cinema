@@ -1,13 +1,97 @@
-# HTTPS/subtitle promotion integration: main220157aba carries the reviewed
-# managed-subtitle deltas; preserve all HTTPS and prior main attributions.
-# Namespaced spawns 960 + 13 = 973; timers 1773 + 11 + 1 = 1785;
-# launch-shaped methods 760 + 7 = 767. Scope/patterns/equality stay exact.
-# Merge of main 89d790d2e (HDR playback follow-ups, PR #1125) into the HTTPS
-# effort: the F5/F6 deltas below compose with the HTTPS deltas above.
-# Namespaced spawns 973 + 1 = 974; timers 1785 + 5 = 1790; launch-shaped
-# methods 767 + 4 = 771; method-spawn 70 + 1 = 71 (HTTPS JoinSet owner plus
-# the F6 fence-loop task); UFCS lifecycle 327 + 1 = 328 (HTTPS Barrier::wait
-# plus the F6 try_wait observation). Scope/patterns/equality stay exact.
+# HTTPS Barrier::wait adds one test-only joined observation to main’s lifecycle census.
+# HTTPS integration 2026-10-25: retain main lifecycle owners and compose the
+# reviewed HTTPS additions: 13 awaited test/serving tasks, one owned JoinSet
+# spawn, 12 bounded TLS/test timers and seven test/client launch-shaped calls.
+# Exact source census remains enforced; no scan roots or patterns change.
+# Shared playback cache ownership review (2026-10-21, source 99a968993):
+# Codex reviewed the lifecycle sites and their exact census against origin/main.
+# Astra independently approved all seven count changes and their lifecycle owners.
+# +10 namespaced tasks: one node-local 15s upkeep loop stops on its shutdown
+# token; three coordinator owners perform physical inventory and owner callbacks;
+# six test-only drivers cover timeout/fencing, cancelled copying and VOD replay.
+# Blocking inventory retains its single I/O permit until the scan actually ends.
+# Callback tasks retain their single-flight permit after waiter timeout; eviction
+# additionally retains its prefix fence through callback completion. Cancellation
+# cannot expose the namespace while unlink is running. A timeout does not
+# forcibly cancel detached filesystem work. Existing copyseg and
+# subtitle copy workers now carry their reservations/pins through physical work;
+# moving those constructors adds no production task site or producer authority.
+# +19 timers: nine bounded coordinator waits/cadence, two scratch PUT/DELETE
+# framing bounds, one post-child pretranscode upload drain and one dependency
+# read before VOD eviction; the other six are finite fixture observations.
+# +2 Command/+2 launch sites are test-only: a 40s kill-on-drop FFmpeg graph
+# output and an awaited finite 16KiB shell writer with a 4KiB child file limit.
+# The other +7 launch-shaped methods are HTTP response status assertions.
+# +1 kill-on-drop is that same FFmpeg fixture, not a confirmed-reap receipt.
+# +1 free/UFCS lifecycle site ignores SIGXFSZ only in the child's pre_exec hook;
+# RLIMIT_FSIZE then returns EFBIG to tee's onfail=ignore, preserving the index.
+# +1 rendition_build_gate reference takes the existing exact-key gate during
+# VOD eviction, before reader/producer/dependency checks; it starts no builder.
+# Resulting structural totals: 995 tasks, 1846 timers, 294 Commands, 792 launch
+# shapes, 72 free/UFCS lifecycle calls and 111 kill-on-drop constructors.
+# Patterns, scan roots, exact equality and every forbidden-shape zero stay intact.
+
+# System comparison ownership review (PR #1243, 2026-10-20):
+# The shared launcher/guard was adversarially reviewed by Astra; Sol reviewed
+# this exact census delta. comparison.rs adds one background job-owned FFmpeg
+# Command, kill_on_drop and awaited child.wait. Its job guard spans that wait
+# and the two joined 64 KiB tail readers; timeout/cancellation drop that owner.
+# The 60s production run timeout and 600s operator-test timeout replace the
+# removed 180s startup synthetic-benchmark timeout: net +1 namespaced timer.
+# No new task, producer authority, independent reader or cleanup loop is added.
+# Structural patterns, scan roots and exact-equality requirements stay intact.
+
+# Media support ownership review (PR #1239, 2026-10-20; Astra reviewed):
+# ffmpeg_support.rs adds one awaited spawn_blocking for local package hashing.
+# It owns only paths/hash inputs, no child or producer authority. An already
+# started blocking hash finishes even if its awaiting startup caller is dropped;
+# pre-read metadata caps are 2 MiB for the manifest and 256 MiB per companion.
+# There is no hash cancellation deadline; trusted local package reads reach EOF.
+# Three Command constructors are inventory (10s/2MiB), synthetic processing
+# (15s/1MiB), and Windows GPU inventory (10s/64KiB). All use the existing
+# bounded_command_*_cancellable collector with ChildWork::background: owned
+# registration, bounded output, kill-on-drop, and explicit kill/wait on timeout.
+# Capture byte limits apply separately to stdout and stderr.
+# These boot-only probes are cached by OnceCell; Settings polls launch none.
+# There is no session/rolling-producer authority or independent task/reap loop.
+# Patterns, roots and exact-equality requirements remain unchanged.
+
+# Desktop native control ownership review (PR #1220, 2026-10-19):
+# +6 namespaced task sites in desktop_control.rs: DesktopServer retains the
+# listener JoinHandle and cancels/joins it in finish; prepare/commit retain
+# the planned-outage operation guard through caller disconnection and finish
+# their bounded replicated lease transition; three test-only drivers (HTTP,
+# metrics and serving) are stopped and awaited before fixture teardown.
+# +1 method-spawn is the listener's bounded (32) JoinSet of IPC connections;
+# cancellation requests graceful HTTP closure with IPC_DRAIN, then joins all
+# connections before removing the socket. It starts no operating-system child.
+# +8 timers: three awaited production IPC/admission/topology bounds, the
+# daemon's 30s native store-close bound (timeout records failure, never clean
+# closure), two finite sole-voter fixture waits and two fence-expiry sleeps.
+# +10 launch-shaped matches: the same JoinSet spawn, membership.status(),
+# four desktop HTTP status assertions and four drain HTTP status assertions.
+# Nine are readback/assertions, with no process or producer authority. Process
+# constructors/lifecycle counts, patterns, module roots and equality stay intact.
+
+# CQ #1192 Linux isolated subtitle reap fixture (runtime.rs, cfg(test) only):
+# +1 method-spawn, +1 process constructor and +1 launch-shaped method are the
+# same exact-filter self-exec child in isolated_reaper_process. A fresh 0700
+# directory, 0600 exclusive nonce/parent/filter guard and one-use claim bind it;
+# only that child enables subreaper state before its own Tokio runtime starts.
+# Its parent observes/reaps it via four try_wait sites plus one refusal kill
+# (+5 lifecycle-methods). The 30s/8MiB protocol bounds trigger owned-group
+# cleanup and direct-child kill/reap; a bounded diagnostic tail preserves failure.
+# +3 namespaced timers are synchronous 10ms std::thread::sleep polls: the exact
+# adopted descendant's 2s cleanup, direct-child 2s refusal reap and parent 30s
+# protocol observation. They create no detached task or producer authority.
+# +3 free/UFCS lifecycle sites are cleanup_announced_groups' SIGKILL after live
+# PPID/PGID ownership checks and two WNOHANG waitpid sites for the exact known
+# descendant. One is panic/refusal cleanup; the other requires actual SIGKILL
+# and reap before two empty-PGID observations within the original 3s bound.
+# Production timeout/cancellation, 300ms/10s operation budgets and non-Linux
+# semantics remain unchanged. This records finite test owners, not a general
+# post-panic cleanup guarantee. Patterns, roots and exact equality stay intact.
+
 # Current integrated HDR + subtitle ownership census: 968 namespaced tasks,
 # 1784 timers, 272 process constructors, 760 launch-shaped methods,
 # 67 free/UFCS lifecycle calls and 104 kill-on-drop constructors.
@@ -552,7 +636,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
 # raised this count independently; the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
-expected_occurrences = 117
+expected_occurrences = 118
+# PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
+# spawn_prepare. Callers abort/await it for cancellation or release the pause
+# and await refusal; exact-owner cleanup is observed separately. It exercises
+# real preparation with a 10s deadline, not a new shipped task owner.
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
@@ -1053,7 +1141,14 @@ pattern = "HlsPresentationResolution"
 # Architecture close-out (#814): +1 test-only match —
 # sdr_master_codecs_is_frozen_when_the_session_is_created reads the created
 # session's ready context; no new owner.
-expected_occurrences = 25
+# Processed Dolby Vision signaling (#1257): +1 test-only match in
+# processed_profile81_master_declares_hdr10_compatibility reads the admitted
+# session's ready context; no new response owner or worker.
+# Display-targeted DV FR398-1 (0e1e4224d): +1 test-only Ready match in
+# transcode/manager/processed_reuse_tests.rs:1955, assert_admitted_delivery.
+# It reads the admitted successor's frozen HLS context before/after replay;
+# the existing VOD response owner remains authoritative. No worker is added.
+expected_occurrences = 27
 
 [[module_symbols]]
 id = "m4-executor-registration"
@@ -1445,7 +1540,10 @@ expected_occurrences = 5
 [[module_symbols]]
 id = "m4-exact-activation-handoff-store"
 pattern = "complete_media_session_handoff"
-expected_occurrences = 2
+# PR1225: +1 in manager/processed_reuse_tests.rs:1537. commit_and_retire
+# awaits the exact predecessor's end before the existing Store handoff API;
+# test-only, not a new shipped transition owner.
+expected_occurrences = 3
 
 [[module_symbols]]
 id = "m4-exact-activation-handoff-arm"
@@ -1461,7 +1559,10 @@ expected_occurrences = 3
 [[module_symbols]]
 id = "m4-durable-projection-completion-proof"
 pattern = "MediaSessionProjectionCompletion"
-expected_occurrences = 19
+# PR1225: +1 in manager/processed_reuse_tests.rs:1541, the existing
+# PredecessorAcknowledged proof after awaited exact-predecessor retirement.
+# This test helper does not add a proof variant or a shipped release owner.
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-activation-handoff-proof"
@@ -1588,7 +1689,11 @@ pattern = "publication_ready_at_ms"
 # sentinel. None moves a shipped fence.
 # #978: +2, test-only. The create.rs epoch-fence regression builds a blocked
 # activation and then the confirmed row a takeover produces.
-expected_occurrences = 144
+expected_occurrences = 147
+# PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
+# blocked incumbent activation, existing Confirm settlement, then successor
+# publication readback after exact predecessor end and handoff. Test-only;
+# the established Store APIs retain publication authority.
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1650,7 +1755,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # #844: +3, the same three sites as the handoff fence above: the first-
 # preparation refusal compares the sentinel, and two fixtures set it.
 # #978: +1, test-only, the same blocked activation as the handoff fence above.
-expected_occurrences = 54
+# PR1225: +1 in manager/processed_reuse_tests.rs:1425, the test incumbent's
+# blocked activation before its existing Confirm settlement; no shipped write.
+expected_occurrences = 55
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1997,7 +2104,8 @@ pattern = "rendition_build_gate"
 # PR #947 after integrating main 1088d7529: base 30; repair delta +2.
 # Cleanup and conservative cold revalidation take the existing exact-key gate;
 # neither creates a competing build owner.
-expected_occurrences = 33
+# Shared cache eviction takes this same keyed gate before retiring a title.
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -3058,32 +3166,39 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # closes the channel, then the test awaits the JoinHandle and checks every
 # byte received. The two burst regressions share this one spawn site. No
 # production task, timer, process or detached owner is introduced.
-# HTTPS H1 adds four test-only sites in https.rs: one std thread site
-# launches six concurrent identity creators, all retained and joined; another
-# observes FIFO/linked-FIFO reads with a two-second channel deadline and joins
-# successful workers. On a blocking-open regression only, the failed test
-# detaches its blocked worker until the test process exits, so the observer
-# can fail instead of hanging in join. Two tokio sites own finite generated
-# trust (three peers) and private-CA (one peer) servers: awaited on success,
-# owned by the per-test runtime on panic. No production owner or child added.
-# HTTPS H2: +1 awaited startup identity spawn_blocking (bounded regular-file
-# work, no socket until it returns); +4 finite transport regression servers
-# explicitly stopped and joined; +2 full-router test branch tasks joined after
-# ordinary/observation shutdown. Per-test runtime owns unwind cleanup. The
-# production TLS server itself is the JoinSet-owned method-spawn below.
-# HTTPS H3: +1 blocking settings worker retains its owned mutex through
-# read-only preflight, atomic publication and in-memory adoption even when
-# its HTTP waiter disappears. It performs bounded regular-file work and no
-# process launch. +1 cancellation regression waiter is aborted and awaited;
-# the test then acquires the worker-held guard to observe completed file work
-# and adoption before temporary directory teardown.
-# Second main merge into the HTTPS effort: main 926046d0d (970) + HTTPS delta (+13) = 983.
-expected_occurrences = 983
 # Integrated ownership: prior HDR960 plus eight awaited subtitle workers.
 # Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
 # raised this count independently
 # (effort 968, main 961 via the F6 fence-loop task); the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
+# Progressive translation: +3 directly awaited spawn_blocking owners in
+# subtitle_translation/runtime.rs (held-source SHA, PCM inspection, fixture staging).
+# Item ratings (#1205): +1 in http/annotations.rs, the score fetch for one item.
+# It holds that item's single-flight claim (RAII) and ends when the bounded
+# provider requests finish; the reader awaits it for at most FETCH_WAIT and a
+# late result is stored for the next read. No producer, process or timer of its
+# own. +1 test-only mock TMDB/OMDb axum server in http/tests.rs, dropped with
+# the test runtime.
+# Browser restart cancellation: +1 test-only explicit Close task in
+# dv_runtime::capture_owned_graph. It retires the exact registered encoder
+# and its JoinHandle is awaited after capture; no detached production task.
+# supervise_streaming_helper retains the existing run_streaming task site.
+# PR1225: +3 test-only syntax sites: manager/processed_reuse_tests.rs:67
+# (abort/await or release/await preparation), vod/driver.rs:8/1251 (the
+# controlled-driver call and its task). Guard Drop cancels the latter, Ticket
+# records exit even before first poll, and finish_controlled_driver_for_test
+# waits for all exits before capacity assertions; it never runs driver_pass.
+# -2 removed production tasks: serve/delivery.rs refresh expiry and
+# vodserve.rs ProcessedProbeLease drop cleanup. Net +1, no new shipped task.
+# Worker-refinement conformance: +1 `tokio::spawn` in the `#[cfg(test)]`
+# `library_work::tests::spawn_worker` helper. Its returned JoinHandle is awaited
+# by each schedule; this adds no production task owner or shipped behavior.
+# Title acquisition inherited at 83c995e9f (322df0d78): +1 test-only spawn in
+# source_probe/title_work_tests.rs:294, title_admission_accounts_one_thread_and_reaps_before_ordinary_admission.
+# The task owns its Arc manager and physical admission while awaiting the
+# cancellable bounded child. The test cancels it and consumes its JoinHandle
+# before asserting released credit; timeout is failure, never reap evidence.
+expected_occurrences = 1009
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3313,13 +3428,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `true` child (`std::process::Command::spawn`) in process::priority::tests.
 # It is never registered by the launcher, the test reaps it with `wait()`
 # after the assertion, and production gains no launch.
-# HTTPS H2: +1 JoinSet.spawn owns the sole public TLS serving future. Fatal
-# completion cancels daemon shutdown and returns Err; normal stop joins the
-# task before progress/census flush. Dropping the owner aborts the JoinSet.
-# Handshakes are owned futures in a capped queue, never detached tasks.
-# F6 (main #1125): +1 awaited fence-loop task in transcode/tests/chunk_06.rs.
-# Both deltas compose: 69 + 1 + 1 = 71.
-expected_occurrences = 71
+# Browser restart cancellation: +4 test-only child spawns in dv_runtime.
+# capture_owned_graph creates one encoder and one helper; the backpressure
+# regression creates a second pair. Existing ProducerSlot registrations own
+# encoder retirement/reap; helper futures await their children, killing on
+# cancellation.
+expected_occurrences = 77
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3338,7 +3452,9 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # fixture retains the server task and cancels/joins it on teardown.
 # DV adapter: +2 names are its spawn function declaration and probe call;
 # both use the same retained cancellation/reap owner, not separate launchers.
-expected_occurrences = 15
+# PR1225: +1 is vod/driver.rs:1245's cfg(test) controlled_driver::spawn
+# declaration, not a second task. Its actual task/cancellation is noted above.
+expected_occurrences = 16
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4721,25 +4837,38 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # leaves. Timeout fails that assertion; it is not a completion receipt.
 # The single adversarial review covered these paths and found no ownership
 # defect. This inventory records the two constructors already in that review.
-# HTTPS H2: +1 production per-handshake deadline, owned by the capped future
-# queue and cancelled on listener drop; +7 finite regression timers: bounded
-# slot observation/debounce sleep, three pending-peer EOF observations, fatal
-# task stop observation and the full-router serving-task join bound.
-# HTTPS H3: +3 cancellation-regression timers: publication deadline,
-# a short observation that the worker still holds its guard, and completed
-# adoption deadline. All are awaited in the fixture; the bounded blocking
-# channel observer always releases the worker on timeout/disconnection.
-# HTTPS qualification font fixture: +1 sixty-second timeout around the
-# existing real capture and its snapshot-corruption observer. tokio::join!
-# owns both futures inside this test; timeout drops the capture/owned root
-# guard and observer together. No task, process or production timer is added.
 # Integrated ownership: prior HDR1772 plus twelve bounded subtitle observations.
 # Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
 # raised this count independently
 # (effort 1784, main 1778 via the F6 sleeps and timeouts); the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
-# Second main merge into the HTTPS effort: main 926046d0d (1790) + HTTPS delta (+12) = 1802.
-expected_occurrences = 1802
+# Progressive translation: +17 bounded timers (installer phase, manager metadata
+# and demand bounds, module source/readiness bounds, runtime phase/source/fence
+# bounds including the 2 s preparation open, and finite regression waits).
+# Item ratings (#1205): +1 tokio::time::timeout(FETCH_WAIT, task) bounding how
+# long an annotations read waits on the score fetch it started or joined.
+# Browser restart cancellation: +2 two-second test-only timeout observations
+# bound caller-cancel capture and helper-supervisor backpressure completion.
+# Neither supplies settlement: tests await original registered reap and helper
+# completion, including cleanup before asserting the backpressure bound.
+# PR1225: +6 directly awaited test timeout futures: processed_reuse_tests.rs
+# :91 (5s cleanup observation), :117/:145/:218 (10s preparation pauses),
+# vod/driver.rs:1290/1348 (5s held/exited observations). Timeout is failure,
+# never cleanup evidence. -2 removed refresh timeout/expiry sleep in
+# manager/create.rs and serve/delivery.rs. Net +4; no new shipped timer.
+# Worker-refinement conformance: +1 15-second `tokio::time::timeout` in the
+# `#[cfg(test)]` `library_work::tests::next_worker_event` barrier helper. It
+# bounds receipt of the selected event; timeout is failure, not join evidence.
+# Title acquisition inherited at 83c995e9f: +4 syntax sites. source_probe.rs:112
+# (171327649) is the existing scheduler's Linux title-poll pacing sleep; the
+# retained non-Linux sleep is cfg-exclusive, not a concurrent timer owner.
+# source_probe/title_work_tests.rs:321/323/333 (322df0d78) adds two five-second
+# observation bounds and a ten-millisecond startup poll inside the first bound.
+# The task retains admission until bounded child completion; none of these
+# observation deadlines grants reap, publication or admission-release evidence.
+# Frame-MDCV repair: +1 awaited creation-budget timeout around held-source
+# metadata resolution; expiry refuses preparation and creates no recovery owner.
+expected_occurrences = 1863
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5183,7 +5312,30 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # production-copy fixture collection. Each runs finite owned media to
 # completion synchronously before its fixture is released. No task or timer
 # constructor is added; existing probe collector bounds remain unchanged.
-expected_occurrences = 274
+# Progressive translation: +5 constructors (held ffprobe, bounded window decode,
+# qualified recognizer; test-only shell and ps for process-group retirement).
+# HDR10-E physical window test: +1 `Command::new(ffmpeg)` decoding one processed
+# window in the ignored test; collected by `.output()` before its directory drops.
+# Browser restart cancellation: +4 constructors for the test-only encoder/
+# helper pairs in capture_owned_graph and the helper-backpressure regression.
+# These are the same four registered/awaited children reviewed under
+# method-spawn; no production child or independent reap owner is introduced.
+# PR1225: +3 Linux-test-only commands in manager/processed_reuse_tests.rs:
+# :789 muxes the source, :834 probes its actual clock/tracks, :1040 encodes
+# a three-frame control. Each output future is directly awaited and has
+# kill_on_drop(true); no separate per-command timeout or process-group/reap
+# guarantee on cancellation is asserted. No production launcher is added.
+# Title acquisition inherited at 83c995e9f: +2 constructors.
+# source_probe/dv_title.rs:21 (6b060987d) starts the installed scanner through
+# bounded::output_command_clean_env (6h/64KiB); OwnedChild owns kill/reap and
+# joined pipe drains. Tool identity and held-source fences guard its result.
+# source_probe/title_work_tests.rs:341 (322df0d78) synchronously waits for
+# /bin/kill -0 after the cancelled title task joins; it only observes the PID.
+# FR398-1 (0e1e4224d): +1 Linux-test-only FFprobe in
+# vodencode_manager_tests.rs:610, assert_native_sdr_window. Its output future
+# is directly awaited with kill-on-drop; no separate timeout/group-reap claim
+# or production launcher is added by this ignored physical qualification helper.
+expected_occurrences = 297
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5805,16 +5957,27 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # F1/N2 landing repair: +2 matches. constant_size_film.status() synchronously
 # waits/reaps its finite fixture child. record_unplaced's decision.status()
 # names the existing MediaLandingFailed verdict and starts no process.
-# HTTPS H2: +1 JoinSet.spawn is the single owned TLS server (no OS child),
-# plus three response.status() assertions in the full-router startup tests.
-# These broad syntactic matches add no process or reaping obligation.
-# HTTPS H3: +3 status reads, not launches: sanitized JsonRejection's body
-# limit classification and two HTTP certificate/fenced-response assertions.
-# No OS process, producer or child-reaping obligation is added.
 # F5: +2 `VodServe::status()` calls in the frozen-output reporting tests.
 # Both read the attached rendition in process; neither starts an OS child,
 # spawns a task, or acquires a producer lease.
-expected_occurrences = 771
+# HDR10-E physical window test: +1 `.output()` on the finite ffmpeg decode of
+# one processed window (`processed_window_luma`), collected synchronously
+# before its temporary directory is dropped. Ignored test only; no producer.
+# Browser restart cancellation: +4 .spawn() sites for the same test-only
+# encoder/helper pairs reviewed under method-spawn and command-construction.
+# Existing ProducerSlot reaps encoders; helper futures await their own
+# children (killing on cancellation) before retained completion is observed.
+# PR1225: +3 in manager/processed_reuse_tests.rs:826/846/1104, the directly
+# awaited output calls for the test mux/probe/control commands above. Ordinary
+# completion waits for each child; kill-on-drop is a cancellation backstop,
+# not independent confirmed-reap evidence. No production launch is added.
+# Title acquisition inherited at 83c995e9f: +1 synchronous .status() in
+# source_probe/title_work_tests.rs:345 (322df0d78), the finite /bin/kill -0
+# liveness observation after the title task's joined cancellation above.
+# FR398-1 (0e1e4224d): +1 directly awaited FFprobe .output() in
+# vodencode_manager_tests.rs:614, assert_native_sdr_window. It collects the
+# test-owned child normally; its kill-on-drop backstop is not reap evidence.
+expected_occurrences = 801
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6093,18 +6256,17 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # #844: +1 false positive. end_for_owner awaits `cleanup.wait()` on the
 # existing TerminalCleanup; it is not a child-process wait.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's reaping `wait()`.
-# HTTPS H1 adds one Barrier::wait site coordinating the six joined test
-# threads racing managed identity creation. This is in-process synchronization,
-# not an OS child wait; no process start, kill, or reap ownership is added.
-# F6 (main #1125): +1 test-only try_wait observation in transcode/tests/chunk_06.rs
-# proving the negative control starts with a live publisher.
-# Both deltas compose: 326 + 1 + 1 = 328.
-# Second main merge into the HTTPS effort: main 926046d0d (329) + HTTPS delta (+1) = 330.
-expected_occurrences = 330
 # Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
 # raised this count independently
 # (effort 328, main 327 via the F6 try_wait observation); the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
+# Browser restart cancellation: +12 matches. Seven are retained typed
+# HelperCompletion.wait() observations: two in runtime capture, three in the
+# existing physical probe and two in the backpressure regression. They join
+# the existing supervisor result, not an OS process. The other five are the
+# two test helper children's actual wait/start_kill sites (three in the shared
+# capture fixture, two in the backpressure fixture); each child is awaited.
+expected_occurrences = 348
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6180,7 +6342,10 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # #870 adds one test-only libc::kill(pid, 0) liveness observation after its
 # owned cancelled probe has settled; it verifies ESRCH and sends no signal.
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
-expected_occurrences = 67
+# Browser restart cancellation: +1 is the async HelperCompletion::wait method
+# declaration in dv_segment. It observes one retained watch-channel result;
+# it neither signals an OS child nor creates another process/reap owner.
+expected_occurrences = 72
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6312,7 +6477,14 @@ pattern = "kill_on_drop\\s*\\("
 # No repair delta; preserve current main's already reconciled fixture owners.
 # Acceptance root-cause batch: +2 unwind guards on the same two test-only
 # sleep producers; normal settlement is Step::Terminate's confirmed reap.
-expected_occurrences = 106
+# PR1225: +3 in manager/processed_reuse_tests.rs:825/845/1103, the same
+# directly awaited test mux/probe/control commands. These guards request child
+# kill if their output future drops; they are not confirmed-reap receipts.
+# FR398-1 (0e1e4224d): +1 Linux-test-only FFprobe guard in
+# vodencode_manager_tests.rs:613, assert_native_sdr_window. The test directly
+# awaits the output future. Dropping requests a kill; the guard alone proves
+# neither confirmed reap nor process-group cleanup. No shipped owner is added.
+expected_occurrences = 112
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

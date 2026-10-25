@@ -11,9 +11,13 @@ const policy=require('../../crates/plurxd/src/web/playback-policy.js');
 const master='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200000\nindex.m3u8\n';
 const media='#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:8,\nseg_0000.m4s\n#EXTINF:8,\nseg_0001.m4s\n#EXTINF:8,\nseg_0002.m4s\n';
 async function flush(){for(let i=0;i<16;i++)await new Promise(resolve=>setImmediate(resolve));}
-function harness({pendingOpen=false,pendingChange=false}={}){
- let now=0,ordinal=0;const timers=new Map(),answers=[],requests=[],sources=[],rescues=[],diagnoses=[],positions=[],listeners=new Map(),reopens=[],surfaces=[],stops=[];
- const video={readyState:0,videoWidth:0,currentTime:0,paused:true,currentSrc:'/session/master.m3u8',getAttribute:()=>'/session/master.m3u8',addEventListener(event,fn){listeners.set(event,fn);},removeEventListener(event,fn){if(listeners.get(event)===fn)listeners.delete(event);},removeAttribute(){},load(){},pause(){},play(){return Promise.resolve();}};
+function harness({pendingOpen=false,pendingChange=false,realTransport=false}={}){
+ let now=0,ordinal=0;const timers=new Map(),answers=[],requests=[],sources=[],rescues=[],diagnoses=[],positions=[],listeners=new Map(),reopens=[],surfaces=[],stops=[],logs=[];
+ const listenerSets=new Map();
+ const video={readyState:0,videoWidth:0,currentTime:0,paused:true,currentSrc:'/session/master.m3u8',getAttribute:()=>'/session/master.m3u8',
+  addEventListener(event,fn){let callbacks=listenerSets.get(event);if(!callbacks){callbacks=new Set();listenerSets.set(event,callbacks);}callbacks.add(fn);listeners.set(event,(...args)=>Promise.all([...callbacks].map(callback=>callback(...args))));},
+  removeEventListener(event,fn){const callbacks=listenerSets.get(event);callbacks?.delete(fn);if(!callbacks?.size)listeners.delete(event);},
+  removeAttribute(){},load(){},pause(){},play(){return Promise.resolve();}};
  const player={hls:null,wantsPlayback:true,method:'remux',sessionId:'retired',stallRecoveries:0,mediaAttachment:{},controlIntentGeneration:0,qualityCandidates:[],abr:{}};
  if(pendingOpen) player.pendingOpenAttempt={};
  if(pendingChange) player.pendingMediaChange={};
@@ -23,7 +27,7 @@ function harness({pendingOpen=false,pendingChange=false}={}){
   fetch:async(url,options)=>{requests.push({url,options});const answer=answers.shift();if(!answer)throw Error('No scripted answer');return typeof answer==='function'?answer(options):answer;},
   bufferTargets:()=>({}),parseSegTimes:text=>text.split('\n').filter(line=>line.startsWith('#EXTINF:')).map((_,i)=>(i+1)*8),
   setPlaybackMediaSource:(_,url)=>sources.push(url),applyPlaybackTransportIntent(){},applyPlaybackAttachmentPosition(){positions.push(true);},pausePlaybackInternally(){},resetPlaybackTransportEvents(){},
-  qualityCatalogSelectionCurrent:()=>true,notifyPlaybackControl(){},clearStall(){},playbackContext:()=>({}),clientLog(){},tok:x=>x,
+  qualityCatalogSelectionCurrent:()=>true,notifyPlaybackControl(){},clearStall(){},playbackContext:()=>({}),clientLog:row=>logs.push(row),tok:x=>x,
   pbTick(){},pbSyncPlayIcon(){},endWait(){},positionForPlaybackIntent:()=>42,stallRecoverySnapshot:(_p,_v,facts)=>facts,seekTo:(...args)=>reopens.push(args),showStallRecoveryFailure(){throw Error('unexpected recovery exhaustion');},playbackIsReal:()=>false,playbackSurfaceSourceIsBlocking:()=>true,stopPlayerForExhaustion:()=>stops.push(true),raisePlaybackSurface:(source,facts)=>surfaces.push(policy.presentSurface(policy.initialSurfaceState(),{raise:source,...facts,now_ms:now})),toast(){},
   startTranscodeFallback:(...args)=>rescues.push(args),stallDiagnose:()=>{diagnoses.push(true);return Promise.resolve();}});
  vm.runInContext(source,ctx);
@@ -32,11 +36,23 @@ function harness({pendingOpen=false,pendingChange=false}={}){
  vm.runInContext(shippedFunction("stall-diagnosis.js","playbackOwnsAttachedMedia"),ctx);
  vm.runInContext(shippedFunction("measurements.js","recoverServingFencedAttachment"),ctx);
  vm.runInContext(shippedFunction("transport.js","wirePlayerMedia"),ctx);
+ if(realTransport){
+  Object.assign(ctx,{playerActivity(){},reportTtff(){},settlePlaybackControlSeek(){},samplePlaybackPresentationClock(){},samplePreparedSwitchFrames(){},
+   playbackSurfaceStep(){},playbackSurfaceGeneration:()=>player.mediaAttachment,finishStallRecovery(){},streamHasVideo:()=>true,
+   supersedePlaybackControlIntent:p=>++p.controlIntentGeneration});
+  for(const name of ['resetPlaybackTransportEvents','playbackTransportEvents','playbackTransportRecord','logPlaybackTransportRecord',
+   'queuePlaybackTransportCommand','playbackTransportMarker','prunePlaybackPlayInvocations','cancelPlaybackPlayInvocation','pausePlaybackInternally','rememberPlaybackTransportIntent',
+   'applyPlaybackTransportIntent','handlePlaybackTransportEvent']) vm.runInContext(shippedFunction('decode-margin.js',name),ctx);
+  for(const name of ['playerWantsPlayback','togglePlay','playbackProgressTick','playbackWaitNeedsProgress','handlePlaybackPlaying'])
+   vm.runInContext(shippedFunction('transport.js',name),ctx);
+  video.pause=()=>{video.paused=true;};
+  video.play=()=>{video.paused=false;ctx.handlePlaybackTransportEvent(video,player,'play');return Promise.resolve();};
+ }
  ctx.wirePlayerMedia(video);
  const response=(text,status=200,type='application/vnd.apple.mpegurl')=>new Response(text,{status,headers:{'Content-Type':type}});
  ctx.attachNativeHls(video,'http://fixture.invalid/session/master.m3u8?token=fixture',0,player,{current:()=>ctx.current!==false});
  if(!pendingOpen&&!pendingChange){for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}
- return {ctx,player,video,answers,requests,sources,rescues,diagnoses,positions,listeners,response,reopens,surfaces,stops,
+ return {ctx,player,video,answers,requests,sources,rescues,diagnoses,positions,listeners,response,reopens,surfaces,stops,logs,
   advance(ms){now+=ms;for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}},
   retry(){ctx.runNativeHlsReadiness(video,player,player.hlsStartup);},
   stop(){ctx.cancelHlsStartup(player,'test_done');},
@@ -51,6 +67,43 @@ test('native readiness waits for master and selected child before assigning src'
  assert.match(h.requests.at(-1).url,/index\.m3u8\?token=fixture$/);
  assert.equal(h.player.hlsStartup.dispatches,4);h.stop();
 });
+function processedMoviePlaylist(entries=5915){
+ return '#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI="init.mp4"\n'+
+  Array.from({length:entries},(_,i)=>`#EXTINF:2.002000,\nseg${String(i).padStart(5,'0')}.m4s\n`).join('')+'#EXT-X-ENDLIST\n';
+}
+test('native readiness admits the complete processed movie timeline as child or scalar media',async()=>{
+ const playlist=processedMoviePlaylist();assert.ok(Buffer.byteLength(playlist)>65536);
+ for(const scalar of [false,true]){
+  const h=harness();await flush();
+  vm.runInContext(shippedFunction('decode-tiers.js','parseSegTimes'),h.ctx);
+  h.answers.push(...(scalar?[h.response(playlist)]:[h.response(master),h.response(playlist)]));
+  h.advance(1000);await flush();
+  assert.equal(h.sources.length,1,`scalar=${scalar}`);
+  assert.equal(h.player.segTimes.length,5915,'retain every boundary, not a truncated prefix');
+  assert.equal(h.player.segTimes.at(-1),11841.83);
+  assert.equal(h.player.hlsStartup.manifestState,'parsed');h.stop();
+ }
+});
+test('native readiness keeps finite and distinct media, master, error and init body budgets',async()=>{
+ const probe=async({kind,size,status=200})=>{
+  const h=harness();await flush();let reads=0,cancels=0;
+  const prefix=kind==='init'?Buffer.from([0,0,0,8,102,116,121,112]):Buffer.from(kind==='master'?master:media);
+  const bytes=new Uint8Array(size);bytes.fill(32);bytes.set(prefix);
+  h.answers.push({ok:status>=200&&status<300,status,url:'',headers:{get:()=>kind==='init'?'video/mp4':'application/vnd.apple.mpegurl'},
+   body:{getReader:()=>({read:async()=>++reads===1?{done:false,value:bytes}:{done:true},cancel:async()=>{cancels++;}})}});
+  try{return {value:await h.ctx.nativeHlsFetch(h.player,h.player.hlsStartup,'http://fixture.invalid/session/index.m3u8',{init:kind==='init'}),reads,cancels};}
+  catch(error){return {error,reads,cancels};}finally{h.stop();}
+ };
+ const limitHarness=harness();await flush();
+ const limits=vm.runInContext('NATIVE_HLS_BODY_LIMITS',limitHarness.ctx);limitHarness.stop();
+ for(const [kind,limit]of [['media',limits.playlist],['master',limits.master],['init',limits.init]]){
+  const accepted=await probe({kind,size:limit});assert.ok(accepted.value,kind);
+  const refused=await probe({kind,size:limit+1});assert.equal(refused.error?.terminal,true,kind);
+  assert.match(refused.error.message,/byte limit/);assert.ok(refused.cancels>=1,'the bounded reader is retired');
+ }
+ const refused=await probe({kind:'media',size:limits.error+1,status:503});
+ assert.equal(refused.error?.terminal,true);assert.match(refused.error.message,/byte limit/);
+});
 test('native readiness ignores superseded delayed body and does not leak credentials across session',async()=>{
  const h=harness();await flush();
  let release;h.answers.push(()=>new Promise(resolve=>release=resolve));h.advance(1000);await flush();
@@ -63,6 +116,111 @@ test('native pause and expired resume retain the original readiness deadline',as
  h.ctx.pauseHlsStartup(h.player);h.player.wantsPlayback=false;h.advance(50000);await flush();assert.equal(h.sources.length,0);
  h.player.wantsPlayback=true;h.player.controlIntentGeneration++;h.ctx.resumeHlsStartup(h.video,h.player);await flush();
  assert.equal(episode.deadlineMs,deadline);assert.equal(episode.state,'exhausted');assert.equal(h.sources.length,0);h.stop();
+});
+test('unowned startup pause is an observation and the original native deadline still diagnoses',async()=>{
+ const h=harness({realTransport:true});await flush();
+ h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
+ const episode=h.player.hlsStartup,deadline=episode.deadlineMs,generation=h.player.controlIntentGeneration;
+ assert.equal(h.video.paused,false,'the owned startup Play was dispatched');
+ h.video.paused=true;h.listeners.get('pause')();h.listeners.get('pause')();
+ assert.equal(h.player.wantsPlayback,true);assert.equal(h.player.controlIntentGeneration,generation);
+ assert.equal(episode.state,'active');assert.equal(episode.deadlineMs,deadline);
+ const observed=h.logs.filter(row=>row.transport?.reason==='native_observation_before_presentation');
+ assert.equal(observed.length,2);assert.ok(observed.every(row=>row.transport.desired_after===true));
+ h.advance(deadline+1);await flush();h.advance(0);await flush();
+ assert.equal(episode.state,'exhausted');assert.equal(h.diagnoses.length,1);h.stop();
+});
+test('explicit Pause owns preparation and an unknown play cannot undo it',async()=>{
+ const h=harness({realTransport:true});await flush();h.ctx.togglePlay();
+ assert.equal(h.player.wantsPlayback,false);assert.equal(h.player.hlsStartup.state,'paused');
+ const generation=h.player.controlIntentGeneration;
+ h.video.paused=false;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'play');
+ assert.equal(h.player.wantsPlayback,false);assert.equal(h.player.controlIntentGeneration,generation);
+ assert.equal(h.player.hlsStartup.state,'paused');h.stop();
+});
+test('native controls require presentation of this attachment and this element',async()=>{
+ const h=harness({realTransport:true});await flush();
+ h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
+ let frames=0;h.video.getVideoPlaybackQuality=()=>({totalVideoFrames:frames});
+ h.ctx.handlePlaybackPlaying(h.video,h.player);h.ctx.playbackProgressTick(h.video,h.player,true);
+ frames++;h.video.currentTime=0.1;h.ctx.playbackProgressTick(h.video,h.player,true);
+ assert.equal(h.player.hlsStartup.state,'presenting');
+ h.video.paused=true;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'pause');
+ assert.equal(h.player.wantsPlayback,false,'native/PiP Pause remains supported after actual presentation');
+ h.video.paused=false;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'play');
+ assert.equal(h.player.wantsPlayback,true);
+ const generation=h.player.controlIntentGeneration;
+ h.ctx.handlePlaybackTransportEvent(h.video,h.player,'pause');
+ assert.equal(h.player.controlIntentGeneration,generation,'a queued Pause superseded by Play is only an observation');
+ assert.equal(h.logs.at(-1).transport.desired_after,true);
+ assert.equal(h.logs.at(-1).transport.reason,'native_observation_superseded');
+ h.ctx.handlePlaybackTransportEvent({...h.video,paused:true},h.player,'pause');
+ assert.equal(h.player.wantsPlayback,true,'a retired element cannot borrow current proof');
+ const lookup=h.ctx.document.getElementById,successor={...h.video};
+ h.ctx.document.getElementById=id=>id==='video'?successor:lookup(id);
+ h.video.paused=true;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'pause');
+ assert.equal(h.player.wantsPlayback,true,'the actually proven predecessor cannot change successor intent after a DOM swap');
+ h.ctx.document.getElementById=lookup;
+ h.player.mediaAttachment={};h.video.paused=true;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'pause');
+ assert.equal(h.player.wantsPlayback,true,'presentation from the predecessor cannot authorize a replacement Pause');h.stop();
+});
+test('play rejection retains original invocation identity and does not invent viewer Pause',async()=>{
+ const h=harness({realTransport:true});await flush();
+ h.player.attemptId='original';h.player.sessionId='original-session';
+ let reject;h.video.play=()=>new Promise((_resolve,no)=>{reject=no;});
+ h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+ reject(Object.assign(new Error('secret source URL'),{name:'NotSupportedError',code:0}));await flush();
+ const failed=h.logs.find(row=>row.event==='transport_play_rejected');
+ assert.equal(failed.level,'warn');assert.equal(failed.session_id,'original-session');
+ assert.equal(h.player.wantsPlayback,true);
+ assert.match(failed.detail,/^rejected:NotSupportedError:code=0:status=none$/,'the accepted persisted detail retains the cause');
+ assert.equal(h.player.hlsStartup.state,'active');assert.equal(h.rescues.length,0);
+ assert.ok(!JSON.stringify(failed).includes('secret source URL'));
+ h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+ h.player.mediaAttachment={};h.player.sessionId='replacement';h.player.attemptId='incoming';
+ reject(Object.assign(new Error('old abort'),{name:'AbortError'}));await flush();
+ const late=h.logs.filter(row=>row.event==='transport_play_rejected').at(-1);
+ assert.equal(late.level,'warn');assert.equal(late.session_id,'original-session');
+ assert.equal(late.attempt,'original');assert.match(late.detail,/^late_rejection:AbortError:/);h.stop();
+});
+test('owned pause and source commands cancel only their exact pending play invocations',async()=>{
+ for(const command of ['pause','reset','replace']){
+  const h=harness({realTransport:true});await flush();h.player.sessionId='original-session';
+  for(const name of ['resetMediaSource','setPlaybackMediaSource'])vm.runInContext(shippedFunction('decode-margin.js',name),h.ctx);
+  const pending=[];h.video.play=()=>new Promise((resolve,reject)=>pending.push({resolve,reject}));
+  h.ctx.applyPlaybackTransportIntent(h.video,h.player);h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+  if(command==='pause')h.ctx.pausePlaybackInternally(h.video,'viewer_pause');
+  else if(command==='reset')h.ctx.resetMediaSource(h.video);
+  else h.ctx.setPlaybackMediaSource(h.video,'/replacement.m3u8');
+  assert.equal(h.player.transportPlayInvocation,null,'owned cancellation releases its pending invocation chain');
+  for(const request of pending)request.reject(Object.assign(new Error('cancelled'),{name:'AbortError'}));
+  await flush();
+  const cancelled=h.logs.filter(row=>row.event==='transport_play_cancelled');
+  assert.equal(cancelled.length,2,`${command} proves cancellation of both outstanding Play calls`);
+  assert.ok(cancelled.every(row=>row.level==='info'&&row.session_id==='original-session'&&/^cancelled:.*:AbortError:/.test(row.detail)));
+  assert.equal(h.logs.some(row=>row.event==='transport_play_rejected'),false);
+  assert.equal(h.player.hlsStartup.playRejection,null);h.stop();
+ }
+ const h=harness({realTransport:true});await flush();let reject;
+ h.video.play=()=>new Promise((_resolve,no)=>{reject=no;});h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+ h.ctx.pausePlaybackInternally(h.video,'viewer_pause');
+ reject(Object.assign(new Error('actual failure'),{name:'NotSupportedError'}));await flush();
+ assert.equal(h.logs.at(-1).level,'warn','owned cancellation never hides a non-cancellation browser failure');h.stop();
+});
+test('direct outgoing teardown cancels Play before source replacement loses its owner',async()=>{
+ const h=harness({realTransport:true});await flush();h.player.method='direct';h.player.hls=null;
+ h.player.sessionId='outgoing-direct';h.player.attemptId='outgoing-attempt';
+ Object.assign(h.ctx,{abandonPreparedReplacement(){},supersedeDirectedChange(){},cancelPreparedFirstFrame(){}});
+ for(const name of ['teardownHls','setPlaybackMediaSource'])vm.runInContext(shippedFunction('decode-margin.js',name),h.ctx);
+ let reject;h.video.play=()=>new Promise((_resolve,no)=>{reject=no;});h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+ h.ctx.teardownHls();assert.equal(h.video.paused,true,'retirement issues a real owned pause for direct media too');
+ vm.runInContext("PLAYER={sessionId:'incoming',mediaAttachment:{},wantsPlayback:true}",h.ctx);
+ h.ctx.setPlaybackMediaSource(h.video,'/incoming.mp4');
+ reject(Object.assign(new Error('old command aborted'),{name:'AbortError'}));await flush();
+ const cancelled=h.logs.find(row=>row.event==='transport_play_cancelled');
+ assert.equal(cancelled.session_id,'outgoing-direct');assert.equal(cancelled.attempt,'outgoing-attempt');
+ assert.match(cancelled.detail,/^cancelled:source_teardown:AbortError:/);
+ assert.equal(h.logs.some(row=>row.event==='transport_play_rejected'),false);h.stop();
 });
 test('native persistent rejection reloads once and refuses an absent encode route without rescue',async()=>{
  const h=harness();await flush();h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
@@ -86,9 +244,9 @@ test('native readiness metadata ownership survives pause and is retired on cance
  const h=harness();await flush();h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
  const metadata=h.listeners.get('loadedmetadata');assert.equal(typeof metadata,'function');
  h.ctx.pauseHlsStartup(h.player);assert.equal(h.listeners.get('loadedmetadata'),metadata);
- metadata();assert.equal(h.positions.length,1);assert.equal(h.listeners.has('loadedmetadata'),false);h.stop();
+ metadata();assert.equal(h.positions.length,1);assert.equal(h.player.hlsStartup.native.metadataListener,null);h.stop();
  const stale=harness();await flush();stale.answers.push(stale.response(master),stale.response(media));stale.advance(1000);await flush();
- const old=stale.listeners.get('loadedmetadata');stale.stop();assert.equal(stale.listeners.has('loadedmetadata'),false);
+ const old=stale.listeners.get('loadedmetadata');stale.stop();assert.equal(stale.player.hlsStartup.native.metadataListener,null);
  old();assert.equal(stale.positions.length,0);
 });
 test('native persistent refusal admits one verified encode fallback with an unverified cause',async()=>{
@@ -443,4 +601,118 @@ test('native fixture keeps its 16 s sweep by default and serves a lab arm when g
  const timer=setTimeout(()=>refused.kill(),5000);
  const [code]=await new Promise(resolve=>refused.on('exit',(...args)=>resolve(args)));clearTimeout(timer);
  assert.equal(code,2,'an invalid arm must be refused, not served');
+});
+
+// These cases retain the real terminal owner, not just the logging seam above.
+function installPermissionOwner(h){
+ Object.assign(h.ctx,{clearEffectiveProcessing(){},finishPlaybackSeekTelemetry(){},
+  stopPlaybackControl(){h.stops.push('control');},clearPendingSeekTimer(){},clearInterval(){}});
+ for(const [file,names] of [
+  ['surface.js',['retireHlsTerminalAttempt','stopPlayerForExhaustion']],
+  ['decode-margin.js',['stopPlayerTimers']],
+ ])for(const name of names)vm.runInContext(shippedFunction(file,name),h.ctx);
+}
+test('native permission refusal stops recovery immediately and waits for a viewer gesture',async()=>{
+ const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+ h.video.play=()=>Promise.reject(Object.assign(new Error('private URL'),{name:'NotAllowedError'}));
+ h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
+ assert.equal(h.sources.length,1,'the actual readiness owner attached before Play was refused');
+ assert.equal(h.player.wantsPlayback,true,'browser policy never becomes a viewer Pause');
+ assert.equal(h.player.playPermissionDenied.element,h.video);
+ assert.equal(h.player.terminalStop.attachment,h.player.mediaAttachment);
+ assert.equal(h.player.hlsStartup.state,'cancelled');
+ assert.equal(h.player.hlsStartup.native.metadataListener,null);
+ assert.equal(h.player.samplingStopped,true);
+ assert.equal(h.stops.length,1,'the control owner stops exactly once');
+ const surface=h.surfaces.at(-1).surface;
+ assert.equal(surface.kind,'blocking');assert.equal(surface.fault.source,'owner_stopped');
+ assert.deepEqual(Array.from(surface.actions),['retry','close']);
+ assert.match(surface.title,/permission/);
+ assert.equal(h.ctx.playbackOwnsAttachedMedia(h.player),false);
+ h.ctx.applyPlaybackTransportIntent(h.video,h.player);await flush();
+ h.advance(90000);await flush();h.advance(0);await flush();
+ assert.equal(h.logs.filter(row=>row.event==='transport_play_rejected').length,1);
+ assert.equal(h.requests.length,3,'no permission retry is spent on playlist requests');
+ assert.equal(h.reopens.length,0);assert.equal(h.rescues.length,0);assert.equal(h.diagnoses.length,0);
+});
+test('permission refusal is attachment fenced and also stops progressive playback',async()=>{
+ for(const change of ['attachment','element','intent','pause','source','cancelled','none']){
+  const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+  h.ctx.cancelHlsStartup(h.player,'progressive');h.player.hlsStartup=null;
+  let reject;h.video.play=()=>new Promise((_yes,no)=>{reject=no;});
+  h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+  if(change==='attachment')h.player.mediaAttachment={};
+  if(change==='element')h.ctx.document.getElementById=()=>({});
+  if(change==='intent')h.player.controlIntentGeneration++;
+  if(change==='pause')h.player.wantsPlayback=false;
+  if(change==='source')h.video.getAttribute=()=>'/different.mp4';
+  if(change==='cancelled')h.ctx.cancelPlaybackPlayInvocation(h.video,'source_teardown');
+  reject(Object.assign(new Error('refused'),{name:'NotAllowedError'}));await flush();
+  assert.equal(!!h.player.playPermissionDenied,change==='none',change);
+  assert.equal(h.stops.length,change==='none'?1:0,change);
+  assert.equal(h.logs.filter(row=>row.event==='transport_play_rejected').length,1,'every refusal remains observable');
+ }
+});
+
+test('explicit transport after permission refusal retries Play without turning Pause into a retry',async()=>{
+ const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+ h.video.play=()=>Promise.reject(Object.assign(new Error('denied'),{name:'NotAllowedError'}));
+ h.ctx.applyPlaybackTransportIntent(h.video,h.player);await flush();
+ const actions=[];h.ctx.playbackSurfaceAction=action=>actions.push(action);
+ vm.runInContext(shippedFunction('transport.js','setPlayerPlaying'),h.ctx);
+ h.ctx.setPlayerPlaying(false);assert.equal(h.player.wantsPlayback,false);assert.equal(actions.length,0);
+ h.ctx.setPlayerPlaying(true);assert.equal(h.player.wantsPlayback,true);assert.deepEqual(actions,['retry']);
+ h.stop();
+});
+
+test('presentation reevaluation permission rejection fences the already pending recovery ask',async()=>{
+ const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+ h.player.started=true;h.player.waitAt=1;h.player.waitStartedRunway=5.5;h.video.paused=false;
+ h.ctx.performance.now=()=>8001;
+ let answer;
+ Object.assign(h.ctx,{SUPPLY_RUNWAY_SECS:1.5,CONTROL_STALL_DEFER_DEADLINE_MS:20000,
+  bufferRunway:()=>5.5,pbPosSec:()=>42,recordWaitStall(){},armedPlaybackControlVerdict:()=>null,
+  askPlaybackControl:()=>({trigger:'ask',action:new Promise(resolve=>{answer=resolve;})}),
+  endWait:()=>{h.player.waitAt=null;}});
+ vm.runInContext(shippedFunction('measurements.js','persistentWaitEvidence'),h.ctx);
+ vm.runInContext('async '+shippedFunction('measurements.js','persistentWait'),h.ctx);
+ h.video.play=()=>Promise.reject(Object.assign(new Error('denied'),{name:'NotAllowedError'}));
+ const pending=h.ctx.persistentWait(h.video,h.player,1,0,0);await flush();
+ assert.ok(h.player.playPermissionDenied,'reevaluation uses the central rejection owner');
+ answer(null);await pending;
+ assert.equal(h.reopens.length,0);assert.equal(h.rescues.length,0);
+ assert.equal(h.player.hlsStartup.state,'cancelled');assert.equal(h.stops.length,1);
+});
+
+test('refilled supply wait permission rejection stops before the same-turn recovery verdict',async()=>{
+ for(const rejection of ['throw','promise']){
+  const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+  h.player.started=true;h.player.waitAt=1;h.player.waitStartedRunway=0;h.video.paused=false;
+  let answer,runway=0,now=8001,plays=0;
+  h.ctx.performance.now=()=>now;
+  Object.assign(h.ctx,{SUPPLY_RUNWAY_SECS:1.5,CONTROL_STALL_DEFER_DEADLINE_MS:20000,
+   bufferRunway:()=>runway,pbPosSec:()=>42,recordWaitStall(){},armedPlaybackControlVerdict:()=>null,
+   askPlaybackControl:()=>({trigger:'ask',action:new Promise(resolve=>{answer=resolve;})}),
+   controlVerdictText:text=>text,playbackStallActions:()=>['retry','close'],
+   endWait:()=>{h.player.waitAt=null;}});
+  vm.runInContext(shippedFunction('measurements.js','persistentWaitEvidence'),h.ctx);
+  vm.runInContext('async '+shippedFunction('measurements.js','persistentWait'),h.ctx);
+  h.video.play=()=>{
+   plays++;const error=Object.assign(new Error('denied'),{name:'NotAllowedError'});
+   if(rejection==='throw')throw error;
+   // Browser play() returns a promise from the media owner's realm.
+   return vm.runInContext("Promise.reject(Object.assign(new Error('denied'),{name:'NotAllowedError'}))",h.ctx);
+  };
+  const pending=h.ctx.persistentWait(h.video,h.player,1,0,0);await flush();
+  assert.equal(plays,0,'the initial empty buffer is a supply wait');
+  runway=5.5;now=25001;
+  answer({type:'terminal',code:'recipe_failed',message:'The producer recipe failed.'});await pending;
+  assert.equal(plays,1,'refill receives exactly one central transport reevaluation');
+  assert.ok(h.player.playPermissionDenied,rejection);
+  assert.equal(h.stops.length,1,'the permission owner alone stops the attachment');
+  assert.equal(h.surfaces.length,1,'the pending verdict cannot replace the permission prompt');
+  assert.match(h.surfaces[0].surface.title,/permission/);
+  assert.equal(h.reopens.length,0);assert.equal(h.rescues.length,0);
+  assert.equal(h.player.hlsStartup.state,'cancelled');
+ }
 });

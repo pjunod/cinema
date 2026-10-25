@@ -10,7 +10,7 @@ function headerSearch(layout){
  const app={innerHTML:''},location={hash:'#/settings/metadata'};
  const document={activeElement:null,getElementById:id=>id==='q'?q:id==='app'?app:null};
  const noop=()=>{};
- const c=vm.createContext({document,location,ME:{is_admin:true,username:'cinema-admin'},APP_NAME:'Cinema',
+ const c=vm.createContext({mountLayoutFrame:markup=>{app.innerHTML=markup;},LAYOUT_RECOMPOSING:false,SEARCH_INPUTS:new WeakSet(),document,location,ME:{is_admin:true,username:'cinema-admin'},APP_NAME:'Cinema',
   captureSearchFocus:()=>null,restoreSearchFocus:noop,installAvailable:()=>false,esc:String,getQ:()=>'',buildLabel:()=>'',
   navKeyboardWireOnce:noop,theaterWireOnce:noop,catalogWireOnce:noop,pollActivity:noop,
   theaterNavHtml:()=>'',catalogIcon:()=>'',catalogTabsHtml:()=>'',catalogFillNav:noop,

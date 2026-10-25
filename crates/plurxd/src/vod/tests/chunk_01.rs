@@ -447,6 +447,7 @@ pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
 
 fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
     SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -753,7 +754,7 @@ async fn insert_control_session(
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
-                processed_probes: Vec::new(),
+                processed_reuse_seed: None,
             preferred_start_ms: None,
             passive_grant: None,
             rendition: Some(rendition),
@@ -810,7 +811,7 @@ async fn insert_terminal_session(
             children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
-                processed_probes: Vec::new(),
+                processed_reuse_seed: None,
             preferred_start_ms: None,
             passive_grant: None,
             rendition: None,

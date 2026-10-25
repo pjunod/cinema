@@ -141,10 +141,10 @@ const SHARED_DECISION=(()=>{
   }
   // A bound context (a reopen of a started session) asks about its base file
   // under the accepted login, the same rule its fresh Start follows.
-  async function decision(context,selection={force:"auto"},signal=null){
+  async function decision(context,selection={force:"auto"},signal=null,incumbent=null){
     const bound=!!context?.session_id,base=bound?bases.get(context):context,c=bound?accepted.get(context):contexts.get(context),valid=()=>bound?authorized(c):current(c);
     if(!c||!base||!valid())fail();playbackFileContext(base);const q=query(selection);
-    const caps=currentCapsDocument();if(caps?.v!==2)fail();const body=JSON.stringify({caps});if(new TextEncoder().encode(body).length>REQUEST_MAX)fail();
+    const caps=currentCapsDocument(incumbent);if(caps?.v!==2)fail();const body=JSON.stringify({caps});if(new TextEncoder().encode(body).length>REQUEST_MAX)fail();
     const snapshot=copy(JSON.parse(body).caps),raw=await read(playbackFileUrl(base,"decision",q),c,body,signal,bound?"session":"page");
     if((bound?accepted.get(context):contexts.get(context))!==c||!valid())fail();const result=validate(raw,base);
     Object.defineProperty(result,"_capsSnapshot",{value:snapshot,enumerable:false});return result;

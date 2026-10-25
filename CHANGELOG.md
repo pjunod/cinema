@@ -8,6 +8,244 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- Optional display-targeted HDR10-E selects a supported downward bucket from
+  the viewer's reported peak, with platform/viewer provenance, complete-title
+  L1 eligibility and master elision. The independent Developer preference is
+  off by default and readiness never blocks saving it. Activity names the
+  actual live target/master choice; DYN requires a published L1-only mapping
+  receipt. Targeted roots remain private live output, outside retained VOD
+  caches; pre-encodes and ordinary VOD remain master-only.
+
+- Internal display-targeted HDR10-E groundwork: complete-title L1 coverage,
+  consistent L6/L9 facts, six explicit target identities and a stateless public
+  Annex B.2/B.3 RGB shader with named engineering edge extensions. Exact requested
+  policy and raw-RPU L1 are checked before helper output is accepted. No display
+  selection was exposed by this groundwork alone; no proprietary
+  Dolby, perceptual-equivalence or display-accuracy claim.
+  Title acquisition uses durable source/scanner generations, retains demand on
+  scheduler preemption, suppresses manual cancellation, and yields its one-thread
+  admitted child to runnable ordinary probes before releasing resources.
+- Web playback controls show the current presented resolution and quality mode,
+  with a brief quality-change notice that also works in fullscreen.
+
+- Native macOS menu-bar and optional Linux desktop controls show local server status, open the web interface and logs, start/stop/restart the server, and manage separate server and tray startup preferences. Named upgrades use authenticated GitHub release artifacts; production release trust and macOS signing must be provisioned before distribution.
+- Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
+- A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
+
+### Changed
+
+- Display-targeted HDR10-E and SDR now map each shot with closed-form Dolby
+  display management instead of the ST 2094-10 Annex B.2 curve: CM v4 (L1+L3,
+  L8 trims interpolated to the target, colour trims across gamuts) for CM v4.0
+  RPUs and CM v2.9 (L2 trims) otherwise, measured against the licensed reference
+  renderer as a QC referee. The helper reports the family and trim selection per
+  frame and the daemon checks it exactly against the raw RPU. Every targeted
+  rendition re-renders under the new method identity.
+- Display-targeted HDR10-E and SDR apply the colourist's creative trims: CM v4
+  L8 trims, and CM v2.9 L2 trims (the bucket's own, otherwise interpolated
+  linearly in target PQ and faded at the mastering peak, as measured on the
+  reference renderer), accepted by pixel comparison against it on real titles.
+  Playback info says “creative trims applied”, “creative trims on some
+  shots” or “L1 only” from the report (`creative_trims_applied`, new
+  `creative_trims_partial`).
+  Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v2`.
+  Apple build 275, Android versionCode 181.
+- CM v2.9 display-targeted output keeps near-black colours neutral, as the
+  reference renderer does: the chroma scale's intensity ratio is capped at 2
+  and multiplied by a measured near-black gain per target (stock 600/1000/2000
+  P3 and BT.2020 targets and the 100-nit SDR target, linear in target PQ).
+  Before, chroma of noise in letterbox bars and very dark areas was boosted up
+  to 13x. On real frames with dark content p99.9 ΔE_ITP drops from 3–28 to
+  0.7–8.5 (SDR and 600/1000-nit P3); titles with little near-black content
+  are unchanged. The BT.2020 rows are measured on synthetic sweeps only.
+  Targeted renditions re-render under method
+  `dolby-closed-form-cm4-cm29-v3`.
+- The CM v2.9 near-black chroma gain is taken on the absolute output
+  intensity, not above the target black. Measured with stock targets redefined
+  with a 0.005-nit black, as plurx renders HDR targets: chroma at and just above
+  black was 2-4x too low (mean ΔE_ITP on near-black sweeps 1.4-2.7 -> 0.6-1.5).
+  CM v2.9 HDR (PQ) targets also clip to the target cube at 0, not at the
+  target black, as the reference does (the black shapes the tone curve only);
+  the SDR target keeps clipping at its display black.
+  Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v4`.
+
+### Fixed
+
+- Display-targeted playback reads mastering metadata carried on decoded frames
+  when stream metadata omits it. The bounded probe stays bound to the held source
+  and selected stream; HDR primaries and unknown-title SDR black levels resolve
+  before the rendition policy is frozen.
+
+- Display-targeted HDR10 resolves one mastering minimum before helper execution
+  and rendition identity: consistent title L6, trusted source MDCV, then the
+  established renderer floor. Completed reports and output metadata describe
+  that exact target; metadata cannot select a different black floor afterward.
+
+- Explicit internal display-targeted HDR10 windows carry consistent post-encode
+  mastering/content-light declarations in init boxes and every IRAP prefix SEI,
+  independent of encoder family. Mastering primaries/minimum use title L9/L6 or
+  the selected held source's MDCV when missing; contradictory or unknown facts
+  refuse the target. Max luminance/CLL follow the bucket and scanned L1 bound;
+  MaxFALL remains unknown. Default/master output is unchanged, and targeting
+  controls remain unexposed pending subsequent delivery stages.
+
+- Processed P7 FEL rendering uses the same bounded public decoder-metadata
+  mapper as base/RPU rendering, preserving real piecewise polynomial and MMR
+  reshaping instead of requiring the synthetic identity subset. Fresh raw-RPU
+  association, paired enhancement-layer contribution and nonbinding residual
+  clipping checks remain required.
+
+- Processed Dolby Vision windows support an observed nonnegative common
+  source origin instead of requiring literal zero. Absolute picture keys,
+  soundtrack offset and bounded membership checks stay intact; missing or
+  differing held video/FORMAT origins explicitly fall back. The frozen held
+  origin is passed to the helper explicitly, so missing or changing partial
+  demux timestamps cannot replace the epoch used for windows and EOF checks.
+
+- Complete-title Dolby Vision scans compare a selected Matroska track's
+  `DURATION` tag to its timestamp endpoint rather than subtracting a nonzero
+  video origin. Independent selected-video declarations, complete decoder
+  drains and the existing one-tick completeness allowance remain required;
+  unrelated audio or container durations cannot supply missing coverage.
+
+- Internal complete-title scan state survives chapter, HEVC-parameter-set and
+  content-encoding probe decorations, including repeated identical writes and
+  manually cancelled generations. Only actual source changes or fresh ordinary
+  probe publication invalidate it; identical ordinary reprobes still rotate.
+- The iPhone Live TV guide opens the station-logo time grid instead of the
+  single-channel dropdown schedule, including phones with the old saved choice.
+
+- Playback info describes the device's Dolby Vision profile compatibility
+  without claiming FEL was discarded or the base picture copied before the
+  session selects its processing. Session enhancement details distinguish
+  FEL reconstruction from basic Profile 8.1 conversion.
+
+- All playback caches share one disk budget with reader-safe global eviction,
+  pre-write capacity reservations and a filesystem free-space reserve, preventing
+  completed renditions and concurrent producers from exhausting server disks.
+
+- Processed Dolby Vision Profile 8.1 playlists include the required HDR10
+  compatibility brand so Apple players can recognize the Dolby Vision enhancement.
+
+- macOS installation reports the blocking transaction and recovery command,
+  records source-upgrade failures, and can explicitly complete an interrupted
+  restoration after verifying the promoted runtime and candidate health.
+
+- Web playback automatically captures bounded frame-drop incidents with recent
+  frame, buffer, lifecycle and request evidence, respecting diagnostic-history
+  controls and retaining account-scoped local copies for investigation.
+
+- Processed Dolby Vision admission respects actual HLS support when clients
+  also advertise progressive DV; native web startup reads complete long-film
+  processing timelines without confusing them with small master playlists.
+
+- Dolby Vision FEL processing on Intel servers can use the independently
+  proved VAAPI output encoder when hardware selection prefers Quick Sync,
+  avoiding an unintended single-thread software encode and startup timeout.
+
+- Web playback counts delivered frame callbacks independently of suspicious
+  timestamps, preventing metadata diagnostics from retaining a buffering
+  overlay or triggering false stall recovery while the picture advances.
+
+- Apple TV movie and show rows keep complete posters, titles and metadata
+  visible while browsing. Library headings, search and the letter index scroll
+  with the results, leaving the compact tools available above them.
+
+- Web prepared quality switches reattach selected subtitles without cancelling
+  the pending quality request or sending a contradictory commit to the server.
+  Visible successors retain HLS failure recovery; established retries and
+  queued stall probes preserve their proper budgets and terminal diagnoses.
+
+- System settings separates Cinema and Jellyfin FFmpeg versions, shows concise
+  configured media capabilities and actual device bindings, and compares
+  representative decoding, processing and encoding work. Auto prefers working
+  hardware using real-media speed; collapsed diagnostics no longer poll.
+
+- Native Mac installs retain the complete patched Jellyfin media package,
+  including Metal reference-white support, static Vulkan/libplacebo, the
+  source parser and font authority. Known legacy media paths follow the
+  current runtime. Settings warns prominently about the wrong package,
+  missing hardware-specific features or failed execution probes, with a
+  separate build/execution matrix for Mac, Intel, AMD and NVIDIA hardware.
+
+- macOS source installation installs the pinned Rust toolchain when missing,
+  bootstrapping rustup through Homebrew and installing Homebrew if needed.
+  Existing toolchains are reused without a download.
+- Safari Play and Resume prepare the persistent media element during the user
+  gesture, before asynchronous stream readiness. Browser permission refusals
+  now stop recovery immediately and retain position and track choices for an
+  explicit retry instead of repeatedly reopening the same blocked stream.
+- macOS tray menus show a short error-details action and bound rendered row widths while retaining full text in dialogs, tooltips and accessibility. Successful GUI upgrades update status without opening a completion window.
+- Linux tray menus keep Docker startup details in the control window, bound long menu labels, and accept clicks after status refreshes when the panel fetches all D-Bus menu properties.
+
+
+- Linux tray installation accepts ordinary group-writable user desktop folders,
+  including existing hicolor icon directories, without changing permissions.
+  Desktop destinations are checked before staging or registering the tray.
+
+- Native desktop controllers embed the approved production update verification
+  key instead of refusing all update checks with an empty trust-root list.
+  Existing empty-root installations need one trusted manual reinstall; signed
+  release publication still requires protected GitHub signing configuration.
+
+- Compose tray registration accepts discovery containers without Docker
+  healthchecks and absent optional stop timeouts. Docker failures identify the
+  command and exit code without exposing container configuration or diagnostics.
+
+- Linux installers use verified prebuilt GitHub tray artifacts by default and
+  reserve GTK development packages/local tray compilation for `--build-tray`.
+  Compose installs select the host architecture and stable release independently
+  of the container, while native source cohorts require an exact source match.
+
+- Linux Compose tray installation accepts the selected user-owned checkout and
+  Compose files with ordinary group-write permissions, without changing them.
+  Private tray state remains protected; permission errors name the exact path.
+
+- Linux GUI Compose installations can install a separate host tray for the
+  selected local deployment, including status, logs, graceful lifecycle controls
+  and separate container boot and tray login preferences. Headless hosts and
+  container images retain their GUI-free runtime.
+
+- Native GUI source and binary installation now installs and opens the complete
+  tray companion and local controller instead of updating only the daemon.
+  Existing server running and startup choices are preserved.
+
+- Converted Profile 7 catalog starts can qualify reconstructed Profile 8.1 under FEL re-encode independently of the HDR-processing switch. The service carries an explicit processed destination on a finite PQ transcode, resolves its own encoded AAC audio, and checks the completed stream against one matching Main10/Profile 8 client capability entry. Native Dolby Vision copying is unchanged; refusals retain their reason and only the saved ordinary request can be a fallback. Remote descriptors retain the destination but do not acquire local execution authority.
+- Exact processed VOD predecessor reuse retains its existing reservation without requiring new throughput samples or missing qualification windows. A first pending same-node staged successor reconstructs current recipe/caps/audio inputs from its exact ledger predecessor's private provenance, under the admitted owner epoch; serialized descriptions alone still grant no execution authority. Replay, prepared-reader marking and cleanup retain the exact attached owner through asynchronous sealing, without mutating a same-id replacement. Unrelated graphs still require normal resource admission.
+- Browser startup keeps the requested transport intent when a decoder emits an unexplained pause before the current attachment presents. The original startup deadline remains active, and rejected Play calls retain their cause in diagnostics. Closing during a prepared quality switch drains both session handles through rollback and pending commit acceptance, including after the old decoder retires.
+- Closing an HDR10-E session preserves intentional cancellation through the processing helper and generation owner, so normal cleanup cannot blacklist the backend for the next play. Failed web session releases and failed quality recovery now retain diagnostics under the originating session without marking a replacement playback failed.
+- Web Auto keeps the current HDR10-E recipe through a matching quality-catalog refresh instead of requesting an ordinary HDR10 replacement. Leaving or reloading the page also releases its playback sessions immediately, so abandoned sessions do not hold processing capacity until the idle timeout.
+
+- Settings names the server you are signed in to by its machine name. A server still on the default name `plurx` used to show `plurx` on every node. A new signed-in route, `GET /api/v1/server/node`, gives the answering node's `hostname` and a `display_name` (a chosen name, else the hostname, the same rule as the LAN picker, which now resolves the hostname the same way the roster does). iOS, tvOS and Android Settings show it, adding the hostname after a chosen name, and the web System tab heads with it and lists the Host.
+- HDR10-E at 4K is produced faster. The processing helper renders into 16-bit rather than 32-bit float textures, converts to 10-bit Y'CbCr in one compute pass, and queues each frame's download so the GPU finishes one frame while the next is decoded. On an Intel Alder Lake test node a 2-second 4K window takes 0.9–1.1 s in the helper instead of 1.7 s, and 1.75 s instead of 2.2 s with the hardware encoder (Profile 7 FEL); Profile 8 takes 2.1 s instead of 2.55 s, still short of real time there.
+- Dolby Vision HDR10-E (server-processed HDR10) plays at every resolution. The processing helper decodes on the GPU (VA-API, mapped zero-copy into the renderer, with a software or host-copy fallback it reports) and converts to 10-bit Y'CbCr on the GPU. Reconstructed frames carry their frame duration and BT.2020 PQ colour description, every display-metadata version is accepted, and the 720p cap, the speed qualification, the Auto-only rule and the other silent gates are gone. Every decline after the Developer setting is named in the plan notes, and an explicitly chosen rung is no longer filtered by Auto's link evidence. Receipts and the effective-processing report record whether the window was GPU-decoded.
+- Apple TV Meridian: choosing a different source from the navigation panel opens that source and focuses its library tools again.
+- Apple Resume retries interrupted native seeks once and retains the saved position when preparation fails or the player closes.
+- Restore Standard's native iPad/Apple TV tabs on iOS/tvOS 18 and later, full-screen TV details, and original TV Theater styling after Meridian changed the existing layouts. Theme choices and open navigation state remain independent of the layout; framework-owned tabs preserve fullscreen playback after switching destinations.
+
+- Non-Dolby-Vision clients that support HLS are offered a segmented HDR10-base copy when Developer → DV processing is enabled, so the HLS processing path can apply HDR10-E instead of silently bypassing it with a progressive remux. Setting-off and progressive-only delivery remain unchanged; actual processing and any decline are reported by the HLS session.
+- Continuous AVC fallback catalogs exclude rows outside H.264 High@5.0 at the source's measured cadence, including 2160p, instead of offering a family that fails at session creation. An unknown or nominal-only cadence offers no continuous family.
+
+### Added
+
+- Web player shows the Dolby Vision enhancement the server reports: FEL / RPU / DYN pills after the dynamic-range badge for what is active, and an Enhancement row in Playback info with one neutral line per enhancement explaining it or why it is unused. Processed-HDR10 pills appear only while a current HDR10-E report is held.
+
+- Web Meridian layout and independent theme, with collapsible source navigation, responsive phone destinations and cinematic Home/detail presentation. Layout changes retain the current page, library controls and playback session.
+
+### Fixed
+
+- Apple preserves saved server/account pairing against launch overrides and
+  unverified bootstrap failures; stale authentication completions cannot
+  overwrite a newer server choice or login.
+- Apple Auto retains its installed candidate after a proposal settles and
+  rejects stale named successors before replacing a current preparation.
+- Apple playback starts on devices without Picture in Picture support by
+  settling repeated attachment to the same player layer.
+- Apple Playback info reports the installed Auto rung after a prepared quality
+  switch, so an encoded 720p stream no longer retains the original Remux label.
+
 ## [0.7.0] — 2026-10-17
 
 ### Added

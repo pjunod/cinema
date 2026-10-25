@@ -42,6 +42,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         MediaSessionRequestClaim::Acquired { .. }
     ));
     let request = crate::transcode::SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -206,6 +207,7 @@ async fn started_session_cleanup_shipped_shape() {
     let dir = crate::test_tempdir().expect("state dir");
     let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
     let request = crate::transcode::SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -644,6 +646,7 @@ async fn vod_ready_metered(
         observed_media_duration_ms: None,
         delivery,
         retained_lease: None,
+        cache_pin: None,
         file: tokio::fs::File::open(path)
             .await
             .expect("open VOD response object"),
@@ -3401,4 +3404,97 @@ async fn negotiated_relay_uses_owner_local_acquisition_and_preserves_cached_mani
     assert!(text.contains("#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n"));
     assert_eq!(text.replace("#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n","").as_bytes(),baseline);
     assert_eq!(fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("unchanged"),baseline);
+}
+
+/// The indicator's route comes from the selected processing plan, not from
+/// whether the first window's report has arrived: a create that beats its
+/// report must still describe HDR10-E, and a staged copy successor keeps the
+/// native DYN pill.
+/// A completed reconstructed 8.1 uses the truthful encoded carrier; its plan
+/// projection, not the PQ base label, supplies FEL+RPU+DYN.
+#[test]
+fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
+    use plurx_core::playback::enhancement::EnhancementBadge;
+    use plurx_core::transcode::OutputGrade;
+    let file = dolby_vision_p7_file();
+    let converted = crate::transcode::SessionKind::Copy {
+        convert_dolby_vision: true,
+        aac: false,
+        preserve_dolby_vision: true,
+    };
+    let reconstructed = crate::transcode::SessionKind::Transcode { height: 1080 };
+    // Retain the original owner-projection regression as well as the new
+    // encoded carrier: the completed plan must not be relabelled by a kind.
+    assert_eq!(
+        session_delivered_processing_shape(Some(&file), &converted, OutputGrade::Hdr10, Some(8)),
+        (Some("dolby_vision"), Some(8))
+    );
+    assert_eq!(
+        session_delivered_processing_shape(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8)),
+        (Some("dolby_vision"), Some(8))
+    );
+    let shown = session_enhancement(
+        Some(&file),
+        &reconstructed,
+        OutputGrade::Hdr10,
+        Some(8),
+        Some(true),
+        None,
+        None,
+        None,
+    )
+    .expect("a Dolby Vision source");
+    assert_eq!(
+        shown.active,
+        [EnhancementBadge::Fel, EnhancementBadge::Rpu, EnhancementBadge::Dyn]
+    );
+    let projected_legacy = session_enhancement(Some(&file), &converted, OutputGrade::Hdr10,
+        Some(8), Some(true), None, None, None).expect("owner-projected completed legacy carrier");
+    assert_eq!(projected_legacy.active, shown.active);
+    // The plain conversion still says why the FEL is unused.
+    let plain = session_enhancement(
+        Some(&file),
+        &converted,
+        OutputGrade::Hdr10,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("a Dolby Vision source");
+    assert_eq!(plain.active, [EnhancementBadge::Dyn]);
+}
+
+#[test]
+fn the_enhancement_follows_the_selected_plan_before_any_report() {
+    use plurx_core::playback::enhancement::EnhancementBadge;
+    use plurx_core::transcode::OutputGrade;
+    let file = dolby_vision_p7_file();
+    let rung = crate::transcode::SessionKind::Transcode { height: 2160 };
+    let planned =
+        session_enhancement(Some(&file), &rung, OutputGrade::Hdr10, None, Some(true), None, None, None)
+            .expect("a Dolby Vision source");
+    assert!(planned.requires_effective_processing);
+    assert!(planned
+        .details
+        .iter()
+        .any(|detail| detail.badge == EnhancementBadge::Rpu && detail.active));
+    assert!(planned
+        .details
+        .iter()
+        .any(|detail| detail.badge == EnhancementBadge::Fel && detail.active));
+    let base = session_enhancement(Some(&file), &rung, OutputGrade::Hdr10, None, None, None, None, None)
+        .expect("a Dolby Vision source");
+    assert!(base.active.is_empty() && !base.requires_effective_processing);
+    // No settings snapshot (a prepared successor): never claims the setting is off.
+    assert!(base.details.iter().all(|detail| !detail.text.contains("Settings")));
+    let native = crate::transcode::SessionKind::Copy {
+        convert_dolby_vision: false,
+        aac: false,
+        preserve_dolby_vision: true,
+    };
+    let kept = session_enhancement(Some(&file), &native, OutputGrade::Sdr, None, None, None, None, None)
+        .expect("a Dolby Vision source");
+    assert_eq!(kept.active, [EnhancementBadge::Dyn]);
 }

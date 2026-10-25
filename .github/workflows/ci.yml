@@ -76,6 +76,7 @@ jobs:
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       apple: ${{ steps.scope.outputs.apple }}
+      desktop_macos: ${{ steps.scope.outputs.desktop_macos }}
       android_jvm: ${{ steps.scope.outputs.android_jvm }}
       android_device: ${{ steps.scope.outputs.android_device }}
       web_layout: ${{ steps.scope.outputs.web_layout }}
@@ -237,8 +238,8 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # The same history/contract sweep runs in the effort and main fast lanes.
-    # Use their ten-minute budget rather than timing out a qualified release.
+    # Allows the 5-minute worker witness smoke, other package smokes, toolchain
+    # provisioning and preflight validation to finish with headroom.
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -265,6 +266,49 @@ jobs:
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+      - name: Check formal protocol source mapping
+        id: formal-inputs
+        env:
+          PLURX_FORMAL_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          mkdir -p target/verification/durable-jobs target/verification/operation-progress target/verification/worker-refinement
+          if [ -n "$PLURX_FORMAL_BASE" ]; then
+            python3 scripts/check-formal check-mapping --package durable-jobs --affected-base "$PLURX_FORMAL_BASE" > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package operation-progress --affected-base "$PLURX_FORMAL_BASE" > target/verification/operation-progress/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package worker-refinement --affected-base "$PLURX_FORMAL_BASE" > target/verification/worker-refinement/ci-inputs.json
+          else
+            python3 scripts/check-formal check-mapping --package durable-jobs > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package operation-progress > target/verification/operation-progress/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package worker-refinement > target/verification/worker-refinement/ci-inputs.json
+          fi
+          python3 -c 'import json, os; from pathlib import Path; base=Path("target/verification"); durable=json.loads((base/"durable-jobs/ci-inputs.json").read_text()); progress=json.loads((base/"operation-progress/ci-inputs.json").read_text()); worker=json.loads((base/"worker-refinement/ci-inputs.json").read_text()); assert all(type(item["affected"]) is bool for item in (durable, progress, worker)); out=open(os.environ["GITHUB_OUTPUT"], "a"); print("affected_durable=" + str(durable["affected"]).lower(), file=out); print("affected_progress=" + str(progress["affected"]).lower(), file=out); print("affected_worker_refinement=" + str(worker["affected"]).lower(), file=out); print("affected=" + str(durable["affected"] or progress["affected"] or worker["affected"]).lower(), file=out)'
+      - name: Provision the pinned formal toolchain
+        if: steps.formal-inputs.outputs.affected == 'true'
+        run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+      - name: Complete the bounded formal smoke configuration
+        id: formal-smoke
+        if: steps.formal-inputs.outputs.affected_durable == 'true'
+        run: python3 scripts/check-formal smoke --package durable-jobs --cache-dir target/formal-toolchain
+      - name: Complete operation-progress formal smoke configurations
+        id: formal-progress-smoke
+        if: steps.formal-inputs.outputs.affected_progress == 'true'
+        run: python3 scripts/check-formal smoke --package operation-progress --cache-dir target/formal-toolchain
+      - name: Complete worker-refinement formal smoke configurations
+        id: formal-worker-refinement-smoke
+        if: steps.formal-inputs.outputs.affected_worker_refinement == 'true'
+        run: python3 scripts/check-formal smoke --package worker-refinement --cache-dir target/formal-toolchain
+      - name: Preserve formal model receipts and counterexamples
+        if: always() && steps.formal-inputs.outcome != 'skipped'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: formal-model-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/verification/durable-jobs/
+            target/verification/operation-progress/
+            target/verification/worker-refinement/
+          if-no-files-found: error
+          retention-days: 90
       - name: Provision checksummed public K08 oracle sources
         run: |
           set -eu
@@ -304,13 +348,19 @@ jobs:
     # General executors also reclaim above 4 GiB during the large Rust check.
     # Share the existing larger-memory topology queue; keep its host bounds.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
-    # Full run 5274 exhausted twenty minutes during all-target checking.
-    # Match the current bounded effort allowance; keep the same command and
-    # one Cargo job. A fresh complete run must prove this margin sufficient.
+    container: ubuntu:24.04
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Install Rust gate prerequisites
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -336,6 +386,11 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   check:
     name: Rust unit and SQLite contracts
@@ -344,8 +399,6 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
-    # The full daemon test compiler exceeded the general 7 GiB resident cap.
-    # This dedicated capacity retains the same suite/profile and combined bound.
     runs-on: [self-hosted, Linux, X64, lab, unit-memory-12g]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
@@ -354,9 +407,11 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    # Run 5228 exhausted 30m after compilation and 1917 unit result rows,
-    # before the full unit/SQLite receipt. Keep the entire suite and a finite cap.
-    timeout-minutes: 90
+    # Run 5447 failed after 88m50s; the two following serial FFmpeg checks
+    # never ran. Source fixture admission may also queue independent bodies.
+    # Preserve every command with a finite 120m cap. Passing full-gate duration
+    # remains unmeasured; this budget is not a completion guarantee.
+    timeout-minutes: 120
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"
@@ -422,6 +477,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: ./.github/actions/rust-native-deps
+        with:
+          desktop: "true"
       - uses: ./.github/actions/ffmpeg
         with:
           major: "8"
@@ -456,7 +513,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, ci-store]
     # Run 5228 completed 188 of 367 serial controls before the 40m cutoff.
     # Preserve the full inventory with a finite budget for its measured runtime.
-    timeout-minutes: 120
+    timeout-minutes: 95
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1019,6 +1076,8 @@ jobs:
     if: needs.scope.outputs.cluster_auth == 'true'
     # Retained outcomes still require compiling the large current native targets.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
+    # Run 5447 passed 213 commands; the next feature target was still compiling
+    # at 30 minutes. Full completion time remains unmeasured.
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "1"
@@ -1456,8 +1515,8 @@ jobs:
   apple:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
-    if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
+    if: (needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true'
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
@@ -1475,9 +1534,30 @@ jobs:
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
-          grep -Fxq "Xcode 27.0" <<< "$xcode_version"
-          grep -Fxq "Build version 27A266a" <<< "$xcode_version"
-          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.0"
+          printf '%s\n' "$xcode_version"
+          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
+          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
+          xcrun --find swift
+      - name: Build and test native macOS server tray
+        if: needs.scope.outputs.desktop_macos == 'true'
+        # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
+        # The complete native output is preserved independently, including failures.
+        run: |
+          mkdir -p target/validation
+          make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
+          echo "Native macOS server tray build and unit checks passed."
+      - name: Preserve native macOS server tray check output
+        if: always() && needs.scope.outputs.desktop_macos == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: desktop-macos-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/validation/desktop-macos-check.log
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify the pinned mobile Apple toolchain
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
+        run: |
+          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.1"
           test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"
           test "$(xcodegen --version)" = "Version: 2.46.0"
           simulator_runtimes="$(xcrun simctl list runtimes)"
@@ -1489,14 +1569,16 @@ jobs:
       # incremental rebuild from a near miss still beats a cold compile, and a
       # poisoned cache only ever costs the rebuild we paid before caching.
       - name: Cache DerivedData
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: clients/apple/build/DerivedData
-          key: apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
+          key: apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
           restore-keys: |
-            apple-dd-${{ hashFiles('clients/apple/project.yml') }}-
-            apple-dd-
+            apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-
+            apple-dd-xcode-27A9275-ios27.1-tvos27.0-
       - name: Create isolated iPhone, iPad, and Apple TV simulators
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
           # A job-level timeout cancels its `always()` cleanup along with the
           # test step. Remove only simulators owned by this workflow before
@@ -1533,13 +1615,15 @@ jobs:
             xcrun simctl bootstatus "$simulator_id" -b
           done
       - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: make apple-test
       - name: Require native TV navigation journeys
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
-        if: always()
+        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1547,7 +1631,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Delete the run's simulators
-        if: always()
+        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
           for destination in "${APPLE_IOS_SIM:-}" "${APPLE_IPAD_SIM:-}" "${APPLE_TVOS_SIM:-}"; do
             udid="${destination##*,id=}"
@@ -1757,9 +1841,12 @@ jobs:
           file: Dockerfile
           target: linux-dolby-package-export
           platforms: linux/amd64
-          outputs: type=local,dest=linux-dolby-export
+          outputs: type=tar,dest=linux-dolby-export.tar
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,scope=package-media-amd64' || '' }}
           cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,mode=max,scope=package-media-amd64' || '' }}
+      - name: Validate and unpack the complete audited media export
+        if: matrix.arch == 'amd64'
+        run: python3 -m validation.media_export linux-dolby-export.tar linux-dolby-export
       - name: Build the runtime from only the verified binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:

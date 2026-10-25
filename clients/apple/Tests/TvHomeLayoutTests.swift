@@ -14,12 +14,17 @@ final class TvHomeLayoutTests: XCTestCase {
             runtimeMs: 3_600_000, resolution: 2160,
             watch: Watch(positionMs: 900_000, watched: false)
         )
+        let model = AppModel(startServices: false)
+        model.layout = .standard
         let renderer = ImageRenderer(content:
             TvTheaterHero(feature: TvTheaterFeature(item: item, isContinueWatching: true))
+                .environmentObject(model)
+                .environmentObject(RemoteNavigationCoordinator())
                 .frame(width: 1920)
         )
         let image = try XCTUnwrap(renderer.uiImage)
         XCTAssertEqual(image.size.width, 1920)
+        XCTAssertGreaterThanOrEqual(image.size.height, 540, "Standard must retain the original Theater hero height")
         XCTAssertLessThanOrEqual(image.size.height, 600, "Leave room for the first shelf below the hero")
         let attachment = XCTAttachment(image: image)
         attachment.name = "Apple TV Theater — missing artwork"

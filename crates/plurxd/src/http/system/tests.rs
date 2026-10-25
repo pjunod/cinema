@@ -912,6 +912,7 @@ fn raft_exposition_is_fixed_and_privacy_safe() {
 fn beacon(event: &str, ms: i64) -> ClientLog {
     ClientLog {
         transport: None,
+        frame_drop: None,
         level: "warn".into(),
         event: event.into(),
         message: "x".into(),

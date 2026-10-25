@@ -28,6 +28,8 @@ mod copyseg;
 mod decode_facts;
 mod decoder_health;
 mod delivery;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod desktop_control;
 mod diagnostics;
 mod diagnostics_delivery;
 mod dv_disk;
@@ -35,6 +37,7 @@ mod dv_disk;
 mod dv_segment;
 mod dvpipe;
 mod ffmpeg;
+mod ffmpeg_support;
 mod fontenv;
 mod fragindex;
 mod fragment_index_cluster;
@@ -56,6 +59,7 @@ mod online_subtitles;
 mod panics;
 mod pgs_overlay;
 mod pipeprobe;
+mod playback_cache;
 mod playback_control;
 mod playstart;
 mod process_control;
@@ -92,6 +96,7 @@ mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;
 mod subtitle_transcription;
+mod subtitle_translation;
 mod subtitles;
 mod telemetry;
 mod titlestore;
@@ -310,6 +315,11 @@ pub(crate) fn test_temp_path(name: impl AsRef<std::path::Path>) -> std::path::Pa
     about = "plurx media server daemon"
 )]
 struct Cli {
+    /// Print the full compiled source commit and exit without loading configuration.
+    #[cfg(unix)]
+    #[arg(long)]
+    source_commit: bool,
+
     /// Path to a TOML config file (default: ./plurx.toml or
     /// /etc/plurx/plurx.toml if present).
     #[arg(long, global = true, env = "PLURX_CONFIG")]
@@ -537,6 +547,11 @@ compile_error!("DV segment physical probe requires Unix descriptor custody");
 #[tokio::main]
 async fn daemon_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    #[cfg(unix)]
+    if cli.source_commit {
+        println!("{}", crate::version::SOURCE_COMMIT);
+        return Ok(());
+    }
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
     if let Err(error) = dispatch(
         cli.command.unwrap_or(Command::Run),
@@ -1772,6 +1787,8 @@ async fn run(config: Config) -> anyhow::Result<()> {
     // lets the startup stages below answer a signal instead of finishing every
     // one of them first.
     let shutdown = ShutdownWatch::observing(shutdown_signal());
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let desktop = desktop_control::DesktopControl::from_environment()?;
 
     let observation = Arc::new(StartupObservationHttp::new(config.server.bind));
     let mut selected =
@@ -1853,15 +1870,38 @@ async fn run(config: Config) -> anyhow::Result<()> {
             start_mdns_advertiser,
             shutdown.signalled(),
             Some(Arc::clone(&observation)),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            desktop.clone(),
         )
         .await
     };
     let result = serving.await;
     observation.stop_and_drain().await;
-    let shutdown = selected
-        .shutdown()
-        .await
-        .context("stopping local Hiqlite voter");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let native_commit = if let Some(desktop) = &desktop {
+        desktop.is_committed().await
+    } else {
+        false
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let native_commit = false;
+    let shutdown = if native_commit {
+        match tokio::time::timeout(Duration::from_secs(30), selected.shutdown()).await {
+            Ok(result) => result.context("stopping local Hiqlite voter"),
+            Err(_) => Err(anyhow::anyhow!(
+                "local Hiqlite store close timed out during committed native shutdown"
+            )),
+        }
+    } else {
+        selected
+            .shutdown()
+            .await
+            .context("stopping local Hiqlite voter")
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(desktop) = desktop {
+        desktop.finish(shutdown.is_ok()).await?;
+    }
     result.and(shutdown)
 }
 
@@ -2164,7 +2204,16 @@ async fn boot(
     advertiser: MdnsAdvertiser,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    boot_observing(config, parts, advertiser, shutdown, None).await
+    boot_observing(
+        config,
+        parts,
+        advertiser,
+        shutdown,
+        None,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        None,
+    )
+    .await
 }
 
 async fn boot_observing(
@@ -2173,6 +2222,9 @@ async fn boot_observing(
     advertiser: MdnsAdvertiser,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     observation: Option<Arc<StartupObservationHttp>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))] desktop: Option<
+        Arc<desktop_control::DesktopControl>,
+    >,
 ) -> anyhow::Result<()> {
     let observation = match observation {
         Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
@@ -2312,6 +2364,31 @@ async fn boot_observing(
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let desktop_server = if let Some(desktop) = &desktop {
+        let bind = config.server.bind;
+        let ip = match bind.ip() {
+            std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            }
+            std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+            }
+            ip => ip,
+        };
+        Some(
+            desktop
+                .serve(
+                    state.clone(),
+                    format!("http://{}", SocketAddr::new(ip, bind.port())),
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let desktop_shutdown = desktop.clone();
     let app = http::router(state);
     tokio::task::spawn_blocking(http::web::warm_static_assets)
         .await
@@ -2346,7 +2423,7 @@ async fn boot_observing(
         tokio::select! {
             () = shutdown => {}
             () = leave_shutdown.cancelled() => {
-                tracing::info!("cluster leave committed, draining");
+                tracing::info!("local shutdown requested, draining");
             }
         }
         // One drain token for both causes: owners that must hand work back
@@ -2365,6 +2442,10 @@ async fn boot_observing(
             .await;
         crate::telemetry::drain_for_shutdown(&telemetry_store).await;
         if let Err(error) = live_tv_shutdown.shutdown().await {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Some(desktop) = &desktop_shutdown {
+                desktop.record_auxiliary_failure();
+            }
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
         // The main listener stops accepting when this future completes;
@@ -2403,6 +2484,20 @@ async fn boot_observing(
     // them, so both write an unclean final record and the next start counts an
     // unclean stop. A failed write is read the same way, which is honest too.
     let clean = matches!(served, Ok(HttpDrain::Complete));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if let Some(server) = desktop_server {
+            if let Err(error) = server.finish().await {
+                if let Some(desktop) = &desktop {
+                    desktop.record_auxiliary_failure();
+                }
+                tracing::warn!(%error, "native IPC did not drain cleanly");
+            }
+        }
+        if let Some(desktop) = &desktop {
+            desktop.record_http_drain(clean);
+        }
+    }
     if let Err(error) = plex_census
         .flush_durable(http::plex_census::unix_now_s(), clean)
         .await
@@ -2934,23 +3029,14 @@ async fn probe_system(
         .await?;
     let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
-    let optimization = match tokio::time::timeout(
-        std::time::Duration::from_secs(180),
-        transcoder_optimization::measure(&ffmpeg, &encoder_caps),
-    )
-    .await
+    // Representative comparisons run only on an explicit idle-node request.
+    // A saved receipt is reusable only for this executable/fixture/driver set.
+    let optimization = match transcoder_optimization::load(store, node_id, &ffmpeg, &encoder_caps)
+        .await
     {
-        Ok(Ok(report)) => {
-            if let Err(error) = transcoder_optimization::save(store, node_id, &report).await {
-                tracing::warn!(%error, "could not persist transcoder benchmark");
-            }
-            Some(report)
-        }
-        result => {
-            tracing::warn!(
-                ?result,
-                "transcoder benchmark unavailable; using validated encoder order"
-            );
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, "could not load representative transcode comparison; using validated hardware order");
             None
         }
     };
@@ -3020,6 +3106,17 @@ async fn probe_system(
     );
     system.hwaccel_override = hwaccel_override;
     system.transcoder_optimization = optimization;
+    let support = crate::ffmpeg_support::report(&system).await;
+    if !support.package_problems.is_empty()
+        || support.rows.iter().any(|row| row.required && !row.included)
+    {
+        tracing::error!(
+            executable = %support.executable,
+            package_problems = ?support.package_problems,
+            missing = ?support.rows.iter().filter(|row| row.required && !row.included).map(|row| (&row.label, &row.missing)).collect::<Vec<_>>(),
+            "FFmpeg does not satisfy this node's media support contract; see Settings > System"
+        );
+    }
     Ok((encoder_caps, system))
 }
 
@@ -3375,6 +3472,7 @@ fn spawn_background_loops(
             .root_readability_loop(std::sync::Arc::clone(&state.store)),
     );
     tokio::spawn(std::sync::Arc::clone(&state.shared_cache).run(background_shutdown.clone()));
+    tokio::spawn(std::sync::Arc::clone(&state.playback_cache).run(background_shutdown.clone()));
     // Fragment indexes are node-local for both storage backends. Validate one
     // bounded page here on every node; cluster leadership is neither required
     // nor sufficient to cover another node's sidecar.
@@ -4100,15 +4198,14 @@ fn discovery_name(
 ) -> DiscoveryName {
     let configured = configured.trim();
     let machine = hostname.and_then(normalized_hostname);
-    let (label, names_the_machine) =
-        if !configured.is_empty() && !configured.eq_ignore_ascii_case("plurx") {
-            (configured.to_owned(), false)
-        } else {
-            match machine {
-                Some(host) => (host, true),
-                None => ("plurx".to_owned(), false),
-            }
-        };
+    let (label, names_the_machine) = if plurx_core::config::is_default_server_name(configured) {
+        match machine {
+            Some(host) => (host, true),
+            None => (plurx_core::config::DEFAULT_SERVER_NAME.to_owned(), false),
+        }
+    } else {
+        (configured.to_owned(), false)
+    };
     let Some(address) = address else {
         return DiscoveryName {
             label,
@@ -4178,26 +4275,10 @@ fn primary_lan_address() -> Option<IpAddr> {
     (!address.is_loopback() && !address.is_unspecified()).then_some(address)
 }
 
-#[cfg(unix)]
+/// The machine name the picker shows: the same resolution the cluster roster
+/// and `/api/v1/server` use, so a picker row and Settings name a node alike.
 fn system_hostname() -> Option<String> {
-    let mut buffer = [0_u8; 256];
-    // SAFETY: `buffer` is writable for exactly the length passed to libc, and
-    // it remains alive until the returned bytes are copied into a Rust String.
-    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
-        return None;
-    }
-    let end = buffer
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(buffer.len());
-    normalized_hostname(&String::from_utf8_lossy(&buffer[..end]))
-}
-
-#[cfg(not(unix))]
-fn system_hostname() -> Option<String> {
-    std::env::var("COMPUTERNAME")
-        .ok()
-        .and_then(|value| normalized_hostname(&value))
+    plurx_core::cluster::membership::system_short_hostname()
 }
 
 #[derive(Deserialize)]
@@ -4469,7 +4550,7 @@ fn mdns_service_info(
     let host_suffix = node_label_suffix(node_id.unwrap_or(instance_id));
     let hostname = format!("plurx-{host_suffix}.local.");
     let logical_name = if name.trim().is_empty() {
-        "plurx"
+        plurx_core::config::DEFAULT_SERVER_NAME
     } else {
         name
     };

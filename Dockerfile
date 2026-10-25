@@ -59,7 +59,7 @@ RUN sed -i \
     && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
     && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl build-essential patch pkg-config ninja-build nasm python3-venv \
-      libvulkan-dev glslang-dev libxxhash-dev \
+      libvulkan-dev glslang-dev libxxhash-dev libva-dev libdrm-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY tools/dv_processing/build-requirements.txt /build-inputs/build-requirements.txt
 RUN python3 -m venv /opt/dv-build-python \
@@ -90,7 +90,7 @@ RUN sed -i \
       /etc/apt/sources.list.d/debian.sources \
     && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
     && apt-get update && apt-get install -y --no-install-recommends \
-      python3 libvulkan1 mesa-vulkan-drivers liblcms2-2 libstdc++6 \
+      python3 libvulkan1 mesa-vulkan-drivers liblcms2-2 libstdc++6 libva2 libva-drm2 libdrm2 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=dv-processing-helpers /opt/dv-bundle /usr/lib/plurx/dv-processing
 RUN python3 /usr/lib/plurx/dv-processing/sources/bundle-manifest.py \
@@ -321,7 +321,7 @@ RUN ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         build-essential clang cmake curl git jq libssl-dev lld llvm make nasm ninja-build \
-        pkg-config python3 python3-venv \
+        libgtk-4-dev libdbus-1-dev pkg-config python3 python3-venv \
     && python3 -m venv /opt/playwright-venv \
     && /opt/playwright-venv/bin/pip install --no-cache-dir 'playwright==1.62.0' \
     && /opt/playwright-venv/bin/python3 -m playwright install --with-deps chromium \

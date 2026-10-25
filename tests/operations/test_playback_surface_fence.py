@@ -337,6 +337,9 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
             "encoder", "finished", "isChangingStream", "isPlaying", "isVOD",
             "knownDurationMs", "lastTTFFMs", "pgsOverlayStatus", "pgsOverlayWindow",
             "playbackControlSummary",
+            # Not a surface: the server's FEL / RPU / DYN enhancement answer
+            # behind the media-fact pills. No fault prose; a stop clears it.
+            "playbackEnhancement",
             # Not surfaces: the AVPlayer the view's layer draws, and the warm
             # prepared player whose own layer is staged beside it for inline
             # promotion (commit 11ad88cc1). Both are pictures, never fault prose;

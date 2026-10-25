@@ -45,7 +45,7 @@ impl TranscodeManager {
         // The same guard the catalog restore path keeps: a processed candidate
         // exists only as the prepared VOD graph it was qualified with, and the
         // rolling engine would serve its recipe identity unprocessed.
-        if candidate_context.is_some_and(|context| context.selected_candidate.processed_hdr10) {
+        if candidate_context.is_some_and(|context| context.selected_candidate.processed_dv) {
             return Err(vod_refusal_error(
                 "candidate_recipe_unavailable",
                 "processed candidate requires fresh admitted owner qualification",
@@ -1733,6 +1733,7 @@ impl TranscodeManager {
 
         Ok(StartInfo {
             processed_dv_profile: None,
+            processed_fel: None,
             degraded_processing: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),
@@ -2523,6 +2524,7 @@ impl TranscodeManager {
 
         Ok(StartInfo {
             processed_dv_profile: None,
+            processed_fel: None,
             degraded_processing: None,
             retained_output: None,
             audio_delivery: audio_delivery.cloned(),
