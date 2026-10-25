@@ -236,7 +236,9 @@ int main(int argc, char **argv) {
   // a title mastered at 1000 nits (display_target.rs pins the same): the 100-nit trim fades to
   // neutral at 1000; the 3079 trim lies above PQ(1000), so at 600 nothing is left to interpolate
   f = prep_m(&hi, 600, DM_P3D65, 1000);
-  assert(f.algo == 29 && !strcmp(f.trim, "l1-only") && f.weight == 0 && f.trim_targets == 1);
+  assert(f.algo == 29 && !strcmp(f.trim, "l1-only") && f.weight == 0 && f.trim_targets == 0);
+  f = prep_m(&hi, 1000, DM_P3D65, 1000);   // an L2 authored for the mastering peak is not applied at it
+  assert(f.algo == 29 && !strcmp(f.trim, "l1-only") && f.weight == 0 && f.trim_targets == 0);
   {
     rpu low; base(&low, 80, 1528, 3728); add_l2(&low, 2081, 2010, 2180, 2075, 2050, 2179, 1800);
     f = prep_m(&low, 600, DM_P3D65, 1000);

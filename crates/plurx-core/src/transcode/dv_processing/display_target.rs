@@ -324,7 +324,8 @@ impl DvDisplayTarget {
 /// trims, otherwise CM v2.9. With trims, CM v4 uses every L8 whose target display is a preset or
 /// is described by an L10. CM v2.9 uses the L2 authored for the bucket peak; otherwise each trim
 /// field is interpolated linearly in target PQ between the bracketing L2 targets, with neutral
-/// trims at PQ 0 and at the mastering peak (measured against the reference renderer).
+/// trims at PQ 0 and at the mastering peak (measured against the reference renderer). At or above
+/// the mastering peak both families map untrimmed.
 fn dv_display_management(
     raw: &[u8],
     nits: u32,
@@ -409,9 +410,11 @@ fn dv_display_management(
     // An L2 target between this display and the mastering peak; without one (and without a lower
     // target) every trim has faded out.
     let (upper, lower) = (hi <= 1.0 && hi < smast, lo >= 0.0);
-    let (curve, weight) = if let Some(ms) = exact {
+    let (curve, weight) = if tmax >= smast {
+        ("cm29-l1-only", 0.0)
+    } else if let Some(ms) = exact {
         ("cm29-l2-exact", ms)
-    } else if tmax < smast && (lower || upper) {
+    } else if lower || upper {
         if !upper {
             (hi, hi_ms) = (smast, 0.0);
         }
@@ -426,7 +429,7 @@ fn dv_display_management(
     Ok(DvDisplayManagement {
         cm4: false,
         curve,
-        trim_targets: l2_trims,
+        trim_targets: if curve == "cm29-l1-only" { 0 } else { l2_trims },
         detail_weight: weight,
     })
 }
@@ -589,7 +592,12 @@ mod tests {
         assert!((w - -0.02760024702986694).abs() < 1e-12, "{w}");
         assert_eq!(
             at_1000(&build(false, vec![l2(3079, 1800)]), 600),
-            (false, "cm29-l1-only", 1, 0.0)
+            (false, "cm29-l1-only", 0, 0.0)
+        );
+        // an L2 authored for the mastering peak itself is not applied at it
+        assert_eq!(
+            at_1000(&build(false, vec![l2(3079, 1800)]), 1000),
+            (false, "cm29-l1-only", 0, 0.0)
         );
         assert_eq!(
             at_1000(&build(true, vec![l8(48)]), 1000),

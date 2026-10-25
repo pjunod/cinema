@@ -167,10 +167,10 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
   // CM v2.9: the L2 trim authored for this target's peak (12-bit PQ match); otherwise each decoded
   // trim field interpolated linearly in target PQ between the bracketing L2 targets, with neutral
   // trims at PQ 0 and at the mastering display (title peak). No usable L2, or a target at or above
-  // the mastering peak: neutral trim with the default MS weight.
+  // the mastering peak (even with an L2 authored for it): neutral trim with the default MS weight.
   dm_cm29_trim tr = {0, 0, 0, 0, 0, 0}; unsigned want = (unsigned)floor(tmax * 4095 + 0.5); int found = 0;
   {
-    dm_cm29_trim lo_t = tr, hi_t = tr; double lo = -1, hi = 2; bool exact = false;
+    dm_cm29_trim lo_t = tr, hi_t = tr, ex_t = tr; double lo = -1, hi = 2; bool exact = false;
     for (size_t i = 0; cm29_trims && i < d->level2.len; i++) {
       const DoviExtMetadataBlockLevel2 *x = d->level2.list[i];
       dm_cm29_trim t;
@@ -179,7 +179,7 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
       t.ms = dv_dm_off((unsigned)(x->ms_weight < 0 ? 2048 : x->ms_weight), 2048);
       double q = dv_dm_pq12(x->target_max_pq);
       if (!exact && (unsigned)x->target_max_pq + 1 >= want && (unsigned)x->target_max_pq <= want + 1) {
-        exact = true; tr = t;
+        exact = true; ex_t = t;
       }
       if (q < tmax && q > lo) { lo = q; lo_t = t; }
       if (q > tmax && q < hi) { hi = q; hi_t = t; }
@@ -187,8 +187,8 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
     // an L2 target between this display and the mastering peak; without one (and without a lower
     // target) every trim has faded out and the mapping is the untrimmed one
     bool upper = hi <= 1 && hi < smast, lower = lo >= 0;
-    if (exact) found = 2;
-    else if (tmax < smast && (lower || upper)) {
+    if (exact && tmax < smast) { found = 2; tr = ex_t; }
+    else if (!exact && tmax < smast && (lower || upper)) {
       if (!upper) { hi = smast; memset(&hi_t, 0, sizeof(hi_t)); }   // neutral at the mastering peak
       if (!lower) { lo = 0; memset(&lo_t, 0, sizeof(lo_t)); }       // neutral at PQ 0
       double w = (hi - tmax) / (hi - lo);                  // weight of the lower trim
@@ -204,7 +204,7 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
   if (!dm_cm29_prepare(&s, L1, d->level6 ? d->level6->min_display_mastering_luminance / 10000.0 : 0.005,
                        smast_nits, &tg, &tr)) return "degenerate CM2.9 shot";
   f->weight = tr.ms;
-  f->trim_targets = cm29_trims ? (int)d->level2.len : 0; f->trim = found == 2 ? "l2-exact" : (found ? "l2-interpolated" : "l1-only");
+  f->trim_targets = found ? (int)d->level2.len : 0; f->trim = found == 2 ? "l2-exact" : (found ? "l2-interpolated" : "l1-only");
   f->c29 = s;
   dv_dm_pack_cm29(f, &s);
   return NULL;

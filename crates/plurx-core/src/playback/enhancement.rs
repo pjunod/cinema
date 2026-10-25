@@ -219,7 +219,7 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
                     || "DYN: not carried — HDR10 has no Dolby Vision dynamic metadata".into(),
                     |nits| match creative_trims {
                         CreativeTrims::All => format!("DYN: per-shot Dolby display mapping for a {nits}-nit display by the server, with the colourist's creative trims"),
-                        CreativeTrims::Partial => format!("DYN: per-shot Dolby display mapping for a {nits}-nit display by the server, with the colourist's creative trims on the shots that carry them"),
+                        CreativeTrims::Partial => format!("DYN: per-shot Dolby display mapping for a {nits}-nit display by the server, with the colourist's creative trims on some shots"),
                         CreativeTrims::None => format!("DYN: per-shot L1 metadata mapped for a {nits}-nit display by the server (L1 only; creative trims are not applied)"),
                     },
                 ),
@@ -252,7 +252,7 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
                 *display_target == Some(100),
                 match (*display_target == Some(100), creative_trims) {
                     (true, CreativeTrims::All) => "DYN: per-shot Dolby display mapping for 100-nit BT.709 SDR by the server, with the colourist's creative trims",
-                    (true, CreativeTrims::Partial) => "DYN: per-shot Dolby display mapping for 100-nit BT.709 SDR by the server, with the colourist's creative trims on the shots that carry them",
+                    (true, CreativeTrims::Partial) => "DYN: per-shot Dolby display mapping for 100-nit BT.709 SDR by the server, with the colourist's creative trims on some shots",
                     (true, CreativeTrims::None) => "DYN: per-shot L1 mapped for 100-nit BT.709 SDR by the server (L1 only; creative trims are not applied)",
                     (false, _) => "DYN: no current per-shot L1 mapping receipt",
                 },
@@ -376,9 +376,7 @@ mod tests {
             .find(|d| d.badge == Dyn)
             .expect("DYN");
         assert!(dyn_detail.text.contains("1600-nit") && dyn_detail.text.contains("creative trims"));
-        assert!(
-            !dyn_detail.text.contains("L1 only") && !dyn_detail.text.contains("shots that carry")
-        );
+        assert!(!dyn_detail.text.contains("L1 only") && !dyn_detail.text.contains("some shots"));
         let partial = playback_enhancement(&facts(EnhancementRoute::ProcessedHdr10 {
             fel_contributed: true,
             display_target: Some(1600),
@@ -390,7 +388,7 @@ mod tests {
             .iter()
             .find(|d| d.badge == Dyn)
             .expect("DYN");
-        assert!(dyn_detail.text.contains("on the shots that carry them"));
+        assert!(dyn_detail.text.contains("creative trims on some shots"));
         assert!(!dyn_detail.text.contains("L1 only"));
     }
 
