@@ -38,7 +38,9 @@ use super::placeholder_census::STORE_SOURCES;
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Progressive translation checks both the committed extension shape and its
     // singleton marker before migration/admission; neither may use a stale replica.
-    ("hiqlite.rs", 50),
+    // The title-job and annotations extensions each added the same shape and
+    // marker pair (54); the playback handoff extension adds a third (56).
+    ("hiqlite.rs", 56),
     ("hiqlite_background_jobs.rs", 2),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
@@ -57,6 +59,9 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
     ("hiqlite_media.rs", 72),
+    // Handoff status, the redemption verdict and the token scope each read
+    // committed authority; see the `authority:` reasons at the sites.
+    ("hiqlite_playback_handoffs.rs", 3),
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 7),
     ("hiqlite_reading.rs", 2),

@@ -2048,6 +2048,7 @@ impl HiqliteAuthStore {
         store.install_subtitle_translation_schema(None).await?;
         store.install_library_annotations_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
+        store.install_playback_handoffs_schema(None).await?;
         Ok(store)
     }
 
@@ -2234,7 +2235,8 @@ impl HiqliteAuthStore {
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
                     self.install_library_annotations_schema(admission).await?;
-                    return self.install_dv_title_jobs_schema(admission).await;
+                    self.install_dv_title_jobs_schema(admission).await?;
+                    return self.install_playback_handoffs_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4091,6 +4093,61 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "title jobs schema install did not settle".into(),
+        ))
+    }
+
+    async fn playback_handoffs_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed handoff shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::playback_handoffs::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::playback_handoffs::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    super::playback_handoffs::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "playback handoff schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_playback_handoffs_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.playback_handoffs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::playback_handoffs::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.playback_handoffs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "playback handoff schema install did not settle".into(),
         ))
     }
 
@@ -6379,8 +6436,21 @@ impl UserStore for HiqliteAuthStore {
                           (SELECT value FROM settings WHERE key = $3) AS expiry_since \
                  FROM users u JOIN tokens t ON t.user_id = u.id \
                  WHERE t.token_hash = $4 \
-                   AND ($5 = 'native') = NOT EXISTS ( \
-                     SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)";
+                   AND CASE $5 \
+                     WHEN 'native' THEN NOT EXISTS ( \
+                         SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash) \
+                       AND NOT EXISTS ( \
+                         SELECT 1 FROM playback_handoffs_tokens h WHERE h.token_hash = t.token_hash) \
+                     WHEN 'jellyfin' THEN EXISTS ( \
+                         SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash) \
+                     WHEN 'playback_handoff' THEN EXISTS ( \
+                         SELECT 1 FROM playback_handoffs_tokens h \
+                         WHERE h.token_hash = t.token_hash AND h.user_id = t.user_id \
+                           AND h.expires_at > $6 \
+                           AND EXISTS (SELECT 1 FROM tokens s \
+                                       WHERE s.token_hash = h.source_token_hash \
+                                         AND s.user_id = h.user_id)) \
+                     ELSE 0 END";
         validate_sql(sql)?;
         trace_statement("authenticate_token", sql);
         let mut rows = self
@@ -6392,7 +6462,8 @@ impl UserStore for HiqliteAuthStore {
                     keys::AUTH_TOKEN_IDLE_DAYS,
                     keys::AUTH_TOKEN_EXPIRY_SINCE,
                     token_hash,
-                    audience.as_str()
+                    audience.as_str(),
+                    self.now()?
                 ),
             )
             .await?;
@@ -6456,7 +6527,12 @@ impl UserStore for HiqliteAuthStore {
         let sql = "SELECT substr(token_hash, 1, 8) AS token_hash_prefix, \
                           substr(device, 1, $1) AS device, created_at, last_seen_at \
                    FROM tokens WHERE user_id = $2 \
-                   ORDER BY created_at, token_hash LIMIT $3";
+                     AND NOT EXISTS (SELECT 1 FROM playback_handoffs_tokens h \
+                       WHERE h.token_hash = tokens.token_hash \
+                         AND (h.expires_at <= $3 OR NOT EXISTS ( \
+                           SELECT 1 FROM tokens s WHERE s.token_hash = h.source_token_hash \
+                             AND s.user_id = h.user_id))) \
+                   ORDER BY created_at, token_hash LIMIT $4";
         validate_sql(sql)?;
         Ok(self
             .client()
@@ -6465,6 +6541,7 @@ impl UserStore for HiqliteAuthStore {
                 params!(
                     MAX_DEVICE_LABEL_BYTES as i64,
                     user_id,
+                    self.now()?,
                     TOKEN_SUMMARY_MAX as i64
                 ),
             )
