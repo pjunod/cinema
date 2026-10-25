@@ -4,6 +4,9 @@
 // at their target and fade out at the mastering peak, and pinned golden values of the model.
 // (The GPU shader is checked against this reference by dm_shader_control / run_dm_parity.py.)
 #include <assert.h>
+#ifdef NDEBUG
+#error "test_dv_dm relies on assert() side effects; build without NDEBUG"
+#endif
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -93,7 +96,8 @@ static double maxdiff(const float *a, const float *b, int n) {
   return d;
 }
 
-// level 2: range, neutral, monotone, not flat; 1: range, neutral, monotone; 0: range only
+// level 2: range, neutral, monotone (1e-5 PQ), not flat; 1: range, neutral, monotone to 1e-4 PQ
+// (0.1 of a 10-bit code: float noise on the flat curves of degenerate frames); 0: range only
 static void check_range(const char *name, const dv_dm_frame *f, double nits, int level) {
   const double top = dm_pq_oetf(nits) + 1.0 / 1023;
   // grey axis, detail stage off: pointwise curve, monotone and neutral
@@ -107,7 +111,7 @@ static void check_range(const char *name, const dv_dm_frame *f, double nits, int
     }
     if (level >= 1 && (fabs(o[4*i] - o[4*i+1]) > 2e-4 || fabs(o[4*i+1] - o[4*i+2]) > 2e-4)) { fprintf(stderr, "%s grey %d not neutral\n", name, i); exit(1); }
     // monotone to 1e-5 PQ (0.01 of a 10-bit code: float noise at the black clamp)
-    if (level >= 1 && i && o[4*i+1] < o[4*(i-1)+1] - 1e-5) { fprintf(stderr, "%s grey not monotone at %d\n", name, i); exit(1); }
+    if (level >= 1 && i && o[4*i+1] < o[4*(i-1)+1] - (level >= 2 ? 1e-5 : 1e-4)) { fprintf(stderr, "%s grey not monotone at %d\n", name, i); exit(1); }
   }
   if (level >= 2 && !(o[4*(N-1)+1] > o[4*(N/2)+1] && o[4*(N/2)+1] > o[1])) { fprintf(stderr, "%s grey axis flat\n", name); exit(1); }
   free(g); free(o);
@@ -123,7 +127,7 @@ static void check_range(const char *name, const dv_dm_frame *f, double nits, int
 // The retained P7 fixture (controls/tags/p7-frame0.nal) through the real parser: the same
 // selection the Rust tests pin (FIXTURE_DM in dv_runtime.rs), so the C and Rust family rules are
 // checked on identical bytes.
-static void check_fixture(const char *path) {
+static const DoviVdrDmData *read_rpu(const char *path, DoviRpuOpaque **out) {
   FILE *fp = fopen(path, "rb"); assert(fp);
   static uint8_t buf[1 << 16]; size_t len = fread(buf, 1, sizeof(buf), fp); fclose(fp);
   assert(len > 0 && len < sizeof(buf));
@@ -131,17 +135,35 @@ static void check_fixture(const char *path) {
   assert(raw && !dovi_rpu_get_error(raw));
   const DoviVdrDmData *dm = dovi_rpu_get_vdr_dm_data(raw);
   assert(dm);
+  *out = raw;
+  return dm;
+}
+// algo, trim and count with trims on; served output (trims off) is always the l1-only form
+static void check_fixture(const char *path, int algo, const char *trim, int n, double weight) {
+  DoviRpuOpaque *raw; const DoviVdrDmData *dm = read_rpu(path, &raw);
   dv_dm_frame f;
+  assert(dv_dm_prepare(dm, 1000, 0.005, DM_P3D65, 4000, true, &f) == NULL);
+  if (!(f.algo == algo && !strcmp(f.trim, trim) && f.trim_targets == n && fabs(f.weight - weight) < 1e-12)) {
+    fprintf(stderr, "%s: trims-on selection algo %d %s %d %g differs from the Rust pin\n", path, f.algo, f.trim, f.trim_targets, f.weight);
+    exit(1);
+  }
   assert(dv_dm_prepare(dm, 1000, 0.005, DM_P3D65, 4000, DV_TARGET_CREATIVE_TRIMS, &f) == NULL);
   (void)dv_target;
-  assert(f.algo == 4 && !strcmp(f.trim, "l1-only") && f.trim_targets == 0 && f.weight == 0);
+  assert(f.algo == algo && !strcmp(f.trim, "l1-only") && f.trim_targets == 0 && f.weight == 0);
   dovi_rpu_free_vdr_dm_data(dm);
   dovi_rpu_free(raw);
-  printf("fixture %s: cm4-l1-only\n", path);
+  printf("fixture %s: cm%d-%s served cm%d-l1-only\n", path, algo, trim, algo);
 }
 
 int main(int argc, char **argv) {
-  if (argc > 1) check_fixture(argv[1]);
+  if (argc != 2) { fprintf(stderr, "usage: test_dv_dm tools/dv_processing/controls/tags\n"); return 2; }
+  // the selections the Rust tests pin on the same committed bytes (dv_runtime.rs FIXTURE_DM,
+  // display_target.rs display_management_selection_follows_the_raw_rpu_exactly)
+  char path[4096];
+  snprintf(path, sizeof(path), "%s/p7-frame0.nal", argv[1]); check_fixture(path, 4, "l1-only", 0, 0);
+  snprintf(path, sizeof(path), "%s/cm4-l8-trims.nal", argv[1]); check_fixture(path, 4, "l8-interpolated", 2, 0);
+  snprintf(path, sizeof(path), "%s/cm29-l2-trims.nal", argv[1]);
+  check_fixture(path, 29, "l2-exact", 2, (1800 - 2048) / 2048.0);
   static const unsigned buckets[] = {100, 400, 600, 1000, 1600, 2000, 4000};
   rpu c4, c4n, c29, c29n;
   base(&c4, 0, 1600, 3500); cm4(&c4);
@@ -250,7 +272,7 @@ int main(int argc, char **argv) {
           dv_dm_frame x = prep(&d, nb[b], nb[b] == 100 ? DM_BT709 : DM_P3D65);
           check_range(name, &x, nb[b], 0);                          // nonsensical trims: range only
           x = prep_t(&d, nb[b], nb[b] == 100 ? DM_BT709 : DM_P3D65, false);
-          check_range(name, &x, nb[b], 0);   // untrimmed: range (a black frame's curve is flat at black)
+          check_range(name, &x, nb[b], 1);   // untrimmed: range, neutral and monotone (no pole near black)
         }
   }
 

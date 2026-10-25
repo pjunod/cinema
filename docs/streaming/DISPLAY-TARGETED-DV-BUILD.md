@@ -381,9 +381,11 @@ cases/samples. A compile is not a run.
 - Build controls with `sh tools/dv_processing/controls/build_target_controls.sh`
   and the same four explicit dependency/output arguments as the helper build.
 - Phase 2 (2026-10-25) replaced the phase 1 controls. Run
-  `"$CONTROL_BIN/test_dv_dm" tools/dv_processing/controls/tags/p7-frame0.nal`:
-  the retained P7 fixture through the real parser gives the selection the Rust
-  tests pin (C and Rust agree on the same bytes); family and trim selection
+  `"$CONTROL_BIN/test_dv_dm" tools/dv_processing/controls/tags`: the retained
+  P7 fixture and two committed trim fixtures (`cm4-l8-trims.nal`,
+  `cm29-l2-trims.nal`, written by the Rust selection test) go through the real
+  parser and must give the selections the Rust tests pin, with trims on and as
+  served (C and Rust agree on the same bytes); family and trim selection
   from the RPU, black/flat/clipped L1 and nonsensical trim codes, every
   bucket finite and inside the target, monotone neutral grey axis, L1
   sensitivity, trims that act at their target and fade out at the mastering

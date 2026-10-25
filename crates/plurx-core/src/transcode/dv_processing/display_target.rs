@@ -511,7 +511,7 @@ mod tests {
             ..Default::default()
         });
         check(
-            &build(true, vec![l8(48), l8(99), described]),
+            &build(true, vec![l8(48), l8(99), described.clone()]),
             1000,
             (true, "cm4-l8-interpolated", 2, 0.0),
         );
@@ -520,6 +520,35 @@ mod tests {
             1000,
             (true, "cm4-l1-only", 0, 0.0),
         );
+        // Committed fixtures with trims, read by the C control (controls/test_dv_dm.c) through the
+        // real parser, so the C and Rust selections are compared on identical bytes. Regenerate
+        // with PLURX_WRITE_DM_FIXTURES=1 only when the fixture definition changes.
+        let cm4_trims = build(true, vec![l8(48), l8(99), described]);
+        for (name, raw, expected) in [
+            (
+                "cm4-l8-trims.nal",
+                &cm4_trims,
+                (true, "cm4-l8-interpolated", 2, 0.0),
+            ),
+            (
+                "cm29-l2-trims.nal",
+                &cm29,
+                (false, "cm29-l2-exact", 2, weight),
+            ),
+        ] {
+            check(raw, 1000, expected);
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tools/dv_processing/controls/tags")
+                .join(name);
+            if std::env::var_os("PLURX_WRITE_DM_FIXTURES").is_some() {
+                std::fs::write(&path, raw).expect("write fixture");
+            }
+            assert_eq!(
+                &std::fs::read(&path).expect("committed fixture"),
+                raw,
+                "{name}"
+            );
+        }
         // Served output: creative trims are not applied, whatever the RPU carries.
         for (raw, cm4) in [(&cm29, false), (&build(true, vec![l8(48)]), true)] {
             let dm = target(1000)

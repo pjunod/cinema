@@ -449,14 +449,31 @@ DM_STATIC int dm_cm29_prepare(dm_cm29_state *s, const double l1[3], double smin,
   if (!(clip > crush && SM > Sm && TM > Tm)) return 0;
   double ratio = dm_mind(1.0, sqrt((TM + Tm) / (SM + Sm)));
   double n = 3 * sqrt(1 / ratio);
-  double m = dm_mind(dm_maxd(mid, crush + 0.25 * (clip - crush)), crush + 0.75 * (clip - crush));
-  double key = 2 * (m - Sm) / (SM - Sm), shift = m * (1 - ratio) * key;
-  double xs[3] = {dm_maxd(crush, 1e-9), m, clip};
-  double ts[3] = {dm_maxd(crush - shift, Tm), m - shift, dm_mind(clip - shift, TM)};
-  double A[3][3], w[3], coef[3];
-  for (int i = 0; i < 3; i++) { w[i] = ts[i] * ts[i] * ts[i]; double xn = pow(xs[i], n); A[i][0] = 1; A[i][1] = xn; A[i][2] = -xn * w[i]; }
-  if (!dm_solve3(A, w, coef)) return 0;
-  s->a = coef[0]; s->b = coef[1]; s->c = coef[2]; s->n = n; s->Tm = Tm; s->TM = TM; s->xs0 = xs[0];
+  double coef[3];
+  /* A very dark shot (a few codes between crush and clip) can put the middle target anchor below
+   * the black one, and the fitted rational then has a pole or turns down inside [0,1]. Such a fit is
+   * rejected and the shot's clip widened (doubling its span) until the curve is increasing and
+   * pole-free on [0,1]; well-conditioned shots are fitted unchanged. */
+  for (int tries = 0;; tries++) {
+    double m = dm_mind(dm_maxd(mid, crush + 0.25 * (clip - crush)), crush + 0.75 * (clip - crush));
+    double key = 2 * (m - Sm) / (SM - Sm), shift = m * (1 - ratio) * key;
+    double xs[3] = {dm_maxd(crush, 1e-9), m, clip};
+    double ts[3] = {dm_maxd(crush - shift, Tm), m - shift, dm_mind(clip - shift, TM)};
+    double A[3][3], w[3];
+    for (int i = 0; i < 3; i++) { w[i] = ts[i] * ts[i] * ts[i]; double xn = pow(xs[i], n); A[i][0] = 1; A[i][1] = xn; A[i][2] = -xn * w[i]; }
+    int ok = dm_solve3(A, w, coef);
+    /* (a + b x^n)/(1 + c x^n) increases iff b - a c > 0, and has no pole on [0,1] iff 1 + c > 0 */
+    if (ok && coef[1] - coef[0] * coef[2] > 0 && 1 + coef[2] > 0) { s->xs0 = xs[0]; break; }
+    if (clip >= 1 || tries >= 24) {
+      /* nothing left to widen (a frame at the top of the range): the two-anchor curve through
+       * black and clip, y^3 = a + b x^n, increasing (or flat) and pole-free */
+      double x0 = pow(xs[0], n), x2 = pow(xs[2], n), y0 = w[0], y2 = dm_maxd(w[2], w[0]);
+      coef[2] = 0; coef[1] = x2 > x0 ? (y2 - y0) / (x2 - x0) : 0; coef[0] = y0 - coef[1] * x0;
+      s->xs0 = xs[0]; break;
+    }
+    clip = dm_mind(1.0, crush + 2 * (clip - crush));
+  }
+  s->a = coef[0]; s->b = coef[1]; s->c = coef[2]; s->n = n; s->Tm = Tm; s->TM = TM;
   double xyz2lms[3][3]; memcpy(xyz2lms, DM_HPE, sizeof(xyz2lms));
   dm_mat_mul(xyz2lms, DM_M2020_XYZ, s->rgb2lms); dm_mat_inv(s->rgb2lms, s->lms2rgb); dm_mat_inv(DM_IPT, s->ipt2lms);
   dm_conv(DM_BT2020, tg->prim, s->to_t); dm_conv(tg->prim, DM_BT2020, s->from_t);

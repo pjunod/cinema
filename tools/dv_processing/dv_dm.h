@@ -204,7 +204,7 @@ static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w
     double rgb[3];
     if (f->algo == 4) { o3[3 * i] = b[i]; dm_cm4_finish(&f->c4, o3 + 3 * i, rgb); }
     else dm_cm29_finish(&f->c29, &px[i], b[i], c[i], rgb);
-    for (int c = 0; c < 3; c++) out[4 * i + c] = isnan(rgb[c]) ? 0.0f : (float)rgb[c];   // as the shader
+    for (int k = 0; k < 3; k++) out[4 * i + k] = isnan(rgb[k]) ? 0.0f : (float)rgb[k];   // as the shader
     out[4 * i + 3] = 1;
   }
   free(a); free(b); free(c); free(e); free(o3); free(px);

@@ -87,6 +87,9 @@ for tgt in ("600 0 1 4000", "1000 0 1 4000", "100 0.005 2 4000", "2000 0 0 4000"
 cm29b = cm29.replace('2020 2030 512', '2048 2030 65535', 1).replace('2048 2294 512', '2048 2294 65535', 1).replace('2050 2179 512', '2048 2179 65535', 1)
 for tgt in ("1000 0 1 4000", "100 0.005 2 4000"):
     ok &= run('cm29b_' + tgt.split()[0] + '_p' + tgt.split()[2], cm29b + 'target ' + tgt + '\n', frames[2], W, H)
+# raw ms_weight 0 is MS weight -1: the detail stage is skipped (single-pass shader path)
+cm29c = cm29.replace(' 512\n', ' 0\n')
+ok &= run('cm29_nodetail_1000_p1', cm29c + 'target 1000 0 1 4000\n', frames[2], W, H)
 # a black frame (L1 0,0,0) maps instead of refusing
 black = 'l1 0 0 0\nl6 50 4000\n'
 ok &= run('cm29_black_1000_p1', black + 'target 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)
