@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038"
+        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d"
       },
       {
         "table": "31 authority implementation",
@@ -255,19 +255,19 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2"
+        "sha256": "b800ba362d1f0570712c79fc3d6b7443f75765301427f08cfd5434b6ca15240f"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2"
+        "sha256": "b800ba362d1f0570712c79fc3d6b7443f75765301427f08cfd5434b6ca15240f"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "28150af6c4f83ed44a28063832f34404908d794e1026c4f89803772e91844894"
+        "sha256": "684cfd988b9313546b1560464f6c8f0f2aa7f6f1cadd45f60fc7711c4083949a"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -279,7 +279,7 @@
         "table": "FIFO lock contract pinned Tokio dependency",
         "source": "Cargo.lock",
         "anchor": "name = \"tokio\"\nversion = \"1.53.1\"",
-        "sha256": "89a14d94492150e41b3975c189657f4e13949a0be285831258742087bf7820bb"
+        "sha256": "fcdd68b956d1965645f63e5d91fb26a0bc940d57e9d45eefa5c6dc3d9ec26730"
       },
       {
         "table": "production-consumed post-claim lifecycle controller; local safety only",
@@ -288,7 +288,7 @@
         "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
       }
     ],
-    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence."
+    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes."
   },
   "configs": {
     "progress.cfg": {

@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`be610d6472b8717bc034e45404141ef0854c4bf2` · **Scope:** bound `library_scan` and
+`f18c39e66954b71fcedcf8f463914f112498a518` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,34 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## HTTPS integration — scoped refresh on 2026-10-25
+
+Codex reviewed source `f18c39e66954b71fcedcf8f463914f112498a518` against
+`9bcfa9ca1f792d214122762981c84c85ba5b3e64`; the parent coordinator approved
+the source disposition. Five drifted whole-file pins are refreshed; every
+existing exact anchor remains unique.
+
+The shared enqueue SQL moves fragment analysis/source guards before receipt
+reuse. `EnqueueJob` and ordinary library admission omit `analysis_request`
+and `fragment_domain`; only the fragment adapter adds them. The selected
+`library_scan` / `metadata_refresh` admission and claim-token replay guards
+are unchanged. General fragment enqueue receipts are outside this model's
+`ReplayClaim` / `ResolveClaim` transitions and S4 claim-token ledger property.
+The separate runtime receipt matrix passed replay, cancellation, reclaimed
+analysis and replaced-source cases on memory/pooled SQLite and three voters;
+that is runtime evidence, not a model result.
+
+Managed-schema bootstrap now validates/preserves the installed resource view;
+its mapped `QueueSql` implementation is byte-identical. Store-contract edits
+repair/add fixtures while retaining the exact formal-publication registration.
+`AppState` only gains the addressed-node HTTPS control field and initializer.
+The lockfile adds daemon dependency edges without changing Tokio 1.53.1 or
+Hiqlite 0.14.0. Valid installed schema and valid selected payloads remain
+premises; this refresh claims no bootstrap, fragment-admission or TLS theorem.
+Model/configuration/toolchain bytes, anchors, governed scope and rejection
+rules are unchanged. Prior qualification retains its original source binding;
+fresh affected smoke receipts are recorded separately.
 
 ## Advisory title readiness — scoped refresh on 2026-10-23
 

@@ -4,6 +4,25 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## HTTPS integration — scoped refresh on 2026-10-25
+
+Codex reviewed source `f18c39e66954b71fcedcf8f463914f112498a518` against
+`9bcfa9ca1f792d214122762981c84c85ba5b3e64`; the parent coordinator approved
+the scoped disposition. Four drifted whole-file inputs cover five table rows.
+
+| Binding | Source-backed disposition |
+|---|---|
+| Library authority (30) | Fragment enqueue guards now precede receipt reuse, but ordinary library inputs omit both fragment/analysis fields. The selected authority arm, claim/bind/publish/renew/cancel/settle paths and worker wait order are unchanged. General fragment receipt admission remains outside this operation. |
+| Daemon loops (42–43) | `AppState` gains only the HTTPS control field and initialization. Both mapped scheduler/worker bodies and their wait/lock/settlement order are unchanged. |
+| Main worker owner (44) | Public TLS preparation, serving and drain gain a separate owner and may request the existing daemon cancellation. The mapped background worker spawn and shutdown consumers are unchanged. Public listener startup, handshake/drain latency and whole-daemon shutdown remain outside the selected operation-progress guarantee. |
+| Tokio dependency | Only daemon dependency edges are added; Tokio remains 1.53.1 and Hiqlite remains 0.14.0. |
+
+Exact anchors, executable model/configurations, toolchain, historical
+source-anchor snapshot and worker correspondence are unchanged. Whole-file
+pins remain deliberate and fail closed on future drift. This source review
+adds no liveness guarantee or qualification result; fresh affected smoke
+receipts are separate evidence.
+
 ## Read-only readiness binding — scoped refresh on 2026-10-23
 
 The A2923b2c to be610d647 delta adds the advisory `dv_title_readiness`
