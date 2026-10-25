@@ -8,6 +8,21 @@ Companion to [the display-targeted HDR10-E build](../streaming/DISPLAY-TARGETED-
 peak capability, Settings controls, and synthetic PQ comparison asset. It
 records implementation separately from display qualification.
 
+## HDR capability in the browser changes after boot
+
+The browser half of the capability claim (`hdr`, `hdr10t`) comes from CSS
+`(dynamic-range: high)` together with a MediaCapabilities `transferFunction:
+"pq"` probe. The CSS answer is not constant for a page: Chrome on Linux
+(Wayland, a compositor with `wp_color_manager_v1` such as GNOME in HDR mode)
+answers false until its GPU process is running and true a few seconds later,
+and moving a window between an SDR and an HDR monitor changes it on every
+platform. The web client listens for the change and rebuilds the claim, so the
+next fresh playback hears the current answer; an admitted playback keeps its
+caps, like the peak below. Tested on Chrome 152 / GNOME 51 (nativehdr10 Mutter)
+on a 616-nit panel: HDR, P3 gamut and smooth HEVC Main10 PQ decode. Firefox 157
+on the same session reports no HDR capability (with or without
+`gfx.wayland.hdr`), so it is offered the tone-mapped path.
+
 ## Peak reports belong to one playback
 
 Both clients send optional integer `display.max_nits` and `display.peak_source`
