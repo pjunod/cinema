@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** A–D and F promoted to `main` through #1271 by Paul's decision of 2026-10-24. E (creative trims): closed-form Dolby display management merged through #1275; the served CM v4 L8 and CM v2.9 L2 trims (#1276, merged as 072d0f65 on 2026-10-25, not deployed) are accepted by pixel comparison against the reference on real titles, and playback reports `creative_trims_applied` per session; CM v2.9 near-black chroma follows the reference since #1278 (deca1e1e, not deployed) · **Updated:** 2026-10-25 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
+**Status:** A–D and F promoted to `main` through #1271 by Paul's decision of 2026-10-24. E (creative trims): closed-form Dolby display management merged through #1275; the served CM v4 L8 and CM v2.9 L2 trims (#1276, merged as 072d0f65 on 2026-10-25, not deployed) are accepted by pixel comparison against the reference on real titles, and playback reports `creative_trims_applied` per session; CM v2.9 near-black chroma follows the reference since #1278 (deca1e1e, not deployed); at the title's target black since #1281 (b9eb0466, not deployed) · **Updated:** 2026-10-25 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 Evidence remains bound to its recorded source.
@@ -333,8 +333,8 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   vertical Gaussian / derivative-of-Gaussian detail; finish and gamut clip).
   `display_target.h` calls it and prints one `display_target_frame` row per
   frame (`curve`, `trim_targets`, `detail_weight`). Method identity:
-  `dolby-closed-form-cm4-cm29-v3` (v1 served no trims; v2 had no CM v2.9
-  near-black chroma gain); helper graph
+  `dolby-closed-form-cm4-cm29-v4` (v1 served no trims; v2 had no CM v2.9
+  near-black chroma gain; v3 offset it by the target black); helper graph
   `dv-native-master-or-closed-form-dm-v1`.
 - **Accuracy of the equations (private evidence, 2026-10-25).** CM v4
   reproduces the reference on 30/30 random30 shots (median mean ΔE_ITP
@@ -342,7 +342,7 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   ≤ 0.001 at 300–1600 nits, ≤ 0.007 at 100 nits). CM v2.9 passes 23/23
   random30 shots (median 0.19, before the near-black gain); its gamut stage is approximate. Near black,
   CM v2.9 caps the chroma scale's intensity ratio at 2 and applies a measured
-  gain D (output intensity above the target black), tabulated per stock target
+  gain D (absolute output intensity; it does not move with the target black), tabulated per stock target
   in `dm_closed_form.h` (CM29_CLOSED_FORM.md, "Near-black chroma"). On real
   frames with dark content this takes p99.9 ΔE_ITP from 3–28 to 0.7–8.5
   (SDR and 600/1000-nit P3; BT.2020 rows are synthetic-only). The P3 gamut stage
