@@ -10,6 +10,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [LINUX-PLAYER-PLAN.md](LINUX-PLAYER-PLAN.md) | How Dolby Vision plays on Linux through plurx: an mpv launcher, the server playback handoff (§3.1), reconstructed Profile 8.1 for Profile 7 FEL, packaging, and the milestones with their acceptance. | open |
 | [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) | Android/TV platform reports, browser peak choices, session boundaries and the synthetic PQ comparison; physical qualification pending. | open |
 | [FRAME-DROP-RECORDER.md](FRAME-DROP-RECORDER.md) | Automatic web incident capture, bounds, privacy, retrieval and attribution limits; production acceptance pending. | built |
 | [AVATAR-WEB-PLAYBACK-STATUS.md](AVATAR-WEB-PLAYBACK-STATUS.md) | Avatar Safari presentation faults, FEL encoder-selection root cause, physical evidence and review state. | open |
