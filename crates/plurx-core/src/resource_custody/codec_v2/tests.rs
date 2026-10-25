@@ -1,5 +1,6 @@
 //! Authored typed ownership regressions. No tests run before final review.
 use super::*;
+pub(in crate::resource_custody) mod planning;
 fn id() -> Id {
     Id::new(Uuid::new_v4()).unwrap()
 }
