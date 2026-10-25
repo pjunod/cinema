@@ -12,6 +12,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::*;
 
+mod playback_handoffs;
 mod public_copy_wire;
 mod subtitle_generation;
 

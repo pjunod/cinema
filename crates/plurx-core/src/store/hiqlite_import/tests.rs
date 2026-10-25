@@ -442,7 +442,13 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     assert!(names.contains(&"jellyfin_login_tokens"));
     assert!(names.contains(&"jellyfin_entity_ids"));
     assert!(names.contains(&"jellyfin_plays"));
-    assert_eq!(names.len(), 92, "review every imported durable table");
+    // A playback handoff token's audience marker must travel with its
+    // `tokens` row, or the imported row would be a native account bearer.
+    assert!(names.contains(&"playback_handoffs"));
+    assert!(names.contains(&"playback_handoffs_tokens"));
+    // 95 with the three item-annotation tables (SQLite v113), 97 with the
+    // two playback handoff tables (SQLite v115).
+    assert_eq!(names.len(), 97, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its

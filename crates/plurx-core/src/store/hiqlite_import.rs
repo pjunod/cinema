@@ -594,6 +594,46 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
+    // A handoff token's marker travels with its `tokens` row: imported
+    // without it, the row would authenticate as a native account bearer.
+    TablePlan {
+        name: "playback_handoffs",
+        columns: &[
+            "id",
+            "code_hash",
+            "user_id",
+            "file_id",
+            "source_token_hash",
+            "start_ms",
+            "audio",
+            "subtitle",
+            "origin",
+            "created_at",
+            "expires_at",
+            "redeemed_at",
+        ],
+        order_by: "id",
+        minimum_schema: 115,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "playback_handoffs_tokens",
+        columns: &[
+            "token_hash",
+            "handoff_id",
+            "user_id",
+            "file_id",
+            "source_token_hash",
+            "expires_at",
+        ],
+        order_by: "token_hash",
+        minimum_schema: 115,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
     TablePlan {
         name: "jellyfin_plays",
         columns: &[
