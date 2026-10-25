@@ -38,7 +38,8 @@ JOB = 'Apple compile and native TV navigation'
 LABELS = ['self-hosted','macOS','ARM64','lab','apple','xcode-27.1']
 ROOTS = ('clients/server-tray/macos','Makefile','Cargo.toml','LICENSE','brand/export')
 # Whole recipes are pinned: a new helper/dependency cannot escape ROOTS.
-RECIPE_VERSION = 1
+RECIPE_VERSION = 2
+MAX_ROOT_ENTRIES, MAX_ROOT_BYTES = 512, 32*1024
 RECIPE_PINS = {
     'Makefile':('100644','ffd8237d4bc75ad370ca7c7045e1565710035659f1929ce48ccf40531a221528'),
     'Cargo.toml':('100644','72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f'),
@@ -147,8 +148,14 @@ def manifest(workspace, commit):
 
 def supported_recipe(workspace,commit,entries,contents):
     """The fixed dependency-free recipe must still close over ROOTS."""
-    require(not git(workspace,'ls-tree','-z',commit,'--','GNUmakefile','makefile',limit=1024),
-        'Unsupported native root Make selector; closure review required')
+    roots = [row for row in git(workspace,'ls-tree','-z',commit,limit=MAX_ROOT_BYTES).split(b'\0') if row]
+    require(len(roots) <= MAX_ROOT_ENTRIES, 'Native root selector inventory bound exceeded')
+    for row in roots:
+        header,raw_name = row.split(b'\t',1)
+        mode,kind,blob = header.decode('ascii').split()
+        name = raw_name.decode('utf-8')
+        require(name == 'Makefile' or name.casefold() not in ('gnumakefile','makefile'),
+            'Unsupported native root Make selector; closure review required: '+name)
     by_path = {row['path']:row for row in entries}
     for path,(mode,sha) in RECIPE_PINS.items():
         row = by_path.get(path)
@@ -157,8 +164,8 @@ def supported_recipe(workspace,commit,entries,contents):
     prefix = 'clients/server-tray/macos/'
     for path in contents:
         if path.startswith(prefix):
-            first = path.removeprefix(prefix).split('/',1)[0]
-            require(not first.startswith('Package@') and first not in ('Package.resolved','.swiftpm'),
+            first = path.removeprefix(prefix).split('/',1)[0].casefold()
+            require(not first.startswith('package@') and first not in ('package.resolved','.swiftpm'),
                 'Unsupported native SwiftPM selector/configuration; closure review required')
 
 
@@ -168,7 +175,7 @@ def live_recipe_selectors(workspace):
         require(not directory.is_symlink(), 'Native selector directory is a symlink; closure review required')
         with os.scandir(directory) as children:
             for index,child in enumerate(children):
-                require(index < 512, 'Native selector directory bound exceeded')
+                require(index < MAX_ROOT_ENTRIES, 'Native selector directory bound exceeded')
                 name = child.name
                 forbidden = (name.casefold().startswith('package@') or name.casefold() in ('package.resolved','.swiftpm')) if package else (
                     name != 'Makefile' and name.casefold() in ('gnumakefile','makefile'))
@@ -544,6 +551,7 @@ def run_gate(api, scope, workspace, current, run_id, output, toolchain, fresh_on
     require(digest(legacy) == PRODUCER_WORKFLOW, 'Known native workflow object differs')
     consumer_workflow = workflow_identity(workspace,current,legacy)
     require(consumer_workflow == digest(transformed_workflow(legacy)), 'Current native job lacks reviewed adapter recipe')
+    live_recipe_selectors(workspace)
     entries, contents = manifest(workspace,current); expected = case_inventory(contents)
     key = execution_key(entries,expected)
     origin_entries, origin_contents = manifest(workspace,PRODUCER)
@@ -637,7 +645,7 @@ def policy_fingerprint():
         'job_log_sha256':ORIGIN_JOB_SHA,'roots':ROOTS,'command':COMMAND,
         'workflow_sha256':PRODUCER_WORKFLOW,'recipe_version':RECIPE_VERSION,'recipe_pins':RECIPE_PINS,
         'forbidden_make_selectors':['GNUmakefile','makefile'],'forbidden_package_selectors':['Package@*','Package.resolved','.swiftpm'],
-        'upload_section_limits':[32,16*1024],'live_selector_policy':{'actual_names':True,'casefold':True,'allow_root_spelling':'Makefile','directory_limit':512},
+        'upload_section_limits':[32,16*1024],'live_selector_policy':{'actual_names':True,'casefold':True,'allow_root_spelling':'Makefile','directory_limit':MAX_ROOT_ENTRIES},'committed_selector_policy':{'nonrecursive_root_bytes':MAX_ROOT_BYTES,'root_entries':MAX_ROOT_ENTRIES,'casefold':True,'allow_root_spelling':'Makefile'},
         'limits':[MAX_FILES,MAX_BLOB,MAX_SOURCE,MAX_ZIP,MAX_LOG,MAX_HISTORY,MAX_V1_ZIP,MAX_V1_JSON,MAX_V1_TOTAL]}))
 
 

@@ -88,8 +88,11 @@ def source_tree():
     def read_git(workspace,*args,**kwargs):
         if args[:2] == ('cat-file','-t'): return b'commit'
         if args[0] == 'ls-tree':
-            selected = {p:value for p,value in rows.items() if p in ('GNUmakefile','makefile')} if args[-2:] == ('GNUmakefile','makefile') else rows
-            return b''.join((mode+' blob '+hashlib.sha1(raw).hexdigest()+'\t'+p).encode()+b'\0' for p,(mode,raw) in selected.items())
+            if '-r' in args:
+                selected = {p:value for p,value in rows.items() if any(p==r or p.startswith(r+'/') for r in native.ROOTS)}
+            else:
+                selected = {p.split('/',1)[0]:(('040000',b'tree') if '/' in p else value) for p,value in rows.items()}
+            return b''.join((mode+(' tree ' if mode=='040000' else ' blob ')+hashlib.sha1(raw).hexdigest()+'\t'+p).encode()+b'\0' for p,(mode,raw) in selected.items())
         raw = next(raw for mode,raw in rows.values() if hashlib.sha1(raw).hexdigest() == args[-1])
         return str(len(raw)).encode() if args[1] == '-s' else raw
     rows.update({path:('100644',raw) for path,raw in source_cases().items()})
@@ -281,8 +284,10 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             rows['clients/server-tray/macos/New.swift'] = ('100755',b'changed')
             changed,_ = native.manifest(ROOT,CURRENT);self.assertNotEqual(changed,added)
             del rows['clients/server-tray/macos/New.swift']
-            for path in ('GNUmakefile','makefile','clients/server-tray/macos/Package@swift-6.swift',
-                         'clients/server-tray/macos/Package.resolved','clients/server-tray/macos/.swiftpm/configuration/mirrors.json'):
+            for path in ('GNUmakefile','makefile','gnumakefile','MAKEFILE','GNUmakeFile/child','clients/server-tray/macos/Package@swift-6.swift',
+                         'clients/server-tray/macos/Package.resolved','clients/server-tray/macos/.swiftpm/configuration/mirrors.json',
+                         'clients/server-tray/macos/PACKAGE@swift-6.swift','clients/server-tray/macos/PACKAGE.RESOLVED',
+                         'clients/server-tray/macos/.SWIFTPM/configuration/mirrors.json'):
                 rows[path] = ('100644',b'outside root or alternate dependency selector')
                 with self.subTest(path=path),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):native.manifest(ROOT,CURRENT)
                 del rows[path]
@@ -429,6 +434,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         def git_value(workspace,*args,**kwargs):
             return legacy if args[-1]==native.PRODUCER+':'+native.WORKFLOW else b'identity'
         real_manifest = native.manifest
+        rows,read_git = source_tree()
         with tempfile.TemporaryDirectory() as directory,mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile','GITHUB_TOKEN':'never-child','PATH':'/tools'}), \
              mock.patch.object(native,'git',side_effect=git_value),mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
              mock.patch.object(native,'manifest',side_effect=sources),mock.patch.object(native,'current_job',return_value=self.api.jobs[RUN][0]), \
@@ -439,7 +445,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             out = Path(directory)
             with self.assertRaises(native.receipts.ReceiptError):native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},False)
             make.assert_not_called()
-            rows,read_git = source_tree();guard_calls = []
+            guard_calls = []
             def guarded_manifest(workspace,commit):
                 if commit == native.PRODUCER:return self.entries,self.contents
                 guard_calls.append(commit)
@@ -534,20 +540,24 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
 
     def test_unsupported_recipe_refuses_history_selection_and_direct_v1_reuse(self):
         api,envelope,payload,receipt,key,legacy,packed = self.v1_fixture()
-        rows,read_git = source_tree()
-        rows['Makefile'] = ('100644',rows['Makefile'][1]+b'\ndesktop-macos-build:\n\t@scripts/native-prep\n')
+        rows,read_git = source_tree();supported = rows.copy()
         with mock.patch.object(native,'git',side_effect=read_git), \
              mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
              mock.patch.object(native,'v1_envelope',return_value=envelope), \
              mock.patch.object(native.subprocess,'run') as launch:
-            for call in (lambda:native.history_before_fresh(api,SCOPE,ROOT,CURRENT,RUN,key,legacy),
-                         lambda:native.matching_v1(api,SCOPE,ROOT,CURRENT,RUN,key,legacy),
-                         lambda:native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)):
-                with self.subTest(call=call),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
-                    call()
-            launch.assert_not_called()
+            for shape in ('outside helper','case alias'):
+                rows.clear();rows.update(supported)
+                if shape == 'outside helper':rows['Makefile'] = ('100644',rows['Makefile'][1]+b'\ndesktop-macos-build:\n\t@scripts/native-prep\n')
+                else:rows['GNUmakeFile/child'] = ('100644',b'outside helper')
+                for call in (lambda:native.history_before_fresh(api,SCOPE,ROOT,CURRENT,RUN,key,legacy),
+                             lambda:native.matching_v1(api,SCOPE,ROOT,CURRENT,RUN,key,legacy),
+                             lambda:native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)):
+                    with self.subTest(shape=shape,call=call),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
+                        call()
+                launch.assert_not_called()
 
     def test_live_recipe_selectors_use_actual_names_and_refuse_untracked_inputs(self):
+        legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory);package = root/'clients/server-tray/macos';package.mkdir(parents=True)
             (root/'Makefile').write_text('supported spelling')
@@ -561,6 +571,14 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             # clean directory to verify the actual lower-case name independently.
             (root/'Makefile').unlink();(root/'makefile').write_text('alternate selector')
             with self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):native.live_recipe_selectors(root)
+            with mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile'}), \
+                 mock.patch.object(native,'git',return_value=legacy), \
+                 mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+                 mock.patch.object(native,'manifest') as source,mock.patch.object(native,'legacy_result') as retain, \
+                 mock.patch.object(native.subprocess,'run') as launch:
+                with self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
+                    native.run_gate(self.api,SCOPE,root,CURRENT,RUN,root/'evidence',{},True)
+                source.assert_not_called();retain.assert_not_called();launch.assert_not_called()
 
     def test_recipe_pins_and_rules_are_bound_to_policy_without_changing_execution_key(self):
         key = native.execution_key(self.entries,self.expected);policy = native.policy_fingerprint()

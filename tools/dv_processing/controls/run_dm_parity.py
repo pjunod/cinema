@@ -90,6 +90,21 @@ for tgt in ("1000 0 1 4000", "100 0.005 2 4000"):
 # raw ms_weight 0 is MS weight -1: the detail stage is skipped (single-pass shader path)
 cm29c = cm29.replace(' 512\n', ' 0\n')
 ok &= run('cm29_nodetail_1000_p1', cm29c + 'target 1000 0 1 4000\n', frames[2], W, H)
+# CM v2.9 near black (cm29_dark_colour): saturated and part-desaturated colours on eight hues from
+# PQ 0 to 0.25, so the near-black chroma gain, its offset above the target black (0 and 0.005 nit)
+# and the intensity-ratio cap run on the GPU. Real-crop limits for P3 and BT.709; the BT.2020 target
+# keeps fully saturated BT.2020 colours, where float32 loses digits as on the lattice (synthetic limits).
+def cm29_dark_colour():
+    ramp = np.linspace(0, 0.25, W)
+    hues = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [0, 1, 1], [1, 0, 1], [1, .5, 0], [.3, .6, 1]])
+    img = np.zeros((H, W, 3))
+    for r in range(H):
+        mix = (r // len(hues)) / (H // len(hues))
+        img[r] = ramp[:, None] * (hues[r % len(hues)] * (1 - mix) + 0.5 * mix)
+    return img
+dark = cm29_dark_colour()
+for tgt in ("600 0 1 4000", "1000 0.005 1 4000", "1000 0 0 4000", "100 0.005 2 4000"):
+    ok &= run('cm29_dark_colour_' + tgt.split()[0] + '_f' + tgt.split()[1] + '_p' + tgt.split()[2], cm29 + 'target ' + tgt + '\n', dark, W, H, tgt.split()[2] == '0')
 # a black frame (L1 0,0,0) maps instead of refusing
 black = 'l1 0 0 0\nl6 50 4000\n'
 ok &= run('cm29_black_1000_p1', black + 'target 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)

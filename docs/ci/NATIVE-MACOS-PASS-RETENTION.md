@@ -39,12 +39,15 @@ The closure policy pins the original whole Makefile, Cargo.toml, package `build`
 and Package.swift bytes and Git modes. Cargo.toml supplies the version expanded
 by Make; treating arbitrary manifest changes as harmless could introduce shell
 inputs outside the closure. Alternate root Make selectors (`GNUmakefile` and
-`makefile`), versioned package manifests, Package.resolved and package `.swiftpm`
-configuration are refused. An unsupported recipe or dependency requires closure
+`makefile`, including case variants except exact `Makefile`), versioned package
+manifests, Package.resolved and package `.swiftpm` configuration aliases are
+refused. The committed root-name inventory is nonrecursive and bounded to
+32 KiB/512 entries; package selectors use the same case-folded name policy. An unsupported recipe or dependency requires closure
 review before any reuse, history classification or fresh execution. Ordinary
 Swift, test, resource, brand and license changes remain eligible as new inputs.
 The guard runs on every reconstructed manifest and again immediately before a
-fresh start. The final launch also checks actual root/package directory names
+fresh start. Before any current applicability decision and again at the final
+launch, it also checks actual root/package directory names
 for untracked alternate selectors, without following child symlinks or probing
 a case-insensitive alias of Makefile. These restrictions preserve the original 45-file provenance; they
 do not claim that future command/dependency changes have the same closure.
