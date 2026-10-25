@@ -252,3 +252,68 @@ fn actual_mix_refuses_another_active_role_and_unknown_held_state() {
         Err(AdmissionRefusal::InsufficientEvidence)
     );
 }
+
+#[test]
+fn live_planning_metadata_is_counted_instead_of_refusing_the_mix() {
+    let actual = fixture(256);
+    let before = actual
+        .ledger
+        .actual_history_mix_for(actual.selected_family)
+        .expect("incumbent retained storage");
+    // Use the original retained row as a ledger-only M fixture: no native
+    // owner or settlement capability is constructed by this test.
+    {
+        let mut state = actual.ledger.inner.lock().expect("ledger state");
+        let entry = state
+            .entries
+            .get_mut(&actual.retained_binding.reservation)
+            .expect("retained fixture");
+        entry.memory_claim = MemoryClaim::PlanningMetadata;
+        entry.resources = ResourceVector {
+            peak_memory_bytes: 256,
+            ..ResourceVector::default()
+        };
+        entry.state = ReservationState::Reserved;
+    }
+    let snapshot = actual.ledger.snapshot().expect("actual held owners");
+    assert_eq!(snapshot.planning_metadata_held, 1);
+    assert_eq!(
+        snapshot.planning_metadata_reserved_bytes,
+        Metric::Known(256)
+    );
+    assert!(
+        matches!(snapshot.managed_memory_peak_bytes, Metric::Unknown(_)),
+        "M's known bytes do not bound the active producer's unknown native peak"
+    );
+    let with_metadata = actual
+        .ledger
+        .actual_history_mix_for(actual.selected_family)
+        .expect("live heap-only M owner is a counted incumbent");
+    assert_ne!(before, with_metadata);
+    {
+        let mut state = actual.ledger.inner.lock().expect("ledger state");
+        state
+            .entries
+            .get_mut(&actual.retained_binding.reservation)
+            .expect("M fixture")
+            .resources
+            .peak_memory_bytes = 512;
+    }
+    let larger_metadata = actual
+        .ledger
+        .actual_history_mix_for(actual.selected_family)
+        .expect("larger M owner remains counted");
+    assert_ne!(with_metadata, larger_metadata);
+    {
+        let mut state = actual.ledger.inner.lock().expect("ledger state");
+        state
+            .entries
+            .get_mut(&actual.retained_binding.reservation)
+            .expect("M fixture")
+            .state = ReservationState::UnknownHeld;
+    }
+    assert!(actual
+        .ledger
+        .actual_history_mix_for(actual.selected_family)
+        .is_err());
+}

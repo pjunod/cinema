@@ -9,6 +9,21 @@ use tokio::sync::oneshot;
 mod tests;
 
 const MAX_OWNED_OPERATIONS: usize = 2048;
+
+/// Requested capacity of one queued journal operation retained in the
+/// owner book: one sparse BTree leaf/internal node pair for its key plus the
+/// shared operation allocation. Variable command payloads are charged by
+/// their callers. Allocator headers and RSS are out of scope.
+pub(crate) fn owned_operation_requested_bytes() -> Option<usize> {
+    let entry = std::mem::size_of::<Uuid>()
+        .checked_add(std::mem::size_of::<Arc<Mutex<OwnedOperation>>>())?;
+    let node = entry
+        .checked_mul(11)?
+        .checked_add(16 * std::mem::size_of::<usize>())?
+        .checked_mul(2)?;
+    node.checked_add(std::mem::size_of::<Mutex<OwnedOperation>>())?
+        .checked_add(2 * std::mem::size_of::<usize>())
+}
 struct OwnedOperation {
     operation: QueuedOperation,
     result: Option<Result<OperationResult, CustodyError>>,

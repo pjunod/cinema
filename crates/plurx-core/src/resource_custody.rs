@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
+pub(crate) use worker::owned_operation_requested_bytes;
 pub use worker::{CustodyJournal, PendingOperation};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

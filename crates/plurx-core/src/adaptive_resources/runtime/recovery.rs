@@ -399,6 +399,7 @@ fn filename(output: OutputKey) -> String {
         OutputKey::Playlist => "index.m3u8".into(),
         OutputKey::IdentityMetadata => "identity.json".into(),
         OutputKey::EncodedProcessMetadata => "encoded-process".into(),
+        OutputKey::CompleteArtifactManifest => "complete-v1.json".into(),
     }
 }
 
@@ -666,6 +667,7 @@ impl NodeResourceRuntime {
                     OutputKey::Init => init = file.logical_len > 0,
                     OutputKey::IdentityMetadata => identity = file.logical_len > 0,
                     OutputKey::EncodedProcessMetadata => marker = true,
+                    OutputKey::CompleteArtifactManifest => return Err(unavailable()),
                     OutputKey::Playlist => return Err(unavailable()),
                     OutputKey::Segment { index } => {
                         if index >= segment_count

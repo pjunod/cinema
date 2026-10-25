@@ -170,6 +170,7 @@ fn basename(output: OutputKey) -> Result<CString, OperationError> {
         OutputKey::Playlist => "index.m3u8".to_owned(),
         OutputKey::IdentityMetadata => "identity.json".to_owned(),
         OutputKey::EncodedProcessMetadata => "encoded-process".to_owned(),
+        OutputKey::CompleteArtifactManifest => "complete-v1.json".to_owned(),
     };
     CString::new(name).map_err(|_| invalid())
 }

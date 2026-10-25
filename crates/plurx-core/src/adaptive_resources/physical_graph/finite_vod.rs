@@ -398,6 +398,8 @@ impl OwnedPhysicalGraph {
                 start: Some(start),
                 joined_abandoned: false,
             }),
+            #[cfg(target_os = "linux")]
+            copy: None,
             joined: false,
         });
         Ok((selection, abort))

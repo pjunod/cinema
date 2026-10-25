@@ -430,11 +430,19 @@ impl NodeResourceRuntime {
                     .is_some();
             #[cfg(not(target_os = "linux"))]
             let recovered_producer = false;
+            #[cfg(target_os = "linux")]
+            let closed_copy_producer = role
+                .copy_vod
+                .as_ref()
+                .is_some_and(|copy| copy.process_closure.is_some() && copy.terminal.is_some());
+            #[cfg(not(target_os = "linux"))]
+            let closed_copy_producer = false;
             if role.refunded
                 || (mode == CleanupMode::Retained && role.retirement.is_none())
                 || (mode == CleanupMode::Producer
                     && (role.retirement.is_some()
                         || (!recovered_producer
+                            && !closed_copy_producer
                             && role.finite_vod.as_ref().is_none_or(|finite| {
                                 let never_root = finite.never_root_closure.is_some();
                                 let root_only = finite.root_only_closure.is_some();

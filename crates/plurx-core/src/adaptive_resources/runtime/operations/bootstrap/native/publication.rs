@@ -221,10 +221,8 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?
             .state();
         let prior_playlist = if output == OutputKey::Playlist {
-            let mut matches = bootstrap
-                .fold
-                .as_ref()
-                .ok_or(OperationError::State)?
+            let fold = bootstrap.fold.as_ref().ok_or(OperationError::State)?;
+            let mut matches = fold
                 .files()
                 .iter()
                 .filter(|file| file.published == Some(OutputKey::Playlist));
@@ -232,15 +230,14 @@ impl NodeResourceRuntime {
             if matches.next().is_some() {
                 return Err(OperationError::State);
             }
-            first.map(|file| {
-                if state.asset.totals.readers != 0 || !file.held_copy_ids.is_empty() {
-                    return Err(OperationError::State);
-                }
-                Ok((
-                    file.file_id,
-                    expected_playlist_object(&file.native_object)?,
-                ))
-            }).transpose()?
+            first
+                .map(|file| {
+                    if fold.has_reader_for_file(file.file_id) || !file.held_copy_ids.is_empty() {
+                        return Err(OperationError::State);
+                    }
+                    Ok((file.file_id, expected_playlist_object(&file.native_object)?))
+                })
+                .transpose()?
         } else {
             None
         };
@@ -271,11 +268,14 @@ impl NodeResourceRuntime {
             OutputKey::Playlist => "index.m3u8".to_owned(),
             OutputKey::IdentityMetadata => "identity.json".to_owned(),
             OutputKey::EncodedProcessMetadata => "encoded-process".to_owned(),
+            OutputKey::CompleteArtifactManifest => "complete-v1.json".to_owned(),
         };
         let content_binding = format!("sha256:{:x}", Sha256::digest(payload.as_slice()));
         let metadata = matches!(
             output,
-            OutputKey::IdentityMetadata | OutputKey::EncodedProcessMetadata
+            OutputKey::IdentityMetadata
+                | OutputKey::EncodedProcessMetadata
+                | OutputKey::CompleteArtifactManifest
         );
         let validated = if matches!(output, OutputKey::Playlist) {
             if let Some((_, old)) = prior_playlist {

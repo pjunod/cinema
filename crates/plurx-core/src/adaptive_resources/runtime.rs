@@ -21,6 +21,9 @@ use crate::resource_custody::{
     ProcessIdentity, RecoverySnapshot, Role,
 };
 
+mod capacity_observer;
+#[cfg(target_os = "linux")]
+pub mod copy_vod;
 #[cfg(target_os = "linux")]
 pub mod direct_source;
 #[cfg(unix)]
@@ -29,11 +32,15 @@ mod finite_lifetime;
 pub mod finite_vod;
 mod operations;
 #[cfg(target_os = "linux")]
+pub mod planning_probe;
+#[cfg(target_os = "linux")]
 pub(crate) mod recovery;
 #[cfg(unix)]
 mod response_memory;
 #[cfg(unix)]
 pub(super) use operations::bootstrap::retirement::RetainedFiniteClosure;
+#[cfg(target_os = "linux")]
+pub(super) use operations::copy_close::CopyCancellationClosure;
 #[cfg(target_os = "linux")]
 pub(super) use operations::direct_source::DirectReadDomainClosure;
 #[cfg(target_os = "linux")]
@@ -43,9 +50,22 @@ pub(super) use operations::finite_cancel::FiniteCancellationClosure;
 #[cfg(unix)]
 pub(super) use operations::finite_retirement::FiniteRetirementClosure;
 #[cfg(target_os = "linux")]
+pub(super) use operations::planning_settlement::PlanningNativeClosure;
+#[cfg(target_os = "linux")]
 pub(super) use operations::recovered_producer::RecoveredRClosure;
 #[cfg(unix)]
 pub use operations::source_files::RetainedSourceLease;
+
+/// Bounded, nonblocking diagnostics for original planning ownership. These
+/// counts describe live book entries, not physical closure or free capacity.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct PlanningOwnershipDiagnostics {
+    pub metadata_owners: usize,
+    pub native_roles_held: usize,
+    pub original_tasks_pending: usize,
+    pub uncertain_native_owners: usize,
+    pub cleanup_requested: usize,
+}
 
 /// Nonclone, nonserde, same-live-operation acquisition capability. Only the
 /// retained operation bridge constructs it AFTER exact durable arm commit.
@@ -100,6 +120,9 @@ pub struct NodeResourceRuntime {
     recovered_adoptions: Mutex<BTreeMap<Uuid, Arc<tokio::sync::Mutex<recovery::RecoveryAdoption>>>>,
     #[cfg(target_os = "linux")]
     direct_read_domain: Mutex<Option<Arc<direct_source::DirectReadDomain>>>,
+    capacity_observer: tokio::sync::Mutex<capacity_observer::CapacityObserver>,
+    #[cfg(target_os = "linux")]
+    mount_namespace_inode: Option<u64>,
     operations: Mutex<operations::Operations>,
     // Immutable actual daemon configuration, not a path authorized by audit JSON.
     rendition_root: Option<PathBuf>,
@@ -155,6 +178,14 @@ impl NodeResourceRuntime {
             recovered_adoptions: Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]
             direct_read_domain: Mutex::new(None),
+            capacity_observer: tokio::sync::Mutex::new(capacity_observer::CapacityObserver::new()),
+            #[cfg(target_os = "linux")]
+            mount_namespace_inode: {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata("/proc/self/ns/mnt")
+                    .ok()
+                    .map(|metadata| metadata.ino())
+            },
             operations: Mutex::new(operations::Operations::default()),
             rendition_root: None,
         })
@@ -182,6 +213,19 @@ impl NodeResourceRuntime {
         self.ledger.snapshot()
     }
 
+    /// Advisory owner counts only. A busy or oversized book is unavailable,
+    /// never an empty inventory or evidence authorizing admission/refund.
+    pub fn planning_ownership_diagnostics(&self) -> Option<PlanningOwnershipDiagnostics> {
+        #[cfg(target_os = "linux")]
+        {
+            self.read_planning_ownership_diagnostics()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     /// A nonblocking advisory read cannot grant capacity or delay admission.
     pub fn history_diagnostics(&self) -> Option<crate::resource_history::HistoryDiagnostics> {
         #[cfg(target_os = "linux")]
@@ -195,21 +239,6 @@ impl NodeResourceRuntime {
         {
             None
         }
-    }
-
-    /// Refresh actual node/filesystem headroom before compiling an ordinary
-    /// finite demand. This exposes no ledger, journal or caller-supplied cap.
-    /// Physical reads happen outside the ledger lock; reservation still checks
-    /// the newest sample and every live claim atomically. Samples expire in one
-    /// second and never rewrite an existing allocation's custody generation.
-    pub fn observe_admission_capacity(&self) -> Result<u64, AdmissionRefusal> {
-        let root = self
-            .rendition_root
-            .as_deref()
-            .ok_or(AdmissionRefusal::Unavailable)?;
-        let sample = crate::resource_limits::admission::snapshot(root);
-        self.ledger
-            .observe_capacity(sample.capacity, sample.measured_at)
     }
 
     /// Complete cleanup-only diagnostic data, not launch, fencing or refund

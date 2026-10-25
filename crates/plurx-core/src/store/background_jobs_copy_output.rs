@@ -2,7 +2,7 @@
 use super::background_jobs::{CopyOutputIntent, JobToken};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyOutputJobOutput {
     pub artifact_id: String,
     pub output_identity: String,
@@ -27,6 +27,14 @@ pub struct PublishEncodedOutputJob {
     pub intent: super::background_jobs::EncodedOutputIntent,
     pub output: CopyOutputJobOutput,
     pub now_ms: i64,
+}
+
+/// Read-only immutable Store command, used to reconcile a lost publication
+/// waiter. Its presence says nothing about native output custody or closure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodedOutputPublicationRecord {
+    pub request: PublishEncodedOutputJob,
+    pub result: super::background_jobs_publication::JobPublishOutcome,
 }
 
 /// Identical ownership and terminal-effect contract, but a distinct closed
@@ -424,10 +432,22 @@ mod tests {
         ));
         assert!(matches!(
             store
-                .publish_encoded_output_job(publication)
+                .publish_encoded_output_job(publication.clone())
                 .await
                 .expect("reconcile"),
             JobPublishOutcome::AlreadyPublished { .. }
+        ));
+        let restored = store
+            .encoded_output_publication(&publication.token.claim_id)
+            .await
+            .expect("read original command")
+            .expect("immutable command");
+        assert!(restored.request.token.same_claim_as(&publication.token));
+        assert_eq!(restored.request.output, publication.output);
+        assert_eq!(restored.request.intent, publication.intent);
+        assert!(matches!(
+            restored.result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
         ));
         assert_eq!(
             store

@@ -18,6 +18,16 @@ impl NodeResourceRuntime {
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.response_budget.is_some()
             || role.finite_vod.is_some()
+            || {
+                #[cfg(target_os = "linux")]
+                {
+                    role.copy_vod.is_some()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    false
+                }
+            }
             || !role.bootstrap.is_empty()
             || role.transition.is_some()
             || role.refunded

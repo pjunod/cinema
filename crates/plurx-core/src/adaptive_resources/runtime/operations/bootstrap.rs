@@ -8,6 +8,8 @@ use v2::scratch::{AssetEventV1, ScratchLifecycleV1};
 #[cfg(unix)]
 pub(super) mod native;
 #[cfg(unix)]
+pub(in crate::adaptive_resources::runtime) mod prefix_removal;
+#[cfg(unix)]
 pub(in crate::adaptive_resources::runtime) mod readers;
 #[cfg(unix)]
 pub(in crate::adaptive_resources::runtime) mod retirement;
@@ -29,6 +31,14 @@ pub(super) struct BootstrapMember {
     readers: BTreeMap<Uuid, readers::ReaderEntry>,
     #[cfg(unix)]
     retirement: Option<retirement::CleanupRun>,
+    #[cfg(unix)]
+    prefix_removal: Option<prefix_removal::LiveRemoval>,
+}
+
+impl BootstrapMember {
+    pub(in crate::adaptive_resources::runtime) fn fold(&self) -> Option<&BootstrapFold> {
+        self.fold.as_ref()
+    }
 }
 
 /// BTree node storage reserves eleven entries, including unused slots. One
@@ -88,17 +98,79 @@ impl PreparedBootstrapTransfer {
             sync: source.sync.take(),
             readers: std::mem::take(&mut source.readers),
             retirement: source.retirement.take(),
+            prefix_removal: source.prefix_removal.take(),
         }
     }
 }
 
 impl BootstrapMember {
+    /// Metadata-only preflight for one new rolling segment. A false result
+    /// means the original producer may wait for a reader/retention transition;
+    /// it does not arm I/O or grant capacity. The queue rechecks everything
+    /// under the same role lock immediately before native entry.
+    #[cfg(unix)]
+    pub(super) fn rolling_segment_slot_ready(
+        &self,
+        next_bytes: u64,
+    ) -> Result<bool, OperationError> {
+        let fold = self.fold.as_ref().ok_or(OperationError::State)?;
+        let state = fold.state();
+        if state.asset.lifecycle != ScratchLifecycleV1::Open
+            || state.bootstrap.phase != BootstrapPhase::SinkReady
+            || self.retirement.is_some()
+        {
+            return Err(OperationError::State);
+        }
+        if self.change.is_some()
+            || self.next_arm.is_some()
+            || self.prefix_removal.is_some()
+            || state.asset.totals.pending_jobs != 0
+            || self
+                .publication
+                .as_ref()
+                .is_some_and(|p| !p.ready_for_transfer())
+            || self.sync.as_ref().is_some_and(|s| !s.ready_for_transfer())
+        {
+            return Ok(false);
+        }
+        let limits = &self.plan.limits;
+        if next_bytes == 0
+            || next_bytes > limits.one_file_logical_bytes
+            || next_bytes > limits.one_io_payload_bytes
+        {
+            return Err(OperationError::State);
+        }
+        let storage = limits
+            .storage_for(next_bytes)
+            .map_err(|_| OperationError::State)?;
+        Ok(
+            state.asset.totals.resident_file_objects < limits.resident_file_objects
+                && state.asset.totals.handles_reserved < limits.live_handles
+                && state
+                    .asset
+                    .totals
+                    .logical_bytes
+                    .checked_add(next_bytes)
+                    .is_some_and(|n| n <= limits.resident_logical_bytes)
+                && state
+                    .asset
+                    .totals
+                    .charged_storage_bytes
+                    .checked_add(storage)
+                    .is_some_and(|n| n <= limits.reserved_storage_bytes),
+        )
+    }
+
     /// Dynamic native-cell metadata surviving the exact R→S move. The staged
     /// fold inventory and each reader's fixed payload have distinct charged
     /// partitions and are deliberately excluded here.
     #[cfg(unix)]
     pub(super) fn retained_native_metadata_bytes(&self) -> Result<usize, OperationError> {
-        if self.change.is_some() || self.next_arm.is_some() || self.retirement.is_some() {
+        if self.change.is_some()
+            || self.next_arm.is_some()
+            || self.retirement.is_some()
+            || self.prefix_removal.is_some()
+        {
             return Err(OperationError::State);
         }
         let mut bytes = self
@@ -210,6 +282,7 @@ impl BootstrapMember {
             sync: None,
             readers: BTreeMap::new(),
             retirement: None,
+            prefix_removal: None,
         }
     }
 
@@ -355,6 +428,13 @@ impl BootstrapMember {
                     }
                 }
             }
+            if let Some(removal) = self.prefix_removal.as_mut() {
+                if removal.launched() {
+                    if let Err(error) = removal.join_registered().await {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
             if let Some(error) = first_error {
                 return Err(error);
             }
@@ -473,6 +553,7 @@ impl NodeResourceRuntime {
                     readers: BTreeMap::new(),
                     #[cfg(unix)]
                     retirement: None,
+                    prefix_removal: None,
                 },
             );
         }
@@ -740,5 +821,9 @@ pub(super) fn acknowledge(role: &mut OwnedRole, member: Uuid) -> Result<(), Oper
     bootstrap.change.take().ok_or(OperationError::State)?;
     #[cfg(unix)]
     readers::notify_progress(bootstrap);
+    #[cfg(target_os = "linux")]
+    if let Some(copy) = role.copy_vod.as_ref() {
+        copy.progress.notify_waiters();
+    }
     Ok(())
 }

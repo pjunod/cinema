@@ -123,6 +123,9 @@ impl OwnedPhysicalGraph {
             drain: Some(DrainRecord { selection }),
             #[cfg(unix)]
             finite: None,
+            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
+            copy: None,
             joined: false,
         });
         Ok(selection)

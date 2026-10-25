@@ -74,6 +74,9 @@ impl BootstrapFold {
     pub(crate) fn files(&self) -> &[FileObservedV1] {
         &self.output.files
     }
+    pub(crate) fn has_reader_for_file(&self, file_id: Id) -> bool {
+        self.output.has_reader_for_file(file_id)
+    }
     pub(crate) fn frozen_snapshot(
         &self,
         plan: &ScratchPlanV3,

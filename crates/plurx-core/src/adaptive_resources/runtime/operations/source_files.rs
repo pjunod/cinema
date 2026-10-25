@@ -221,6 +221,15 @@ pub(super) struct InheritedSource {
     pub verified_elf: bool,
     pub verified_sha256_cached: bool,
 }
+
+/// Audit-only source child observation after the original P document process
+/// has positively closed. No descriptor or File alias leaves the SourceCell.
+pub(in crate::adaptive_resources::runtime) struct FixedProbeChildObservation {
+    pub acquisition_id: v2::Id,
+    pub observation_id: Uuid,
+    pub envelope: v2::Envelope,
+    pub acknowledged: bool,
+}
 struct SourceResult {
     file: Option<Arc<File>>,
     observed: Option<v2::SourceObserved>,
@@ -232,6 +241,7 @@ struct SourceResult {
 enum SourceOpenPlan {
     Original(v2::SourcePlan),
     Direct(v2::DirectSourcePlanV1),
+    FixedProbe(v2::FixedProbeDiscoverSourceV1),
 }
 /// Inline original-job frames used by the direct Source component bound.
 /// Dynamic strings and serialized envelopes are charged separately there.
@@ -300,6 +310,68 @@ impl SourceCell {
         Ok((metadata.len(), actual))
     }
 
+    /// The scanner-bound P source's observed S1 comes from this retained
+    /// original File. It is checked again before the root inherits the fd.
+    pub(in crate::adaptive_resources::runtime) fn probe_observed_identity(
+        &self,
+    ) -> Result<(u64, String), OperationError> {
+        let v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        if !self.observed_committed || self.pending.is_some() || self.lease_issued {
+            return Err(OperationError::State);
+        }
+        let result = self.result.as_ref().ok_or(OperationError::State)?;
+        let file = result.file.as_ref().ok_or(OperationError::State)?;
+        let observed = result.observed.as_ref().ok_or(OperationError::State)?;
+        let metadata = file.metadata()?;
+        let actual = SourceIdentity::from_metadata(&metadata).render_s1();
+        if !metadata.is_file()
+            || !SourceIdentity::scanner_matches(
+                &metadata,
+                source.scanner_size,
+                source.scanner_mtime,
+            )
+            || observed.holder_id != source.holder_id
+            || observed.member_id != source.member_id
+            || observed.copies.as_slice() != &source.planned_copies[..1]
+            || observed.source_association.media_file_id != source.media_file_id
+            || observed.source_association.recipe_source_binding != source.recipe_source_binding
+            || observed.source_association.object_version != actual
+            || observed.native_object.device
+                != (v2::NativeValue::Known {
+                    value: metadata.dev(),
+                })
+            || observed.native_object.inode
+                != (v2::NativeValue::Known {
+                    value: metadata.ino(),
+                })
+            || observed.native_object.mount_id != bootstrap::native::steps::mount_id(file)
+            || observed.native_object.filesystem_domain != source.filesystem_domain
+        {
+            return Err(OperationError::State);
+        }
+        Ok((metadata.len(), actual))
+    }
+
+    /// The original P task is registered under the same bundle lock before
+    /// its entry latch opens, so this lease cannot escape an untracked task.
+    pub(in crate::adaptive_resources::runtime) fn take_probe_lease(
+        &mut self,
+    ) -> Result<(RetainedSourceLease, u64, String), OperationError> {
+        let (length, object_version) = self.probe_observed_identity()?;
+        let file = self
+            .result
+            .as_ref()
+            .and_then(|result| result.file.as_ref())
+            .ok_or(OperationError::State)?;
+        let lease = RetainedSourceLease {
+            file: Arc::clone(file),
+        };
+        self.lease_issued = true;
+        Ok((lease, length, object_version))
+    }
+
     /// Await only the original source-open worker if it was registered. The
     /// actual file/observation remain cached; this does not launch or observe it.
     pub(super) async fn join_registered(&mut self) -> Result<(), OperationError> {
@@ -336,6 +408,9 @@ impl SourceCell {
         let plan = match &self.plan {
             v2::MemberPlan::SourceV1 { source, .. } => SourceOpenPlan::Original(source.clone()),
             v2::MemberPlan::DirectSourceV1 { source, .. } => SourceOpenPlan::Direct(source.clone()),
+            v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } => {
+                SourceOpenPlan::FixedProbe(source.clone())
+            }
             _ => return Err(OperationError::State),
         };
         let runtime = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
@@ -362,10 +437,66 @@ fn open_source(spec: SourceOpenSpec, plan: SourceOpenPlan) -> SourceResult {
     match plan {
         SourceOpenPlan::Original(plan) => open_source_with_cache(spec, plan, &VERIFIED_EXECUTABLES),
         SourceOpenPlan::Direct(plan) => open_direct_source(spec, plan),
+        SourceOpenPlan::FixedProbe(plan) => open_fixed_probe_source(spec, plan),
     }
 }
 
+fn open_fixed_probe_source(
+    spec: SourceOpenSpec,
+    plan: v2::FixedProbeDiscoverSourceV1,
+) -> SourceResult {
+    open_scanner_source(
+        spec,
+        plan.holder_id,
+        plan.member_id,
+        plan.media_file_id,
+        plan.recipe_source_binding,
+        plan.absolute_path,
+        plan.scanner_size,
+        plan.scanner_mtime,
+        true,
+        plan.filesystem_domain,
+        plan.planned_copies
+            .into_iter()
+            .filter(|copy| matches!(copy.owner, v2::CopyOwner::DaemonSourceCell { .. }))
+            .collect(),
+    )
+}
+
 fn open_direct_source(spec: SourceOpenSpec, plan: v2::DirectSourcePlanV1) -> SourceResult {
+    let scanner_exact = matches!(
+        plan.expectation,
+        v2::DirectSourceExpectationV1::ScannerExact
+    );
+    open_scanner_source(
+        spec,
+        plan.holder_id,
+        plan.member_id,
+        plan.media_file_id,
+        plan.recipe_source_binding,
+        plan.absolute_path,
+        plan.scanner_size,
+        plan.scanner_mtime,
+        scanner_exact,
+        plan.filesystem_domain,
+        plan.planned_copies,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_scanner_source(
+    spec: SourceOpenSpec,
+    holder_id: v2::Id,
+    member_id: v2::Id,
+    media_file_id: String,
+    recipe_source_binding: String,
+    absolute_path: String,
+    scanner_size: i64,
+    scanner_mtime: i64,
+    scanner_exact: bool,
+    filesystem_domain: v2::FilesystemDomain,
+    planned_copies: Vec<v2::SourceCopy>,
+) -> SourceResult {
     let mut result = SourceResult {
         file: None,
         observed: None,
@@ -375,11 +506,11 @@ fn open_direct_source(spec: SourceOpenSpec, plan: v2::DirectSourcePlanV1) -> Sou
         verified_sha256_cached: false,
     };
     if spec.expected_sha256.is_some()
-        || spec.path.to_str() != Some(plan.absolute_path.as_str())
-        || spec.scanner_size != plan.scanner_size
-        || spec.scanner_mtime != plan.scanner_mtime
+        || spec.path.to_str() != Some(absolute_path.as_str())
+        || spec.scanner_size != scanner_size
+        || spec.scanner_mtime != scanner_mtime
         || !std::fs::metadata("/proc/self/ns/mnt").is_ok_and(|metadata| {
-            matches!(plan.filesystem_domain.mount_namespace,
+            matches!(filesystem_domain.mount_namespace,
                 v2::NativeValue::Known { value } if value == metadata.ino())
         })
     {
@@ -398,19 +529,17 @@ fn open_direct_source(spec: SourceOpenSpec, plan: v2::DirectSourcePlanV1) -> Sou
         return result;
     };
     if !metadata.is_file()
-        || (matches!(
-            plan.expectation,
-            v2::DirectSourceExpectationV1::ScannerExact
-        ) && !SourceIdentity::scanner_matches(&metadata, spec.scanner_size, spec.scanner_mtime))
+        || (scanner_exact
+            && !SourceIdentity::scanner_matches(&metadata, spec.scanner_size, spec.scanner_mtime))
     {
         return result;
     }
     let actual_s1 = SourceIdentity::from_metadata(&metadata).render_s1();
     result.observed = Some(v2::SourceObserved {
         version: 1,
-        holder_id: plan.holder_id,
-        member_id: plan.member_id,
-        copies: plan.planned_copies.clone(),
+        holder_id: holder_id,
+        member_id: member_id,
+        copies: planned_copies,
         native_object: v2::NativeObject {
             file_type: v2::FileType::Regular,
             device: v2::NativeValue::Known {
@@ -420,13 +549,13 @@ fn open_direct_source(spec: SourceOpenSpec, plan: v2::DirectSourcePlanV1) -> Sou
                 value: metadata.ino(),
             },
             mount_id: bootstrap::native::steps::mount_id(file),
-            filesystem_domain: plan.filesystem_domain,
+            filesystem_domain: filesystem_domain,
         },
         access: v2::SourceAccess::ReadOnlyRegular,
         source_association: v2::SourceAssociation {
-            media_file_id: plan.media_file_id,
+            media_file_id: media_file_id,
             object_version: actual_s1,
-            recipe_source_binding: plan.recipe_source_binding,
+            recipe_source_binding: recipe_source_binding,
         },
     });
     result
@@ -619,6 +748,15 @@ impl NodeResourceRuntime {
                     && source.scanner_mtime == spec.scanner_mtime
                     && spec.expected_sha256.is_none(),
             ),
+            v2::MemberPlan::FixedProbeDiscoverSourceV1 { slot, source } => (
+                slot,
+                &source.filesystem_domain,
+                &source.planned_copies,
+                source.absolute_path == path
+                    && source.scanner_size == spec.scanner_size
+                    && source.scanner_mtime == spec.scanner_mtime
+                    && spec.expected_sha256.is_none(),
+            ),
             _ => return Err(OperationError::State),
         };
         if !slot.protected_paths.iter().any(|p| p == path)
@@ -743,6 +881,44 @@ impl NodeResourceRuntime {
         Ok((lease, length, object_version))
     }
 
+    /// Return P's one retained source alias and the S1 observed from that
+    /// same original File under the source book lock, before marking the
+    /// lease issued. No pathname reopen or raw descriptor leaves the book.
+    pub(in crate::adaptive_resources::runtime) async fn open_prepared_probe_source(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(RetainedSourceLease, u64, String), OperationError> {
+        self.acquire_prepared_source(owner, index, member, deadline)
+            .await?;
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if !bundle.installed {
+            return Err(OperationError::State);
+        }
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let source = role.sources.get_mut(&member).ok_or(OperationError::State)?;
+        if role.refunded
+            || !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+            || source.lease_issued
+        {
+            return Err(OperationError::State);
+        }
+        let (length, object_version) = source.probe_observed_identity()?;
+        let file = source
+            .result
+            .as_ref()
+            .and_then(|result| result.file.as_ref())
+            .ok_or(OperationError::State)?;
+        let lease = RetainedSourceLease {
+            file: Arc::clone(file),
+        };
+        source.lease_issued = true;
+        Ok((lease, length, object_version))
+    }
+
     /// Runs source prepare/arm/open/observe and durable observation, without
     /// exporting the retained File through a lease.
     pub(in crate::adaptive_resources::runtime) async fn acquire_prepared_source(
@@ -819,6 +995,9 @@ impl NodeResourceRuntime {
                     v2::MemberPlan::SourceV1 { .. } => v2::Observed::SourceV1 { source: observed },
                     v2::MemberPlan::DirectSourceV1 { .. } => {
                         v2::Observed::DirectSourceV1 { source: observed }
+                    }
+                    v2::MemberPlan::FixedProbeDiscoverSourceV1 { .. } => {
+                        v2::Observed::FixedProbeDiscoverSourceV1 { source: observed }
                     }
                     _ => return Err(OperationError::State),
                 }),
@@ -965,11 +1144,79 @@ impl SourceCell {
         &mut self,
         root_member: Uuid,
     ) -> Result<InheritedSource, OperationError> {
-        if !self.observed_committed || self.lease_issued {
+        self.inherited_source_inner(root_member, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn fixed_probe_child_observation(
+        &mut self,
+        closure: &crate::adaptive_resources::physical_graph::fixed_probe::FixedProbeNativeClosure,
+    ) -> Result<FixedProbeChildObservation, OperationError> {
+        let v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        if source.member_id.uuid() != closure.source_member()
+            || closure.document_identity().pid == 0
+            || closure.document_identity().start_marker == 0
+        {
             return Err(OperationError::State);
         }
-        let v2::MemberPlan::SourceV1 { source: plan, .. } = &self.plan else {
+        let inherited = self.inherited_source_inner(closure.document_member(), true)?;
+        Ok(FixedProbeChildObservation {
+            acquisition_id: inherited.acquisition_id,
+            observation_id: inherited.observation_id,
+            envelope: inherited.envelope,
+            acknowledged: inherited.acknowledged,
+        })
+    }
+
+    fn inherited_source_inner(
+        &mut self,
+        root_member: Uuid,
+        allow_issued_lease: bool,
+    ) -> Result<InheritedSource, OperationError> {
+        if !self.observed_committed || (self.lease_issued && !allow_issued_lease) {
             return Err(OperationError::State);
+        }
+        let (
+            expected_holder_id,
+            expected_member_id,
+            association,
+            filesystem_domain,
+            planned_copies,
+            recovery,
+            fixed_probe,
+        ) = match &self.plan {
+            v2::MemberPlan::SourceV1 { source, .. } => (
+                source.holder_id,
+                source.member_id,
+                source.source_association.clone(),
+                &source.filesystem_domain,
+                &source.planned_copies,
+                &source.recovery,
+                false,
+            ),
+            v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } => (
+                source.holder_id,
+                source.member_id,
+                v2::SourceAssociation {
+                    media_file_id: source.media_file_id.clone(),
+                    object_version: self
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.observed.as_ref())
+                        .ok_or(OperationError::State)?
+                        .source_association
+                        .object_version
+                        .clone(),
+                    recipe_source_binding: source.recipe_source_binding.clone(),
+                },
+                &source.filesystem_domain,
+                &source.planned_copies,
+                &source.recovery,
+                true,
+            ),
+            _ => return Err(OperationError::State),
         };
         let result = self.result.as_ref().ok_or(OperationError::State)?;
         let file = result.file.as_ref().ok_or(OperationError::State)?;
@@ -977,12 +1224,12 @@ impl SourceCell {
         let metadata = file.metadata()?;
         let native = &source_observed.native_object;
         if !metadata.is_file()
-            || source_observed.holder_id != plan.holder_id
-            || source_observed.member_id != plan.member_id
-            || source_observed.source_association != plan.source_association
+            || source_observed.holder_id != expected_holder_id
+            || source_observed.member_id != expected_member_id
+            || source_observed.source_association != association
             || source_observed.access != v2::SourceAccess::ReadOnlyRegular
             || native.file_type != v2::FileType::Regular
-            || native.filesystem_domain != plan.filesystem_domain
+            || native.filesystem_domain != *filesystem_domain
             || native.device
                 != (v2::NativeValue::Known {
                     value: metadata.dev(),
@@ -997,21 +1244,21 @@ impl SourceCell {
         {
             return Err(OperationError::State);
         }
-        let planned_graph_id = match &plan.recovery {
+        let planned_graph_id = match recovery {
             v2::SourceRecovery::LocalSourceHandlesV1 { graph_id, .. } => *graph_id,
         };
         let mut source_copies = source_observed.copies.iter().filter(|copy| {
             matches!(copy.owner,
-                v2::CopyOwner::DaemonSourceCell { owner_id, graph_id, member_id }
-                    if owner_id == plan.filesystem_domain.daemon_owner_id
+                v2::CopyOwner::DaemonSourceCell { owner_id, graph_id, member_id: copy_member_id }
+                    if owner_id == filesystem_domain.daemon_owner_id
                         && graph_id == planned_graph_id
-                        && member_id == plan.member_id)
+                        && copy_member_id == expected_member_id)
         });
         let source_copy = source_copies.next().ok_or(OperationError::State)?;
-        if source_copies.next().is_some() || !plan.planned_copies.contains(source_copy) {
+        if source_copies.next().is_some() || !planned_copies.contains(source_copy) {
             return Err(OperationError::State);
         }
-        let mut root_copies = plan.planned_copies.iter().filter(|copy| {
+        let mut root_copies = planned_copies.iter().filter(|copy| {
             matches!(copy.owner,
                 v2::CopyOwner::OwnedRoot { graph_id, root_member_id: planned_root }
                     if graph_id == planned_graph_id && planned_root.uuid() == root_member)
@@ -1056,7 +1303,11 @@ impl SourceCell {
             envelope: v2::Envelope {
                 version: 2,
                 planned: self.plan.clone(),
-                observed: Some(v2::Observed::SourceV1 { source: observed }),
+                observed: Some(if fixed_probe {
+                    v2::Observed::FixedProbeDiscoverSourceV1 { source: observed }
+                } else {
+                    v2::Observed::SourceV1 { source: observed }
+                }),
             },
             acknowledged: self.root_observed_committed,
             verified_sha256: result.verified_sha256,
@@ -1396,6 +1647,17 @@ impl SourceCell {
         self.finite_closed_fact_with(FiniteProcessClosedProof::Joined(closure))
     }
 
+    /// The rolling-copy parser is a distinct fixed actor. It shares the
+    /// SourceV1 copy inventory and exact parent/root close audit only after
+    /// its own original parser and root closure has been retained.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn copy_closed_fact(
+        &self,
+        closure: &crate::adaptive_resources::physical_graph::copy_vod::CopyProcessClosure,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        self.finite_closed_fact_with(FiniteProcessClosedProof::CopyJoined(closure))
+    }
+
     /// A root-only graph can close an inherited copy even when the root-copy
     /// enrichment was not durably observed. Its original native witness is
     /// distinct from the joined-writer witness above.
@@ -1425,6 +1687,14 @@ impl SourceCell {
                     closure.acquisition_id(),
                     closure.close_operation_id(),
                     false,
+                ),
+                #[cfg(target_os = "linux")]
+                FiniteProcessClosedProof::CopyJoined(closure) => (
+                    closure.generation(),
+                    closure.root_member(),
+                    closure.acquisition_id(),
+                    closure.close_operation_id(),
+                    true,
                 ),
             };
         if !self.parent_closed()
@@ -1540,11 +1810,91 @@ impl SourceCell {
             copies,
         })
     }
+
+    /// The original P task has joined and dropped its held-source aliases.
+    /// Close this SourceCell's SAME original File after the document-root
+    /// observation was committed from the native close capability.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) async fn close_fixed_probe_parent(
+        &mut self,
+        closure: &crate::adaptive_resources::physical_graph::fixed_probe::FixedProbeNativeClosure,
+    ) -> Result<(), OperationError> {
+        let v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        if source.member_id.uuid() != closure.source_member()
+            || !self.root_observed_committed
+            || self.selected_root_member != Some(closure.document_member())
+            || self.pending_root.is_some()
+        {
+            return Err(OperationError::State);
+        }
+        self.join_registered().await?;
+        self.close_parent_inner(true, true).await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn fixed_probe_closed_fact(
+        &self,
+        closure: &crate::adaptive_resources::physical_graph::fixed_probe::FixedProbeNativeClosure,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        let v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        if source.member_id.uuid() != closure.source_member()
+            || !self.parent_closed()
+            || self.pending.is_some()
+            || self.failed_join
+            || !self.observed_committed
+            || !self.root_observed_committed
+            || self.selected_root_member != Some(closure.document_member())
+            || self.pending_root.is_some()
+            || source.planned_copies.len() != 2
+            || self.parent_close_operation_id == closure.document_close_operation_id()
+        {
+            return Err(OperationError::State);
+        }
+        let observed = self
+            .result
+            .as_ref()
+            .filter(|result| result.file.is_none())
+            .and_then(|result| result.observed.as_ref())
+            .ok_or(OperationError::State)?;
+        if observed.copies != source.planned_copies
+            || observed.holder_id != source.holder_id
+            || observed.member_id != source.member_id
+            || observed.source_association.media_file_id != source.media_file_id
+            || observed.source_association.recipe_source_binding != source.recipe_source_binding
+        {
+            return Err(OperationError::State);
+        }
+        let parent = &source.planned_copies[0];
+        let child = &source.planned_copies[1];
+        if !matches!(parent.owner, v2::CopyOwner::DaemonSourceCell { member_id, .. }
+                if member_id == source.member_id)
+            || child.parent_copy_id != Some(parent.copy_id)
+        {
+            return Err(OperationError::State);
+        }
+        let child_closed = closure.closed_document_source_copy(child)?;
+        Ok(v2::ClosedFact::FixedProbeDiscoverSourceV1 {
+            holder_id: source.holder_id,
+            copies: vec![
+                v2::CopyClosed::ActualOwnedClose {
+                    copy: parent.clone(),
+                    operation_id: v2::Id::new(self.parent_close_operation_id)?,
+                },
+                child_closed,
+            ],
+        })
+    }
 }
 
 enum FiniteProcessClosedProof<'a> {
     Joined(&'a crate::adaptive_resources::physical_graph::finite_vod::FiniteVodProcessClosure),
     RootOnly(&'a crate::adaptive_resources::physical_graph::finite_vod::FiniteVodRootOnlyClosure),
+    #[cfg(target_os = "linux")]
+    CopyJoined(&'a crate::adaptive_resources::physical_graph::copy_vod::CopyProcessClosure),
 }
 
 pub(super) fn acknowledge(
@@ -1571,9 +1921,15 @@ pub(super) fn acknowledge_root(
     operation: Uuid,
 ) -> Result<(), OperationError> {
     let source = role.sources.get_mut(&member).ok_or(OperationError::State)?;
+    // The planning source issued its one probe lease to the original P task;
+    // its child observation is committed only after that task joined.
+    let lease_allowed = matches!(
+        source.plan,
+        v2::MemberPlan::FixedProbeDiscoverSourceV1 { .. }
+    );
     if source.root_observation_id != operation
         || !source.observed_committed
-        || source.lease_issued
+        || (source.lease_issued && !lease_allowed)
         || source
             .result
             .as_ref()
@@ -1593,23 +1949,35 @@ pub(super) fn acknowledge_root(
         .as_ref()
         .cloned()
         .ok_or(OperationError::State)?;
-    let v2::MemberPlan::SourceV1 { source: plan, .. } = &source.plan else {
-        return Err(OperationError::State);
+    let (planned_copies, recovery, filesystem_domain, plan_member_id) = match &source.plan {
+        v2::MemberPlan::SourceV1 { source: plan, .. } => (
+            &plan.planned_copies,
+            &plan.recovery,
+            &plan.filesystem_domain,
+            plan.member_id,
+        ),
+        v2::MemberPlan::FixedProbeDiscoverSourceV1 { source: plan, .. } => (
+            &plan.planned_copies,
+            &plan.recovery,
+            &plan.filesystem_domain,
+            plan.member_id,
+        ),
+        _ => return Err(OperationError::State),
     };
     let base = source
         .result
         .as_ref()
         .and_then(|result| result.observed.as_ref())
         .ok_or(OperationError::State)?;
-    let planned_graph_id = match &plan.recovery {
+    let planned_graph_id = match recovery {
         v2::SourceRecovery::LocalSourceHandlesV1 { graph_id, .. } => *graph_id,
     };
     let mut source_copies = base.copies.iter().filter(|copy| {
         matches!(copy.owner,
             v2::CopyOwner::DaemonSourceCell { owner_id, graph_id, member_id }
-                if owner_id == plan.filesystem_domain.daemon_owner_id
+                if owner_id == filesystem_domain.daemon_owner_id
                     && graph_id == planned_graph_id
-                    && member_id == plan.member_id)
+                    && member_id == plan_member_id)
     });
     let source_copy = source_copies.next().ok_or(OperationError::State)?;
     let added: Vec<_> = observed
@@ -1623,7 +1991,7 @@ pub(super) fn acknowledge_root(
             v2::CopyOwner::OwnedRoot { graph_id, root_member_id }
                 if graph_id == planned_graph_id && root_member_id.uuid() == root_member)
         || source_copies.next().is_some()
-        || !plan.planned_copies.contains(&root_copy)
+        || !planned_copies.contains(&root_copy)
         || added[0].parent_copy_id != Some(source_copy.copy_id)
     {
         return Err(OperationError::State);

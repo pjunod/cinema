@@ -138,6 +138,7 @@ fn name(key: &OutputKey) -> String {
         OutputKey::Playlist => "index.m3u8".into(),
         OutputKey::IdentityMetadata => "identity.json".into(),
         OutputKey::EncodedProcessMetadata => "encoded-process".into(),
+        OutputKey::CompleteArtifactManifest => "complete-v1.json".into(),
     }
 }
 impl NodeResourceRuntime {

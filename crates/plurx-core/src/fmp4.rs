@@ -5692,6 +5692,7 @@ pub struct Segmenter {
     video_timescale: u32,
     pending: Vec<Fragment>,
     finite_limits: Option<FiniteSegmenterLimits>,
+    copy_pending_limit: Option<(usize, usize)>,
     pending_bytes: usize,
     pending_ticks: u64,
     next_index: u64,
@@ -5711,6 +5712,7 @@ impl Segmenter {
             video_timescale,
             pending: Vec::new(),
             finite_limits: None,
+            copy_pending_limit: None,
             pending_bytes: 0,
             pending_ticks: 0,
             next_index: 0,
@@ -5720,6 +5722,26 @@ impl Segmenter {
             counts: SegmentCounts::default(),
             retain_hevc_parameter_sets: false,
         }
+    }
+
+    /// Use the exact pending-fragment allocation reserved before the selected
+    /// copy root entered. The parser cannot grow this vector or retain more
+    /// media bytes than the admitted copy graph declared.
+    pub fn new_copy_bounded(
+        init: Init,
+        policy: CutPolicy,
+        pending: Vec<Fragment>,
+        max_pending_bytes: usize,
+    ) -> Result<Segmenter, Fmp4Error> {
+        if !pending.is_empty() || pending.capacity() == 0 || max_pending_bytes == 0 {
+            return Err(Fmp4Error::Unsupported(
+                "invalid bounded copy pending reservation".into(),
+            ));
+        }
+        let mut segmenter = Self::new(init, policy);
+        segmenter.copy_pending_limit = Some((pending.capacity(), max_pending_bytes));
+        segmenter.pending = pending;
+        Ok(segmenter)
     }
 
     /// Keep every video sample's in-band HEVC parameter sets when merging.
@@ -5891,6 +5913,22 @@ impl Segmenter {
     /// once you can see what comes after it.
     pub fn push(&mut self, fragment: Fragment) -> Result<Option<Published>, Fmp4Error> {
         let mut fragment = fragment;
+        if let Some((max_fragments, max_bytes)) = self.copy_pending_limit {
+            if self
+                .pending
+                .len()
+                .checked_add(1)
+                .is_none_or(|count| count > max_fragments)
+                || self
+                    .pending_bytes
+                    .checked_add(fragment.len())
+                    .is_none_or(|bytes| bytes > max_bytes)
+            {
+                return Err(Fmp4Error::Unsupported(
+                    "copy pending fragments exceed admitted reservation".into(),
+                ));
+            }
+        }
         if let Some(limits) = self.finite_limits {
             let count = self.pending.len().checked_add(1).ok_or_else(|| {
                 Fmp4Error::Unsupported("finite pending fragment count overflows".into())

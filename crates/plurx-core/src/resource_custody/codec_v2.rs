@@ -1,6 +1,7 @@
 //! Strict v2 audit data for the concrete finite-VOD ownership path.
 //! None of these disk types constructs a physical receipt or a launch permit.
 mod cost;
+mod fixed_probe;
 mod retained_v2;
 pub(crate) mod scratch;
 mod settlement;
@@ -9,6 +10,13 @@ pub(in crate::resource_custody) mod tests;
 use super::{codec, CustodyError, Role};
 use codec::{BootIdentity, MemberEnvelope, MemberKind, PlannedMember};
 pub(crate) use cost::{retained_minimum_resources, validate_retained_resources};
+#[cfg(target_os = "linux")]
+pub(crate) use fixed_probe::{FixedPlanningEngineFileSlotV1, FIXED_PLANNING_ENGINE_MAX_OBJECTS};
+pub(crate) use fixed_probe::{
+    FixedPlanningEngineTaskObservedV1, FixedPlanningEngineTaskV1, FixedProbeDiscoverSourceV1,
+    FixedProbeDiscoverTaskObservedV1, FixedProbeDiscoverTaskV1, FixedProbeMetadataV1,
+    FixedProbeTaskV1,
+};
 pub(crate) use retained_v2::*;
 use serde::{Deserialize, Serialize};
 pub(crate) use settlement::*;
@@ -362,6 +370,7 @@ impl IoInventory {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum VodActor {
     VodGenerationV1,
+    RollingCopyV1,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -412,6 +421,10 @@ pub(crate) enum MemberPlan {
         slot: MemberSlot,
         source: DirectSourcePlanV1,
     },
+    FixedProbeDiscoverSourceV1 {
+        slot: MemberSlot,
+        source: FixedProbeDiscoverSourceV1,
+    },
     DirectReadDomainV1 {
         slot: MemberSlot,
         domain: DirectReadDomainPlanV1,
@@ -419,6 +432,22 @@ pub(crate) enum MemberPlan {
     VodOutputTaskV1 {
         slot: MemberSlot,
         task: VodOutputTask,
+    },
+    FixedProbeTaskV1 {
+        slot: MemberSlot,
+        task: FixedProbeTaskV1,
+    },
+    FixedProbeDiscoverTaskV1 {
+        slot: MemberSlot,
+        task: FixedProbeDiscoverTaskV1,
+    },
+    FixedPlanningEngineTaskV1 {
+        slot: MemberSlot,
+        task: FixedPlanningEngineTaskV1,
+    },
+    FixedProbeMetadataV1 {
+        slot: MemberSlot,
+        metadata: FixedProbeMetadataV1,
     },
     ScratchAssetsV1 {
         slot: MemberSlot,
@@ -439,8 +468,13 @@ impl MemberPlan {
             Self::LegacyV1 { planned } => planned.member_id,
             Self::SourceV1 { slot, .. }
             | Self::DirectSourceV1 { slot, .. }
+            | Self::FixedProbeDiscoverSourceV1 { slot, .. }
             | Self::DirectReadDomainV1 { slot, .. }
             | Self::VodOutputTaskV1 { slot, .. }
+            | Self::FixedProbeTaskV1 { slot, .. }
+            | Self::FixedProbeDiscoverTaskV1 { slot, .. }
+            | Self::FixedPlanningEngineTaskV1 { slot, .. }
+            | Self::FixedProbeMetadataV1 { slot, .. }
             | Self::ScratchAssetsV1 { slot, .. }
             | Self::ScratchAssetsV2 { slot, .. }
             | Self::ScratchAssetsV3 { slot, .. } => slot.member_id.uuid(),
@@ -449,7 +483,10 @@ impl MemberPlan {
     pub(crate) fn kind(&self) -> MemberKind {
         match self {
             Self::LegacyV1 { planned } => planned.kind.clone(),
-            Self::VodOutputTaskV1 { .. } => MemberKind::Task,
+            Self::VodOutputTaskV1 { .. }
+            | Self::FixedProbeTaskV1 { .. }
+            | Self::FixedProbeDiscoverTaskV1 { .. } => MemberKind::Task,
+            Self::FixedPlanningEngineTaskV1 { .. } => MemberKind::Task,
             _ => MemberKind::TypedResource,
         }
     }
@@ -458,8 +495,13 @@ impl MemberPlan {
             Self::LegacyV1 { planned } => planned.adapter.as_str(),
             Self::SourceV1 { .. } => "source_file",
             Self::DirectSourceV1 { .. } => "direct_source_file",
+            Self::FixedProbeDiscoverSourceV1 { .. } => "fixed_probe_discover_source",
             Self::DirectReadDomainV1 { .. } => "direct_read_domain",
             Self::VodOutputTaskV1 { .. } => "vod_output_task",
+            Self::FixedProbeTaskV1 { .. } => "fixed_probe_task",
+            Self::FixedProbeDiscoverTaskV1 { .. } => "fixed_probe_discover_task",
+            Self::FixedPlanningEngineTaskV1 { .. } => "fixed_planning_engine_task",
+            Self::FixedProbeMetadataV1 { .. } => "fixed_probe_metadata",
             Self::ScratchAssetsV1 { .. }
             | Self::ScratchAssetsV2 { .. }
             | Self::ScratchAssetsV3 { .. } => "scratch",
@@ -475,8 +517,13 @@ impl MemberPlan {
                 .collect(),
             Self::SourceV1 { slot, .. }
             | Self::DirectSourceV1 { slot, .. }
+            | Self::FixedProbeDiscoverSourceV1 { slot, .. }
             | Self::DirectReadDomainV1 { slot, .. }
             | Self::VodOutputTaskV1 { slot, .. }
+            | Self::FixedProbeTaskV1 { slot, .. }
+            | Self::FixedProbeDiscoverTaskV1 { slot, .. }
+            | Self::FixedPlanningEngineTaskV1 { slot, .. }
+            | Self::FixedProbeMetadataV1 { slot, .. }
             | Self::ScratchAssetsV1 { slot, .. }
             | Self::ScratchAssetsV2 { slot, .. }
             | Self::ScratchAssetsV3 { slot, .. } => slot
@@ -510,8 +557,23 @@ pub(crate) enum Observed {
     DirectSourceV1 {
         source: SourceObserved,
     },
+    FixedProbeDiscoverSourceV1 {
+        source: SourceObserved,
+    },
     VodOutputTaskV1 {
         task: VodOutputTask,
+    },
+    FixedProbeTaskV1 {
+        task: FixedProbeTaskV1,
+    },
+    FixedProbeDiscoverTaskV1 {
+        task: FixedProbeDiscoverTaskObservedV1,
+    },
+    FixedPlanningEngineTaskV1 {
+        task: FixedPlanningEngineTaskObservedV1,
+    },
+    FixedProbeMetadataV1 {
+        metadata: FixedProbeMetadataV1,
     },
     ScratchAssetsV1 {
         scratch: ScratchAssets,
@@ -710,15 +772,30 @@ fn validate_source(source: &SourcePlan, manifest: &Manifest) -> Result<(), Custo
     Ok(())
 }
 fn validate_task(task: &VodOutputTask, manifest: &Manifest) -> Result<(), CustodyError> {
+    let scratch_matches = manifest
+        .members
+        .iter()
+        .any(|member| match (&task.actor, member) {
+            (VodActor::VodGenerationV1, MemberPlan::ScratchAssetsV1 { scratch, .. }) => {
+                scratch.asset_id == task.asset_id
+            }
+            (VodActor::VodGenerationV1, MemberPlan::ScratchAssetsV2 { plan, .. }) => {
+                plan.asset_id == task.asset_id
+            }
+            (VodActor::VodGenerationV1, MemberPlan::ScratchAssetsV3 { plan, .. }) => {
+                plan.asset_id == task.asset_id
+            }
+            (VodActor::RollingCopyV1, MemberPlan::ScratchAssetsV3 { plan, .. }) => {
+                plan.asset_id == task.asset_id
+                    && plan.generation_epoch == task.generation_epoch
+                    && matches!(plan.outputs.naming, scratch::OutputNamingV1::CopyRollingV1)
+            }
+            _ => false,
+        });
     if task.version != 1 || task.graph_id != manifest.graph_id
         || task.stdout_owner_id == task.diagnostic_owner_id
         || !manifest.members.iter().any(|m| matches!(m, MemberPlan::SourceV1 { source, .. } if source.source_association == task.source_association))
-        || !manifest.members.iter().any(|m| match m {
-            MemberPlan::ScratchAssetsV1 { scratch, .. } => scratch.asset_id == task.asset_id,
-            MemberPlan::ScratchAssetsV2 { plan, .. } => plan.asset_id == task.asset_id,
-            MemberPlan::ScratchAssetsV3 { plan, .. } => plan.asset_id == task.asset_id,
-            _ => false,
-        })
+        || !scratch_matches
         || !manifest.members.iter().any(|m| m.member_id() == task.root_member_id.uuid() && m.kind() == MemberKind::Root) { return Err(codec::invalid()); }
     task.source_association.validate()?;
     task.inventory.validate()
@@ -813,6 +890,17 @@ pub(crate) fn validate_manifest(value: &Manifest) -> Result<(), CustodyError> {
                 }
                 validate_direct_source(source, value)?;
             }
+            MemberPlan::FixedProbeDiscoverSourceV1 { slot, source } => {
+                validate_slot(slot)?;
+                if slot.member_id != source.member_id
+                    || slot.owned_by.is_some()
+                    || !slot.depends_on.is_empty()
+                    || slot.protected_paths.as_slice() != [source.absolute_path.as_str()]
+                {
+                    return Err(codec::invalid());
+                }
+                fixed_probe::validate_discover_source(source, value)?;
+            }
             MemberPlan::DirectReadDomainV1 { slot, domain } => {
                 validate_slot(slot)?;
                 if domain.version != 1
@@ -832,6 +920,52 @@ pub(crate) fn validate_manifest(value: &Manifest) -> Result<(), CustodyError> {
                     return Err(codec::invalid());
                 }
                 validate_task(task, value)?;
+            }
+            MemberPlan::FixedProbeTaskV1 { slot, task } => {
+                validate_slot(slot)?;
+                if slot.member_id != task.member_id
+                    || slot.owned_by != Some(task.root_member_id)
+                    || !slot.depends_on.contains(&task.source_member_id)
+                    || !slot.depends_on.contains(&task.executable_member_id)
+                    || !slot.protected_paths.is_empty()
+                {
+                    return Err(codec::invalid());
+                }
+                fixed_probe::validate_task(task, value)?;
+            }
+            MemberPlan::FixedProbeDiscoverTaskV1 { slot, task } => {
+                validate_slot(slot)?;
+                if slot.member_id != task.member_id
+                    || slot.owned_by != Some(task.document_root_member_id)
+                    || !slot.depends_on.contains(&task.version_root_member_id)
+                    || !slot.depends_on.contains(&task.source_member_id)
+                    || !slot.protected_paths.is_empty()
+                {
+                    return Err(codec::invalid());
+                }
+                fixed_probe::validate_discover_task(task, value)?;
+            }
+            MemberPlan::FixedPlanningEngineTaskV1 { slot, task } => {
+                validate_slot(slot)?;
+                if slot.member_id != task.member_id
+                    || slot.owned_by != Some(task.dependency_root_member_id)
+                    || !slot.depends_on.contains(&task.version_root_member_id)
+                    || !slot.protected_paths.is_empty()
+                {
+                    return Err(codec::invalid());
+                }
+                fixed_probe::validate_engine_task(task, value)?;
+            }
+            MemberPlan::FixedProbeMetadataV1 { slot, metadata } => {
+                validate_slot(slot)?;
+                if slot.member_id != metadata.member_id
+                    || slot.owned_by.is_some()
+                    || !slot.depends_on.is_empty()
+                    || !slot.protected_paths.is_empty()
+                {
+                    return Err(codec::invalid());
+                }
+                fixed_probe::validate_metadata(metadata)?;
             }
             MemberPlan::ScratchAssetsV1 { slot, scratch } => {
                 validate_slot(slot)?;
@@ -959,6 +1093,36 @@ pub(crate) fn validate_envelope(
             observed.native_object.validate()?;
         }
         (
+            MemberPlan::FixedProbeDiscoverSourceV1 { source, .. },
+            Some(Observed::FixedProbeDiscoverSourceV1 { source: observed }),
+        ) => {
+            if observed.version != 1
+                || observed.holder_id != source.holder_id
+                || observed.member_id != source.member_id
+                || observed.access != SourceAccess::ReadOnlyRegular
+                || observed.source_association.media_file_id != source.media_file_id
+                || observed.source_association.recipe_source_binding != source.recipe_source_binding
+                || observed.native_object.file_type != FileType::Regular
+                || observed.native_object.filesystem_domain != source.filesystem_domain
+                // The first durable observation is the original parent File.
+                // A second observation adds the child only after the sealed
+                // root has inherited it. Closure still requires BOTH planned
+                // copies, even if the root was never entered.
+                || !matches!(observed.copies.as_slice(), [parent]
+                    if Some(parent) == source.planned_copies.first())
+                    && observed.copies != source.planned_copies
+                || !direct_s1_matches(
+                    &observed.source_association.object_version,
+                    &observed.native_object,
+                    Some(source.scanner_size),
+                )
+            {
+                return Err(codec::invalid());
+            }
+            validate_copies(&observed.copies)?;
+            observed.native_object.validate()?;
+        }
+        (
             MemberPlan::DirectSourceV1 { source, .. },
             Some(Observed::DirectSourceV1 { source: observed }),
         ) => {
@@ -988,6 +1152,22 @@ pub(crate) fn validate_envelope(
             MemberPlan::VodOutputTaskV1 { task, .. },
             Some(Observed::VodOutputTaskV1 { task: observed }),
         ) if task == observed => {}
+        (
+            MemberPlan::FixedProbeTaskV1 { task, .. },
+            Some(Observed::FixedProbeTaskV1 { task: observed }),
+        ) if task == observed => {}
+        (
+            MemberPlan::FixedProbeDiscoverTaskV1 { task, .. },
+            Some(Observed::FixedProbeDiscoverTaskV1 { task: observed }),
+        ) => fixed_probe::validate_discover_task_observed(task, observed)?,
+        (
+            MemberPlan::FixedPlanningEngineTaskV1 { task, .. },
+            Some(Observed::FixedPlanningEngineTaskV1 { task: observed }),
+        ) => fixed_probe::validate_engine_task_observed(task, observed)?,
+        (
+            MemberPlan::FixedProbeMetadataV1 { metadata, .. },
+            Some(Observed::FixedProbeMetadataV1 { metadata: observed }),
+        ) if metadata == observed => {}
         (
             MemberPlan::ScratchAssetsV1 { scratch, .. },
             Some(Observed::ScratchAssetsV1 { scratch: observed }),

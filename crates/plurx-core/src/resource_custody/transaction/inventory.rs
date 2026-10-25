@@ -245,7 +245,12 @@ pub(super) fn protected_paths(inventory: &ObligationInventory) -> Vec<PathBuf> {
                 v2::MemberPlan::LegacyV1 { planned } => planned.protected_paths.as_slice(),
                 v2::MemberPlan::SourceV1 { slot, .. }
                 | v2::MemberPlan::DirectSourceV1 { slot, .. }
+                | v2::MemberPlan::FixedProbeDiscoverSourceV1 { slot, .. }
                 | v2::MemberPlan::VodOutputTaskV1 { slot, .. }
+                | v2::MemberPlan::FixedProbeTaskV1 { slot, .. }
+                | v2::MemberPlan::FixedProbeDiscoverTaskV1 { slot, .. }
+                | v2::MemberPlan::FixedPlanningEngineTaskV1 { slot, .. }
+                | v2::MemberPlan::FixedProbeMetadataV1 { slot, .. }
                 | v2::MemberPlan::ScratchAssetsV1 { slot, .. }
                 | v2::MemberPlan::ScratchAssetsV2 { slot, .. }
                 | v2::MemberPlan::ScratchAssetsV3 { slot, .. } => slot.protected_paths.as_slice(),

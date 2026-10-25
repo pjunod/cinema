@@ -18,6 +18,10 @@ pub(crate) enum TypedMemberPlan {
         slot: v2::MemberSlot,
         source: DirectSourcePlan,
     },
+    FixedProbeDiscoverSource {
+        slot: v2::MemberSlot,
+        source: FixedProbeDiscoverPlan,
+    },
     DirectReadDomain {
         slot: v2::MemberSlot,
         domain_id: v2::Id,
@@ -25,6 +29,26 @@ pub(crate) enum TypedMemberPlan {
     VodOutputTask {
         slot: v2::MemberSlot,
         task: VodTaskPlan,
+    },
+    CopyOutputTask {
+        slot: v2::MemberSlot,
+        task: VodTaskPlan,
+    },
+    FixedProbeTask {
+        slot: v2::MemberSlot,
+        task: v2::FixedProbeTaskV1,
+    },
+    FixedProbeDiscoverTask {
+        slot: v2::MemberSlot,
+        task: v2::FixedProbeDiscoverTaskV1,
+    },
+    FixedPlanningEngineTask {
+        slot: v2::MemberSlot,
+        task: v2::FixedPlanningEngineTaskV1,
+    },
+    FixedProbeMetadata {
+        slot: v2::MemberSlot,
+        metadata: v2::FixedProbeMetadataV1,
     },
     ScratchV1 {
         slot: v2::MemberSlot,
@@ -63,6 +87,18 @@ pub(crate) struct DirectSourcePlan {
     pub copy_id: v2::Id,
     pub acquisition_operation_id: v2::Id,
     pub read_domain: DirectReadDomainRef,
+}
+
+#[derive(Clone)]
+pub(crate) struct FixedProbeDiscoverPlan {
+    pub holder_id: v2::Id,
+    pub media_file_id: String,
+    pub recipe_source_binding: String,
+    pub absolute_path: String,
+    pub scanner_size: i64,
+    pub scanner_mtime: i64,
+    pub filesystem_domain: v2::FilesystemDomain,
+    pub copies: Vec<SourceCopyPlan>,
 }
 
 #[derive(Clone)]
@@ -137,6 +173,68 @@ impl TypedMemberPlan {
                     maximum_parallel_reads: 1,
                 },
             },
+            Self::FixedProbeDiscoverSource { slot, source } => {
+                let member_id = slot.member_id;
+                let copies = source
+                    .copies
+                    .into_iter()
+                    .map(|copy| v2::SourceCopy {
+                        copy_id: copy.copy_id,
+                        owner: match copy.owner {
+                            SourceCopyOwner::LocalSourceCell => v2::CopyOwner::DaemonSourceCell {
+                                owner_id,
+                                graph_id,
+                                member_id,
+                            },
+                            SourceCopyOwner::LocalRoot { root_member_id } => {
+                                v2::CopyOwner::OwnedRoot {
+                                    graph_id,
+                                    root_member_id,
+                                }
+                            }
+                            SourceCopyOwner::RetainedAssets { asset_id } => {
+                                v2::CopyOwner::RetainedAssets {
+                                    asset_id,
+                                    source_member_id: member_id,
+                                }
+                            }
+                            SourceCopyOwner::RetainedRoleHolder {
+                                obligation_id,
+                                member_id,
+                                family_id,
+                                role,
+                            } => v2::CopyOwner::RetainedRoleHolder {
+                                obligation_id,
+                                member_id,
+                                family_id,
+                                role,
+                            },
+                        },
+                        acquisition_operation_id: copy.acquisition_operation_id,
+                        parent_copy_id: copy.parent_copy_id,
+                    })
+                    .collect();
+                v2::MemberPlan::FixedProbeDiscoverSourceV1 {
+                    slot,
+                    source: v2::FixedProbeDiscoverSourceV1 {
+                        version: 1,
+                        holder_id: source.holder_id,
+                        member_id,
+                        media_file_id: source.media_file_id,
+                        recipe_source_binding: source.recipe_source_binding,
+                        absolute_path: source.absolute_path,
+                        scanner_size: source.scanner_size,
+                        scanner_mtime: source.scanner_mtime,
+                        filesystem_domain: source.filesystem_domain.clone(),
+                        planned_copies: copies,
+                        recovery: v2::SourceRecovery::LocalSourceHandlesV1 {
+                            owner_id,
+                            graph_id,
+                            filesystem_domain: source.filesystem_domain,
+                        },
+                    },
+                }
+            }
             Self::DirectSource { slot, source } => v2::MemberPlan::DirectSourceV1 {
                 source: v2::DirectSourcePlanV1 {
                     version: 1,
@@ -234,6 +332,33 @@ impl TypedMemberPlan {
                     },
                 }
             }
+            Self::FixedProbeTask { slot, task } => v2::MemberPlan::FixedProbeTaskV1 { slot, task },
+            Self::FixedProbeDiscoverTask { slot, task } => {
+                v2::MemberPlan::FixedProbeDiscoverTaskV1 { slot, task }
+            }
+            Self::FixedPlanningEngineTask { slot, task } => {
+                v2::MemberPlan::FixedPlanningEngineTaskV1 { slot, task }
+            }
+            Self::FixedProbeMetadata { slot, metadata } => {
+                v2::MemberPlan::FixedProbeMetadataV1 { slot, metadata }
+            }
+            Self::CopyOutputTask { slot, task } => v2::MemberPlan::VodOutputTaskV1 {
+                task: v2::VodOutputTask {
+                    version: 1,
+                    actor: v2::VodActor::RollingCopyV1,
+                    graph_id,
+                    member_id: slot.member_id,
+                    root_member_id: task.root_member_id,
+                    generation_epoch: task.generation_epoch,
+                    source_association: task.source_association,
+                    stdout_owner_id: task.stdout_owner_id,
+                    diagnostic_owner_id: task.diagnostic_owner_id,
+                    asset_id: task.asset_id,
+                    sink_owner_id: task.sink_owner_id,
+                    inventory: task.inventory,
+                },
+                slot,
+            },
             Self::VodOutputTask { slot, task } => v2::MemberPlan::VodOutputTaskV1 {
                 task: v2::VodOutputTask {
                     version: 1,

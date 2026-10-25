@@ -4,8 +4,12 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum MemoryClaim {
-    KnownBounded { active_producer: bool },
+    KnownBounded {
+        active_producer: bool,
+    },
     UnknownProducerPeak,
+    /// Prepared heap-only M role paired atomically with the fixed probe P.
+    PlanningMetadata,
 }
 impl Default for MemoryClaim {
     fn default() -> Self {
@@ -23,7 +27,7 @@ impl MemoryClaim {
             self,
             Self::KnownBounded {
                 active_producer: false
-            }
+            } | Self::PlanningMetadata
         )
     }
     pub(crate) fn sql_key(self) -> &'static str {
@@ -35,6 +39,7 @@ impl MemoryClaim {
                 active_producer: false,
             } => "bounded_resident",
             Self::UnknownProducerPeak => "unknown_producer",
+            Self::PlanningMetadata => "planning_metadata",
         }
     }
     pub(crate) fn from_sql_key(key: &str) -> Option<Self> {
@@ -44,6 +49,7 @@ impl MemoryClaim {
                 active_producer: false,
             }),
             "unknown_producer" => Some(Self::UnknownProducerPeak),
+            "planning_metadata" => Some(Self::PlanningMetadata),
             _ => None,
         }
     }

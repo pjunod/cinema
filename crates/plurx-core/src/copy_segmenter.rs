@@ -4,6 +4,7 @@ use crate::domain::MediaFile;
 use crate::fmp4::{
     self, FragmentReader, Init, Published, SegmentCounts, Segmenter, TrackKind, Unit,
 };
+use crate::fmp4::{BoundedFragmentReader, FragmentReaderBounds};
 use crate::transcode::{
     CopyVideoOptions, COPY_FIRST_SEGMENT_SECONDS, COPY_PUBLISH_GATE_SECS, COPY_SEGMENT_MAX_BYTES,
     COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS, ROLLING_PRESENTATION_TARGET_SECS,
@@ -12,6 +13,98 @@ use crate::vod_generation::sanitize_stale_dolby_brand;
 use tokio::io::{AsyncRead, AsyncReadExt};
 const READ_CHUNK: usize = 256 * 1024;
 const MEMORY_WARN_BYTES: usize = 160 * 1024 * 1024;
+
+/// Preallocated input state for a registered native copy parser. The ordinary
+/// compatibility reader remains below; selected admitted copy calls move this
+/// exact state into the original registered task before root entry.
+pub struct PreparedCopyParser {
+    reader: BoundedFragmentReader,
+    read_chunk: Vec<u8>,
+    pending: Vec<fmp4::Fragment>,
+    max_pending_bytes: usize,
+    charged_bytes: usize,
+}
+impl PreparedCopyParser {
+    pub fn new(
+        bounds: FragmentReaderBounds,
+        max_pending_fragments: usize,
+        max_pending_bytes: usize,
+    ) -> std::io::Result<Self> {
+        if max_pending_fragments == 0
+            || max_pending_fragments > 65_536
+            || max_pending_bytes < bounds.unit_bytes
+        {
+            return Err(std::io::Error::other("invalid bounded copy pending limits"));
+        }
+        let reader = BoundedFragmentReader::new(bounds).map_err(std::io::Error::other)?;
+        let read_chunk = vec![0u8; READ_CHUNK];
+        let mut pending = Vec::new();
+        pending
+            .try_reserve_exact(max_pending_fragments)
+            .map_err(std::io::Error::other)?;
+        let charged_bytes = std::mem::size_of::<Self>()
+            .checked_add(bounds.buffer_bytes)
+            .and_then(|n| n.checked_add(read_chunk.capacity()))
+            .and_then(|n| {
+                n.checked_add(
+                    pending
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<fmp4::Fragment>())?,
+                )
+            })
+            .and_then(|n| n.checked_add(max_pending_bytes))
+            .ok_or_else(|| std::io::Error::other("copy parser memory overflow"))?;
+        Ok(Self {
+            reader,
+            read_chunk,
+            pending,
+            max_pending_bytes,
+            charged_bytes,
+        })
+    }
+    pub fn charged_bytes(&self) -> usize {
+        self.charged_bytes
+    }
+}
+
+enum ReaderState {
+    Legacy(FragmentReader),
+    Bounded(BoundedFragmentReader),
+}
+impl ReaderState {
+    fn push(&mut self, bytes: &[u8]) -> Result<(), fmp4::Fmp4Error> {
+        match self {
+            Self::Legacy(reader) => {
+                reader.push(bytes);
+                Ok(())
+            }
+            Self::Bounded(reader) => reader.try_push(bytes),
+        }
+    }
+    fn next_unit(&mut self) -> Result<Option<Unit>, fmp4::Fmp4Error> {
+        match self {
+            Self::Legacy(reader) => reader.next_unit(),
+            Self::Bounded(reader) => reader.next_unit(),
+        }
+    }
+    fn reject_reinitialization(&mut self) {
+        if let Self::Legacy(reader) = self {
+            reader.reject_reinitialization();
+        }
+    }
+    fn buffered(&self) -> usize {
+        match self {
+            Self::Legacy(reader) => reader.buffered(),
+            Self::Bounded(reader) => reader.buffered(),
+        }
+    }
+    fn saw_trailer(&self) -> bool {
+        match self {
+            Self::Legacy(reader) => reader.saw_trailer(),
+            Self::Bounded(reader) => reader.saw_trailer(),
+        }
+    }
+}
 
 /// The floor and the two ceilings, as a session sees them.
 ///
@@ -145,7 +238,7 @@ pub trait CopyPublicationSink {
     async fn write_segment(&mut self, published: &Published) -> Result<(), PublishError>;
     async fn write_endlist(&mut self) -> std::io::Result<()>;
     fn started(&self) -> bool;
-    async fn read_endlist(&self) -> std::io::Result<String>;
+    async fn verify_endlist(&self) -> std::io::Result<bool>;
 }
 
 fn converted_dolby_vision_record(file: &MediaFile) -> Result<fmp4::DolbyVisionRecord, String> {
@@ -158,16 +251,55 @@ fn converted_dolby_vision_record(file: &MediaFile) -> Result<fmp4::DolbyVisionRe
 }
 
 pub async fn run_copy_pipe<R: AsyncRead + Unpin, S: CopyPublicationSink>(
-    mut src: R,
+    src: R,
     sink: &mut S,
     session_id: &str,
     limits: Limits,
     source: &MediaFile,
     video: CopyVideoOptions,
 ) -> Outcome {
+    run_copy_pipe_with(src, sink, session_id, limits, source, video, None).await
+}
+
+/// The admitted copy graph moves this exact parser reservation into the
+/// original registered task. An overflowing box or input buffer refuses the
+/// stream without silently growing the native-work partition.
+pub async fn run_copy_pipe_prepared<R: AsyncRead + Unpin, S: CopyPublicationSink>(
+    src: R,
+    sink: &mut S,
+    session_id: &str,
+    limits: Limits,
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    parser: PreparedCopyParser,
+) -> Outcome {
+    run_copy_pipe_with(src, sink, session_id, limits, source, video, Some(parser)).await
+}
+
+async fn run_copy_pipe_with<R: AsyncRead + Unpin, S: CopyPublicationSink>(
+    mut src: R,
+    sink: &mut S,
+    session_id: &str,
+    limits: Limits,
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    parser: Option<PreparedCopyParser>,
+) -> Outcome {
     let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
     let retain_hevc_parameter_sets = video.retains_hevc_parameter_sets();
-    let mut reader = FragmentReader::new();
+    let (mut reader, mut buf, mut pending_reservation) = if let Some(parser) = parser {
+        (
+            ReaderState::Bounded(parser.reader),
+            parser.read_chunk,
+            Some((parser.pending, parser.max_pending_bytes)),
+        )
+    } else {
+        (
+            ReaderState::Legacy(FragmentReader::new()),
+            vec![0u8; READ_CHUNK],
+            None,
+        )
+    };
     // Hold the initialization segment until the first video sample arrives.
     // ffmpeg may put HDR10's static SEIs only in that sample; Apple needs the
     // same records in hvcC before it will accept a PQ HLS variant.
@@ -175,7 +307,6 @@ pub async fn run_copy_pipe<R: AsyncRead + Unpin, S: CopyPublicationSink>(
     let mut segmenter: Option<Segmenter> = None;
     let mut guarded_dvh1_init: Option<Init> = None;
     let mut converter: Option<crate::vod_generation::conversion::Converter> = None;
-    let mut buf = vec![0u8; READ_CHUNK];
     let mut warned_memory = false;
 
     loop {
@@ -196,7 +327,14 @@ pub async fn run_copy_pipe<R: AsyncRead + Unpin, S: CopyPublicationSink>(
                 };
             }
         };
-        reader.push(&buf[..n]);
+        if let Err(error) = reader.push(&buf[..n]) {
+            return Outcome::ReaderFailed {
+                reason: format!("bounded copy input: {error}"),
+                counts: segmenter
+                    .as_ref()
+                    .map_or_else(SegmentCounts::default, Segmenter::counts),
+            };
+        }
 
         loop {
             let unit = match reader.next_unit() {
@@ -489,10 +627,24 @@ pub async fn run_copy_pipe<R: AsyncRead + Unpin, S: CopyPublicationSink>(
                                 }
                             };
                         }
-                        segmenter =
-                            Some(Segmenter::new(init, policy).retaining_hevc_parameter_sets(
-                                retain_hevc_parameter_sets && !guard_dvh1,
-                            ));
+                        let candidate = if let Some((pending, max_bytes)) =
+                            pending_reservation.take()
+                        {
+                            match Segmenter::new_copy_bounded(init, policy, pending, max_bytes) {
+                                Ok(segmenter) => segmenter,
+                                Err(error) => {
+                                    return Outcome::ReaderFailed {
+                                        reason: format!("bounded copy segmenter: {error}"),
+                                        counts: SegmentCounts::default(),
+                                    }
+                                }
+                            }
+                        } else {
+                            Segmenter::new(init, policy)
+                        };
+                        segmenter = Some(candidate.retaining_hevc_parameter_sets(
+                            retain_hevc_parameter_sets && !guard_dvh1,
+                        ));
                     }
                     if let Some(init) = guarded_dvh1_init.as_ref() {
                         if let Err(error) = fmp4::validate_rolling_dvh1_fragment(init, &fragment) {
@@ -647,10 +799,9 @@ async fn finish<S: CopyPublicationSink>(
                 counts: seg.counts(),
             };
         }
-        let endlist = sink.read_endlist().await;
-        match endlist {
-            Ok(text) if text.ends_with("#EXT-X-ENDLIST\n") => {}
-            Ok(_) => {
+        match sink.verify_endlist().await {
+            Ok(true) => {}
+            Ok(false) => {
                 return Outcome::ReaderFailed {
                     reason: "the final playlist did not end with ENDLIST".into(),
                     counts: seg.counts(),

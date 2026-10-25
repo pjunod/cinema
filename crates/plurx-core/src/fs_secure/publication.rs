@@ -134,7 +134,9 @@ impl PublicationRequest {
     ) -> io::Result<Self> {
         let mut request = Self::for_playlist_operation(payload, io_id)?;
         if prior.device == 0 || prior.inode == 0 || prior.mount_id == 0 {
-            return Err(invalid("playlist replacement requires exact prior native identity"));
+            return Err(invalid(
+                "playlist replacement requires exact prior native identity",
+            ));
         }
         request.replacement = Some(prior);
         Ok(request)
@@ -494,7 +496,7 @@ fn verify_prior_playlist(
         return Err(io::Error::last_os_error());
     }
     let stat = unsafe { stat.assume_init() };
-    let device = unsafe { libc::makedev(stat.stx_dev_major, stat.stx_dev_minor) };
+    let device = libc::makedev(stat.stx_dev_major, stat.stx_dev_minor);
     if stat.stx_mask & libc::STATX_MNT_ID == 0
         || stat.stx_mode & libc::S_IFMT as u16 != libc::S_IFREG as u16
         || device != expected.device

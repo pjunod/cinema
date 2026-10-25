@@ -45,6 +45,12 @@ impl ScratchFold {
     pub(super) fn readers(&self) -> &[ReaderLeaseV1] {
         &self.readers
     }
+    /// A live playlist replacement or prefix removal needs the exact old
+    /// file's reader fence. Readers of independent segments are allowed to
+    /// continue holding their original native file copies.
+    pub(crate) fn has_reader_for_file(&self, file_id: Id) -> bool {
+        self.readers.iter().any(|reader| reader.file_id == file_id)
+    }
     pub(super) fn from_frozen_inventory(
         state: ScratchStateV2,
         files: Vec<FileObservedV1>,
@@ -167,7 +173,9 @@ impl ScratchFold {
                     } => {
                         let metadata = matches!(
                             output,
-                            OutputKey::IdentityMetadata | OutputKey::EncodedProcessMetadata
+                            OutputKey::IdentityMetadata
+                                | OutputKey::EncodedProcessMetadata
+                                | OutputKey::CompleteArtifactManifest
                         );
                         if metadata != matches!(operation, AssetIoV1::PublishMetadata { .. })
                             || self.state.directory.is_none()
@@ -199,7 +207,10 @@ impl ScratchFold {
                             || old.temporary
                             || !old.held_copy_ids.is_empty()
                             || old.native_object != *expected_native_object
-                            || self.readers.iter().any(|reader| reader.file_id == *prior_file_id)
+                            || self
+                                .readers
+                                .iter()
+                                .any(|reader| reader.file_id == *prior_file_id)
                             || slot_id.0 != *io_id
                             || *logical_end == 0
                             || *logical_end > plan.limits.one_io_payload_bytes
@@ -225,6 +236,7 @@ impl ScratchFold {
                         // Reader/copy support must not silently reuse this rule.
                         let f = self.file(*file_id)?;
                         if !f.held_copy_ids.is_empty()
+                            || self.readers.iter().any(|reader| reader.file_id == *file_id)
                             || expected_native_object
                                 .as_ref()
                                 .is_some_and(|expected| expected != &f.native_object)
@@ -399,9 +411,10 @@ impl ScratchFold {
                             || f.held_copy_ids.len() > 1
                             || f.held_copy_ids.iter().any(|id| *id != *copy_id)
                             || f.charged_bytes < plan.limits.storage_for(*logical_end)?
-                            || self.files.iter().any(|file| {
-                                file.file_id == f.file_id || file.slot_id == f.slot_id
-                            })
+                            || self
+                                .files
+                                .iter()
+                                .any(|file| file.file_id == f.file_id || file.slot_id == f.slot_id)
                         {
                             return Err(codec::invalid());
                         }
@@ -428,7 +441,9 @@ impl ScratchFold {
                                 .ok_or_else(codec::invalid)?;
                             self.files.remove(index);
                         } else if (!f.temporary && f.published.is_none())
-                            || f.published.as_ref().is_some_and(|key| *key != OutputKey::Playlist)
+                            || f.published
+                                .as_ref()
+                                .is_some_and(|key| *key != OutputKey::Playlist)
                             || content_binding.is_some()
                         {
                             return Err(codec::invalid());
@@ -463,7 +478,10 @@ impl ScratchFold {
                         },
                     ) => {
                         if file_id != unresolved
-                            || self.state.lifecycle != ScratchLifecycleV1::Retiring
+                            || !matches!(
+                                self.state.lifecycle,
+                                ScratchLifecycleV1::Retiring | ScratchLifecycleV1::Open
+                            )
                             || !matches!(outcome, NativeOutcomeV1::Failed { .. })
                         {
                             return Err(codec::invalid());

@@ -464,6 +464,7 @@ pub(crate) fn prove_previous_fixed_root_exit(
                     || !matches!(
                         &plan.outputs.naming,
                         v2::scratch::OutputNamingV1::FiniteVodMetadataV2 { .. }
+                            | v2::scratch::OutputNamingV1::StaticArtifactV1 { .. }
                     )
                     || plan.bootstrap().authority.installation_id.uuid()
                         != recovered.installation_id

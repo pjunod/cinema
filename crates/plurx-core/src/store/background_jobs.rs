@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::background_jobs_copy_output::PUBLISH_COPY_OUTPUT_SQL;
 pub use super::background_jobs_copy_output::{
-    CopyOutputJobOutput, PublishCopyOutputJob, PublishEncodedOutputJob,
+    CopyOutputJobOutput, EncodedOutputPublicationRecord, PublishCopyOutputJob,
+    PublishEncodedOutputJob,
 };
 pub use super::background_jobs_delivery::{
     hydration_identity, DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
@@ -2045,6 +2046,13 @@ pub trait BackgroundJobStore: Send + Sync {
     ) -> Result<EnqueueOutcome, StoreError>;
     /// Authoritative single-job lookup for ownership-sensitive cleanup.
     async fn background_job(&self, id: &str) -> Result<Option<BackgroundJob>, StoreError>;
+    /// Original immutable publication command for this exact claim ID.
+    /// A caller must compare its full request and positive result to the
+    /// retained artifact; the command grants no physical custody.
+    async fn encoded_output_publication(
+        &self,
+        claim_id: &str,
+    ) -> Result<Option<EncodedOutputPublicationRecord>, StoreError>;
     async fn background_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
     async fn enqueue_job(&self, request: EnqueueJob) -> Result<EnqueueOutcome, StoreError>;
     /// A fresh administrator interest, never resurrection of old consumers.
@@ -2719,6 +2727,20 @@ LIMIT 1
         }
         let rows = self.queue_sql(format!("SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.id')"),
             encode(&serde_json::json!({"id": id}))?, false, true).await?;
+        rows.first().map(|row| decode(row)).transpose()
+    }
+
+    async fn encoded_output_publication(
+        &self,
+        claim_id: &str,
+    ) -> Result<Option<EncodedOutputPublicationRecord>, StoreError> {
+        if uuid::Uuid::parse_str(claim_id).is_err() {
+            return Err(invalid("invalid encoded publication claim id"));
+        }
+        let rows = self.queue_sql(
+            "SELECT json_object('request', json(request_json), 'result', json(result_json)) AS result_json FROM background_job_commands WHERE id = json_extract($1, '$.claim_id') AND operation = 'publish_copy_output'".into(),
+            encode(&serde_json::json!({"claim_id": claim_id}))?, false, true,
+        ).await?;
         rows.first().map(|row| decode(row)).transpose()
     }
 

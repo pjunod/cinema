@@ -24,11 +24,38 @@ impl NodeResourceRuntime {
         index: usize,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        self.finish_application_close(selection, index, FinalApplicationRole::Finite, deadline)
+            .await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) async fn finish_planning_metadata_close(
+        &self,
+        selection: &mut Option<OwnedPreparation>,
+        index: usize,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.finish_application_close(
+            selection,
+            index,
+            FinalApplicationRole::PlanningMetadata,
+            deadline,
+        )
+        .await
+    }
+
+    async fn finish_application_close(
+        &self,
+        selection: &mut Option<OwnedPreparation>,
+        index: usize,
+        kind: FinalApplicationRole,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
         let owner = selection.as_ref().ok_or(OperationError::State)?;
         self.validate_preparation(owner)?;
         {
             let mut bundle = owner.state.lock().await;
-            if !bundle.installed || bundle.roles.len() != 1 || index != 0 {
+            if !bundle.installed || !kind.matches(&bundle, index) {
                 return Err(OperationError::State);
             }
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
@@ -104,11 +131,11 @@ impl NodeResourceRuntime {
         }
         let (binding, durable, effect) = {
             let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
-            let role = bundle.roles.first().ok_or(OperationError::State)?;
+            let role = bundle.roles.get(index).ok_or(OperationError::State)?;
             let transition = role.transition.as_ref().ok_or(OperationError::State)?;
             if bundle.id != owner.id
                 || !bundle.prepare.acknowledged
-                || bundle.roles.len() != 1
+                || !kind.matches(&bundle, index)
                 || role.refunded
                 || role.phase != Phase::Settled
                 || role.pending_finite_close.is_some()
@@ -192,5 +219,28 @@ impl NodeResourceRuntime {
             .durable = None;
         ledger.release(binding.reservation)?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FinalApplicationRole {
+    Finite,
+    #[cfg(target_os = "linux")]
+    PlanningMetadata,
+}
+impl FinalApplicationRole {
+    fn matches(self, bundle: &Bundle, index: usize) -> bool {
+        match self {
+            Self::Finite => bundle.roles.len() == 1 && index == 0,
+            #[cfg(target_os = "linux")]
+            Self::PlanningMetadata => {
+                bundle.roles.len() == 2
+                    && index == 1
+                    && bundle.roles[0].refunded
+                    && bundle.roles[0].transition.is_none()
+                    && bundle.roles[0].pending_finite_close.is_none()
+                    && bundle.roles[1].planning_metadata.is_some()
+            }
+        }
     }
 }

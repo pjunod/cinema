@@ -4,6 +4,7 @@ use crate::adaptive_resources::{FamilyRoleDemand, WorkloadDemand};
 use crate::resource_custody::{InstallationContext, MemberKind, RecoveryMethod};
 use std::time::Duration;
 mod binding;
+mod live_typed_settlement;
 mod native_entry;
 mod typed;
 

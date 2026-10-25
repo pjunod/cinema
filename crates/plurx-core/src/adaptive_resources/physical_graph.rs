@@ -25,9 +25,15 @@ use crate::process::observation::{Metric, ProcessIdentity, ProcessObserver, Unkn
 use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure};
 
 mod budgets;
+#[cfg(target_os = "linux")]
+pub(super) mod copy_vod;
 pub(super) mod finite_pipes;
 #[cfg(unix)]
 pub(super) mod finite_vod;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources) mod fixed_engine;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources) mod fixed_probe;
 mod live_close;
 mod live_jobs;
 mod source_files;
@@ -104,6 +110,8 @@ struct Members {
     // One actual graph can mint at most one nonclone physical receipt.
     receipt_issued: bool,
     finite_process_closed: bool,
+    #[cfg(target_os = "linux")]
+    copy_process_closed: bool,
     roots: Vec<Root>,
     writers: Vec<Writer>,
     joined_writers: usize,
@@ -117,6 +125,8 @@ struct Writer {
     drain: Option<pipe_drains::DrainRecord>,
     #[cfg(unix)]
     finite: Option<finite_vod::FiniteRecord>,
+    #[cfg(target_os = "linux")]
+    copy: Option<copy_vod::CopyRecord>,
     joined: bool,
 }
 
@@ -127,6 +137,10 @@ impl Writer {
         }
         #[cfg(unix)]
         if self.finite.is_some() {
+            return true;
+        }
+        #[cfg(target_os = "linux")]
+        if self.copy.is_some() {
             return true;
         }
         false
@@ -257,6 +271,8 @@ impl ResourceReservation {
                 unaudited_handoff: false,
                 receipt_issued: false,
                 finite_process_closed: false,
+                #[cfg(target_os = "linux")]
+                copy_process_closed: false,
                 roots: Vec::new(),
                 writers: Vec::new(),
                 joined_writers: 0,
@@ -448,6 +464,8 @@ impl OwnedPhysicalGraph {
             drain: None,
             #[cfg(unix)]
             finite: None,
+            #[cfg(target_os = "linux")]
+            copy: None,
             joined: false,
         });
         Ok(())
@@ -752,6 +770,10 @@ impl SealedPhysicalGraph {
             if let Some(finite) = writer.finite.as_mut() {
                 finite.note_join(abandoned);
             }
+            #[cfg(target_os = "linux")]
+            if let Some(copy) = writer.copy.as_mut() {
+                copy.joined_abandoned = abandoned;
+            }
             members.joined_writers += 1;
             members.abandoned_writers += usize::from(abandoned);
         }
@@ -759,6 +781,16 @@ impl SealedPhysicalGraph {
         for writer in &members.writers {
             if let Some(finite) = &writer.finite {
                 if finite.close_joined_pipes().is_err() {
+                    return GraphCloseOutcome::UnknownHeld(GraphHoldReason::SourceCloseFailed);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(copy) = &writer.copy {
+                if copy
+                    .pipes
+                    .iter()
+                    .any(|pipe| pipe.close_after_reader_drop().is_err())
+                {
                     return GraphCloseOutcome::UnknownHeld(GraphHoldReason::SourceCloseFailed);
                 }
             }
@@ -845,3 +877,53 @@ fn parse_boot_identity(bytes: Option<&[u8]>) -> Metric<Uuid> {
 
 #[cfg(test)]
 mod tests;
+
+// Heap-only M graphs have no native members. Refuse other graphs rather than
+// presenting an incomplete byte count for nested live job/pipe allocations.
+#[cfg(target_os = "linux")]
+fn empty_graph_heap_bytes(custody: &GraphCustody) -> Option<usize> {
+    let members = custody.members.try_lock().ok()?;
+    if !members.roots.is_empty() || !members.writers.is_empty() || !members.source_files.is_empty()
+    {
+        return None;
+    }
+    std::mem::size_of::<GraphCustody>()
+        .checked_add(2 * std::mem::size_of::<usize>())?
+        .checked_add(
+            members
+                .roots
+                .capacity()
+                .checked_mul(std::mem::size_of::<Root>())?,
+        )?
+        .checked_add(
+            members
+                .writers
+                .capacity()
+                .checked_mul(std::mem::size_of::<Writer>())?,
+        )?
+        .checked_add(
+            members
+                .source_files
+                .capacity()
+                .checked_mul(std::mem::size_of::<source_files::SourceFile>())?,
+        )
+}
+/// Requested capacity of one graph representation with no member and no
+/// member-vector capacity: the shared custody plus its Arc header. A retained
+/// empty graph must not exceed this (`retained_empty_heap_bytes`).
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources) fn empty_graph_structural_bytes() -> Option<usize> {
+    std::mem::size_of::<GraphCustody>().checked_add(2 * std::mem::size_of::<usize>())
+}
+#[cfg(target_os = "linux")]
+impl OwnedPhysicalGraph {
+    pub(in crate::adaptive_resources) fn retained_empty_heap_bytes(&self) -> Option<usize> {
+        empty_graph_heap_bytes(self.custody.as_deref()?)
+    }
+}
+#[cfg(target_os = "linux")]
+impl SealedPhysicalGraph {
+    pub(in crate::adaptive_resources) fn retained_empty_heap_bytes(&self) -> Option<usize> {
+        empty_graph_heap_bytes(&self.custody)
+    }
+}

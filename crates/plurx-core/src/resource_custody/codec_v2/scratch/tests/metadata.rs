@@ -153,3 +153,45 @@ fn completed_metadata_observation_requires_the_exact_armed_key() {
     )
     .is_err());
 }
+
+#[test]
+fn static_artifact_manifest_is_a_distinct_counted_metadata_file() {
+    let legacy = metadata_plan(true);
+    assert!(arm_publication(
+        &legacy,
+        directory(&legacy),
+        OutputKey::CompleteArtifactManifest,
+        true
+    )
+    .is_err());
+
+    let mut static_plan = metadata_plan(true);
+    static_plan.outputs.naming = OutputNamingV1::StaticArtifactV1 {
+        encoded_process: true,
+    };
+    let (pending, io) = arm_publication(
+        &static_plan,
+        directory(&static_plan),
+        OutputKey::CompleteArtifactManifest,
+        true,
+    )
+    .expect("static manifest arm");
+    assert_eq!(pending.state.totals.pending_jobs, 1);
+    assert_eq!(pending.state.totals.resident_file_objects, 1);
+    let completed = observe_completed_metadata(
+        &static_plan,
+        pending,
+        io,
+        OutputKey::CompleteArtifactManifest,
+    )
+    .expect("same-file manifest observation");
+    assert_eq!(
+        completed.files[0].published,
+        Some(OutputKey::CompleteArtifactManifest)
+    );
+    assert_eq!(completed.state.totals.pending_jobs, 0);
+    assert_eq!(
+        completed.state.totals.charged_storage_bytes,
+        static_plan.limits.directory_charge() + static_plan.limits.storage_for(64).unwrap()
+    );
+}

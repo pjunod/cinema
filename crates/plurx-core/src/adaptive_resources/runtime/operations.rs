@@ -19,6 +19,10 @@ use tokio::sync::Mutex as AsyncMutex;
 
 pub(super) mod bootstrap;
 #[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) mod copy_close;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) mod copy_vod;
+#[cfg(target_os = "linux")]
 pub(in crate::adaptive_resources::runtime) mod direct_source;
 #[cfg(unix)]
 pub(in crate::adaptive_resources::runtime) mod finite_cancel;
@@ -32,6 +36,14 @@ mod finite_terminal;
 mod finite_vod;
 mod live_settlement;
 mod pipe_drains;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) mod planning_collector;
+#[cfg(target_os = "linux")]
+mod planning_metadata;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources) mod planning_settlement;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) mod planning_tasks;
 pub(super) mod plans;
 mod protection;
 #[cfg(target_os = "linux")]
@@ -48,6 +60,8 @@ pub(crate) use plans::{TypedGraphPlan, TypedMemberPlan};
 #[derive(Default)]
 pub(super) struct Operations {
     draining: bool,
+    #[cfg(target_os = "linux")]
+    planning_cursor: Option<Uuid>,
     families: BTreeMap<FamilyIdentity, FamilyHandle>,
     family_users: BTreeMap<FamilyIdentity, BTreeSet<Uuid>>,
     bindings: BTreeMap<ReservationBinding, ObligationHandle>,
@@ -102,8 +116,16 @@ struct OwnedRole {
     sources: BTreeMap<Uuid, source_files::SourceCell>,
     #[cfg(unix)]
     finite_vod: Option<finite_vod::FiniteLaunch>,
+    #[cfg(target_os = "linux")]
+    copy_vod: Option<copy_vod::CopyLaunch>,
+    #[cfg(target_os = "linux")]
+    copy_admission_failed: bool,
     #[cfg(unix)]
     finite_app: Option<Arc<super::finite_lifetime::FiniteAppState>>,
+    #[cfg(target_os = "linux")]
+    planning_metadata: Option<super::planning_probe::PlanningMetadataRole>,
+    #[cfg(target_os = "linux")]
+    planning_tasks: Option<planning_tasks::PlanningTasks>,
     #[cfg(unix)]
     retirement: Option<finite_retirement::FiniteRetirement>,
     #[cfg(unix)]
@@ -148,6 +170,8 @@ enum Effect {
     SourceRoot(Uuid),
     #[cfg(unix)]
     FiniteTask(Uuid),
+    #[cfg(target_os = "linux")]
+    CopyTask(Uuid),
     Enrich,
     Seal,
     Hold,
@@ -165,6 +189,9 @@ struct JournalOperation {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OperationError {
+    #[cfg(target_os = "linux")]
+    #[error("planning facts refused: {0}")]
+    Planning(crate::process::fixed_probe::DecodeFactError),
     #[error("resource admission refused: {0:?}")]
     Admission(AdmissionRefusal),
     #[error("{0}")]
@@ -378,7 +405,9 @@ impl NodeResourceRuntime {
             false,
             None,
             deadline,
+            |_| (),
         )
+        .map(|(owner, ())| owner)
     }
 
     pub(crate) fn prepare_typed_families(
@@ -396,6 +425,21 @@ impl NodeResourceRuntime {
         claims: Option<&[MemoryClaim]>,
         deadline: Instant,
     ) -> Result<OwnedPreparation, OperationError> {
+        self.prepare_typed_families_claiming_initialized(families, plans, claims, deadline, |_| ())
+            .map(|(owner, ())| owner)
+    }
+
+    /// Attach a fixed core-owned payload while the new preparation is still
+    /// private. Initializers cannot fail or enter native work; observers only
+    /// obtain the bundle after its complete cleanup owner is installed.
+    pub(in crate::adaptive_resources::runtime) fn prepare_typed_families_claiming_initialized<T>(
+        &self,
+        families: &[FamilyDemand<'_>],
+        plans: Vec<TypedGraphPlan>,
+        claims: Option<&[MemoryClaim]>,
+        deadline: Instant,
+        initialize: impl FnOnce(&OwnedPreparation) -> T,
+    ) -> Result<(OwnedPreparation, T), OperationError> {
         self.prepare_plan_families(
             families,
             plans
@@ -413,18 +457,20 @@ impl NodeResourceRuntime {
             true,
             claims,
             deadline,
+            initialize,
         )
     }
 
     // Same reservation/family/cancellation/refund owner for both codec versions.
-    fn prepare_plan_families(
+    fn prepare_plan_families<T>(
         &self,
         families: &[FamilyDemand<'_>],
         plans: Vec<PreparationPlan>,
         typed: bool,
         claims: Option<&[MemoryClaim]>,
         deadline: Instant,
-    ) -> Result<OwnedPreparation, OperationError> {
+        initialize: impl FnOnce(&OwnedPreparation) -> T,
+    ) -> Result<(OwnedPreparation, T), OperationError> {
         if families.is_empty()
             || families.len() > 2
             || plans.is_empty()
@@ -573,8 +619,16 @@ impl NodeResourceRuntime {
                 sources: BTreeMap::new(),
                 #[cfg(unix)]
                 finite_vod: None,
+                #[cfg(target_os = "linux")]
+                copy_vod: None,
+                #[cfg(target_os = "linux")]
+                copy_admission_failed: false,
                 #[cfg(unix)]
                 finite_app: None,
+                #[cfg(target_os = "linux")]
+                planning_metadata: None,
+                #[cfg(target_os = "linux")]
+                planning_tasks: None,
                 #[cfg(unix)]
                 retirement: None,
                 #[cfg(unix)]
@@ -669,6 +723,14 @@ impl NodeResourceRuntime {
             installed: false,
             roles,
         }));
+        let owner = OwnedPreparation {
+            ledger: self.ledger.id,
+            id,
+            state: Arc::clone(&state),
+        };
+        // The book lock excludes maintenance, and the state has never been
+        // published. Install infallible fixed payloads before exposing it.
+        let initialized = initialize(&owner);
         book.bundles.insert(id, Arc::clone(&state));
         for family in families {
             book.family_users
@@ -679,11 +741,7 @@ impl NodeResourceRuntime {
         for binding in retained_bindings {
             book.retained_users.entry(binding).or_default().insert(id);
         }
-        Ok(OwnedPreparation {
-            ledger: self.ledger.id,
-            id,
-            state,
-        })
+        Ok((owner, initialized))
     }
 
     fn validate_preparation(&self, owner: &OwnedPreparation) -> Result<(), OperationError> {
@@ -1044,6 +1102,13 @@ impl NodeResourceRuntime {
             if role.refunded {
                 continue;
             }
+            // M's original book/metadata allocations are application owners,
+            // even if no native object was acquired. Their exact finalizer
+            // destroys the bundle before refund; generic cancellation cannot.
+            #[cfg(target_os = "linux")]
+            if role.planning_metadata.is_some() {
+                return Err(OperationError::State);
+            }
             if role.transition.is_none() {
                 if role.phase != Phase::Prepared {
                     return Err(OperationError::State);
@@ -1208,7 +1273,7 @@ impl NodeResourceRuntime {
 
     async fn finish_transition(
         &self,
-        bundle_id: Uuid,
+        _bundle_id: Uuid,
         role: &mut OwnedRole,
     ) -> Result<(), OperationError> {
         let transition = role.transition.as_mut().ok_or(OperationError::State)?;
@@ -1265,6 +1330,8 @@ impl NodeResourceRuntime {
             Effect::FiniteTask(member) => {
                 finite_vod::acknowledge_task(role, member, ack.operation_id)?
             }
+            #[cfg(target_os = "linux")]
+            Effect::CopyTask(member) => copy_vod::acknowledge_task(role, member, ack.operation_id)?,
             _ => {}
         }
         role.sequence = ack.sequence;
@@ -1488,3 +1555,7 @@ fn refund(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "operations/finite_initialization_tests.rs"]
+mod finite_initialization_tests;

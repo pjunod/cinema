@@ -248,6 +248,35 @@ pub struct PhysicalCloseReceipt {
 }
 
 impl PhysicalCloseReceipt {
+    /// M has no native objects. Its original alias fence proves that the
+    /// charged metadata and coordinator owners were destroyed; the runtime
+    /// separately checks the exact M graph has no native acquisition.
+    #[cfg(target_os = "linux")]
+    fn from_planning_metadata(closure: runtime::planning_probe::FixedMetadataClosure) -> Self {
+        Self {
+            binding: closure.into_binding(),
+            _recovered_r: None,
+        }
+    }
+    /// Consumes BOTH original planning closures (probe roots/images/pipes,
+    /// engine roots/files/pipes/hash buffer). Only P's settlement path, after
+    /// deriving its journal facts from the same closures, constructs this.
+    #[cfg(target_os = "linux")]
+    fn from_planning_native(closure: runtime::PlanningNativeClosure) -> Self {
+        Self {
+            binding: closure.into_binding(),
+            _recovered_r: None,
+        }
+    }
+    /// Consumes the original fixed copy root/parser, source and scratch
+    /// closures. A parser result or journal DTO cannot construct this.
+    #[cfg(target_os = "linux")]
+    fn from_copy_cancel(closure: runtime::CopyCancellationClosure) -> Self {
+        Self {
+            binding: closure.into_binding(),
+            _recovered_r: None,
+        }
+    }
     /// Consumes an original registered direct SourceCell close, after every
     /// escaped body/chunk owner has drained. No DTO can construct this proof.
     #[cfg(target_os = "linux")]
@@ -401,6 +430,10 @@ pub struct LedgerSnapshot {
     /// Fresh headroom sample age; unknown for explicit fixed fixture/policy caps.
     pub capacity_observation_age_ms: Metric<u64>,
     pub unknown_peak_producers: usize,
+    /// Heap-only planning roles retain report/controller aliases independently
+    /// of native P job completion. These bytes are already included in used.
+    pub planning_metadata_held: usize,
+    pub planning_metadata_reserved_bytes: Metric<u64>,
     /// Active roots have unknown kernel-task peaks until their original
     /// process owner proves cleanup; this is never reported as a numeric peak.
     pub unknown_task_peak_producers: usize,
@@ -735,8 +768,21 @@ impl ResourceLedger {
         }
         let defaults = vec![MemoryClaim::default(); missing.len()];
         let claims = claims.unwrap_or(&defaults);
-        if claims.iter().any(|claim| !claim.is_active_producer()) {
-            // Residency is earned only by the original proof-bearing R→S swap.
+        let fixed_planning_pair = claims.len() == 2
+            && claims[0] == MemoryClaim::UnknownProducerPeak
+            && claims[1] == MemoryClaim::PlanningMetadata
+            && matches!(missing[1].1.resources, Metric::Known(resource)
+                if resource.processes == 0
+                    && resource.cpu_ns_per_second == 0
+                    && resource.hardware_slots == 0
+                    && resource.tuner_slots == 0
+                    && resource.scratch_bytes == 0
+                    && resource.handles == 0
+                    && resource.peak_memory_bytes > 0);
+        if claims.iter().any(|claim| !claim.is_active_producer()) && !fixed_planning_pair {
+            // Ordinary residency is earned only by a proof-bearing R→S swap.
+            // The exact P/M exception is verified again against the typed M
+            // manifest by the durable journal before either role may enter IO.
             return Err(AdmissionRefusal::InvalidBundle);
         }
         // All candidate producer claims and every old hold share this ledger's
@@ -995,6 +1041,20 @@ impl ResourceLedger {
                 .values()
                 .filter(|entry| entry.memory_claim == MemoryClaim::UnknownProducerPeak)
                 .count(),
+            planning_metadata_held: state
+                .entries
+                .values()
+                .filter(|entry| entry.memory_claim == MemoryClaim::PlanningMetadata)
+                .count(),
+            planning_metadata_reserved_bytes: state
+                .entries
+                .values()
+                .filter(|entry| entry.memory_claim == MemoryClaim::PlanningMetadata)
+                .try_fold(0u64, |bytes, entry| {
+                    bytes.checked_add(entry.resources.peak_memory_bytes)
+                })
+                .map(Metric::Known)
+                .unwrap_or(Metric::Unknown(UnknownReason::InvalidCounter)),
             unknown_task_peak_producers: state
                 .entries
                 .values()

@@ -768,6 +768,19 @@ void probe_main(unsigned long *stack) {
     unsigned long delay[2] = { 60, 0 };
     syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
 #endif
+#elif PROBE_MODE == 10 || PROBE_MODE == 11 || PROBE_MODE == 12
+    if (argc > 1 && same(argv[1], "-version")) {
+        write_text(1, "ffprobe version admitted-static\n");
+        finish(0);
+    }
+#if PROBE_MODE == 10
+    write_text(1, "{\"streams\":[{\"index\":4,\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"profile\":\"Main\",\"pix_fmt\":\"yuv420p\",\"width\":1920,\"height\":1080,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"disposition\":{\"attached_pic\":0}}]}\n");
+#elif PROBE_MODE == 11
+    write_text(1, "{\"streams\":[{\"index\":4,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":1920,\"height\":1080,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"field_order\":\"tt\",\"disposition\":{\"attached_pic\":0}}]}\n");
+#else
+    write_text(1, "{invalid-json\n");
+#endif
+    finish(0);
 #endif
     write_text(1, facts);
     finish(0);
@@ -992,6 +1005,136 @@ async fn production_probe_executes_sealed_bytes_and_collects_bound_json() {
         .expect("sealed production collection");
     assert_eq!(facts.input_video_stream(), 4);
     assert_eq!(facts.codec(), Some("h264"));
+}
+
+#[cfg(target_os = "linux")]
+async fn admitted_static_probe_fixture(
+    mode: u8,
+    wrong_source_version: bool,
+) -> Result<AdmittedProbeCompletion, AdmittedProbeNativeFailure> {
+    let root = test_tempdir().expect("admitted probe tempdir");
+    let probe = root.path().join("static-ffprobe");
+    build_static_probe(&probe, mode);
+    let media = root.path().join("media.bin");
+    std::fs::write(&media, b"production-bound source").expect("source bytes");
+    let source = Arc::new(std::fs::File::open(&media).expect("source file"));
+    let source_version = crate::source_identity::SourceIdentity::from_metadata(
+        &source.metadata().expect("source metadata"),
+    )
+    .render_s1();
+    let expected = if wrong_source_version {
+        "s1:wrong"
+    } else {
+        &source_version
+    };
+    let version_close = uuid::Uuid::new_v4();
+    let document_close = uuid::Uuid::new_v4();
+    let image =
+        DecodeProbeIdentity::discover_admitted(probe.to_str().expect("probe path"), version_close)
+            .await?;
+    let catalog =
+        DecodeCatalogMetadata::new(None, None, crate::domain::DolbyVisionFacts::default())
+            .expect("SDR catalog");
+    let completion = image
+        .collect_source(
+            &DecodeFactCache::new(),
+            DecodeFactSource::isolated(source),
+            &catalog,
+            ProbeStreamSelection::Absolute(4),
+            Duration::from_secs(5),
+            expected,
+            document_close,
+        )
+        .await?;
+    assert_eq!(completion.roots().0.close_operation_id(), version_close);
+    assert_eq!(completion.roots().1.close_operation_id(), document_close);
+    Ok(completion)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn admitted_logical_probe_refusals_keep_original_native_close() {
+    for mode in [10, 11, 12] {
+        let completion = match admitted_static_probe_fixture(mode, false).await {
+            Ok(completion) => completion,
+            Err(failure) => panic!("logical refusal lost native completion: {}", failure.error),
+        };
+        let (version, document) = completion.roots();
+        assert!(version.original_native_close_verified());
+        assert!(document.original_native_close_verified());
+        assert!(!version.inherited_source());
+        assert!(document.inherited_source());
+        assert_eq!(
+            completion.image_closed().original_object_version(),
+            completion.object_version()
+        );
+        assert_eq!(
+            completion.image_closed().snapshot_digest(),
+            completion.sha256()
+        );
+        assert!(
+            matches!(&completion.output,
+                Err(DecodeFactError::InvalidFacts(_)) if mode == 10 || mode == 11
+            ) || matches!(&completion.output,
+                Err(DecodeFactError::InvalidJson(_)) if mode == 12
+            )
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn admitted_source_identity_mismatch_never_yields_positive_completion() {
+    let closed = match admitted_static_probe_fixture(0, false).await {
+        Ok(completion) => completion,
+        Err(failure) => panic!("matching held source lost completion: {}", failure.error),
+    };
+    assert!(closed.roots().0.original_native_close_verified());
+    assert!(closed.roots().1.original_native_close_verified());
+    assert!(closed.output.is_ok());
+    assert!(matches!(
+        admitted_static_probe_fixture(0, true).await,
+        Err(AdmittedProbeNativeFailure {
+            error: DecodeFactError::SourceChanged,
+            ..
+        })
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn admitted_timeout_retains_original_probe_owners_for_checked_cleanup() {
+    // This ELF forks an inherited pipe writer and stalls its leader. The
+    // admitted collector times out, then maintenance retries the SAME child,
+    // job, pidfd, and pipe owners retained in the native failure.
+    let mut failure = match admitted_static_probe_fixture(9, false).await {
+        Ok(_) => panic!("stalled native probe must remain an original failure"),
+        Err(failure) => failure,
+    };
+    assert!(matches!(&failure.error, DecodeFactError::Deadline));
+    {
+        let custody = failure.custody.lock().expect("private custody");
+        assert!(custody
+            .original
+            .iter()
+            .flatten()
+            .any(|slot| slot.lock().expect("original command").has_original_owner()));
+        assert!(custody.configured_image.is_some());
+        assert!(custody.sealed_snapshot.is_some());
+    }
+    failure
+        .retry_cleanup(std::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("original native cleanup");
+    let custody = failure.custody.lock().expect("private custody");
+    assert!(custody
+        .original
+        .iter()
+        .flatten()
+        .all(|slot| !slot.lock().expect("original command").has_original_owner()));
+    assert!(custody.configured_image_checked_closed);
+    assert!(custody.sealed_snapshot_checked_closed);
+    assert!(!custody.uncertain_image_close);
 }
 
 #[cfg(target_os = "linux")]
@@ -2523,6 +2666,8 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
         ProbeStreamSelection::FirstPlayable,
         Duration::from_secs(2),
         None,
+        false,
+        None,
     )
     .await
     .expect("held executable runs even while its path names another program")
@@ -2580,6 +2725,8 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
         None,
         ProbeStreamSelection::FirstPlayable,
         Duration::from_secs(2),
+        None,
+        false,
         None,
     )
     .await

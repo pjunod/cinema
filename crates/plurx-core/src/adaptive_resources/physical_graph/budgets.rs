@@ -53,6 +53,13 @@ pub(super) fn check(
                 .ok_or_else(overflow)?;
             continue;
         }
+        #[cfg(target_os = "linux")]
+        if let Some(copy) = &writer.copy {
+            finite_memory = finite_memory
+                .checked_add(copy.minimum_memory_bytes())
+                .ok_or_else(overflow)?;
+            continue;
+        }
         if !writer.joined {
             // A generic future can retain arbitrary memory or export resources.
             // Its mere JoinHandle is not a finite cost for another adapter to

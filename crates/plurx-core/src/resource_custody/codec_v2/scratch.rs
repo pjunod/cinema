@@ -40,7 +40,14 @@ pub(crate) struct DirectoryPlanV2 {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OutputNamingV1 {
     FilmSegmentV1,
-    FiniteVodMetadataV2 { encoded_process: bool },
+    FiniteVodMetadataV2 {
+        encoded_process: bool,
+    },
+    /// Complete immutable background artifact in the original finite S.
+    /// The manifest is a separately published, counted native file.
+    StaticArtifactV1 {
+        encoded_process: bool,
+    },
     CopyRollingV1,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +66,7 @@ pub(crate) enum OutputKey {
     Playlist,
     IdentityMetadata,
     EncodedProcessMetadata,
+    CompleteArtifactManifest,
 }
 impl OutputNamesV1 {
     pub(crate) fn contains(&self, key: &OutputKey) -> bool {
@@ -69,14 +77,23 @@ impl OutputNamesV1 {
             }
             OutputKey::Playlist => matches!(self.naming, OutputNamingV1::CopyRollingV1),
             OutputKey::IdentityMetadata => {
-                matches!(self.naming, OutputNamingV1::FiniteVodMetadataV2 { .. })
+                matches!(
+                    self.naming,
+                    OutputNamingV1::FiniteVodMetadataV2 { .. }
+                        | OutputNamingV1::StaticArtifactV1 { .. }
+                )
             }
             OutputKey::EncodedProcessMetadata => matches!(
                 self.naming,
                 OutputNamingV1::FiniteVodMetadataV2 {
                     encoded_process: true
+                } | OutputNamingV1::StaticArtifactV1 {
+                    encoded_process: true
                 }
             ),
+            OutputKey::CompleteArtifactManifest => {
+                matches!(self.naming, OutputNamingV1::StaticArtifactV1 { .. })
+            }
         }
     }
 }

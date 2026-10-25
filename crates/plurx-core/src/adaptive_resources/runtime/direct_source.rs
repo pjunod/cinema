@@ -953,7 +953,7 @@ impl DirectSourceOwner {
         let slot = self.inner.budget.reserve(self.inner.chunk_bytes)?;
         let buffer = FiniteResponseBuffer::allocate(slot, self.inner.chunk_bytes)?;
         let (file, expected_s1) = {
-            let mut state = self.inner.state.lock().map_err(|_| invalid())?;
+            let state = self.inner.state.lock().map_err(|_| invalid())?;
             if state.closing
                 || state.lease.is_none()
                 || offset >= state.length.ok_or_else(invalid)?

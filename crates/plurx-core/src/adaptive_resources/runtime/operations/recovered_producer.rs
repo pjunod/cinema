@@ -311,7 +311,13 @@ impl NodeResourceRuntime {
             bootstrap: BTreeMap::new(),
             sources: BTreeMap::new(),
             finite_vod: None,
+            #[cfg(target_os = "linux")]
+            copy_vod: None,
+            copy_admission_failed: false,
             finite_app: None,
+            #[cfg(target_os = "linux")]
+            planning_metadata: None,
+            planning_tasks: None,
             retirement: None,
             response_budget: Some(budget),
             armed: BTreeSet::from([member]),

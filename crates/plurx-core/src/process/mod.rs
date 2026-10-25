@@ -4,6 +4,8 @@
 pub mod bounded;
 #[cfg(test)]
 mod census;
+#[cfg(target_os = "linux")]
+pub(crate) mod fixed_planning_engine;
 #[doc(hidden)]
 pub mod fixed_probe;
 #[cfg(unix)]

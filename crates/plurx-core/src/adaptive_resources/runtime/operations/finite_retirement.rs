@@ -153,6 +153,52 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         let full = bootstrap.frozen_inventory()?;
+        if matches!(
+            plan.outputs.naming,
+            v2::scratch::OutputNamingV1::StaticArtifactV1 { .. }
+        ) {
+            // A static Store result may be exposed only from the same frozen
+            // S that owns every byte, including its complete-v1.json. The
+            // fold already guarantees unique published keys; this verifies
+            // the exact planned range before producer credit can return.
+            let segment_count = usize::try_from(plan.outputs.segment_end_exclusive)
+                .map_err(|_| OperationError::State)?;
+            if plan.outputs.first_segment != 0
+                || segment_count == 0
+                || full.files.len() != segment_count.checked_add(4).ok_or(OperationError::State)?
+            {
+                return Err(OperationError::State);
+            }
+            let mut init = false;
+            let mut identity = false;
+            let mut marker = false;
+            let mut manifest = false;
+            let mut segments = 0_usize;
+            for file in &full.files {
+                match file.published {
+                    Some(v2::scratch::OutputKey::Init) => init = file.logical_len > 0,
+                    Some(v2::scratch::OutputKey::IdentityMetadata) => {
+                        identity = file.logical_len > 0;
+                    }
+                    Some(v2::scratch::OutputKey::EncodedProcessMetadata) => {
+                        marker = file.logical_len > 0;
+                    }
+                    Some(v2::scratch::OutputKey::CompleteArtifactManifest) => {
+                        manifest = file.logical_len > 0 && file.logical_len <= 4 * 1024 * 1024;
+                    }
+                    Some(v2::scratch::OutputKey::Segment { index })
+                        if usize::try_from(index).is_ok_and(|index| index < segment_count)
+                            && file.logical_len > 0 =>
+                    {
+                        segments += 1;
+                    }
+                    _ => return Err(OperationError::State),
+                }
+            }
+            if !init || !identity || !marker || !manifest || segments != segment_count {
+                return Err(OperationError::State);
+            }
+        }
         let frozen_inventory_bytes = full.resident_inventory_bytes()?;
         if frozen_inventory_bytes > plan.limits.resident_memory_bytes {
             return Err(OperationError::State);

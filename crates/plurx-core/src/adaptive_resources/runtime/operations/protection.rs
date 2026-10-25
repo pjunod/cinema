@@ -50,7 +50,27 @@ impl NodeResourceRuntime {
                                 slot,
                                 ..
                             }
+                            | crate::resource_custody::codec_v2::MemberPlan::FixedProbeDiscoverSourceV1 {
+                                slot,
+                                ..
+                            }
                             | crate::resource_custody::codec_v2::MemberPlan::VodOutputTaskV1 {
+                                slot,
+                                ..
+                            }
+                            | crate::resource_custody::codec_v2::MemberPlan::FixedProbeTaskV1 {
+                                slot,
+                                ..
+                            }
+                            | crate::resource_custody::codec_v2::MemberPlan::FixedProbeDiscoverTaskV1 {
+                                slot,
+                                ..
+                            }
+                            | crate::resource_custody::codec_v2::MemberPlan::FixedPlanningEngineTaskV1 {
+                                slot,
+                                ..
+                            }
+                            | crate::resource_custody::codec_v2::MemberPlan::FixedProbeMetadataV1 {
                                 slot,
                                 ..
                             }

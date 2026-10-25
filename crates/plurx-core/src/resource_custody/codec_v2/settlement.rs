@@ -138,6 +138,27 @@ pub(crate) struct OwnerClosed {
     pub owner_id: Id,
     pub operation_id: Id,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub(crate) enum FixedEngineOwnerDispositionV1 {
+    ActualOwnedClose { owner_id: Id, operation_id: Id },
+    ProvenNeverAcquired { owner_id: Id, operation_id: Id },
+}
+impl FixedEngineOwnerDispositionV1 {
+    fn owner_id(&self) -> Id {
+        match self {
+            Self::ActualOwnedClose { owner_id, .. }
+            | Self::ProvenNeverAcquired { owner_id, .. } => *owner_id,
+        }
+    }
+    fn operation_id(&self) -> Id {
+        match self {
+            Self::ActualOwnedClose { operation_id, .. }
+            | Self::ProvenNeverAcquired { operation_id, .. } => *operation_id,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ClosedFact {
@@ -156,6 +177,10 @@ pub(crate) enum ClosedFact {
         holder_id: Id,
         copies: Vec<CopyClosed>,
     },
+    FixedProbeDiscoverSourceV1 {
+        holder_id: Id,
+        copies: Vec<CopyClosed>,
+    },
     DirectReadDomainV1 {
         domain_id: Id,
         close_operation_id: Id,
@@ -164,6 +189,42 @@ pub(crate) enum ClosedFact {
         task: VodOutputTask,
         join_operation_id: Id,
         owners: Vec<OwnerClosed>,
+    },
+    FixedProbeTaskV1 {
+        task: FixedProbeTaskV1,
+        join_operation_id: Id,
+        owners: Vec<OwnerClosed>,
+    },
+    FixedProbeTaskNeverAcquiredV1 {
+        task: FixedProbeTaskV1,
+        operation_id: Id,
+    },
+    FixedProbeDiscoverTaskV1 {
+        task: FixedProbeDiscoverTaskV1,
+        join_operation_id: Id,
+        version_close_operation_id: Id,
+        document_close_operation_id: Id,
+        owners: Vec<OwnerClosed>,
+    },
+    FixedProbeDiscoverTaskNeverAcquiredV1 {
+        task: FixedProbeDiscoverTaskV1,
+        operation_id: Id,
+    },
+    FixedPlanningEngineTaskV1 {
+        task: FixedPlanningEngineTaskV1,
+        join_operation_id: Id,
+        version_close_operation_id: Id,
+        dependency_close_operation_id: Id,
+        used_file_slots: u16,
+        owners: Vec<FixedEngineOwnerDispositionV1>,
+    },
+    FixedPlanningEngineTaskNeverAcquiredV1 {
+        task: FixedPlanningEngineTaskV1,
+        operation_id: Id,
+    },
+    FixedProbeMetadataV1 {
+        metadata: FixedProbeMetadataV1,
+        release_operation_id: Id,
     },
     /// Same-boot fixed software root and daemon domains were positively
     /// extinct before import. This records old task-owner extinction, not a
@@ -367,6 +428,26 @@ pub(crate) fn validate_settlement(
                     validate_copy_closures(source, &envelope.observed, copies)?;
                 }
                 (
+                    MemberPlan::FixedProbeDiscoverSourceV1 { source, .. },
+                    ClosedFact::FixedProbeDiscoverSourceV1 { holder_id, copies },
+                ) => {
+                    if *holder_id != source.holder_id
+                        || copies.len() != source.planned_copies.len()
+                        || copies.iter().zip(&source.planned_copies)
+                            .any(|(closed, planned)| closed.copy() != planned)
+                        || copies.iter().any(|closed| match closed {
+                            CopyClosed::DomainExtinct { .. } => true,
+                            CopyClosed::ProvenNeverAcquired { copy, .. } =>
+                                matches!(&envelope.observed,
+                                    Some(Observed::FixedProbeDiscoverSourceV1 { source: observed })
+                                        if observed.copies.contains(copy)),
+                            CopyClosed::ActualOwnedClose { .. } => false,
+                        })
+                    {
+                        return Err(codec::invalid());
+                    }
+                }
+                (
                     MemberPlan::DirectSourceV1 { source, .. },
                     ClosedFact::DirectSourceV1 { holder_id, copies },
                 ) => {
@@ -405,6 +486,133 @@ pub(crate) fn validate_settlement(
                 {
                     validate_closed_owners(owners, &task.inventory)?
                 }
+                (
+                    MemberPlan::FixedProbeTaskV1 { task, .. },
+                    ClosedFact::FixedProbeTaskV1 {
+                        task: closed,
+                        join_operation_id,
+                        owners,
+                    },
+                ) if task == closed
+                    && !join_operation_id.uuid().is_nil()
+                    && matches!(&envelope.observed,
+                        Some(Observed::FixedProbeTaskV1 { task: observed }) if observed == task) =>
+                {
+                    validate_closed_owners(owners, &task.inventory)?
+                }
+                (
+                    MemberPlan::FixedProbeTaskV1 { task, .. },
+                    ClosedFact::FixedProbeTaskNeverAcquiredV1 { task: closed, operation_id },
+                ) if task == closed
+                    && envelope.observed.is_none()
+                    && !operation_id.uuid().is_nil() => {}
+                (
+                    MemberPlan::FixedProbeDiscoverTaskV1 { task, .. },
+                    ClosedFact::FixedProbeDiscoverTaskV1 {
+                        task: closed, join_operation_id, version_close_operation_id,
+                        document_close_operation_id, owners,
+                    },
+                ) if task == closed
+                    && !join_operation_id.uuid().is_nil()
+                    && *version_close_operation_id == task.version_close_operation_id
+                    && *document_close_operation_id == task.document_close_operation_id
+                    && matches!(&envelope.observed,
+                        Some(Observed::FixedProbeDiscoverTaskV1 { task: observed })
+                            if observed.task == *task) =>
+                {
+                    validate_closed_owners(owners, &task.inventory)?;
+                    for (owner_id, operation_id) in [
+                        (task.image_owner_id, task.image_close_operation_id),
+                        (task.snapshot_owner_id, task.snapshot_close_operation_id),
+                        (task.source_child_owner_id, task.source_child_close_operation_id),
+                        (task.version_stdout_owner_id, task.version_stdout_close_operation_id),
+                        (task.stdout_owner_id, task.stdout_close_operation_id),
+                        (task.diagnostic_owner_id, task.diagnostic_close_operation_id),
+                    ] {
+                        if !owners.iter().any(|owner| owner.owner_id == owner_id
+                            && owner.operation_id == operation_id) {
+                            return Err(codec::invalid());
+                        }
+                    }
+                }
+                (
+                    MemberPlan::FixedProbeDiscoverTaskV1 { task, .. },
+                    ClosedFact::FixedProbeDiscoverTaskNeverAcquiredV1 { task: closed, operation_id },
+                ) if task == closed
+                    && envelope.observed.is_none()
+                    && !operation_id.uuid().is_nil() => {}
+                (
+                    MemberPlan::FixedPlanningEngineTaskV1 { task, .. },
+                    ClosedFact::FixedPlanningEngineTaskV1 {
+                        task: closed, join_operation_id,
+                        version_close_operation_id, dependency_close_operation_id,
+                        used_file_slots, owners,
+                    },
+                ) if task == closed
+                    && !join_operation_id.uuid().is_nil()
+                    && *version_close_operation_id == task.version_close_operation_id
+                    && *dependency_close_operation_id == task.dependency_close_operation_id
+                    && matches!(&envelope.observed,
+                        Some(Observed::FixedPlanningEngineTaskV1 { task: observed })
+                            if observed.task == *task
+                                && observed.used_file_slots == *used_file_slots) =>
+                {
+                    let inventoried: BTreeSet<_> = task.inventory.pending_io.iter()
+                        .chain(&task.inventory.buffers)
+                        .chain(&task.inventory.readers)
+                        .map(|owner| owner.owner_id).collect();
+                    let closed_ids: BTreeSet<_> = owners.iter()
+                        .map(FixedEngineOwnerDispositionV1::owner_id).collect();
+                    if owners.len() != inventoried.len() || closed_ids != inventoried {
+                        return Err(codec::invalid());
+                    }
+                    for (index, slot) in task.file_slots.iter().enumerate() {
+                        let matching = owners.iter().find(|closed|
+                            closed.owner_id() == slot.owner_id
+                                && closed.operation_id() == slot.close_operation_id);
+                        let valid = if index < usize::from(*used_file_slots) {
+                            matches!(matching,
+                                Some(FixedEngineOwnerDispositionV1::ActualOwnedClose { .. }))
+                        } else {
+                            matches!(matching,
+                                Some(FixedEngineOwnerDispositionV1::ProvenNeverAcquired { .. }))
+                        };
+                        if !valid {
+                            return Err(codec::invalid());
+                        }
+                    }
+                    for (owner_id, operation_id) in [
+                        (task.version_stdout_owner_id, task.version_stdout_close_operation_id),
+                        (task.version_diagnostic_owner_id, task.version_diagnostic_close_operation_id),
+                        (task.dependency_stdout_owner_id, task.dependency_stdout_close_operation_id),
+                        (task.dependency_diagnostic_owner_id, task.dependency_diagnostic_close_operation_id),
+                        (task.hash_buffer_owner_id, task.hash_buffer_close_operation_id),
+                    ] {
+                        if !owners.iter().any(|owner| matches!(owner,
+                            FixedEngineOwnerDispositionV1::ActualOwnedClose {
+                                owner_id: actual, operation_id: close,
+                            } if *actual == owner_id && *close == operation_id)) {
+                            return Err(codec::invalid());
+                        }
+                    }
+                }
+                (
+                    MemberPlan::FixedPlanningEngineTaskV1 { task, .. },
+                    ClosedFact::FixedPlanningEngineTaskNeverAcquiredV1 { task: closed, operation_id },
+                ) if task == closed
+                    && envelope.observed.is_none()
+                    && !operation_id.uuid().is_nil() => {}
+                (
+                    MemberPlan::FixedProbeMetadataV1 { metadata, .. },
+                    ClosedFact::FixedProbeMetadataV1 {
+                        metadata: closed,
+                        release_operation_id,
+                    },
+                ) if metadata == closed
+                    && !release_operation_id.uuid().is_nil()
+                    && envelope.observed.as_ref().is_none_or(|observed|
+                        matches!(observed, Observed::FixedProbeMetadataV1 { metadata: actual }
+                            if actual == metadata)) => {}
                 (
                     MemberPlan::VodOutputTaskV1 { task, .. },
                     ClosedFact::VodOutputTaskDomainExtinctV1 {

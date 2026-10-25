@@ -62,6 +62,53 @@ const MAX_PROBE_STDOUT_BYTES: usize = 256 * 1024;
 const MAX_PROBE_STDERR_BYTES: usize = 16 * 1024;
 const MAX_PROBE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_VERSION_BYTES: usize = 64 * 1024;
+pub(crate) struct FixedProbeNativeProfile {
+    pub original_roots: u64,
+    pub retained_parent_files: u64,
+    pub sealed_image_files: u64,
+    pub inherited_child_files: u64,
+    pub pipe_readers: u64,
+    pub max_image_bytes: u64,
+    pub max_version_stdout_bytes: u64,
+    pub max_document_stdout_bytes: u64,
+    pub max_document_stderr_bytes: u64,
+    /// Bounded Rust custody allocation apart from the image and output buffers.
+    pub retained_custody_bytes: u64,
+}
+pub(crate) fn fixed_probe_native_profile() -> FixedProbeNativeProfile {
+    // The admitted collector pre-registers exactly two original command
+    // slots. Count each Arc allocation's two counters and aligned payload;
+    // the image bytes and command output buffers have separate limits above.
+    #[cfg(target_os = "linux")]
+    let custody = {
+        use std::mem::{align_of, size_of};
+        use std::sync::atomic::AtomicUsize;
+        fn arc_bytes<T>() -> u64 {
+            (size_of::<T>() + 2 * size_of::<AtomicUsize>() + 2 * align_of::<T>()) as u64
+        }
+        arc_bytes::<std::sync::Mutex<ProbeAdmittedCustody>>()
+            + 2 * arc_bytes::<std::sync::Mutex<ProbeOriginalOwners>>()
+            + arc_bytes::<std::fs::File>()
+            + arc_bytes::<ExecutableSnapshot>()
+            + size_of::<AdmittedProbeNativeFailure>() as u64
+            + size_of::<AdmittedProbeCompletion>() as u64
+            + 2 * libc::PATH_MAX as u64
+    };
+    #[cfg(not(target_os = "linux"))]
+    let custody = 0;
+    FixedProbeNativeProfile {
+        original_roots: 2,
+        retained_parent_files: 1,
+        sealed_image_files: 2,
+        inherited_child_files: 1,
+        pipe_readers: 3,
+        max_image_bytes: MAX_PROBE_EXECUTABLE_BYTES,
+        max_version_stdout_bytes: MAX_VERSION_BYTES as u64,
+        max_document_stdout_bytes: (16 * 1024 * 1024) as u64,
+        max_document_stderr_bytes: MAX_PROBE_STDERR_BYTES as u64,
+        retained_custody_bytes: custody,
+    }
+}
 /// Bump when the selective FFprobe projection changes the meaning of cached facts.
 ///
 /// v3 is the projection S-08 published on main, which added `field_order`.
@@ -902,6 +949,666 @@ pub struct DecodeProbeIdentity {
     /// Content verifications `validate_current` has run (discovery's own
     /// hashes are not counted).
     content_verifications: Arc<AtomicU64>,
+    admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
+}
+
+#[derive(Default)]
+struct ProbeAdmittedCustody {
+    configured_image: Option<Arc<std::fs::File>>,
+    sealed_snapshot: Option<Arc<ExecutableSnapshot>>,
+    configured_image_checked_closed: bool,
+    sealed_snapshot_checked_closed: bool,
+    uncertain_image_close: bool,
+    #[cfg(target_os = "linux")]
+    original: [Option<Arc<std::sync::Mutex<ProbeOriginalOwners>>>; 2],
+}
+impl std::fmt::Debug for ProbeAdmittedCustody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProbeAdmittedCustody")
+            .field("configured_image_held", &self.configured_image.is_some())
+            .field("sealed_snapshot_held", &self.sealed_snapshot.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A failed original P probe keeps its real image and child owners. It has no
+/// public/native close constructor and cannot be converted into a receipt.
+pub(crate) struct AdmittedProbeNativeFailure {
+    pub(crate) error: DecodeFactError,
+    custody: Arc<std::sync::Mutex<ProbeAdmittedCustody>>,
+    version_root: Option<FixedProbeRootClosed>,
+    document_root: Option<FixedProbeRootClosed>,
+}
+impl AdmittedProbeNativeFailure {
+    pub(crate) fn before_entry(error: DecodeFactError) -> Self {
+        Self {
+            error,
+            custody: Arc::new(std::sync::Mutex::new(ProbeAdmittedCustody::default())),
+            version_root: None,
+            document_root: None,
+        }
+    }
+    fn with_custody(
+        error: DecodeFactError,
+        custody: Arc<std::sync::Mutex<ProbeAdmittedCustody>>,
+        version_root: Option<FixedProbeRootClosed>,
+        document_root: Option<FixedProbeRootClosed>,
+    ) -> Self {
+        Self {
+            error,
+            custody,
+            version_root,
+            document_root,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn retry_cleanup(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> std::io::Result<()> {
+        let slots = {
+            let custody = self
+                .custody
+                .lock()
+                .map_err(|_| std::io::Error::other("original FFprobe custody lock poisoned"))?;
+            custody.original.clone()
+        };
+        for slot in slots.into_iter().flatten() {
+            let mut owner = ProbeRetryOwner::take(slot)?;
+            owner.owners.retry_cleanup(deadline).await?;
+        }
+        let mut custody = self
+            .custody
+            .lock()
+            .map_err(|_| std::io::Error::other("original FFprobe custody lock poisoned"))?;
+        if custody.original.iter().flatten().any(|slot| {
+            slot.lock()
+                .map_or(true, |owners| owners.has_original_owner())
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "original FFprobe command owners remain",
+            ));
+        }
+        if let Some(file) = custody.configured_image.take() {
+            match Arc::try_unwrap(file) {
+                Ok(file) => match checked_close_probe_fd(file.into()) {
+                    Ok(()) => custody.configured_image_checked_closed = true,
+                    Err(error) => {
+                        custody.uncertain_image_close = true;
+                        return Err(error);
+                    }
+                },
+                Err(file) => {
+                    custody.configured_image = Some(file);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "original FFprobe configured image still has an alias",
+                    ));
+                }
+            }
+        }
+        if let Some(snapshot) = custody.sealed_snapshot.take() {
+            match Arc::try_unwrap(snapshot) {
+                Ok(snapshot) => match checked_close_probe_fd(snapshot.file.into()) {
+                    Ok(()) => custody.sealed_snapshot_checked_closed = true,
+                    Err(error) => {
+                        custody.uncertain_image_close = true;
+                        return Err(error);
+                    }
+                },
+                Err(snapshot) => {
+                    custody.sealed_snapshot = Some(snapshot);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "original FFprobe sealed image still has an alias",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct ProbeOriginalOwners {
+    child: Option<tokio::process::Child>,
+    job: Option<crate::process::ChildJob>,
+    supervisor: Option<ProbeExecutionSupervisor>,
+    anchor: Option<ProbeExitAnchor>,
+    unregistered_pidfd: Option<(Arc<std::os::fd::OwnedFd>, uuid::Uuid)>,
+    stdout: Option<BoundProbePipe<tokio::process::ChildStdout>>,
+    stderr: Option<BoundProbePipe<tokio::process::ChildStderr>>,
+    reaped_status: Option<std::process::ExitStatus>,
+    original_group_absent: bool,
+    supervisor_finished: bool,
+    stdout_closed: Option<ProbePipeClosed>,
+    stderr_closed: Option<ProbePipeClosed>,
+    pidfd_closed: Option<ProbePidfdClosed>,
+    uncertain_descriptor_close: bool,
+}
+#[cfg(target_os = "linux")]
+impl ProbeOriginalOwners {
+    fn has_original_owner(&self) -> bool {
+        self.child.is_some()
+            || self.job.is_some()
+            || self.supervisor.is_some()
+            || self.anchor.is_some()
+            || self.unregistered_pidfd.is_some()
+            || self.stdout.is_some()
+            || self.stderr.is_some()
+    }
+
+    async fn retry_cleanup(&mut self, deadline: std::time::Instant) -> std::io::Result<()> {
+        let process_group = match self.child.as_ref() {
+            Some(child) => Some(
+                child
+                    .id()
+                    .and_then(|pid| libc::pid_t::try_from(pid).ok())
+                    .ok_or_else(|| {
+                        std::io::Error::other(
+                            "original FFprobe child has no process-group identity",
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+        let signal = match process_group {
+            Some(group) => Some(kill_probe_session_checked(Some(group))?),
+            None => None,
+        };
+        if let Some(child) = self.child.as_mut() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            self.reaped_status = Some(
+                tokio::time::timeout(remaining, child.wait())
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "original FFprobe child cleanup deadline",
+                        )
+                    })??,
+            );
+        }
+        if let Some(signal) = signal {
+            observe_probe_group_absent(process_group, signal, deadline).await?;
+            self.original_group_absent = true;
+        }
+        if let Some(stdout) = self.stdout.as_mut() {
+            let limit = stdout.output_limit;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            tokio::time::timeout(remaining, read_bounded(&mut stdout.reader, limit))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "original FFprobe stdout cleanup deadline",
+                    )
+                })?
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            match self.stdout.take().expect("original stdout").checked_close() {
+                Ok(closed) => self.stdout_closed = Some(closed),
+                Err(error) => {
+                    self.uncertain_descriptor_close = true;
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(stderr) = self.stderr.as_mut() {
+            let limit = stderr.output_limit;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            tokio::time::timeout(remaining, read_bounded(&mut stderr.reader, limit))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "original FFprobe stderr cleanup deadline",
+                    )
+                })?
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            match self.stderr.take().expect("original stderr").checked_close() {
+                Ok(closed) => self.stderr_closed = Some(closed),
+                Err(error) => {
+                    self.uncertain_descriptor_close = true;
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(anchor) = self.anchor.take() {
+            match anchor.checked_close() {
+                Ok(closed) => self.pidfd_closed = Some(closed),
+                Err(error) => {
+                    self.uncertain_descriptor_close = true;
+                    return Err(error);
+                }
+            }
+        }
+        if let Some((owner, bound_root_close_operation_id)) = self.unregistered_pidfd.take() {
+            match Arc::try_unwrap(owner) {
+                Ok(fd) => {
+                    if let Err(error) = checked_close_probe_fd(fd) {
+                        self.uncertain_descriptor_close = true;
+                        return Err(error);
+                    }
+                    self.pidfd_closed = Some(ProbePidfdClosed {
+                        bound_root_close_operation_id,
+                    });
+                }
+                Err(owner) => {
+                    self.unregistered_pidfd = Some((owner, bound_root_close_operation_id));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "original FFprobe pidfd still has an alias",
+                    ));
+                }
+            }
+        }
+        if let Some(supervisor) = self.supervisor.as_mut() {
+            supervisor.try_finish_nonblocking()?;
+            self.supervisor_finished = true;
+            self.supervisor.take();
+        }
+        drop(self.child.take());
+        drop(self.job.take());
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn register_probe_command_slot(
+    admitted: Option<&Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
+) -> Result<Option<Arc<std::sync::Mutex<ProbeOriginalOwners>>>, DecodeFactError> {
+    let Some(admitted) = admitted else {
+        return Ok(None);
+    };
+    let command = Arc::new(std::sync::Mutex::new(ProbeOriginalOwners::default()));
+    let mut held = match admitted.lock() {
+        Ok(held) => held,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let slot = held
+        .original
+        .iter_mut()
+        .find(|slot| slot.is_none())
+        .ok_or(DecodeFactError::CacheInvariant)?;
+    *slot = Some(Arc::clone(&command));
+    Ok(Some(command))
+}
+
+#[cfg(target_os = "linux")]
+struct CapturedProbeOwner<T> {
+    item: Option<T>,
+    slot: Option<Arc<std::sync::Mutex<ProbeOriginalOwners>>>,
+    retain: fn(&mut ProbeOriginalOwners, T),
+}
+
+#[cfg(target_os = "linux")]
+struct ProbeRetryOwner {
+    slot: Arc<std::sync::Mutex<ProbeOriginalOwners>>,
+    owners: ProbeOriginalOwners,
+}
+#[cfg(target_os = "linux")]
+impl ProbeRetryOwner {
+    fn take(slot: Arc<std::sync::Mutex<ProbeOriginalOwners>>) -> std::io::Result<Self> {
+        let owners = {
+            let mut locked = slot
+                .lock()
+                .map_err(|_| std::io::Error::other("original FFprobe command lock poisoned"))?;
+            std::mem::take(&mut *locked)
+        };
+        Ok(Self { slot, owners })
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for ProbeRetryOwner {
+    fn drop(&mut self) {
+        let mut locked = match self.slot.lock() {
+            Ok(locked) => locked,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // The original task and its detached workers have joined before
+        // recovery starts. Restore the same private slot after every await.
+        debug_assert!(!locked.has_original_owner());
+        *locked = std::mem::take(&mut self.owners);
+    }
+}
+#[cfg(target_os = "linux")]
+impl<T> CapturedProbeOwner<T> {
+    fn new(
+        item: T,
+        slot: Option<Arc<std::sync::Mutex<ProbeOriginalOwners>>>,
+        retain: fn(&mut ProbeOriginalOwners, T),
+    ) -> Self {
+        Self {
+            item: Some(item),
+            slot,
+            retain,
+        }
+    }
+    fn take(&mut self) -> T {
+        self.item.take().expect("original probe owner")
+    }
+    fn release(&mut self) {
+        self.slot = None;
+        drop(self.item.take());
+    }
+}
+#[cfg(target_os = "linux")]
+impl<T> std::ops::Deref for CapturedProbeOwner<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.item.as_ref().expect("original probe owner")
+    }
+}
+#[cfg(target_os = "linux")]
+impl<T> std::ops::DerefMut for CapturedProbeOwner<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.item.as_mut().expect("original probe owner")
+    }
+}
+#[cfg(target_os = "linux")]
+impl<T> Drop for CapturedProbeOwner<T> {
+    fn drop(&mut self) {
+        if let (Some(item), Some(slot)) = (self.item.take(), self.slot.take()) {
+            let mut held = match slot.lock() {
+                Ok(held) => held,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            (self.retain)(&mut held, item);
+        }
+    }
+}
+
+/// Move-only original P image owner. The digest and object identity are read
+/// from the held configured File and sealed snapshot, never from a caller's
+/// proposed path or observed JSON. Its destructor closes both original FDs.
+pub(crate) struct AdmittedProbeImage {
+    identity: DecodeProbeIdentity,
+    configured_locator: String,
+    version_root: FixedProbeRootClosed,
+}
+
+/// Constructed only while the original ChildJob is still retained, after the
+/// original child has exited, its pipes have drained, its session has been
+/// terminated, and the execution supervisor has finished. The process marker
+/// is sampled from that child before waiting, never looked up by a later PID.
+pub(crate) struct FixedProbeRootClosed {
+    identity: crate::process::observation::ProcessIdentity,
+    inherited_source: bool,
+    close_operation_id: uuid::Uuid,
+    exit_status: std::process::ExitStatus,
+    session_closed: ProbeSessionClosed,
+    drained_stdout_bytes: usize,
+    drained_stderr_bytes: usize,
+    stdout_closed: ProbePipeClosed,
+    stderr_closed: Option<ProbePipeClosed>,
+    pidfd_closed: ProbePidfdClosed,
+}
+
+#[cfg(target_os = "linux")]
+struct ProbePipeClosed {
+    bound_root_close_operation_id: uuid::Uuid,
+}
+#[cfg(not(target_os = "linux"))]
+struct ProbePipeClosed;
+#[cfg(target_os = "linux")]
+struct ProbePidfdClosed {
+    bound_root_close_operation_id: uuid::Uuid,
+}
+#[cfg(not(target_os = "linux"))]
+struct ProbePidfdClosed;
+
+/// The two original admitted image Files have each had one checked close.
+/// It is constructed only after the descriptor aliases from the original P
+/// collector have drained and both Arc owners can be reclaimed uniquely.
+pub(crate) struct FixedProbeImageClosed {
+    original_object_version: String,
+    snapshot_digest: String,
+}
+
+impl FixedProbeImageClosed {
+    pub(crate) fn original_object_version(&self) -> &str {
+        &self.original_object_version
+    }
+    pub(crate) fn snapshot_digest(&self) -> &str {
+        &self.snapshot_digest
+    }
+}
+
+#[cfg(target_os = "linux")]
+enum ProbeSessionClosed {
+    KilledOriginalGroupAndObservedAbsent,
+    OriginalGroupAlreadyAbsent,
+}
+#[cfg(not(target_os = "linux"))]
+enum ProbeSessionClosed {}
+#[cfg(target_os = "linux")]
+enum ProbeSessionSignal {
+    KillDelivered,
+    AlreadyAbsent,
+}
+
+impl FixedProbeRootClosed {
+    pub(crate) fn identity(&self) -> crate::process::observation::ProcessIdentity {
+        self.identity
+    }
+
+    pub(crate) fn inherited_source(&self) -> bool {
+        self.inherited_source
+    }
+
+    pub(crate) fn close_operation_id(&self) -> uuid::Uuid {
+        self.close_operation_id
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn original_native_close_verified(&self) -> bool {
+        self.exit_status.success()
+            && self.identity.pid != 0
+            && self.identity.start_marker != 0
+            && matches!(
+                self.session_closed,
+                ProbeSessionClosed::KilledOriginalGroupAndObservedAbsent
+                    | ProbeSessionClosed::OriginalGroupAlreadyAbsent
+            )
+            && self.drained_stdout_bytes <= MAX_PROBE_STDOUT_BYTES.max(MAX_VERSION_BYTES)
+            && self.drained_stderr_bytes <= MAX_PROBE_STDERR_BYTES
+            && self.stdout_closed.bound_root_close_operation_id == self.close_operation_id
+            && (!self.inherited_source || self.stderr_closed.is_some())
+            && self.stderr_closed.as_ref().is_none_or(|closed| {
+                closed.bound_root_close_operation_id == self.close_operation_id
+            })
+            && self.pidfd_closed.bound_root_close_operation_id == self.close_operation_id
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn original_native_close_verified(&self) -> bool {
+        false
+    }
+}
+
+/// Opaque positive completion of the selected trusted Linux parser job. Only
+/// successful inline collection, bounded pipe drains, session kill and child
+/// reap can construct this value. It is not a journal settlement by itself.
+pub(crate) struct AdmittedProbeCompletion {
+    output: Result<(String, DecodeFacts), DecodeFactError>,
+    executable: PathBuf,
+    configured_locator: String,
+    source_object_version: String,
+    object_version: String,
+    sha256: String,
+    build_digest: String,
+    version_root: FixedProbeRootClosed,
+    document_root: FixedProbeRootClosed,
+    image_closed: FixedProbeImageClosed,
+}
+
+impl AdmittedProbeCompletion {
+    pub(crate) fn executable(&self) -> &Path {
+        &self.executable
+    }
+    pub(crate) fn configured_locator(&self) -> &str {
+        &self.configured_locator
+    }
+    pub(crate) fn source_object_version(&self) -> &str {
+        &self.source_object_version
+    }
+    pub(crate) fn object_version(&self) -> &str {
+        &self.object_version
+    }
+    pub(crate) fn sha256(&self) -> &str {
+        &self.sha256
+    }
+    pub(crate) fn build_digest(&self) -> &str {
+        &self.build_digest
+    }
+    pub(crate) fn roots(&self) -> (&FixedProbeRootClosed, &FixedProbeRootClosed) {
+        (&self.version_root, &self.document_root)
+    }
+    pub(crate) fn image_closed(&self) -> &FixedProbeImageClosed {
+        &self.image_closed
+    }
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Result<(String, DecodeFacts), DecodeFactError>,
+        PathBuf,
+        String,
+        String,
+        String,
+        String,
+        String,
+        FixedProbeRootClosed,
+        FixedProbeRootClosed,
+        FixedProbeImageClosed,
+    ) {
+        (
+            self.output,
+            self.executable,
+            self.configured_locator,
+            self.source_object_version,
+            self.object_version,
+            self.sha256,
+            self.build_digest,
+            self.version_root,
+            self.document_root,
+            self.image_closed,
+        )
+    }
+}
+
+impl AdmittedProbeImage {
+    /// The original P task retains the image through both fresh document and
+    /// decoder refinement. No identity or native File is exported afterward.
+    pub(crate) async fn collect_source(
+        self,
+        cache: &DecodeFactCache,
+        source: DecodeFactSource,
+        catalog: &DecodeCatalogMetadata,
+        selected_stream: ProbeStreamSelection,
+        budget: Duration,
+        expected_source_object_version: &str,
+        document_close_operation_id: uuid::Uuid,
+    ) -> Result<AdmittedProbeCompletion, AdmittedProbeNativeFailure> {
+        let custody = self
+            .identity
+            .admitted_custody
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                AdmittedProbeNativeFailure::before_entry(DecodeFactError::CacheInvariant)
+            })?;
+        if document_close_operation_id.is_nil()
+            || document_close_operation_id == self.version_root.close_operation_id()
+        {
+            return Err(AdmittedProbeNativeFailure::with_custody(
+                DecodeFactError::CacheInvariant,
+                custody,
+                Some(self.version_root),
+                None,
+            ));
+        }
+        let AdmittedProbeImage {
+            identity,
+            configured_locator,
+            version_root,
+        } = self;
+        let held_source = Arc::clone(&source.handle);
+        let collected = cache
+            .admitted_source_document_and_refine(
+                &identity,
+                source,
+                catalog,
+                selected_stream,
+                budget,
+                document_close_operation_id,
+            )
+            .await;
+        let (output, document_root) = match collected {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(AdmittedProbeNativeFailure::with_custody(
+                    error,
+                    custody,
+                    Some(version_root),
+                    None,
+                ))
+            }
+        };
+        let source_metadata = match held_source.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Err(AdmittedProbeNativeFailure::with_custody(
+                    DecodeFactError::SourceMetadata(error.to_string()),
+                    custody,
+                    Some(version_root),
+                    Some(document_root),
+                ))
+            }
+        };
+        let observed_source_version =
+            crate::source_identity::SourceIdentity::from_metadata(&source_metadata).render_s1();
+        if observed_source_version != expected_source_object_version {
+            return Err(AdmittedProbeNativeFailure::with_custody(
+                DecodeFactError::SourceChanged,
+                custody,
+                Some(version_root),
+                Some(document_root),
+            ));
+        }
+        drop(held_source);
+        let executable = identity.executable.clone();
+        let object_version = identity.source_identity().render_s1();
+        let sha256 = identity.file.content_digest.clone();
+        let build_digest = identity.build_digest.clone();
+        let image_closed = match identity.close_admitted() {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(AdmittedProbeNativeFailure::with_custody(
+                    error,
+                    custody,
+                    Some(version_root),
+                    Some(document_root),
+                ))
+            }
+        };
+        let completion = AdmittedProbeCompletion {
+            output,
+            executable,
+            configured_locator,
+            source_object_version: observed_source_version,
+            object_version,
+            sha256,
+            build_digest,
+            version_root,
+            document_root,
+            image_closed,
+        };
+        Ok(completion)
+    }
 }
 
 #[derive(Debug)]
@@ -940,8 +1647,170 @@ impl Drop for ExecutableSnapshot {
 }
 
 impl DecodeProbeIdentity {
+    #[cfg(target_os = "linux")]
+    fn close_admitted(self) -> Result<FixedProbeImageClosed, DecodeFactError> {
+        use std::os::fd::IntoRawFd;
+        let original_object_version = self.source_identity().render_s1();
+        let snapshot_digest = self.snapshot_file.content_digest.clone();
+        if let Some(custody) = self.admitted_custody.as_ref() {
+            let mut custody = match custody.lock() {
+                Ok(custody) => custody,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if custody
+                .original
+                .iter()
+                .flatten()
+                .any(|slot| match slot.lock() {
+                    Ok(owners) => owners.has_original_owner(),
+                    Err(_) => true,
+                })
+            {
+                return Err(DecodeFactError::CacheInvariant);
+            }
+            custody.original.fill(None);
+            // The original identity still owns both Files. Remove only the
+            // accounting aliases before consuming those original FDs below.
+            custody.configured_image.take();
+            custody.sealed_snapshot.take();
+        }
+        let original = match Arc::try_unwrap(self.executable_file) {
+            Ok(original) => original,
+            Err(original) => {
+                if let Some(custody) = self.admitted_custody.as_ref() {
+                    let mut custody = match custody.lock() {
+                        Ok(custody) => custody,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    custody.configured_image = Some(original);
+                }
+                return Err(DecodeFactError::CacheInvariant);
+            }
+        };
+        let snapshot = match Arc::try_unwrap(self.executable_snapshot) {
+            Ok(snapshot) => snapshot,
+            Err(snapshot) => {
+                if let Some(custody) = self.admitted_custody.as_ref() {
+                    let mut custody = match custody.lock() {
+                        Ok(custody) => custody,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    custody.configured_image = Some(Arc::new(original));
+                    custody.sealed_snapshot = Some(snapshot);
+                }
+                return Err(DecodeFactError::CacheInvariant);
+            }
+        };
+        let original_fd = original.into_raw_fd();
+        let snapshot_fd = snapshot.file.into_raw_fd();
+        // Never retry a failed close: its numeric descriptor may already have
+        // been recycled. A failure leaves the P role held with Unknown close.
+        let original_result = unsafe { libc::close(original_fd) };
+        let original_error = (original_result != 0).then(std::io::Error::last_os_error);
+        let snapshot_result = unsafe { libc::close(snapshot_fd) };
+        let snapshot_error = (snapshot_result != 0).then(std::io::Error::last_os_error);
+        if original_error.is_some() || snapshot_error.is_some() {
+            if let Some(custody) = self.admitted_custody.as_ref() {
+                let mut custody = match custody.lock() {
+                    Ok(custody) => custody,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                custody.uncertain_image_close = true;
+            }
+            return Err(DecodeFactError::Read(format!(
+                "closing original admitted image Files: original={original_error:?}, snapshot={snapshot_error:?}")));
+        }
+        Ok(FixedProbeImageClosed {
+            original_object_version,
+            snapshot_digest,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn close_admitted(self) -> Result<FixedProbeImageClosed, DecodeFactError> {
+        Err(DecodeFactError::CacheInvariant)
+    }
+
     pub async fn discover(bin: &str) -> Result<Self, DecodeFactError> {
         Self::discover_with_mode(bin, ProbeLaunchMode::Production).await
+    }
+
+    /// P's original retained task waits for every discovery worker even when
+    /// the ordinary discovery deadline returned first. The identity/version
+    /// workers hold their singleflight permits through native hash, spawn,
+    /// pipe drain and child reap; reacquiring both lanes is a completion fence.
+    /// A hung worker therefore keeps P held instead of inventing closure.
+    pub(crate) async fn discover_admitted(
+        bin: &str,
+        version_close_operation_id: uuid::Uuid,
+    ) -> Result<AdmittedProbeImage, AdmittedProbeNativeFailure> {
+        if version_close_operation_id.is_nil() {
+            return Err(AdmittedProbeNativeFailure::before_entry(
+                DecodeFactError::CacheInvariant,
+            ));
+        }
+        let root = Arc::new(std::sync::Mutex::new(None));
+        let custody = Arc::new(std::sync::Mutex::new(ProbeAdmittedCustody::default()));
+        let result = Self::discover_with_mode_recording(
+            bin,
+            ProbeLaunchMode::Production,
+            Some((Arc::clone(&root), version_close_operation_id)),
+            Some(Arc::clone(&custody)),
+        )
+        .await;
+        let identity = identity_gate().acquire_owned().await.map_err(|_| {
+            AdmittedProbeNativeFailure::with_custody(
+                DecodeFactError::CacheInvariant,
+                Arc::clone(&custody),
+                None,
+                None,
+            )
+        })?;
+        let version = version_gate().acquire_owned().await.map_err(|_| {
+            AdmittedProbeNativeFailure::with_custody(
+                DecodeFactError::CacheInvariant,
+                Arc::clone(&custody),
+                None,
+                None,
+            )
+        })?;
+        drop(version);
+        drop(identity);
+        let version_root = root
+            .lock()
+            .map_err(|_| {
+                AdmittedProbeNativeFailure::with_custody(
+                    DecodeFactError::CacheInvariant,
+                    Arc::clone(&custody),
+                    None,
+                    None,
+                )
+            })?
+            .take();
+        let identity = match result {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Err(AdmittedProbeNativeFailure::with_custody(
+                    error,
+                    Arc::clone(&custody),
+                    version_root,
+                    None,
+                ))
+            }
+        };
+        let version_root = version_root.ok_or_else(|| {
+            AdmittedProbeNativeFailure::with_custody(
+                DecodeFactError::CacheInvariant,
+                Arc::clone(&custody),
+                None,
+                None,
+            )
+        })?;
+        Ok(AdmittedProbeImage {
+            identity,
+            configured_locator: bin.to_owned(),
+            version_root,
+        })
     }
 
     #[cfg(any(test, feature = "fixtures"))]
@@ -952,6 +1821,18 @@ impl DecodeProbeIdentity {
     async fn discover_with_mode(
         bin: &str,
         launch_mode: ProbeLaunchMode,
+    ) -> Result<Self, DecodeFactError> {
+        Self::discover_with_mode_recording(bin, launch_mode, None, None).await
+    }
+
+    async fn discover_with_mode_recording(
+        bin: &str,
+        launch_mode: ProbeLaunchMode,
+        version_root: Option<(
+            Arc<std::sync::Mutex<Option<FixedProbeRootClosed>>>,
+            uuid::Uuid,
+        )>,
+        admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
     ) -> Result<Self, DecodeFactError> {
         let discovery_started = std::time::Instant::now();
         // Unit fixtures are executable scripts and exercise many independent
@@ -986,6 +1867,12 @@ impl DecodeProbeIdentity {
             std::fs::File::open(&executable)
                 .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?,
         );
+        if let Some(custody) = admitted_custody.as_ref() {
+            custody
+                .lock()
+                .map_err(|_| DecodeFactError::CacheInvariant)?
+                .configured_image = Some(Arc::clone(&executable_file));
+        }
         let before =
             held_probe_file_identity_within(Arc::clone(&executable_file), IDENTITY_DEADLINE, None)
                 .await?;
@@ -996,6 +1883,12 @@ impl DecodeProbeIdentity {
             })
             .await?,
         );
+        if let Some(custody) = admitted_custody.as_ref() {
+            custody
+                .lock()
+                .map_err(|_| DecodeFactError::CacheInvariant)?
+                .sealed_snapshot = Some(Arc::clone(&executable_snapshot));
+        }
         let snapshot_file = held_probe_file_identity_within(
             Arc::new(
                 executable_snapshot
@@ -1020,7 +1913,14 @@ impl DecodeProbeIdentity {
         if launch_mode.is_production() {
             require_direct_probe_executable(executable_snapshot.as_file())?;
         }
-        let version = probe_version(&executable_snapshot, &executable, launch_mode).await?;
+        let version = probe_version_recording(
+            &executable_snapshot,
+            &executable,
+            launch_mode,
+            version_root,
+            admitted_custody.as_ref().map(Arc::clone),
+        )
+        .await?;
         let after_path = executable.clone();
         let after = path_probe_file_identity_within(after_path, IDENTITY_DEADLINE, None).await?;
         if before != after {
@@ -1054,6 +1954,7 @@ impl DecodeProbeIdentity {
             launch_mode,
             content_verified_at: Arc::new(std::sync::Mutex::new(Some(discovery_started))),
             content_verifications: Arc::new(AtomicU64::new(0)),
+            admitted_custody,
         })
     }
 
@@ -1063,6 +1964,20 @@ impl DecodeProbeIdentity {
 
     pub fn content_digest(&self) -> &str {
         &self.file.content_digest
+    }
+
+    /// Startup-held exact FFprobe object identity for the selected planning
+    /// source plan. This reads no path and grants no native acquisition.
+    pub(crate) fn source_identity(&self) -> crate::source_identity::SourceIdentity {
+        crate::source_identity::SourceIdentity::from_fields(
+            self.file.device,
+            self.file.inode,
+            self.file.bytes,
+            self.file.modified_seconds,
+            self.file.modified_nanoseconds,
+            self.file.changed_seconds,
+            self.file.changed_nanoseconds,
+        )
     }
 
     pub fn build_digest(&self) -> &str {
@@ -2630,6 +3545,26 @@ impl ProbeExecutionSupervisor {
         }
         Ok(())
     }
+
+    #[cfg(target_os = "linux")]
+    fn try_finish_nonblocking(&mut self) -> std::io::Result<()> {
+        if let Some(supervisor) = self.linux.as_mut() {
+            supervisor.parent_after_spawn();
+            supervisor.stop.store(true, Ordering::Release);
+            if supervisor
+                .worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "original FFprobe supervisor is still active",
+                ));
+            }
+            supervisor.finish()?;
+        }
+        Ok(())
+    }
 }
 
 /// The probe binary's `-version` check at discovery: nobody is waiting on it.
@@ -2646,6 +3581,7 @@ async fn spawn_configured_probe(
     mut command: tokio::process::Command,
     mut supervisor: ProbeExecutionSupervisor,
     work: crate::process::ChildWork,
+    #[cfg(target_os = "linux")] command_slot: Option<Arc<std::sync::Mutex<ProbeOriginalOwners>>>,
 ) -> Result<
     (
         tokio::process::Child,
@@ -2658,18 +3594,46 @@ async fn spawn_configured_probe(
         // `configure_probe_execution` already registered the priority ahead
         // of its own exec-from-`pre_exec`; the launcher's second registration
         // lands after that closure and never runs.
-        let spawned = crate::process::spawn_job_owned(&mut command, work);
+        let spawned = crate::process::spawn_job_custodied(&mut command, work);
         supervisor.parent_after_spawn();
         match spawned {
             Ok((child, job)) => Ok((child, job, supervisor)),
-            Err(error) => {
+            Err(failure) => {
+                let failure = *failure;
+                let error = DecodeFactError::Spawn(failure.error.to_string());
+                #[cfg(target_os = "linux")]
+                if let Some(slot) = command_slot {
+                    let mut held = match slot.lock() {
+                        Ok(held) => held,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    held.child = failure.child;
+                    held.job = failure.job;
+                    held.supervisor = Some(supervisor);
+                    return Err(error);
+                }
                 let _ = supervisor.finish();
-                Err(DecodeFactError::Spawn(error.to_string()))
+                Err(error)
             }
         }
     })
     .await
     .map_err(|error| DecodeFactError::Spawn(error.to_string()))?
+}
+
+#[cfg(target_os = "linux")]
+fn spawned_probe_identity(
+    child: &tokio::process::Child,
+) -> Option<crate::process::observation::ProcessIdentity> {
+    use crate::process::observation::{Metric, ProcessObserver};
+    let pid = child.id()?;
+    match ProcessObserver::new(pid)
+        .snapshot(std::time::Instant::now())
+        .counters
+    {
+        Metric::Known(counters) if counters.identity.pid == pid => Some(counters.identity),
+        Metric::Known(_) | Metric::Unknown(_) => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2935,10 +3899,84 @@ fn kill_probe_session(process_group: Option<libc::pid_t>) {
 }
 
 #[cfg(target_os = "linux")]
+fn kill_probe_session_checked(
+    process_group: Option<libc::pid_t>,
+) -> std::io::Result<ProbeSessionSignal> {
+    let group = process_group
+        .ok_or_else(|| std::io::Error::other("original FFprobe session has no process group"))?;
+    let result = unsafe { libc::kill(-group, libc::SIGKILL) };
+    if result == 0 {
+        Ok(ProbeSessionSignal::KillDelivered)
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            // The original group was already empty. The pidfd and wait below
+            // still anchor the leader until this observation is complete.
+            Ok(ProbeSessionSignal::AlreadyAbsent)
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn observe_probe_group_absent(
+    process_group: Option<libc::pid_t>,
+    signal: ProbeSessionSignal,
+    deadline: std::time::Instant,
+) -> std::io::Result<ProbeSessionClosed> {
+    let group = process_group
+        .ok_or_else(|| std::io::Error::other("original FFprobe session has no process group"))?;
+    if matches!(signal, ProbeSessionSignal::AlreadyAbsent) {
+        return Ok(ProbeSessionClosed::OriginalGroupAlreadyAbsent);
+    }
+    loop {
+        if unsafe { libc::kill(-group, 0) } == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(ProbeSessionClosed::KilledOriginalGroupAndObservedAbsent);
+            }
+            if error.raw_os_error() != Some(libc::EPERM) {
+                return Err(error);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "original FFprobe process group has not exited",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
 struct ProbeExitAnchor {
-    pidfd: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+    pidfd: tokio::io::unix::AsyncFd<ProbeSharedPidfd>,
+    owner: Arc<std::os::fd::OwnedFd>,
+    bound_root_close_operation_id: uuid::Uuid,
     #[cfg(any(test, feature = "fixtures"))]
     inject_read_failure: bool,
+}
+
+#[cfg(target_os = "linux")]
+struct ProbeSharedPidfd(Arc<std::os::fd::OwnedFd>);
+#[cfg(target_os = "linux")]
+impl std::os::fd::AsRawFd for ProbeSharedPidfd {
+    fn as_raw_fd(&self) -> i32 {
+        std::os::fd::AsRawFd::as_raw_fd(&*self.0)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn checked_close_probe_fd(fd: std::os::fd::OwnedFd) -> std::io::Result<()> {
+    use std::os::fd::IntoRawFd;
+    let raw = fd.into_raw_fd();
+    if unsafe { libc::close(raw) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2946,6 +3984,8 @@ impl ProbeExitAnchor {
     fn open(
         process_group: Option<libc::pid_t>,
         launch_mode: ProbeLaunchMode,
+        bound_root_close_operation_id: uuid::Uuid,
+        command_slot: Option<&Arc<std::sync::Mutex<ProbeOriginalOwners>>>,
     ) -> std::io::Result<Self> {
         use std::os::fd::FromRawFd;
 
@@ -2968,9 +4008,24 @@ impl ProbeExitAnchor {
                 "FFprobe pidfd exceeded the descriptor range",
             )
         })?;
-        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) };
+        let owner = Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) });
+        let pidfd = match tokio::io::unix::AsyncFd::new(ProbeSharedPidfd(Arc::clone(&owner))) {
+            Ok(pidfd) => pidfd,
+            Err(error) => {
+                if let Some(slot) = command_slot {
+                    let mut held = match slot.lock() {
+                        Ok(held) => held,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    held.unregistered_pidfd = Some((owner, bound_root_close_operation_id));
+                }
+                return Err(error);
+            }
+        };
         Ok(Self {
-            pidfd: tokio::io::unix::AsyncFd::new(owned)?,
+            pidfd,
+            owner,
+            bound_root_close_operation_id,
             #[cfg(any(test, feature = "fixtures"))]
             inject_read_failure: launch_mode.inject_pidfd_read_failure(),
         })
@@ -2986,6 +4041,48 @@ impl ProbeExitAnchor {
         }
         let _readiness = self.pidfd.readable().await?;
         Ok(())
+    }
+
+    fn checked_close(self) -> std::io::Result<ProbePidfdClosed> {
+        drop(self.pidfd.into_inner());
+        let owner = Arc::try_unwrap(self.owner)
+            .map_err(|_| std::io::Error::other("original FFprobe pidfd still has an alias"))?;
+        checked_close_probe_fd(owner)?;
+        Ok(ProbePidfdClosed {
+            bound_root_close_operation_id: self.bound_root_close_operation_id,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct BoundProbePipe<R> {
+    reader: R,
+    bound_root_close_operation_id: uuid::Uuid,
+    output_limit: usize,
+}
+#[cfg(target_os = "linux")]
+trait OriginalProbePipe: tokio::io::AsyncRead + Unpin {
+    fn into_original_owned_fd(self) -> std::io::Result<std::os::fd::OwnedFd>;
+}
+#[cfg(target_os = "linux")]
+impl OriginalProbePipe for tokio::process::ChildStdout {
+    fn into_original_owned_fd(self) -> std::io::Result<std::os::fd::OwnedFd> {
+        self.into_owned_fd()
+    }
+}
+#[cfg(target_os = "linux")]
+impl OriginalProbePipe for tokio::process::ChildStderr {
+    fn into_original_owned_fd(self) -> std::io::Result<std::os::fd::OwnedFd> {
+        self.into_owned_fd()
+    }
+}
+#[cfg(target_os = "linux")]
+impl<R: OriginalProbePipe> BoundProbePipe<R> {
+    fn checked_close(self) -> std::io::Result<ProbePipeClosed> {
+        checked_close_probe_fd(self.reader.into_original_owned_fd()?)?;
+        Ok(ProbePipeClosed {
+            bound_root_close_operation_id: self.bound_root_close_operation_id,
+        })
     }
 }
 
@@ -3031,6 +4128,11 @@ impl ProbeSessionGuard {
 
     fn kill_once(&self) {
         self.terminator.kill_once();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn kill_once_checked(&self) -> std::io::Result<ProbeSessionSignal> {
+        kill_probe_session_checked(self.terminator.take_process_group())
     }
 }
 
@@ -3542,35 +4644,49 @@ fn system_time_parts(value: std::time::SystemTime) -> (i64, i64) {
 }
 
 #[cfg(unix)]
-async fn probe_version(
+async fn probe_version_recording(
     executable: &Arc<ExecutableSnapshot>,
     configured_path: &Path,
     launch_mode: ProbeLaunchMode,
+    record: Option<(
+        Arc<std::sync::Mutex<Option<FixedProbeRootClosed>>>,
+        uuid::Uuid,
+    )>,
+    admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
 ) -> Result<Vec<u8>, DecodeFactError> {
     #[cfg(not(any(test, feature = "fixtures")))]
     let _ = configured_path;
-    probe_version_with_deadline(
+    probe_version_with_deadline_recording(
         executable,
         configured_path,
         launch_mode,
         launch_mode.version_deadline(),
+        record,
+        admitted_custody,
     )
     .await
 }
 
 #[cfg(unix)]
-async fn probe_version_with_deadline(
+async fn probe_version_with_deadline_recording(
     executable: &Arc<ExecutableSnapshot>,
     configured_path: &Path,
     launch_mode: ProbeLaunchMode,
     deadline: Duration,
+    record: Option<(
+        Arc<std::sync::Mutex<Option<FixedProbeRootClosed>>>,
+        uuid::Uuid,
+    )>,
+    admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
 ) -> Result<Vec<u8>, DecodeFactError> {
-    probe_version_with_deadline_on(
+    probe_version_with_deadline_on_recording(
         executable,
         configured_path,
         launch_mode,
         deadline,
         version_gate(),
+        record,
+        admitted_custody,
     )
     .await
 }
@@ -3582,6 +4698,31 @@ async fn probe_version_with_deadline_on(
     launch_mode: ProbeLaunchMode,
     deadline: Duration,
     gate: Arc<tokio::sync::Semaphore>,
+) -> Result<Vec<u8>, DecodeFactError> {
+    probe_version_with_deadline_on_recording(
+        executable,
+        configured_path,
+        launch_mode,
+        deadline,
+        gate,
+        None,
+        None,
+    )
+    .await
+}
+
+#[cfg(unix)]
+async fn probe_version_with_deadline_on_recording(
+    executable: &Arc<ExecutableSnapshot>,
+    configured_path: &Path,
+    launch_mode: ProbeLaunchMode,
+    deadline: Duration,
+    gate: Arc<tokio::sync::Semaphore>,
+    record: Option<(
+        Arc<std::sync::Mutex<Option<FixedProbeRootClosed>>>,
+        uuid::Uuid,
+    )>,
+    admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
 ) -> Result<Vec<u8>, DecodeFactError> {
     let started = std::time::Instant::now();
     let launch_deadline = started + deadline;
@@ -3638,12 +4779,48 @@ async fn probe_version_with_deadline_on(
             &arguments,
             DECODE_FACT_VERSION_PROBE.class,
         )?;
-        let (mut child, _child_job, mut supervisor) =
-            spawn_configured_probe(command, supervisor, DECODE_FACT_VERSION_PROBE).await?;
+        #[cfg(target_os = "linux")]
+        let command_slot = register_probe_command_slot(admitted_custody.as_ref())?;
+        let (mut child, child_job, mut supervisor) = spawn_configured_probe(
+            command,
+            supervisor,
+            DECODE_FACT_VERSION_PROBE,
+            #[cfg(target_os = "linux")]
+            command_slot.as_ref().map(Arc::clone),
+        )
+        .await?;
+        #[cfg(target_os = "linux")]
+        let mut child = CapturedProbeOwner::new(
+            child,
+            command_slot.as_ref().map(Arc::clone),
+            |owners, child| owners.child = Some(child),
+        );
+        #[cfg(target_os = "linux")]
+        let mut child_job = CapturedProbeOwner::new(
+            child_job,
+            command_slot.as_ref().map(Arc::clone),
+            |owners, job| owners.job = Some(job),
+        );
+        #[cfg(target_os = "linux")]
+        let mut supervisor = CapturedProbeOwner::new(
+            supervisor,
+            command_slot.as_ref().map(Arc::clone),
+            |owners, supervisor| owners.supervisor = Some(supervisor),
+        );
+        #[cfg(target_os = "linux")]
+        let original_identity = spawned_probe_identity(&child);
         let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
         let session = ProbeSessionGuard::new(process_group);
         #[cfg(target_os = "linux")]
-        let exit_anchor = match ProbeExitAnchor::open(process_group, launch_mode) {
+        let exit_anchor = match ProbeExitAnchor::open(
+            process_group,
+            launch_mode,
+            record
+                .as_ref()
+                .map(|(_, id)| *id)
+                .unwrap_or(uuid::Uuid::nil()),
+            command_slot.as_ref(),
+        ) {
             Ok(anchor) => anchor,
             Err(error) => {
                 terminate_probe_session(&mut child, &session, &mut supervisor, launch_mode).await;
@@ -3652,6 +4829,12 @@ async fn probe_version_with_deadline_on(
                 )));
             }
         };
+        #[cfg(target_os = "linux")]
+        let mut exit_anchor = CapturedProbeOwner::new(
+            exit_anchor,
+            command_slot.as_ref().map(Arc::clone),
+            |owners, anchor| owners.anchor = Some(anchor),
+        );
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
@@ -3659,6 +4842,19 @@ async fn probe_version_with_deadline_on(
                 return Err(DecodeFactError::MissingPipe);
             }
         };
+        #[cfg(target_os = "linux")]
+        let mut stdout_owner = CapturedProbeOwner::new(
+            BoundProbePipe {
+                reader: stdout,
+                bound_root_close_operation_id: record
+                    .as_ref()
+                    .map(|(_, id)| *id)
+                    .unwrap_or(uuid::Uuid::nil()),
+                output_limit: MAX_VERSION_BYTES,
+            },
+            command_slot.as_ref().map(Arc::clone),
+            |owners, pipe| owners.stdout = Some(pipe),
+        );
         let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             terminate_probe_session(&mut child, &session, &mut supervisor, launch_mode).await;
@@ -3666,24 +4862,29 @@ async fn probe_version_with_deadline_on(
         }
         let outcome = tokio::time::timeout(remaining, async {
             #[cfg(target_os = "linux")]
-            let (stdout, exited) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), async {
-                let exited = exit_anchor.wait_until_exit().await;
-                // Kill descendants as soon as the leader exits so inherited
-                // pipe writers cannot hold the drain open.
-                session.kill_once();
-                exited
-            });
+            let (stdout, exited) = tokio::join!(
+                read_bounded(&mut stdout_owner.reader, MAX_VERSION_BYTES),
+                async {
+                    let exited = exit_anchor.wait_until_exit().await;
+                    // Kill descendants as soon as the leader exits so inherited
+                    // pipe writers cannot hold the drain open.
+                    let killed = session.kill_once_checked();
+                    exited.and(killed)
+                }
+            );
             #[cfg(target_os = "linux")]
-            let (status, exit_error) = {
+            let (status, exit_error, session_closed) = {
                 // pidfd readiness proves exit without reaping. The zombie anchors
                 // the PID/PGID until descendants are killed and only then is the
                 // leader reaped.
-                let exit_error = exited
-                    .err()
-                    .map(|error| DecodeFactError::Read(error.to_string()));
+                let (session_closed, exit_error) = match exited {
+                    Ok(closed) => (Some(closed), None),
+                    Err(error) => (None, Some(DecodeFactError::Read(error.to_string()))),
+                };
                 (
                     wait_for_probe_reap(&mut child, launch_mode).await,
                     exit_error,
+                    session_closed,
                 )
             };
             #[cfg(not(target_os = "linux"))]
@@ -3693,10 +4894,12 @@ async fn probe_version_with_deadline_on(
             session.kill_once();
             #[cfg(not(target_os = "linux"))]
             let exit_error: Option<DecodeFactError> = None;
-            (stdout, status, exit_error)
+            #[cfg(not(target_os = "linux"))]
+            let session_closed: Option<ProbeSessionClosed> = None;
+            (stdout, status, exit_error, session_closed)
         })
         .await;
-        let (stdout, status, exit_error) = match outcome {
+        let (stdout, status, exit_error, session_closed) = match outcome {
             Ok(outcome) => outcome,
             Err(_) => {
                 terminate_probe_session(&mut child, &session, &mut supervisor, launch_mode).await;
@@ -3707,6 +4910,15 @@ async fn probe_version_with_deadline_on(
         if let Some(error) = exit_error {
             return Err(error);
         }
+        #[cfg(target_os = "linux")]
+        let session_closed = match session_closed {
+            Some(signal) => Some(
+                observe_probe_group_absent(process_group, signal, launch_deadline)
+                    .await
+                    .map_err(|error| DecodeFactError::Read(error.to_string()))?,
+            ),
+            None => None,
+        };
         supervisor_result?;
         let stdout = stdout?;
         let status = match status {
@@ -3720,6 +4932,47 @@ async fn probe_version_with_deadline_on(
                 "bounded version probe failed".to_owned(),
             ));
         }
+        #[cfg(target_os = "linux")]
+        let (stdout_closed, pidfd_closed) = (
+            stdout_owner.take().checked_close().map_err(|error| {
+                DecodeFactError::Read(format!("closing original version stdout: {error}"))
+            })?,
+            exit_anchor.take().checked_close().map_err(|error| {
+                DecodeFactError::Read(format!("closing original version pidfd: {error}"))
+            })?,
+        );
+        #[cfg(not(target_os = "linux"))]
+        drop(child_job);
+        #[cfg(target_os = "linux")]
+        if let Some((record, close_operation_id)) = record {
+            let identity = original_identity.ok_or_else(|| {
+                DecodeFactError::ProbeIdentity(
+                    "original version process identity could not be sampled".to_owned(),
+                )
+            })?;
+            let session_closed = session_closed.ok_or(DecodeFactError::CacheInvariant)?;
+            *record.lock().map_err(|_| DecodeFactError::CacheInvariant)? =
+                Some(FixedProbeRootClosed {
+                    identity,
+                    inherited_source: false,
+                    close_operation_id,
+                    exit_status: status,
+                    session_closed,
+                    drained_stdout_bytes: stdout.0.len(),
+                    drained_stderr_bytes: 0,
+                    stdout_closed,
+                    stderr_closed: None,
+                    pidfd_closed,
+                });
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (record, session_closed);
+        #[cfg(target_os = "linux")]
+        {
+            child.release();
+            child_job.release();
+            supervisor.release();
+        }
         Ok(stdout.0)
     });
     tokio::select! {
@@ -3731,6 +4984,20 @@ async fn probe_version_with_deadline_on(
             Err(DecodeFactError::Deadline)
         }
     }
+}
+
+#[cfg(windows)]
+async fn probe_version_recording(
+    executable: &Arc<ExecutableSnapshot>,
+    configured_path: &Path,
+    launch_mode: ProbeLaunchMode,
+    _record: Option<(
+        Arc<std::sync::Mutex<Option<FixedProbeRootClosed>>>,
+        uuid::Uuid,
+    )>,
+    _admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
+) -> Result<Vec<u8>, DecodeFactError> {
+    probe_version(executable, configured_path, launch_mode).await
 }
 
 #[cfg(windows)]
@@ -3804,6 +5071,7 @@ struct CollectedProbe {
     facts: Result<DecodeFacts, DecodeFactError>,
     document: Option<String>,
     key: Option<CacheKey>,
+    original_root: Option<FixedProbeRootClosed>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3853,6 +5121,7 @@ impl ProbeProjection {
             facts,
             document,
             key: None,
+            original_root: None,
         })
     }
 }
@@ -3903,7 +5172,16 @@ impl DecodeFactCache {
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<DecodeFacts, DecodeFactError> {
         let result = self
-            .get_or_probe_inner(probe, source, catalog, selected_stream, budget, cancelled)
+            .get_or_probe_inner(
+                probe,
+                source,
+                catalog,
+                selected_stream,
+                budget,
+                cancelled,
+                false,
+                None,
+            )
             .await;
         self.metrics.record_lookup(match &result {
             Ok((_, result)) => *result,
@@ -3926,7 +5204,16 @@ impl DecodeFactCache {
     ) -> Result<FreshSourceProbe, DecodeFactError> {
         source.projection = ProbeProjection::SourceDocument;
         let result = self
-            .get_or_probe_inner(probe, source, catalog, selected_stream, budget, cancelled)
+            .get_or_probe_inner(
+                probe,
+                source,
+                catalog,
+                selected_stream,
+                budget,
+                cancelled,
+                false,
+                None,
+            )
             .await;
         self.metrics.record_lookup(match &result {
             Ok((_, outcome)) => *outcome,
@@ -3961,6 +5248,106 @@ impl DecodeFactCache {
             .await
     }
 
+    /// The admitted P collector is itself the original task retained by the
+    /// resource runtime. It collects inline rather than registering a second
+    /// detached cache task, so joining that original task also joins every
+    /// probe child and source-offset owner it acquired. Call only from P's
+    /// retained task after its durable acquisition arm.
+    pub(crate) async fn admitted_source_document_and_refine(
+        &self,
+        probe: &DecodeProbeIdentity,
+        source: DecodeFactSource,
+        catalog: &DecodeCatalogMetadata,
+        selected_stream: ProbeStreamSelection,
+        budget: Duration,
+        document_close_operation_id: uuid::Uuid,
+    ) -> Result<
+        (
+            Result<(String, DecodeFacts), DecodeFactError>,
+            FixedProbeRootClosed,
+        ),
+        DecodeFactError,
+    > {
+        let result = async {
+            let mut document_source = source.clone();
+            document_source.projection = ProbeProjection::SourceDocument;
+            let (collected, _) = self
+                .get_or_probe_inner(
+                    probe,
+                    document_source,
+                    Some(catalog),
+                    selected_stream,
+                    budget,
+                    None,
+                    true,
+                    Some(document_close_operation_id),
+                )
+                .await?;
+            let document_root = collected
+                .original_root
+                .ok_or(DecodeFactError::CacheInvariant)?;
+            let Some(document) = collected.document else {
+                return Ok((Err(DecodeFactError::CacheInvariant), document_root));
+            };
+            let Some(key) = collected.key else {
+                return Ok((Err(DecodeFactError::CacheInvariant), document_root));
+            };
+            let facts = match collected.facts {
+                Ok(facts) => facts,
+                Err(error) => return Ok((Err(error), document_root)),
+            };
+            // The fixed P plan names exactly one document root. Additional
+            // HEVC/interlace refinement roots have no prearmed owner here.
+            if needs_hevc_scan_refinement(&facts)
+                || matches!(facts.scan_type(), ScanType::Interlaced(_))
+            {
+                return Ok((
+                    Err(DecodeFactError::InvalidFacts(
+                        "selected source requires additional native probe roots".to_owned(),
+                    )),
+                    document_root,
+                ));
+            }
+            let mut decoder_source = source;
+            decoder_source.seed = Some(FreshFactSeed {
+                facts: Ok(facts),
+                key,
+            });
+            let refined = self
+                .get_or_probe_inner(
+                    probe,
+                    decoder_source,
+                    Some(catalog),
+                    selected_stream,
+                    budget,
+                    None,
+                    true,
+                    None,
+                )
+                .await;
+            let output = match refined {
+                Ok((refined, _)) => refined.facts.map(|facts| (document, facts)),
+                Err(error) => Err(error),
+            };
+            Ok((output, document_root))
+        }
+        .await;
+        // A source observation or identity hash may have timed out after its
+        // blocking worker entered. Their gates stay inside those workers.
+        // The original P task cannot finish until both lanes drain.
+        let identity = identity_gate()
+            .acquire_owned()
+            .await
+            .map_err(|_| DecodeFactError::CacheInvariant)?;
+        let source = Arc::clone(&self.probe_gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| DecodeFactError::CacheInvariant)?;
+        drop(source);
+        drop(identity);
+        result
+    }
+
     async fn get_or_probe_inner(
         &self,
         probe: &DecodeProbeIdentity,
@@ -3969,6 +5356,8 @@ impl DecodeFactCache {
         selected_stream: ProbeStreamSelection,
         budget: Duration,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
+        admitted_original_collector: bool,
+        admitted_document_close_operation_id: Option<uuid::Uuid>,
     ) -> Result<(CollectedProbe, DecodeFactLookupResult), DecodeFactError> {
         let started = std::time::Instant::now();
         let remaining = budget
@@ -4066,6 +5455,7 @@ impl DecodeFactCache {
                     facts: Ok(facts),
                     document: None,
                     key: Some(key.clone()),
+                    original_root: None,
                 },
                 DecodeFactLookupResult::Hit,
             ));
@@ -4101,7 +5491,7 @@ impl DecodeFactCache {
         // The task owns both the source descriptor and the singleflight
         // permit. Dropping or aborting this waiter cannot abandon a live child
         // or restore the shared source offset before kill/reap completes.
-        let collection = tokio::spawn(async move {
+        let collector = async move {
             let phase_started = std::time::Instant::now();
             let result = collect(
                 &owned_probe,
@@ -4117,6 +5507,8 @@ impl DecodeFactCache {
                 selected_stream,
                 remaining,
                 owned_cancelled.as_ref(),
+                admitted_original_collector,
+                admitted_document_close_operation_id,
             )
             .await;
             owned_metrics.record_phase(
@@ -4125,8 +5517,12 @@ impl DecodeFactCache {
                 phase_started.elapsed(),
             );
             (result, gate, source)
-        });
-        let collection_result = await_owned_collection(collection, remaining, cancelled).await;
+        };
+        let collection_result = if admitted_original_collector {
+            Ok(collector.await)
+        } else {
+            await_owned_collection(tokio::spawn(collector), remaining, cancelled).await
+        };
         let (collected, gate, source) = collection_result?;
         let mut collected = collected?;
         let remaining = budget
@@ -4688,20 +6084,28 @@ async fn collect_refinement_output(
         &arguments,
         work.class,
     )?;
-    let (mut child, _child_job, mut supervisor) =
-        spawn_configured_probe(command, supervisor, work).await?;
+    let (mut child, _child_job, mut supervisor) = spawn_configured_probe(
+        command,
+        supervisor,
+        work,
+        #[cfg(target_os = "linux")]
+        None,
+    )
+    .await?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
     #[cfg(target_os = "linux")]
-    let exit_anchor = match ProbeExitAnchor::open(process_group, probe.launch_mode) {
-        Ok(anchor) => anchor,
-        Err(error) => {
-            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
-            return Err(DecodeFactError::Spawn(format!(
-                "opening refinement FFprobe exit anchor: {error}"
-            )));
-        }
-    };
+    let exit_anchor =
+        match ProbeExitAnchor::open(process_group, probe.launch_mode, uuid::Uuid::nil(), None) {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode)
+                    .await;
+                return Err(DecodeFactError::Spawn(format!(
+                    "opening refinement FFprobe exit anchor: {error}"
+                )));
+            }
+        };
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
@@ -4768,6 +6172,7 @@ async fn collect_refinement_output(
     if let Some(error) = exit_error {
         return Err(error);
     }
+    #[cfg(target_os = "linux")]
     supervisor_result?;
     let stdout = stdout?;
     let stderr = stderr?;
@@ -4846,7 +6251,11 @@ async fn collect(
     selected_stream: ProbeStreamSelection,
     budget: Duration,
     cancelled: Option<&tokio_util::sync::CancellationToken>,
+    admitted_original_collector: bool,
+    admitted_document_close_operation_id: Option<uuid::Uuid>,
 ) -> Result<CollectedProbe, DecodeFactError> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = admitted_document_close_operation_id;
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
@@ -4891,6 +6300,16 @@ async fn collect(
         offset: source_offset,
     };
     if let Some(seed) = seed {
+        if admitted_original_collector
+            && seed.facts.as_ref().is_ok_and(|facts| {
+                needs_hevc_scan_refinement(facts)
+                    || matches!(facts.scan_type(), ScanType::Interlaced(_))
+            })
+        {
+            return Err(DecodeFactError::InvalidFacts(
+                "selected source requires additional native probe roots".to_owned(),
+            ));
+        }
         let facts = refine_scan_type(
             probe,
             source_fd,
@@ -4977,12 +6396,45 @@ async fn collect(
         &arguments,
         work.class,
     )?;
-    let (mut child, _child_job, mut supervisor) =
-        spawn_configured_probe(command, supervisor, work).await?;
+    #[cfg(target_os = "linux")]
+    let command_slot = register_probe_command_slot(probe.admitted_custody.as_ref())?;
+    let (mut child, child_job, mut supervisor) = spawn_configured_probe(
+        command,
+        supervisor,
+        work,
+        #[cfg(target_os = "linux")]
+        command_slot.as_ref().map(Arc::clone),
+    )
+    .await?;
+    #[cfg(target_os = "linux")]
+    let mut child = CapturedProbeOwner::new(
+        child,
+        command_slot.as_ref().map(Arc::clone),
+        |owners, child| owners.child = Some(child),
+    );
+    #[cfg(target_os = "linux")]
+    let mut child_job = CapturedProbeOwner::new(
+        child_job,
+        command_slot.as_ref().map(Arc::clone),
+        |owners, job| owners.job = Some(job),
+    );
+    #[cfg(target_os = "linux")]
+    let mut supervisor = CapturedProbeOwner::new(
+        supervisor,
+        command_slot.as_ref().map(Arc::clone),
+        |owners, supervisor| owners.supervisor = Some(supervisor),
+    );
+    #[cfg(target_os = "linux")]
+    let original_identity = spawned_probe_identity(&child);
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
     #[cfg(target_os = "linux")]
-    let exit_anchor = match ProbeExitAnchor::open(process_group, probe.launch_mode) {
+    let exit_anchor = match ProbeExitAnchor::open(
+        process_group,
+        probe.launch_mode,
+        admitted_document_close_operation_id.unwrap_or(uuid::Uuid::nil()),
+        command_slot.as_ref(),
+    ) {
         Ok(anchor) => anchor,
         Err(error) => {
             terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
@@ -4991,6 +6443,12 @@ async fn collect(
             )));
         }
     };
+    #[cfg(target_os = "linux")]
+    let mut exit_anchor = CapturedProbeOwner::new(
+        exit_anchor,
+        command_slot.as_ref().map(Arc::clone),
+        |owners, anchor| owners.anchor = Some(anchor),
+    );
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
@@ -5005,6 +6463,28 @@ async fn collect(
             return Err(DecodeFactError::MissingPipe);
         }
     };
+    #[cfg(target_os = "linux")]
+    let mut stdout_owner = CapturedProbeOwner::new(
+        BoundProbePipe {
+            reader: stdout,
+            bound_root_close_operation_id: admitted_document_close_operation_id
+                .unwrap_or(uuid::Uuid::nil()),
+            output_limit: projection.output_limit(),
+        },
+        command_slot.as_ref().map(Arc::clone),
+        |owners, pipe| owners.stdout = Some(pipe),
+    );
+    #[cfg(target_os = "linux")]
+    let mut stderr_owner = CapturedProbeOwner::new(
+        BoundProbePipe {
+            reader: stderr,
+            bound_root_close_operation_id: admitted_document_close_operation_id
+                .unwrap_or(uuid::Uuid::nil()),
+            output_limit: MAX_PROBE_STDERR_BYTES,
+        },
+        command_slot.as_ref().map(Arc::clone),
+        |owners, pipe| owners.stderr = Some(pipe),
+    );
     let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
     if remaining.is_zero() {
         terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
@@ -5024,22 +6504,24 @@ async fn collect(
         outcome = tokio::time::timeout(remaining, async {
             #[cfg(target_os = "linux")]
             let (stdout, stderr, exited) = tokio::join!(
-                read_bounded(stdout, projection.output_limit()),
-                read_bounded(stderr, MAX_PROBE_STDERR_BYTES),
+                read_bounded(&mut stdout_owner.reader, projection.output_limit()),
+                read_bounded(&mut stderr_owner.reader, MAX_PROBE_STDERR_BYTES),
                 async {
                     let exited = exit_anchor.wait_until_exit().await;
-                    session.kill_once();
-                    exited
+                    let killed = session.kill_once_checked();
+                    exited.and(killed)
                 },
             );
             #[cfg(target_os = "linux")]
-            let (status, exit_error) = {
-                let exit_error = exited
-                    .err()
-                    .map(|error| DecodeFactError::Read(error.to_string()));
+            let (status, exit_error, session_closed) = {
+                let (session_closed, exit_error) = match exited {
+                    Ok(closed) => (Some(closed), None),
+                    Err(error) => (None, Some(DecodeFactError::Read(error.to_string()))),
+                };
                 (
                     wait_for_probe_reap(&mut child, probe.launch_mode).await,
                     exit_error,
+                    session_closed,
                 )
             };
             #[cfg(not(target_os = "linux"))]
@@ -5052,21 +6534,36 @@ async fn collect(
             session.kill_once();
             #[cfg(not(target_os = "linux"))]
             let exit_error: Option<DecodeFactError> = None;
-            Ok::<_, DecodeFactError>((stdout, stderr, status, exit_error))
+            #[cfg(not(target_os = "linux"))]
+            let session_closed: Option<ProbeSessionClosed> = None;
+            Ok::<_, DecodeFactError>((stdout, stderr, status, exit_error, session_closed))
         }) => outcome,
     };
-    let (stdout, stderr, status, exit_error) = match outcome {
-        Ok(Ok((stdout, stderr, status, exit_error))) => (stdout, stderr, status, exit_error),
+    let (stdout, stderr, status, exit_error, session_closed) = match outcome {
+        Ok(Ok((stdout, stderr, status, exit_error, session_closed))) => {
+            (stdout, stderr, status, exit_error, session_closed)
+        }
         Ok(Err(error)) => return Err(error),
         Err(_) => {
             terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
             return Err(DecodeFactError::Deadline);
         }
     };
+    #[cfg(not(target_os = "linux"))]
+    let _ = session_closed;
     let supervisor_result = supervisor.finish();
     if let Some(error) = exit_error {
         return Err(error);
     }
+    #[cfg(target_os = "linux")]
+    let session_closed = match session_closed {
+        Some(signal) => Some(
+            observe_probe_group_absent(process_group, signal, launch_deadline)
+                .await
+                .map_err(|error| DecodeFactError::Read(error.to_string()))?,
+        ),
+        None => None,
+    };
     supervisor_result?;
     let stdout = stdout?;
     let stderr = stderr?;
@@ -5090,11 +6587,67 @@ async fn collect(
             .collect();
         return Err(DecodeFactError::Failed(status.code(), reason));
     }
+    #[cfg(target_os = "linux")]
+    let (stdout_closed, stderr_closed, pidfd_closed) = (
+        stdout_owner.take().checked_close().map_err(|error| {
+            DecodeFactError::Read(format!("closing original document stdout: {error}"))
+        })?,
+        stderr_owner.take().checked_close().map_err(|error| {
+            DecodeFactError::Read(format!("closing original document stderr: {error}"))
+        })?,
+        exit_anchor.take().checked_close().map_err(|error| {
+            DecodeFactError::Read(format!("closing original document pidfd: {error}"))
+        })?,
+    );
+    #[cfg(not(target_os = "linux"))]
+    drop(child_job);
     let facts = parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream);
     if projection == ProbeProjection::SourceDocument {
         drop(restore_offset);
         drop(offset_permit);
-        return projection.finish(facts, &stdout.0, &probe.reporter);
+        let collected = match projection.finish(facts, &stdout.0, &probe.reporter) {
+            Ok(collected) => collected,
+            // Parsing the bounded document is a logical refusal after the
+            // original child has exited and its pipes and session have
+            // closed. Preserve that native close separately from the error.
+            Err(error) if admitted_document_close_operation_id.is_some() => CollectedProbe {
+                facts: Err(error),
+                document: None,
+                key: None,
+                original_root: None,
+            },
+            Err(error) => return Err(error),
+        };
+        #[cfg(target_os = "linux")]
+        let mut collected = collected;
+        #[cfg(target_os = "linux")]
+        if let Some(close_operation_id) = admitted_document_close_operation_id {
+            let identity = original_identity.ok_or_else(|| {
+                DecodeFactError::ProbeIdentity(
+                    "original document process identity could not be sampled".to_owned(),
+                )
+            })?;
+            let session_closed = session_closed.ok_or(DecodeFactError::CacheInvariant)?;
+            collected.original_root = Some(FixedProbeRootClosed {
+                identity,
+                inherited_source: true,
+                close_operation_id,
+                exit_status: status,
+                session_closed,
+                drained_stdout_bytes: stdout.0.len(),
+                drained_stderr_bytes: stderr.0.len(),
+                stdout_closed,
+                stderr_closed: Some(stderr_closed),
+                pidfd_closed,
+            });
+        }
+        #[cfg(target_os = "linux")]
+        {
+            child.release();
+            child_job.release();
+            supervisor.release();
+        }
+        return Ok(collected);
     }
     let mut facts = facts?;
     if projection == ProbeProjection::Decoder {
@@ -5217,6 +6770,8 @@ async fn collect(
     selected_stream: ProbeStreamSelection,
     budget: Duration,
     cancelled: Option<&tokio_util::sync::CancellationToken>,
+    _admitted_original_collector: bool,
+    _admitted_document_close_operation_id: Option<uuid::Uuid>,
 ) -> Result<CollectedProbe, DecodeFactError> {
     let DecodeFactCollectionSource {
         handle,

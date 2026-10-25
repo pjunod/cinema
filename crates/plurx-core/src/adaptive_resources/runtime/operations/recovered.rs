@@ -94,9 +94,15 @@ impl NodeResourceRuntime {
             bootstrap: BTreeMap::new(),
             sources: BTreeMap::new(),
             finite_vod: None,
+            #[cfg(target_os = "linux")]
+            copy_vod: None,
+            copy_admission_failed: false,
             finite_app: Some(
                 crate::adaptive_resources::runtime::finite_lifetime::FiniteAppState::new(),
             ),
+            #[cfg(target_os = "linux")]
+            planning_metadata: None,
+            planning_tasks: None,
             retirement: None,
             response_budget: Some(response_budget),
             armed: BTreeSet::from([member]),

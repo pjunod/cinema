@@ -13,7 +13,8 @@ impl ResourceLedger {
     /// resource dimension. The selected family must own exactly one active
     /// unknown video producer with a process reservation; that selected row
     /// is excluded because its own recipe and demand have their own key fields.
-    /// Every other owner must be process-free retained S. No other active
+    /// Every other owner must be process-free retained S or an admitted
+    /// heap-only planning M role. Its live memory remains in the mix. No other active
     /// workload recipe is silently collapsed into resource totals.
     /// Random reservation IDs are omitted so equivalent resident mixtures
     /// can still have a useful prior after restart.
@@ -47,7 +48,8 @@ impl ResourceLedger {
                     .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
             } else if entry.memory_claim.is_active_producer()
                 || entry.resources.processes != 0
-                || entry.state != ReservationState::Reaping
+                || (entry.state != ReservationState::Reaping
+                    && entry.memory_claim != MemoryClaim::PlanningMetadata)
             {
                 return Err(AdmissionRefusal::InsufficientEvidence);
             }
@@ -68,6 +70,7 @@ impl ResourceLedger {
                     active_producer: false,
                 } => 2,
                 MemoryClaim::UnknownProducerPeak => 3,
+                MemoryClaim::PlanningMetadata => 4,
             };
             let phase = match entry.state {
                 ReservationState::Reserved => 1,

@@ -76,6 +76,36 @@ pub(super) fn prepare(
     for (new, handle) in batch.obligations.iter().zip(handles) {
         v2::validate_manifest(&new.manifest)?;
         validate_direct_read_domain_link(tx, batch, handles, new, owner)?;
+        let fixed_planning_metadata =
+            matches!(
+                new.memory_claim,
+                crate::adaptive_resources::MemoryClaim::PlanningMetadata
+            ) && batch.obligations.len() == 2
+                && matches!(new.manifest.members.as_slice(),
+                [v2::MemberPlan::FixedProbeMetadataV1 { metadata, .. }]
+                    if new.resources.peak_memory_bytes >= metadata.retained_memory_bytes)
+                && new.resources.cpu_ns_per_second == 0
+                && new.resources.processes == 0
+                && new.resources.handles == 0
+                && new.resources.scratch_bytes == 0
+                && new.resources.hardware_slots == 0
+                && new.resources.tuner_slots == 0
+                && batch.obligations.iter().any(|other| {
+                    other.memory_claim
+                        == crate::adaptive_resources::MemoryClaim::UnknownProducerPeak
+                        && other.manifest.members.iter().any(|member| {
+                            matches!(
+                                member,
+                                v2::MemberPlan::FixedProbeTaskV1 { .. }
+                                    | v2::MemberPlan::FixedProbeDiscoverTaskV1 { .. }
+                            )
+                        })
+                        && (other.manifest.members.iter().any(|member| {
+                            matches!(member, v2::MemberPlan::FixedProbeTaskV1 { .. })
+                        }) || other.manifest.members.iter().any(|member| {
+                            matches!(member, v2::MemberPlan::FixedPlanningEngineTaskV1 { .. })
+                        }))
+                });
         if matches!(
             new.memory_claim,
             crate::adaptive_resources::MemoryClaim::KnownBounded {
@@ -83,8 +113,12 @@ pub(super) fn prepare(
             }
         ) || (matches!(
             new.memory_claim,
-            crate::adaptive_resources::MemoryClaim::UnknownProducerPeak
-        ) && (new.resources.processes == 0 || new.resources.cpu_ns_per_second == 0))
+            crate::adaptive_resources::MemoryClaim::PlanningMetadata
+        ) && !fixed_planning_metadata)
+            || (matches!(
+                new.memory_claim,
+                crate::adaptive_resources::MemoryClaim::UnknownProducerPeak
+            ) && (new.resources.processes == 0 || new.resources.cpu_ns_per_second == 0))
             || handle.journal_id != journal
             || handle.owner_id != owner
             || handle.graph_id != new.manifest.graph_id.uuid()
@@ -356,13 +390,19 @@ pub(super) fn change(
                 // Each copy was already declared/armed before acquisition. A
                 // later actual copy result can only ADD exact slots to the SAME
                 // held file; it cannot replace identity or forget an old copy.
+                // The planning source (parent -> parent+child) grows under the
+                // same rules as an ordinary source; no other kind may grow.
                 let old: v2::Envelope = codec::decode(&json)?;
-                let (
-                    Some(v2::Observed::SourceV1 { source: before }),
-                    Some(v2::Observed::SourceV1 { source: after }),
-                ) = (&old.observed, &envelope.observed)
-                else {
-                    return Err(codec::invalid());
+                let (before, after) = match (&old.observed, &envelope.observed) {
+                    (
+                        Some(v2::Observed::SourceV1 { source: before }),
+                        Some(v2::Observed::SourceV1 { source: after }),
+                    )
+                    | (
+                        Some(v2::Observed::FixedProbeDiscoverSourceV1 { source: before }),
+                        Some(v2::Observed::FixedProbeDiscoverSourceV1 { source: after }),
+                    ) => (before, after),
+                    _ => return Err(codec::invalid()),
                 };
                 let mut same = after.clone();
                 same.copies = before.copies.clone();

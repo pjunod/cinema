@@ -133,6 +133,29 @@ pub struct SoftwareVodRequest {
 }
 
 impl SoftwareVodRequest {
+    /// Requested capacity of the request's present planning graph. This is a
+    /// heap projection, not native custody, admission, or a bound on future
+    /// parser/output allocations.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>()
+            .checked_add(self.rendition_id.capacity())?
+            .checked_add(self.recipe_source_binding.capacity())?
+            .checked_add(self.command.requested_heap_bytes()?)?
+            .checked_add(self.producer.requested_heap_bytes()?)?
+            .checked_add(
+                self.sources
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<FiniteSourceRequest>())?,
+            )?;
+        for source in &self.sources {
+            bytes = bytes
+                .checked_add(source.path.capacity())?
+                .checked_add(source.media_file_id.capacity())?
+                .checked_add(source.object_version.capacity())?;
+        }
+        Some(bytes)
+    }
+
     /// Add the caller's concrete rich worker/future slot before reservation.
     /// A later caller-supplied byte count never authorizes native work or
     /// weakens the original hard vector; actual allocation must take its one
@@ -423,6 +446,7 @@ pub enum FiniteFile {
     Segment(u32),
     IdentityMetadata,
     EncodedProcessMetadata,
+    CompleteArtifactManifest,
 }
 
 impl FiniteFile {
@@ -432,6 +456,7 @@ impl FiniteFile {
             Self::Segment(index) => OutputKey::Segment { index },
             Self::IdentityMetadata => OutputKey::IdentityMetadata,
             Self::EncodedProcessMetadata => OutputKey::EncodedProcessMetadata,
+            Self::CompleteArtifactManifest => OutputKey::CompleteArtifactManifest,
         }
     }
 }
@@ -454,7 +479,7 @@ fn software_owner_heap_bytes(
     Some(bytes)
 }
 
-fn finite_directory_path(
+pub(super) fn finite_directory_path(
     root: &str,
     rendition_id: &str,
 ) -> Result<(String, PathBuf), FiniteVodError> {
@@ -619,6 +644,39 @@ impl FiniteOutput {
     ) -> Result<PublicationTicket, FiniteVodError> {
         self.queue(OutputKey::EncodedProcessMetadata, bytes)
     }
+    /// Publish the bounded complete-artifact manifest into the same charged
+    /// scratch directory. Only a StaticArtifactV1 plan admits this key.
+    pub fn queue_complete_artifact_manifest(
+        &self,
+        bytes: &mut Vec<u8>,
+    ) -> Result<PublicationTicket, FiniteVodError> {
+        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 || bytes.capacity() > 4 * 1024 * 1024 {
+            return Err(invalid());
+        }
+        self.queue(OutputKey::CompleteArtifactManifest, bytes)
+    }
+    /// Commit and sync the exact bounded manifest through the original
+    /// publication cell while the finite producer and source parents remain
+    /// live. The caller must finish this before joining/freezing the graph.
+    pub async fn publish_complete_artifact_manifest(
+        &self,
+        bytes: &mut Vec<u8>,
+        deadline: Instant,
+    ) -> Result<(), FiniteVodError> {
+        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 || bytes.capacity() > 4 * 1024 * 1024 {
+            return Err(invalid());
+        }
+        self.validate_sources().await?;
+        let publication = self
+            .queue_file_wait(FiniteFile::CompleteArtifactManifest, bytes)
+            .await?;
+        self.finish(&publication, deadline).await?;
+        let sync = self
+            .queue_sync_one_wait(FiniteFile::CompleteArtifactManifest)
+            .await?;
+        self.finish(&sync, deadline).await?;
+        self.validate_sources().await
+    }
     fn queue(
         &self,
         output: OutputKey,
@@ -647,6 +705,7 @@ impl FiniteOutput {
                 FiniteFile::Segment(index) => OutputKey::Segment { index: *index },
                 FiniteFile::IdentityMetadata => OutputKey::IdentityMetadata,
                 FiniteFile::EncodedProcessMetadata => OutputKey::EncodedProcessMetadata,
+                FiniteFile::CompleteArtifactManifest => OutputKey::CompleteArtifactManifest,
             };
         }
         let id = self.runtime.queue_scratch_sync(
@@ -1034,6 +1093,62 @@ impl NodeResourceRuntime {
         request: SoftwareVodRequest,
         deadline: Instant,
     ) -> Result<SoftwareVodOwner, FiniteVodError> {
+        self.prepare_software_vod_with_naming(request, deadline, false, |_| Ok(()))
+            .map(|(owner, ())| owner)
+    }
+
+    /// Admit the same fixed software graph with one additional, counted
+    /// immutable manifest file in its retained S inventory. This is the
+    /// selected static-background profile; it never enters a second output
+    /// directory or grants a Store job physical-close authority.
+    pub fn prepare_static_software_artifact(
+        self: &Arc<Self>,
+        mut request: SoftwareVodRequest,
+        manifest_workspace_bytes: u64,
+        application_owner_bytes: usize,
+        deadline: Instant,
+    ) -> Result<(SoftwareVodOwner, FiniteApplicationLease), FiniteVodError> {
+        const MANIFEST_LIMIT: u64 = 4 * 1024 * 1024;
+        let named_files = request.segment_count.checked_add(4).ok_or_else(invalid)?;
+        if request.output.resident_file_objects < named_files
+            || request.output.one_file_logical_bytes < MANIFEST_LIMIT
+            || request.output.one_io_payload_bytes < MANIFEST_LIMIT
+            || manifest_workspace_bytes < MANIFEST_LIMIT
+        {
+            return Err(invalid());
+        }
+        // The daemon projects the historical 4 MiB serialized buffer plus
+        // its simultaneously live manifest/observation copies. Charge that
+        // complete requested workspace before any R/native entry. The native
+        // publication payload itself remains capped at MANIFEST_LIMIT.
+        request.output.retained_metadata_bytes = request
+            .output
+            .retained_metadata_bytes
+            .checked_add(manifest_workspace_bytes)
+            .ok_or_else(invalid)?;
+        let Metric::Known(resources) = &mut request.demand.resources else {
+            return Err(invalid());
+        };
+        resources.peak_memory_bytes = resources
+            .peak_memory_bytes
+            .checked_add(manifest_workspace_bytes)
+            .ok_or_else(invalid)?;
+        self.prepare_software_vod_with_naming(request, deadline, true, |state| {
+            state
+                .take_application_lease(application_owner_bytes)
+                .ok_or_else(invalid)
+        })
+    }
+
+    fn prepare_software_vod_with_naming<T>(
+        self: &Arc<Self>,
+        request: SoftwareVodRequest,
+        deadline: Instant,
+        static_artifact: bool,
+        application: impl FnOnce(
+            &Arc<super::finite_lifetime::FiniteAppState>,
+        ) -> Result<T, FiniteVodError>,
+    ) -> Result<(SoftwareVodOwner, T), FiniteVodError> {
         if !cfg!(target_os = "linux")
             || request.sources.is_empty()
             || request.sources.len() > 2
@@ -1329,8 +1444,14 @@ impl NodeResourceRuntime {
                     init: true,
                     first_segment: 0,
                     segment_end_exclusive: u64::from(request.segment_count),
-                    naming: OutputNamingV1::FiniteVodMetadataV2 {
-                        encoded_process: request.encoded_process_marker,
+                    naming: if static_artifact {
+                        OutputNamingV1::StaticArtifactV1 {
+                            encoded_process: request.encoded_process_marker,
+                        }
+                    } else {
+                        OutputNamingV1::FiniteVodMetadataV2 {
+                            encoded_process: request.encoded_process_marker,
+                        }
                     },
                 },
                 limits,
@@ -1415,8 +1536,19 @@ impl NodeResourceRuntime {
             demand: request.demand,
             retained: None,
         }];
+        // Construct every fallible application owner before accepted R. The
+        // initializer below only binds these same objects to the private role.
+        let app_state =
+            super::finite_lifetime::FiniteAppState::with_application_limit(application_owner_limit);
+        let app_guard = app_state.new_guard().ok_or_else(invalid)?;
+        let application = application(&app_state)?;
         let family = self.new_family()?;
-        let preparation = match self.prepare_typed_families_claiming(
+        let control = Arc::new(FiniteControl::new());
+        let source_members_for_launch = source_members.clone();
+        let control_for_launch = Arc::clone(&control);
+        let directory_for_output = Arc::clone(&directory_path);
+        let guard_for_output = Arc::clone(&app_guard);
+        let (preparation, events) = match self.prepare_typed_families_claiming_initialized(
             &[FamilyDemand {
                 identity: family,
                 roles: &roles,
@@ -1427,6 +1559,40 @@ impl NodeResourceRuntime {
             }],
             Some(&[super::super::MemoryClaim::UnknownProducerPeak]),
             deadline,
+            |preparation| {
+                let output = FiniteOutput {
+                    runtime: Arc::clone(self),
+                    preparation: preparation.clone(),
+                    member: scratch_member.uuid(),
+                    directory_path: directory_for_output,
+                    encoded_process_marker: request.encoded_process_marker,
+                    app_guard: guard_for_output,
+                };
+                let (pump, events) =
+                    pump::SoftwarePump::from_encoded_output(output, request.producer);
+                #[cfg(target_os = "linux")]
+                let pump = {
+                    let mut pump = pump;
+                    if let Some(basis) = history_basis {
+                        pump.bind_history_context(basis, self.ledger.clone(), family);
+                    }
+                    pump
+                };
+                self.initialize_finite_vod(
+                    preparation,
+                    0,
+                    root_member.uuid(),
+                    task_member.uuid(),
+                    root_acquisition_id.uuid(),
+                    source_members_for_launch,
+                    request.command,
+                    pump,
+                    control_for_launch,
+                    app_state,
+                    response_budget,
+                );
+                events
+            },
         ) {
             Ok(preparation) => preparation,
             Err(error) => {
@@ -1436,60 +1602,28 @@ impl NodeResourceRuntime {
                 return Err(error.into());
             }
         };
-        self.install_finite_response_budget(&preparation, 0, response_budget)?;
-        let app_state =
-            super::finite_lifetime::FiniteAppState::with_application_limit(application_owner_limit);
-        let app_guard = app_state.new_guard().ok_or_else(invalid)?;
-        let output = FiniteOutput {
-            runtime: Arc::clone(self),
-            preparation: preparation.clone(),
-            member: scratch_member.uuid(),
-            directory_path: directory_path.clone(),
-            encoded_process_marker: request.encoded_process_marker,
-            app_guard: Arc::clone(&app_guard),
-        };
-        let (pump, events) = pump::SoftwarePump::new(output, request.producer)
-            .map_err(|error| FiniteVodError(OperationError::Physical(error)))?;
-        #[cfg(target_os = "linux")]
-        let pump = {
-            let mut pump = pump;
-            if let Some(basis) = history_basis {
-                pump.bind_history_context(basis, self.ledger.clone(), family);
-            }
-            pump
-        };
-        let control = Arc::new(FiniteControl::new());
-        self.queue_finite_vod(
-            &preparation,
-            0,
-            root_member.uuid(),
-            task_member.uuid(),
-            root_acquisition_id.uuid(),
-            source_members.clone(),
-            request.command,
-            pump,
-            Arc::clone(&control),
-            app_state,
-        )?;
-        Ok(SoftwareVodOwner {
-            runtime: Arc::clone(self),
-            preparation,
-            source_members,
-            source_specs,
-            media_source_count,
-            scratch_member: scratch_member.uuid(),
-            directory_path,
-            encoded_process_marker: request.encoded_process_marker,
-            events: Some(events),
-            control,
-            #[cfg(target_os = "linux")]
-            history_basis,
-            #[cfg(target_os = "linux")]
-            history_family: family,
-            #[cfg(target_os = "linux")]
-            history_units: request.segment_count,
-            app_guard,
-        })
+        Ok((
+            SoftwareVodOwner {
+                runtime: Arc::clone(self),
+                preparation,
+                source_members,
+                source_specs,
+                media_source_count,
+                scratch_member: scratch_member.uuid(),
+                directory_path,
+                encoded_process_marker: request.encoded_process_marker,
+                events: Some(events),
+                control,
+                #[cfg(target_os = "linux")]
+                history_basis,
+                #[cfg(target_os = "linux")]
+                history_family: family,
+                #[cfg(target_os = "linux")]
+                history_units: request.segment_count,
+                app_guard,
+            },
+            application,
+        ))
     }
 }
 

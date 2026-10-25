@@ -390,6 +390,16 @@ impl SoftwareAvcCommand {
         }
         Ok(total)
     }
+
+    /// Requested command-owned heap, including the one shared engine snapshot.
+    /// The legacy resident estimate also counts the inline command and
+    /// executable layouts; those are already part of the enclosing request.
+    pub(in crate::adaptive_resources::runtime) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.resident_memory_bytes()
+            .ok()?
+            .checked_sub(size_of::<Self>())?
+            .checked_sub(size_of::<super::SoftwareAvcExecutable>())
+    }
 }
 
 fn bounded_path_len(path: &std::path::Path) -> io::Result<usize> {

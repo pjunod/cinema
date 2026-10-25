@@ -681,6 +681,13 @@ pub struct DecodeCatalogMetadata {
 }
 
 impl DecodeCatalogMetadata {
+    /// Requested backing capacities; inline facts are part of the owning frame.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        self.digest
+            .capacity()
+            .checked_add(self.hdr_format.as_ref().map_or(0, String::capacity))
+    }
+
     pub fn from_media_file(file: &MediaFile) -> Result<Self, PlanError> {
         Self::new_with_luminance(
             file.hdr.as_deref(),
@@ -875,6 +882,32 @@ struct FactsDigest<'a> {
 }
 
 impl DecodeFacts {
+    /// Dynamic String capacities retained by this immutable facts value.
+    /// Inline fields and Arc/task/allocator overhead are counted separately by
+    /// their actual owner; this is not a measured process-memory upper bound.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .source_identity
+            .0
+            .capacity()
+            .checked_add(self.facts_digest.capacity())?;
+        for value in [
+            &self.codec,
+            &self.profile,
+            &self.pixel_format,
+            &self.chroma_sampling,
+            &self.field_order,
+            &self.color_range,
+            &self.color_space,
+            &self.color_transfer,
+            &self.color_primaries,
+            &self.hdr_format,
+        ] {
+            bytes = bytes.checked_add(value.as_ref().map_or(0, String::capacity))?;
+        }
+        Some(bytes)
+    }
+
     /// Parse the first non-attached video stream, preserving its absolute
     /// FFprobe index. Callers that selected a different stream pass its index
     /// to [`Self::from_ffprobe_json_at`].

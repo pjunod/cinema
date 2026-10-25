@@ -39,6 +39,14 @@ pub struct SoftwareAvcPumpPlan {
     encoded_process: String,
 }
 impl SoftwareAvcPumpPlan {
+    /// Planning allocations already owned by this request. Parser, segmenter,
+    /// and future output workspaces are accounted separately at admission.
+    pub(in crate::adaptive_resources::runtime) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.plan
+            .requested_heap_bytes()?
+            .checked_add(self.encoded_process.capacity())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         plan: SegmentPlan,
@@ -248,6 +256,7 @@ pub(in crate::adaptive_resources) struct Diagnostics {
 }
 
 impl SoftwarePump {
+    #[cfg(all(test, target_os = "linux"))]
     pub(in crate::adaptive_resources) fn new(
         output: FiniteOutput,
         plan: SoftwareAvcPumpPlan,
@@ -255,8 +264,17 @@ impl SoftwarePump {
         if !output.has_encoded_process_metadata() {
             return Err(invalid("ordinary AVC requires encoded-process metadata"));
         }
+        Ok(Self::from_encoded_output(output, plan))
+    }
+
+    /// The fixed preparation builder validates the encoded marker before R
+    /// acceptance. Binding that same output performs no fallible validation.
+    pub(in crate::adaptive_resources::runtime) fn from_encoded_output(
+        output: FiniteOutput,
+        plan: SoftwareAvcPumpPlan,
+    ) -> (Self, mpsc::Receiver<SoftwareVodEvent>) {
         let (events, receiver) = mpsc::channel(1);
-        Ok((
+        (
             Self {
                 output,
                 plan,
@@ -265,7 +283,7 @@ impl SoftwarePump {
                 history_context: None,
             },
             receiver,
-        ))
+        )
     }
     pub(in crate::adaptive_resources) fn minimum_memory_bytes(&self) -> io::Result<u64> {
         self.plan.minimum_memory_bytes()

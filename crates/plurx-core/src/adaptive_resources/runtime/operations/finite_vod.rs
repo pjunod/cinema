@@ -226,7 +226,9 @@ impl NodeResourceRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::adaptive_resources::runtime) fn queue_finite_vod(
+    /// Only the original preparation initializer may attach this payload.
+    /// Its unpublished state cannot contend or have acquired native members.
+    pub(in crate::adaptive_resources::runtime) fn initialize_finite_vod(
         &self,
         owner: &OwnedPreparation,
         index: usize,
@@ -238,20 +240,23 @@ impl NodeResourceRuntime {
         pump: SoftwarePump,
         control: Arc<crate::adaptive_resources::runtime::finite_vod::FiniteControl>,
         app_state: Arc<crate::adaptive_resources::runtime::finite_lifetime::FiniteAppState>,
-    ) -> Result<(), OperationError> {
-        self.validate_preparation(owner)?;
-        let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
-        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
-        if role.refunded || role.finite_vod.is_some() || role.graph.is_none()
+        response_budget: Arc<crate::adaptive_resources::runtime::response_memory::ResponseBudget>,
+    ) {
+        let mut bundle = owner
+            .state
+            .try_lock()
+            .expect("unpublished finite preparation");
+        let role = bundle.roles.get_mut(index).expect("original finite role");
+        assert!(!(role.refunded || role.finite_vod.is_some() || role.graph.is_none()
             || source_members.len() < 2 || source_members.len() > 3
             || source_members.len() != command.source_count() + 1 || acquisition_id.is_nil()
             || source_members.iter().collect::<std::collections::BTreeSet<_>>().len()
                 != source_members.len()
             || role.typed_members.as_ref().is_none_or(|members| !members.iter().any(|member|
                 matches!(member, v2::MemberPlan::VodOutputTaskV1 { slot, task }
-                    if slot.member_id.uuid() == task_member && task.root_member_id.uuid() == root_member))) {
-            return Err(OperationError::State);
-        }
+                    if slot.member_id.uuid() == task_member && task.root_member_id.uuid() == root_member)))),
+            "fixed finite initializer must match its original manifest");
+        role.response_budget = Some(response_budget);
         role.finite_vod = Some(FiniteLaunch {
             root_member,
             task_member,
@@ -278,7 +283,6 @@ impl NodeResourceRuntime {
             engine_check_unknown: false,
         });
         role.finite_app = Some(app_state);
-        Ok(())
     }
 
     /// Revalidate each media source through its original retained File. Any

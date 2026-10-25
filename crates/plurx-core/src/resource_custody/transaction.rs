@@ -2,6 +2,7 @@
 mod assets;
 mod direct_exit;
 mod inventory;
+mod live_typed_settlement;
 mod membership;
 mod recovery;
 mod recovery_r;
@@ -295,6 +296,11 @@ pub(super) fn snapshot(
         let memory_claim = MemoryClaim::from_sql_key(&claim_key).ok_or_else(codec::invalid)?;
         if matches!(memory_claim, MemoryClaim::UnknownProducerPeak)
             && (resources.processes == 0 || resources.cpu_ns_per_second == 0)
+        {
+            return Err(codec::invalid());
+        }
+        if memory_claim == MemoryClaim::PlanningMetadata
+            && !fixed_planning_metadata_manifest(&manifest_json, resources)?
         {
             return Err(codec::invalid());
         }
@@ -1253,9 +1259,9 @@ fn check_memory_claim_combination(
 ) -> Result<(), CustodyError> {
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let query = if version >= 3 {
-        "SELECT obligation_id,memory_claim,resources FROM obligations WHERE phase!='settled'"
+        "SELECT obligation_id,memory_claim,resources,manifest_json FROM obligations WHERE phase!='settled'"
     } else {
-        "SELECT obligation_id,'bounded_active',resources FROM obligations WHERE phase!='settled'"
+        "SELECT obligation_id,'bounded_active',resources,manifest_json FROM obligations WHERE phase!='settled'"
     };
     let mut active = false;
     let mut unknown = false;
@@ -1266,6 +1272,12 @@ fn check_memory_claim_combination(
         let key: String = row.get(1)?;
         let resources = codec::vector_from_bytes(&row.get::<_, Vec<u8>>(2)?)?;
         let claim = MemoryClaim::from_sql_key(&key).ok_or_else(codec::invalid)?;
+        if claim == MemoryClaim::PlanningMetadata {
+            let manifest_json: String = row.get(3)?;
+            if !fixed_planning_metadata_manifest(&manifest_json, resources)? {
+                return Err(codec::invalid());
+            }
+        }
         if matches!(claim, MemoryClaim::UnknownProducerPeak)
             && (resources.processes == 0 || resources.cpu_ns_per_second == 0)
         {
@@ -1309,6 +1321,26 @@ fn check_memory_claim_combination(
     Ok(())
 }
 
+fn fixed_planning_metadata_manifest(
+    json: &str,
+    resources: ResourceVector,
+) -> Result<bool, CustodyError> {
+    if resources.cpu_ns_per_second != 0
+        || resources.processes != 0
+        || resources.handles != 0
+        || resources.scratch_bytes != 0
+        || resources.hardware_slots != 0
+        || resources.tuner_slots != 0
+    {
+        return Ok(false);
+    }
+    Ok(matches!(codec_v2::decode_manifest(json)?,
+        codec_v2::ManifestDocument::V2(manifest)
+            if matches!(manifest.members.as_slice(),
+                [codec_v2::MemberPlan::FixedProbeMetadataV1 { metadata, .. }]
+                    if resources.peak_memory_bytes >= metadata.retained_memory_bytes)))
+}
+
 fn include_memory_claim(
     claim: MemoryClaim,
     active: &mut bool,
@@ -1338,6 +1370,7 @@ fn include_memory_claim(
             }
             *unknown = true;
         }
+        MemoryClaim::PlanningMetadata => {}
     }
     Ok(())
 }
@@ -1586,7 +1619,16 @@ fn change(
             return retirement::change(tx, journal, owner, key, prior, &manifest, proof);
         }
         if let Mutation::SettleTyped(proof) = mutation {
-            return retained_settlement::change(tx, owner, key, prior, &manifest, proof);
+            // Exactly one retained scratch member owns the retained-owner
+            // lineage branch; every other live typed manifest settles here.
+            return if matches!(
+                manifest.members.as_slice(),
+                [codec_v2::MemberPlan::ScratchAssetsV3 { .. }]
+            ) {
+                retained_settlement::change(tx, owner, key, prior, &manifest, proof)
+            } else {
+                live_typed_settlement::change(tx, owner, key, prior, &manifest, proof)
+            };
         }
         return typed::change(tx, owner, key, mutation, prior, &manifest);
     }
