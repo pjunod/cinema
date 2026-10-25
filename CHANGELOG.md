@@ -57,8 +57,10 @@ bump may break compatibility and a **patch** bump never does.
   and multiplied by a measured near-black gain per target (stock 600/1000/2000
   P3 and BT.2020 targets and the 100-nit SDR target, linear in target PQ).
   Before, chroma of noise in letterbox bars and very dark areas was boosted up
-  to 13x. On real frames the worst pixels (p99.9) drop from ΔE_ITP 5–17 to
-  about 1–4. Targeted renditions re-render under method
+  to 13x. On real frames with dark content p99.9 ΔE_ITP drops from 3–28 to
+  0.7–8.5 (SDR and 600/1000-nit P3); titles with little near-black content
+  are unchanged. The BT.2020 rows are measured on synthetic sweeps only.
+  Targeted renditions re-render under method
   `dolby-closed-form-cm4-cm29-v3`.
 
 ### Fixed

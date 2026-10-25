@@ -439,8 +439,9 @@ static const double DM_IPT[3][3] = {{0.4, 0.4, 0.2}, {4.4550, -4.8510, 0.3960}, 
  * output intensity only (the same for any L1, trim and chroma). HDR targets: the P3 or BT.2020 row
  * of the stock targets at 600, 1000 and 2000 nits, linear in target PQ and held outside that range
  * (BT.2020 has no usable 600-nit stock row: the 1000-nit row is used), measured with a target
- * black of 0 and applied above the target black (dark_off = Tm). BT.709: the 100-nit SDR stock
- * target, measured with a 0.005-nit black (dark_off = Tm - PQ(0.005)). */
+ * black of 0 and applied above the target black (dark_off = Tm). BT.709 (any peak; plurx renders
+ * BT.709 only for its 100-nit SDR target): the 100-nit SDR stock target, measured with a 0.005-nit
+ * black (dark_off = Tm - PQ(0.005)). The shader (dv_dm.h) holds a copy of the nodes. */
 #define DM_CM29_DARK_N 23
 static const double DM_CM29_DARK_IO[DM_CM29_DARK_N] = {
   0.000, 0.002, 0.004, 0.006, 0.008, 0.010, 0.012, 0.014, 0.016, 0.018, 0.020, 0.022,
@@ -456,6 +457,7 @@ static const double DM_CM29_DARK_2020[3][DM_CM29_DARK_N] = {
   {0.000, 0.140, 0.283, 0.427, 0.567, 0.711, 0.853, 0.945, 0.978, 1.004, 1.042, 1.061, 1.063, 1.057, 1.049, 1.044, 1.032, 1.024, 1.016, 1.012, 1.008, 1.006, 1.000}};
 static const double DM_CM29_DARK_709[DM_CM29_DARK_N] = {
   0.000, 0.006, 0.011, 0.017, 0.022, 0.028, 0.034, 0.039, 0.094, 0.295, 0.496, 0.683, 0.788, 0.836, 0.894, 0.940, 0.991, 1.003, 1.001, 0.996, 0.993, 0.994, 1.000};
+_Static_assert(sizeof(((dm_cm29_state *)0)->dark) / sizeof(double) == DM_CM29_DARK_N, "near-black table size");
 
 DM_STATIC double dm_pq_nits(double n) { return n > 0 ? dm_pq_oetf(n) : 0.0; }
 DM_STATIC int dm_solve3(double A[3][3], const double b[3], double x[3]) {

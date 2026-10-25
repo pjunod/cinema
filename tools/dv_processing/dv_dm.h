@@ -93,7 +93,9 @@ static inline void dv_dm_pack_cm29(dv_dm_frame *f, const dm_cm29_state *s) {
   dv_dm_put(f->u[1], s->Tm, s->TM, s->tg.min_nits, s->tg.peak_nits);
   dv_dm_put(f->u[2], s->tr.lift, s->tr.gain, s->tr.gamma, s->tr.cw);
   dv_dm_put(f->u[3], s->tr.sg, f->weight, s->tg.floor_pq, s->tg.prim != DM_BT2020);
-  // near-black chroma gain: 23 node values in u[4..9] (row-major), its offset in u[9].w
+  // near-black chroma gain: 23 node values in u[4..9] (row-major), its offset in u[9].w; the shader's
+  // DKI[] repeats DM_CM29_DARK_IO
+  _Static_assert(DM_CM29_DARK_N == 23 && 4 + (DM_CM29_DARK_N + 3) / 4 <= 10, "near-black table must fit u[4..9]");
   for (int i = 0; i < DM_CM29_DARK_N; i++) f->u[4 + i / 4][i % 4] = (float)s->dark[i];
   f->u[9][3] = (float)s->dark_off;
   dv_dm_rows(f->u + 11, s->to_t);
