@@ -79,36 +79,14 @@ unchanged. Use still goes through Mac video processing in Developer. Plan
 identity gains the curve terms, so CUDA HDR and Mac Metal renditions (HLG
 included) are made once more under new keys.
 
-## Live TV station logos on Apple TV, iOS and Android
-
-**Branch `fix/live-tv-station-logos-native`, issue
-[#815](http://forge.lan:3000/noirr/plurx/issues/815).** Paul reported
-2026-10-04 that the Apple TV Live TV guide has no station logos while the web
-guide does. Cause: #755 put the rule that picks a channel's logo in the web
-page (`pages/live-tv.js`) instead of the shared guide reducer and
-`tests/playback/live-tv-guide-cases.json` — the one contract all three guides
-reproduce — so the native clients, which already decode `image_url`, were
-never asked to draw it and no suite could see the gap. The rule is now
-`station_logo` in that fixture (lineup-id match, cold guide, 38 address
-cases; a textual `https://` + plain-host rule so three languages agree),
-answered by `PlurxLiveTv.stationLogoUrl`, Apple's and Android's
-`LiveTvGuideReducer`. Apple (build 209) and Android (versionCode 146) draw it
-in list rows, grid headers, programme details, the picture badge and the
-fullscreen identity, with the callsign until the image decodes. Native
-artwork loads on its own connection with no bearer, cookies or HTTPS→HTTP
-redirects (Android's app-wide Coil loader adds the bearer to every host).
-Adversarial review: no blockers; its five should-fix findings are
-addressed (scheme respelled for Coil, Android failure backoff, Apple lock
-kept off suspension points, grid headers keep their width without artwork,
-wiring pinned by source tests). Not yet on hardware.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17 and 2026-10-19 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19 and 2026-10-25 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
 | 2026-10-17 | Agent efficiency: smaller searches, a docs router, paperwork first | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
+| 2026-10-05 | Live TV station logos on Apple TV, iOS and Android | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | 2026-10-04 | A leader restart no longer ends progressive or Live TV playback | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-05 | Main-merge defects D1–D7 and the red gates: one batched PR | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-10-04 | The architecture effort is on `main`; the close-out is a draft PR | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
