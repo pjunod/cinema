@@ -13,6 +13,19 @@
         "delta_review": "t_ef8b9487/run20 reviewed f0f35e274; source-pinned parser attestation approved, with F1 requiring explicit historical invocation attestation."
       },
       "coordinator_attestation": "The coordinator reviewed compatibility of the exact 6fb7996 invocation tuple: unchanged prover command, scoped pinned tools, clean source staging, and actual nine-target execution. Changes since 58a10429c implement requested assertions, parser fixtures, and pins without changing the solver command or weakening safety/unwinding checks."
+    },
+    {
+      "source_commit": "36d25b2313852e4bbde9e7c7b43efa74de23f04c",
+      "digests": {
+        "scripts/check-worker-control": "8fd6aaeaaed74ffc83098a034724c8d9457d387ff4813eb272195c5f217e6d87",
+        ".github/workflows/main-fast-lane.yml": "41eb557438e184abaccad40f9c8cf6bbe22cfa1d69d5c875031f920e83d24eba",
+        "verification/worker-control/toolchain.json": "c0e7b3c9e70ebafa2f34ce45b75f7154685798a475a5d8f2f7806080b14e7935"
+      },
+      "review_basis": {
+        "original_review": "Completed independent actual GPT-6 Astra source APPROVE at 36d25b2313852e4bbde9e7c7b43efa74de23f04c, tree 77a3cd25ae8117f001d09d7c59091cf73784235c; review-schema5-nullable-correction-20261025/FINAL-REVIEW.md SHA256 b511151281a568abdb1daf4e3b9a48bb954e1c098a16fecb27f1918578c7a11a. This includes the preserved unchanged source-review coverage; source approval only.",
+        "delta_review": "Completed independent actual GPT-6 Astra source/delta APPROVE at 2b9d828bb511120b5784358ab77b85f4773c5010, tree 83c6d0d93c83627e15b8b595c6c5f654c763ff31, integrated main 3f3eca1fc9b41d566395ac529e66c4d72637bb1c; review-native-retention-corrections-20261025/FINAL-REVIEW.md SHA256 7cafaa15276e9f3812364cae13f118379b2dec2a5bf6877b5711c85f9abf2403. The review confirms the exact old tuple and Apple-only workflow delta; this is not approval of this policy row or credit of prior results to a new head."
+      },
+      "coordinator_attestation": "The workflow coordinator attests that the exact 36d25b2313852e4bbde9e7c7b43efa74de23f04c producer invocation tuple is controller-compatible: only the Apple desktop wrapper, checkout history depth and native upload path changed in the workflow. Controller job bytes SHA256 97bbe6573a5ca094e65a8794a37e796f3fb7196ec3183768001d093003d8803d, pinned proof commands/tools/source staging, six harnesses and three controls are unchanged. Completed independent source/delta APPROVE at 2b9d828bb511120b5784358ab77b85f4773c5010 reviewed this delta. Existing authenticated per-target validators remain authoritative; there is no parser waiver or async invocation exception."
     }
   ]
 }
