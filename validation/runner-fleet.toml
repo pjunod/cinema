@@ -251,7 +251,7 @@ name = "gha-macb-apple-01"
 host = "macb"
 os = "macOS"
 arch = "ARM64"
-labels = ["lab", "apple", "xcode-27", "backup"]
+labels = ["lab", "apple", "xcode-27", "backup", "xcode-27.1"]
 
 # This VM also runs a Forgejo runner carrying `release-arm64`: the release
 # image's arm64 leg builds there natively instead of under QEMU on X64.
