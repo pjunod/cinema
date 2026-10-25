@@ -159,7 +159,7 @@ def run(args):
                     source_index = round(pts * 24)
                     metadata = l1[source_index]
                     assert (trace[index]['max_pq'], trace[index]['avg_pq']) == (metadata['max_pq'], metadata['avg_pq'])
-                    assert trace[index]['method'] == 'dolby-closed-form-cm4-cm29-v3'
+                    assert trace[index]['method'] == 'dolby-closed-form-cm4-cm29-v4'
                     # served output applies each family's creative trims (DV_TARGET_TRIMS_CM4/_CM29)
                     curve = trace[index]['curve']
                     assert curve in ('cm4-l1-only', 'cm4-l8-interpolated', 'cm29-l1-only',

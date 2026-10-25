@@ -140,7 +140,7 @@ static void check_range(const char *name, const dv_dm_frame *f, double nits, int
 
 // CM v2.9 near black, as the reference renderer does: the chroma of saturated colours below the
 // shot's crush (letterbox noise) is scaled by at most 2 x the near-black gain (the intensity ratio
-// is capped at 2), and is removed where they map to the target black (gain 0 there). Before, the
+// is capped at 2), and is removed where they map to PQ 0 (gain 0 there). Before, the
 // scale (Ib/I)^0.9385 grew without bound as I -> 0. Mid-tone colours keep their chroma.
 static void near_black_chroma_is_neutral(const rpu *c29) {
   const struct { double nits; enum dm_prim prim; } t[] = {{600, DM_P3D65}, {2000, DM_P3D65}, {1000, DM_BT2020}, {100, DM_BT709}};
@@ -156,7 +156,7 @@ static void near_black_chroma_is_neutral(const rpu *c29) {
       double a[3] = {in[4*i], in[4*i+1], in[4*i+2]}, b[3] = {o[4*i], o[4*i+1], o[4*i+2]};
       dm_cm29_pix pi, po; dm_cm29_pixel_pre(&f.c29, a, &pi); dm_cm29_pixel_pre(&f.c29, b, &po);
       double ratio = po.C / pi.C;
-      bool black = pi.Ib <= f.c29.dark_off + 1e-9;
+      bool black = pi.Ib <= 1e-9;   // D(0) = 0: chroma removed where the colour maps to PQ 0
       bool ok = i < 4 ? (ratio <= 2 * dmax + 0.02 && (!black || ratio < 0.02)) : (ratio > 0.3 && ratio < 3);
       if (!ok) { fprintf(stderr, "near black %g nits prim %d: colour %d chroma ratio %g (black %d)\n", t[k].nits, t[k].prim, i, ratio, black); exit(1); }
     }

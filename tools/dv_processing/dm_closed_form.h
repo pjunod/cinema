@@ -423,7 +423,7 @@ typedef struct {
   double a, b, c, n, Tm, TM, xs0;           /* rational curve */
   dm_cm29_trim tr; dm_cm29_target tg;
   double rgb2lms[3][3], lms2rgb[3][3], ipt2lms[3][3], to_t[3][3], from_t[3][3];
-  double dark[23], dark_off;                /* near-black chroma gain D for this target (see below) */
+  double dark[23];                          /* near-black chroma gain D for this target (see below) */
 } dm_cm29_state;
 
 typedef struct { double ipt[3], C, I, Ib, Io; } dm_cm29_pix;
@@ -434,14 +434,14 @@ static const double DM_IPT[3][3] = {{0.4, 0.4, 0.2}, {4.4550, -4.8510, 0.3960}, 
 #define DM_CM29_CHROMA_A 0.9385
 #define DM_CM29_CHROMA_B 0.3246
 /* Near black (measured per stock target, CM29_CLOSED_FORM.md "Near-black chroma"): the chroma
- * scale's intensity ratio is capped at 2 (Ie = max(I, Ib/2)) and the scale is multiplied by
- * D(Ib - dark_off), piecewise linear on the nodes below and 1 above the last one. D depends on the
- * output intensity only (the same for any L1, trim and chroma). HDR targets: the P3 or BT.2020 row
- * of the stock targets at 600, 1000 and 2000 nits, linear in target PQ and held outside that range
- * (BT.2020 has no usable 600-nit stock row: the 1000-nit row is used), measured with a target
- * black of 0 and applied above the target black (dark_off = Tm). BT.709 (any peak; plurx renders
- * BT.709 only for its 100-nit SDR target): the 100-nit SDR stock target, measured with a 0.005-nit
- * black (dark_off = Tm - PQ(0.005)). The shader (dv_dm.h) holds a copy of the nodes. */
+ * scale's intensity ratio is capped at 2 (Ie = max(I, Ib/2)) and the scale is multiplied by D(Ib),
+ * piecewise linear on the nodes below and 1 above the last one. D depends on the output intensity
+ * only (the same for any L1, trim and chroma) and not on the target black: targets redefined with
+ * a 0.005-nit black follow the black-0 rows on absolute Ib within about 0.03. HDR targets: the P3
+ * or BT.2020 row of the stock targets at 600, 1000 and 2000 nits, linear in target PQ and held
+ * outside that range (BT.2020 has no usable 600-nit stock row: the 1000-nit row is used).
+ * BT.709 (any peak; plurx renders BT.709 only for its 100-nit SDR target): the 100-nit SDR stock
+ * target. The shader (dv_dm.h) holds a copy of the nodes. */
 #define DM_CM29_DARK_N 23
 static const double DM_CM29_DARK_IO[DM_CM29_DARK_N] = {
   0.000, 0.002, 0.004, 0.006, 0.008, 0.010, 0.012, 0.014, 0.016, 0.018, 0.020, 0.022,
@@ -504,20 +504,19 @@ DM_STATIC int dm_cm29_prepare(dm_cm29_state *s, const double l1[3], double smin,
   dm_mat_mul(xyz2lms, DM_M2020_XYZ, s->rgb2lms); dm_mat_inv(s->rgb2lms, s->lms2rgb); dm_mat_inv(DM_IPT, s->ipt2lms);
   dm_conv(DM_BT2020, tg->prim, s->to_t); dm_conv(tg->prim, DM_BT2020, s->from_t);
   if (tg->prim == DM_BT709) {
-    memcpy(s->dark, DM_CM29_DARK_709, sizeof(s->dark)); s->dark_off = Tm - dm_pq_oetf(0.005);
+    memcpy(s->dark, DM_CM29_DARK_709, sizeof(s->dark));
   } else {
     const double (*rows)[DM_CM29_DARK_N] = tg->prim == DM_BT2020 ? DM_CM29_DARK_2020 : DM_CM29_DARK_P3;
     double p0 = dm_pq_oetf(DM_CM29_DARK_PEAK[0]), p1 = dm_pq_oetf(DM_CM29_DARK_PEAK[1]), p2 = dm_pq_oetf(DM_CM29_DARK_PEAK[2]);
     int k = TM <= p1 ? 0 : 1; double lo = k ? p1 : p0, hi = k ? p2 : p1;
     double t = dm_clampd((TM - lo) / (hi - lo), 0.0, 1.0);
     for (int i = 0; i < DM_CM29_DARK_N; i++) s->dark[i] = (1 - t) * rows[k][i] + t * rows[k + 1][i];
-    s->dark_off = Tm;
   }
   return 1;
 }
 /* near-black chroma gain D at output intensity Ib */
 DM_STATIC double dm_cm29_dark(const dm_cm29_state *s, double Ib) {
-  double x = Ib - s->dark_off;
+  double x = Ib;
   if (x <= 0) return s->dark[0];
   for (int i = 1; i < DM_CM29_DARK_N; i++)
     if (x < DM_CM29_DARK_IO[i]) {
@@ -557,7 +556,10 @@ DM_STATIC void dm_cm29_finish(const dm_cm29_state *s, const dm_cm29_pix *p, doub
   dm_mat_vec(s->ipt2lms, o, lmsp);
   for (int i = 0; i < 3; i++) lms[i] = dm_pq_eotf(dm_clampd(lmsp[i], 0.0, 1.0));
   dm_mat_vec(s->lms2rgb, lms, lin);
-  double tmin = s->tg.min_nits, tpk = s->tg.peak_nits;
+  /* the cube clip's floor is 0 for PQ targets: their black shapes the tone curve only (measured with
+   * stock targets redefined with a 0.005-nit black; clipping at the black desaturated and shifted
+   * near-black colours). The BT.709 SDR target clips at its display black. */
+  double tmin = s->tg.prim == DM_BT709 ? s->tg.min_nits : 0.0, tpk = s->tg.peak_nits;
   if (s->tg.prim != DM_BT2020) {
     dm_mat_vec(s->to_t, lin, lt);
     for (int i = 0; i < 3; i++) lt[i] = dm_clampd(lt[i], tmin, tpk);

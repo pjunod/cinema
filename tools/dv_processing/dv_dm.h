@@ -19,7 +19,7 @@
 #include "dm_closed_form.h"
 
 #define DV_DM_METHOD_CM4 "dolby-cm4-closed-form-v1"
-#define DV_DM_METHOD_CM29 "dolby-cm29-closed-form-v2"
+#define DV_DM_METHOD_CM29 "dolby-cm29-closed-form-v3"
 
 enum { DV_DM_U = 24 };   // vec4 uniforms
 typedef struct {
@@ -90,14 +90,14 @@ static inline void dv_dm_pack_cm4(dv_dm_frame *f, const dm_cm4_state *s) {
 static inline void dv_dm_pack_cm29(dv_dm_frame *f, const dm_cm29_state *s) {
   f->algo = 29;
   dv_dm_put(f->u[0], s->a, s->b, s->c, s->n);
-  dv_dm_put(f->u[1], s->Tm, s->TM, s->tg.min_nits, s->tg.peak_nits);
+  // u[1].z: the cube clip's floor (0 for PQ targets, the display black for BT.709; dm_cm29_finish)
+  dv_dm_put(f->u[1], s->Tm, s->TM, s->tg.prim == DM_BT709 ? s->tg.min_nits : 0.0, s->tg.peak_nits);
   dv_dm_put(f->u[2], s->tr.lift, s->tr.gain, s->tr.gamma, s->tr.cw);
   dv_dm_put(f->u[3], s->tr.sg, f->weight, s->tg.floor_pq, s->tg.prim != DM_BT2020);
-  // near-black chroma gain: 23 node values in u[4..9] (row-major), its offset in u[9].w; the shader's
+  // near-black chroma gain: 23 node values in u[4..9] (row-major); the shader's
   // DKI[] repeats DM_CM29_DARK_IO
   _Static_assert(DM_CM29_DARK_N == 23 && 4 + (DM_CM29_DARK_N + 3) / 4 <= 10, "near-black table must fit u[4..9]");
   for (int i = 0; i < DM_CM29_DARK_N; i++) f->u[4 + i / 4][i % 4] = (float)s->dark[i];
-  f->u[9][3] = (float)s->dark_off;
   dv_dm_rows(f->u + 11, s->to_t);
   dv_dm_rows(f->u + 14, s->from_t);
   bool sop_on = s->tr.lift != 0 || s->tr.gain != 0 || s->tr.gamma != 0;
@@ -306,7 +306,7 @@ static const char dv_dm_glsl_common[] =
   "const float DKI[23]=float[23](0.000,0.002,0.004,0.006,0.008,0.010,0.012,0.014,0.016,0.018,0.020,0.022,\n"
   " 0.024,0.026,0.028,0.030,0.035,0.040,0.050,0.060,0.080,0.100,0.150);\n"
   "float c29dk(int i){ return u[4+i/4][i%4]; }\n"
-  "float c29dark(float Ib){ float x=Ib-u[9].w; if(x<=0.0) return c29dk(0);\n"
+  "float c29dark(float Ib){ float x=Ib; if(x<=0.0) return c29dk(0);\n"
   " for(int k=1;k<23;k++){ if(x<DKI[k]){ float t=(x-DKI[k-1])/(DKI[k]-DKI[k-1]); return mix(c29dk(k-1),c29dk(k),t); } }\n"
   " return 1.0; }\n"
   "vec3 c29finish(vec3 p, float Ib, float Io){\n"
