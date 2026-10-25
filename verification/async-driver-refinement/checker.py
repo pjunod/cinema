@@ -1459,7 +1459,7 @@ def decode_product(wire):
             else:
                 initial = IDLE[field]
                 if initial is None:
-                    require(cell is None or integer(cell,0,I64_MAX),'invalid nullable worker time cell')
+                    require(cell is None or integer(cell,high=I64_MAX),'invalid nullable worker time cell')
                 else:
                     require(type(cell) is type(initial),'worker scalar wire type drift: '+field)
                 worker[field] = cell

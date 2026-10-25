@@ -509,6 +509,39 @@ class CompactProductWireContracts(unittest.TestCase):
         self.assertIsNone(checker.certify_tlc_numbers({'ordinary':ordinary,'bounds':[checker.TLC_INT_MIN,checker.TLC_INT_MAX],
             'bools':[False,True],'none':None,'string':'1.5'}))
 
+    def test_unused_nullable_worker_scalars_preserve_signed_transport_domain(self):
+        fields = ('claim_issued_mono_ms','claim_request_now_ms','local_deadline_mono_ms')
+        baseline = product_wire_fixture()
+        expected = list(checker.decode_product(baseline)['product_states'])
+        for field in fields:
+            column = checker.WORKER_COLUMNS.index(field)
+            for value in (-1,checker.TLC_INT_MIN,checker.TLC_INT_MAX):
+                wire = copy.deepcopy(baseline);row = copy.deepcopy(wire['worker_pool'][0])
+                row[column] = value;wire['worker_pool'].append(row)
+                with self.subTest(field=field,unused=value):
+                    self.assertEqual(list(checker.decode_product(wire)['product_states']),expected)
+                    self.assertEqual(wire['product_states'],baseline['product_states'])
+                    self.assertEqual(wire['product_digest_sequence_sha256'],baseline['product_digest_sequence_sha256'])
+            invalid = ((False,'invalid nullable worker time cell'),(True,'invalid nullable worker time cell'),
+                (1.0,'UnsupportedTlcNumericDomain'),(-1.0,'UnsupportedTlcNumericDomain'),
+                (checker.TLC_INT_MIN-1,'UnsupportedTlcNumericDomain'),
+                (checker.TLC_INT_MAX+1,'UnsupportedTlcNumericDomain'))
+            for value,message in invalid:
+                wire = copy.deepcopy(baseline);row = copy.deepcopy(wire['worker_pool'][0])
+                row[column] = value;wire['worker_pool'].append(row)
+                with self.subTest(field=field,invalid=value),self.assertRaisesRegex(checker.Invalid,message):
+                    checker.decode_product(wire)
+            # Seal each changed used payload through the fixture helper so a
+            # stale ordered digest cannot masquerade as lifecycle rejection.
+            state = product_predecessor('base');state['w'][0].update(stage='claim',job=0)
+            state['w'][0][field] = 0
+            used = checker.decode_product(product_wire_fixture([state]))['product_states'][0]
+            checker.validate_worker(used['w'][0],product_domain_fixture(),fixture())
+            state['w'][0][field] = -1
+            used = checker.decode_product(product_wire_fixture([state]))['product_states'][0]
+            with self.subTest(field=field,used=-1),self.assertRaisesRegex(checker.Invalid,'invalid nullable acquisition time: '+field):
+                checker.validate_worker(used['w'][0],product_domain_fixture(),fixture())
+
     def test_finite_floats_in_derived_store_raw_fail_global_numeric_preflight(self):
         for value in (1.5,1e100,{'nested':[1.5]}):
             wire = product_wire_fixture();wire['source_boundaries'] = copy.deepcopy(checker.SOURCE_BOUNDARIES)
