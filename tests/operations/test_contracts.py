@@ -2266,8 +2266,9 @@ assert.equal(context.ACT_TIMER, null);
                 job = jobs[job_name]
                 condition = re.search(r"(?m)^    if: (.+)$", job)[1]
                 steps = workflow_step_blocks(job)
-                desktop_name = ("Compile native macOS server tray" if "effort-ci" in path
-                                else "Build and test native macOS server tray")
+                desktop_name = ("Compile native macOS server tray" if "effort-ci" in path else
+                                "Retain or execute native macOS server tray evidence" if "main-fast-lane" in path else
+                                "Build and test native macOS server tray")
                 desktop = steps[desktop_name]
                 # Even retained mobile units must never suppress a selected tray check.
                 self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True))
@@ -2297,8 +2298,15 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_native_macos_tray_unit_output_does_not_pollute_mobile_receipts(self):
         case_line = "Test Case '-[PlurxTrayCoreTests.ProtocolTests testFixture]' passed (0.001 seconds)."
-        for path, name in ((".github/workflows/main-fast-lane.yml", "apple_compile"),
-                           (".github/workflows/ci.yml", "apple")):
+        # Main delegates stdout isolation to the adapter's focused fresh-child
+        # fixture; the direct ci.yml make recipe retains its original guard.
+        main = workflow_step_blocks(workflow_job_blocks(".github/workflows/main-fast-lane.yml")["apple_compile"])
+        adapter = main["Retain or execute native macOS server tray evidence"]
+        self.assertEqual(workflow_step_scalar(adapter, "run"),
+                         "python3 -m validation.desktop_macos_retention --fresh-on-new-inputs")
+        self.assertNotIn("tee ", adapter)
+        self.assertNotIn("cat ", adapter)
+        for path, name in ((".github/workflows/ci.yml", "apple"),):
             step = workflow_step_blocks(workflow_job_blocks(path)[name])[
                 "Build and test native macOS server tray"]
             commands = "\n".join(workflow_step_literal(step, "run"))
@@ -2347,13 +2355,20 @@ assert.equal(context.ACT_TIMER, null);
         for path, name in ((".github/workflows/main-fast-lane.yml", "apple_compile"),
                            (".github/workflows/ci.yml", "apple")):
             steps = workflow_step_blocks(workflow_job_blocks(path)[name])
-            desktop = steps["Build and test native macOS server tray"]
+            is_main = "main-fast-lane" in path
+            desktop = steps["Retain or execute native macOS server tray evidence" if is_main
+                            else "Build and test native macOS server tray"]
             commands = workflow_step_literal(desktop, "run")
-            self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
+            if is_main:
+                self.assertEqual(commands, ["python3 -m validation.desktop_macos_retention --fresh-on-new-inputs"])
+                self.assertIn("GITHUB_TOKEN: ${{ github.token }}", desktop)
+            else:
+                self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
             self.assertFalse(any("tee " in command or "cat " in command for command in commands),
                              "desktop XCTest records must not enter the mobile receipt log")
             artifact = steps["Preserve native macOS server tray check output"]
-            self.assertIn("path: target/validation/desktop-macos-check.log", artifact)
+            self.assertIn("path: target/validation/desktop-macos-retention" if is_main
+                          else "path: target/validation/desktop-macos-check.log", artifact)
             self.assertIn("if-no-files-found: error", artifact)
 
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):

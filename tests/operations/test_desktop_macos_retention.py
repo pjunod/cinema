@@ -386,17 +386,21 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
              mock.patch.object(native,'manifest',side_effect=sources),mock.patch.object(native,'current_job',return_value=self.api.jobs[RUN][0]), \
              mock.patch.object(native,'matching_v1',return_value=None),mock.patch.object(native,'recheck'), \
              mock.patch.object(native,'history_before_fresh',return_value={'pagination_complete':True,'attempts':[]}), \
-             mock.patch.object(native.subprocess,'run') as make:
+             mock.patch.object(native.subprocess,'run') as make,mock.patch('sys.stdout',new_callable=io.StringIO) as console:
             out = Path(directory)
             with self.assertRaises(native.receipts.ReceiptError):native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},False)
             make.assert_not_called()
             def fail(argv,**kwargs):
                 self.assertTrue((out/'fresh-start.json').exists());self.assertNotIn('GITHUB_TOKEN',kwargs['env'])
-                self.assertEqual(kwargs['env']['PATH'],'/tools');return SimpleNamespace(returncode=1)
+                self.assertEqual(kwargs['env']['PATH'],'/tools')
+                kwargs['stdout'].write(b"Test Case '-[PlurxTrayCoreTests.CoreCases testCase000]' passed (0.001 seconds).\n")
+                return SimpleNamespace(returncode=1)
             make.side_effect = fail
             with self.assertRaises(native.receipts.ReceiptError):native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},True)
             make.assert_called_once();self.assertEqual(json.loads((out/'fresh-finish.json').read_text())['exit_code'],1)
             self.assertFalse((out/'receipt.json').exists())
+            self.assertNotIn('Test Case',console.getvalue())
+            self.assertIn('Test Case',(out/native.MEMBER).read_text())
 
     def test_current_authentication_rejects_wrong_live_head_or_pr_event(self):
         api = FakeAPI();event = json.loads(api.runs[RUN]['event_payload'])
