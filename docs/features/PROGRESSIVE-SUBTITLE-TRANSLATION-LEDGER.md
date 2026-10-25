@@ -2,7 +2,7 @@
 
 **Status:** built — first route accepted on 2026-10-17; follow-ups are listed at the end of §2.
 
-**Setup repair — 2026-10-25, local change awaiting qualification and landing.**
+**Setup repair — 2026-10-25; [implementation, qualification and landing](SUBTITLE-SETUP-REPAIR-STATUS.md).**
 The live web setup accepted an Install request, then displayed
 `Invalid model operation response`: the version 2 server response omitted
 `purpose: "translation"`, which the shipped client requires before it follows
