@@ -173,13 +173,13 @@ impl SourceDirectOpened {
 
 impl SourceViewerActor {
     pub(crate) fn is_direct(&self) -> bool {
-        self.0.direct.is_some()
+        self.0.direct
     }
     async fn wait_direct_ready(
         &self,
         deadline: Instant,
     ) -> Result<SourceDirectStart, SourceWorkerError> {
-        if self.0.direct.is_none() {
+        if !self.0.direct {
             return Err(SourceWorkerError::Unsupported);
         }
         loop {
@@ -232,11 +232,7 @@ impl SourceViewerActor {
         deadline: Instant,
     ) -> Result<(SourceDirectStart, SourceResponseGuard), SourceWorkerError> {
         let start = self.wait_direct_ready(deadline).await?;
-        let direct = self
-            .0
-            .direct
-            .clone()
-            .ok_or(SourceWorkerError::Unsupported)?;
+        let direct = self.0.direct_file().ok_or(SourceWorkerError::Unsupported)?;
         let guard = self.reserve_direct_body(&start)?;
         #[cfg(not(target_os = "linux"))]
         let mut guard = guard;
@@ -304,11 +300,7 @@ impl SourceViewerActor {
         if Instant::now() >= deadline {
             return Err(SourceWorkerError::Deadline);
         }
-        let direct = self
-            .0
-            .direct
-            .clone()
-            .ok_or(SourceWorkerError::Unsupported)?;
+        let direct = self.0.direct_file().ok_or(SourceWorkerError::Unsupported)?;
         let start = self
             .0
             .state
@@ -482,12 +474,15 @@ impl TranscodeManager {
                         .iter()
                         .find(|owner| Arc::as_ptr(owner) as usize == owner_address)
                         .and_then(|owner| {
-                            owner
-                                .state
-                                .lock()
-                                .expect("Source worker state")
-                                .restart_admission
-                                .take()
+                            let (admission, application) = {
+                                let mut state = owner.state.lock().expect("Source worker state");
+                                (state.restart_admission.take(), state.direct.take())
+                            };
+                            // The cached actor retains kind/reply metadata, not
+                            // this redundant application Arc. Real aliases can
+                            // still keep the SAME core ticket's lease held.
+                            drop(application);
+                            admission
                         });
                     registry.retain(|owner| Arc::as_ptr(owner) as usize != owner_address);
                     let ticket = Arc::new(tokio::sync::Mutex::new(ticket));
@@ -533,6 +528,46 @@ impl TranscodeManager {
                 }
             }
         }
+    }
+
+    /// Read-only custody diagnostics for the exclusive actual Direct fixture.
+    /// Counts and is_finished never grant native/typed closure or a refund.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn fixture_source_direct_restart_custody(&self) -> (usize, usize, usize) {
+        let registry = self.source_workers.entries.lock().expect("Source workers");
+        let tasks = self
+            .source_workers
+            .direct_tasks
+            .lock()
+            .expect("Source direct tasks");
+        let mut active = 0;
+        let mut settling = 0;
+        let mut finished = 0;
+        for record in tasks.iter().flatten() {
+            match record {
+                SourceDirectRecord::Active { owner_address, .. } => {
+                    active += usize::from(registry.iter().any(|owner| {
+                        Arc::as_ptr(owner) as usize == *owner_address
+                            && owner
+                                .state
+                                .lock()
+                                .expect("Source worker state")
+                                .restart_admission
+                                .is_some()
+                    }));
+                }
+                SourceDirectRecord::Settling {
+                    restart_admission,
+                    worker,
+                    ..
+                } => {
+                    settling += usize::from(restart_admission.is_some());
+                    finished += usize::from(worker.is_finished());
+                }
+                SourceDirectRecord::Failed => {}
+            }
+        }
+        (active, settling, finished)
     }
 
     #[cfg(target_os = "linux")]
@@ -585,7 +620,7 @@ impl TranscodeManager {
                 BudgetedSourceWorker<Pin<Box<dyn Future<Output = ()> + Send>>>,
             >())?
             .checked_add(size_of::<Arc<SourceViewerInner>>())?
-            .checked_add(size_of::<SourceDirectRecord>())?;
+            .checked_add(size_of::<Option<SourceDirectRecord>>())?;
         u64::try_from(bytes).ok()
     }
 
@@ -794,8 +829,9 @@ impl TranscodeManager {
                 ingress,
             }),
             retirement_deadline: Default::default(),
-            direct: Some(Arc::new(direct_file)),
+            direct: true,
             state: std::sync::Mutex::new(SourceViewerState {
+                direct: Some(Arc::new(direct_file)),
                 restart_admission: Some(restart_admission),
                 start: None,
                 retirement_requested: false,
@@ -992,7 +1028,7 @@ impl TranscodeManager {
         deadline: Instant,
     ) -> DirectWorkerResult {
         let actor = SourceViewerActor(Arc::clone(&owner));
-        let direct = Arc::clone(owner.direct.as_ref().expect("direct Source owner"));
+        let direct = owner.direct_file().expect("direct Source owner");
         let mut unowned_existing = true;
         let start = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),

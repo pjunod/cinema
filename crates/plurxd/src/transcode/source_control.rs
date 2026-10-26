@@ -214,7 +214,7 @@ impl SourceViewerActor {
         if request.demand == PlaybackDemand::End
             || request.acknowledgement.is_some()
             || request.intent.is_some()
-            || self.0.direct.is_some()
+            || self.0.direct
         {
             return Err(SourceWorkerError::Unsupported);
         }

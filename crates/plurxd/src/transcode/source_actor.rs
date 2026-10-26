@@ -261,9 +261,9 @@ struct SourceViewerInner {
     assignment: SourceDispatchAssignment,
     manager: std::sync::Weak<TranscodeManager>,
     gate: Arc<SourceProducerAuthority>,
-    /// Present only for a direct-play owner: the fenced file it serves. Such
-    /// an owner has no producer and never publishes an HLS Start.
-    direct: Option<Arc<direct::SourceDirectFile>>,
+    /// Immutable delivery kind remains available to cached Start/End replies
+    /// after the original actor's application alias has retired.
+    direct: bool,
     retirement_deadline: std::sync::OnceLock<Instant>,
     state: std::sync::Mutex<SourceViewerState>,
     changed: tokio::sync::Notify,
@@ -297,6 +297,9 @@ enum SourcePhysicalSettlement {
     ),
 }
 struct SourceViewerState {
+    // Only this redundant actor alias retires at the original joined worker's
+    // ticket handoff. Actual body/open/read aliases still own their application.
+    direct: Option<Arc<direct::SourceDirectFile>>,
     restart_admission: Option<SourceRestartAdmission>,
     native: Option<Arc<super::source_subtitles::SourceNativeTracks>>,
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
@@ -313,6 +316,16 @@ struct SourceViewerState {
         Option<Result<crate::http::sharing_direct_wire::SourceDirectStart, SourceWorkerError>>,
     /// The last admitted direct byte open; status never moves it.
     direct_activity: Option<Instant>,
+}
+
+impl SourceViewerInner {
+    fn direct_file(&self) -> Option<Arc<direct::SourceDirectFile>> {
+        self.state
+            .lock()
+            .expect("Source worker state")
+            .direct
+            .clone()
+    }
 }
 
 /// A waiter for one actual registered owner. Dropping this value cannot cancel
@@ -368,7 +381,7 @@ impl SourceResponseGuard {
         #[cfg(target_os = "linux")]
         if self
             .owner
-            .direct
+            .direct_file()
             .as_ref()
             .is_some_and(|direct| !direct.admitted_unchanged())
         {
@@ -400,7 +413,7 @@ impl SourceResponseGuard {
             #[cfg(target_os = "linux")]
             if self
                 .owner
-                .direct
+                .direct_file()
                 .as_ref()
                 .is_some_and(|direct| !direct.admitted_unchanged())
             {
@@ -440,7 +453,7 @@ impl SourceViewerActor {
         deadline: Instant,
     ) -> Result<crate::http::hls::StartResponse, SourceWorkerError> {
         // A direct owner has no HLS Start, status, control or resources.
-        if self.0.direct.is_some() {
+        if self.0.direct {
             return Err(SourceWorkerError::Unsupported);
         }
         loop {
@@ -581,7 +594,7 @@ impl SourceViewerActor {
         if Instant::now() >= deadline {
             return Err(SourceWorkerError::Deadline);
         }
-        if self.0.direct.is_some() {
+        if self.0.direct {
             return Err(SourceWorkerError::Unsupported);
         }
         let native = self
@@ -1083,8 +1096,9 @@ impl TranscodeManager {
                 ingress,
             }),
             retirement_deadline: Default::default(),
-            direct: None,
+            direct: false,
             state: std::sync::Mutex::new(SourceViewerState {
+                direct: None,
                 restart_admission: Some(SourceRestartAdmission::new(restart_admission)),
                 start: None,
                 retirement_requested: false,
@@ -1947,7 +1961,16 @@ impl TranscodeManager {
         // Linux direct custody moves into the SAME retained typed ticket after
         // the original worker joins. HLS and the legacy direct worker disarm
         // only after their exact physical and final Source settlement succeeds.
-        if settlement.is_ok() && (owner.direct.is_none() || !cfg!(target_os = "linux")) {
+        if settlement.is_ok() && (!owner.direct || !cfg!(target_os = "linux")) {
+            #[cfg(not(target_os = "linux"))]
+            drop(
+                owner
+                    .state
+                    .lock()
+                    .expect("Source worker state")
+                    .direct
+                    .take(),
+            );
             if let Some(admission) = owner
                 .state
                 .lock()
