@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=plurx Player
+GenericName=Media Player
+Comment=Play plurx titles handed over from the plurx web app
+Exec=/usr/bin/plurx-player %u
+Icon=video-x-generic
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+Categories=AudioVideo;Video;Player;
+MimeType=x-scheme-handler/plurx-player;

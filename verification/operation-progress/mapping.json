@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "8e39f192447a48c8a74acb7986144ab65c35b09a272b943632424cac55bedd1c"
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "8e39f192447a48c8a74acb7986144ab65c35b09a272b943632424cac55bedd1c"
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "8e39f192447a48c8a74acb7986144ab65c35b09a272b943632424cac55bedd1c"
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6"
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb"
       },
       {
         "table": "31 authority implementation",
@@ -249,7 +249,7 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "ed20e37826206bc16d278d3f3aa915bed86df5da60b6366bc5b83dd991defd29"
+        "sha256": "e4f16b9581cedf5afb7a0f275df606d904e5ea4686224e761835c1e84ba8aa60"
       },
       {
         "table": "42 daemon schedule loop no token",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "ea61b930bd9457d28e9a62492e4fc076e85b5834f22cd80ef040a71a950d08e0"
+        "sha256": "474ba0991bd9cc10fd3427e14238b0479d611218dbdaf0f7c70a2e6e441e4599"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -291,7 +291,7 @@
         "table": "caption migration exact-shape recognizer outside selected library model",
         "source": "crates/plurx-core/src/store/subtitle_translation_schema.rs",
         "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2.",
-        "sha256": "edce20a61fe220cdb3b44bce2955cb1318ecd2cc334b58c6aee9b767a2123660"
+        "sha256": "2ddca167f66170b385677f38469df4bdfe9d0520a7d63547f0822baed1c8c7d1"
       },
       {
         "table": "caption retarget queue effects remain kind-scoped outside selected library model",

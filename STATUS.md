@@ -3,7 +3,9 @@
 **Updated:** 2026-10-26 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 - **2026-10-26 · Subtitle completion:** [live status](docs/features/SUBTITLE-COMPLETION-STATUS.md). Owner Codex /root; [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292) batches all caption operations and native delivery. Review and moving-runtime qualification pass; useful captions at 14.3/15.9s on two CPUs. Final gate and landing are tracked on the PR. Paul deploys.
+- **2026-10-26 · Linux player (Dolby Vision through plurx):** [plan and milestones](docs/clients/LINUX-PLAYER-PLAN.md). Owner Claude (Linux Dolby Vision session). M1–M5 merged into `effort/linux-player` (#1285, #1288, #1290, #1291); [#1295](http://forge.lan:3000/noirr/plurx/pulls/1295) promotes it to `main`; not deployed. Package 0.3.0 verified in a fresh container; on the ROG the RTX plays 4K CM v4.0, CM v2.9 and FEL clean, the Arc iGPU is not yet real time. Next: deploy, then M6 acceptance on the ROG.
 - **2026-10-26 · CM29 analytic gamut reconstruction:** [current rendering ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner Codex chat 01a17554. Standard IPT D65, the published colorfulness equation, analytic gamut interpolation and separate stock SDR/output blacks replace fitted gains; method v5 invalidates older targeted renditions. Selected-frame comparisons improve across all four titles, including Smile’s dark band. Adversarial review approved; native parity passed. [PR #1289](http://forge.lan:3000/noirr/plurx/pulls/1289) records final fast-lane qualification and landing. Private raw evidence is retained. No deployment: Paul deploys.
+- **2026-10-25 · Progressive subtitle setup repair:** [live status](docs/features/SUBTITLE-SETUP-REPAIR-STATUS.md). Owner Codex /root; [#1283](http://forge.lan:3000/noirr/plurx/pulls/1283) batches `codex/subtitle-setup-repair` to `main`. Install response and setup UX fixes are built locally; FIFO model-test admission is built locally. Adversarial review found no actionable issues; qualification and landing are tracked on the PR.
 - **2026-10-25 · Display-targeted DV creative trims (Phase E finish):** [build plan, phase 2](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). PR #1276 serves the CM v4 L8 and CM v2.9 L2 trims (L2 interpolated linearly in target PQ, measured on the reference), accepted by pixel comparison on eight real titles: CM v4 mean ΔE_ITP ≤ 0.011, CM v2.9 0.14–0.46 (untrimmed was 4.9–14). Playback reports `creative_trims_applied` per session; Apple 275, Android 181. Owner Claude; merged as 072d0f65 after two review rounds and one green fast lane. Not deployed: Paul deploys #1275 and #1276 together, then a GPT physical-display check.
 - **2026-10-25 · Display-targeted DV Phase E (closed-form Dolby display management):** [build plan, phase 2](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). PR #1275 replaces the Annex B.2 curve with our own CM v4 / CM v2.9 equations, checked privately against the licensed reference (CM v4 real P8 title mean ≤ 0.007 at 100 nits, ≤ 0.001 at 300–1600). Merged as 489e86e4 with served trims off; the trims PR #1276 turns them on. Paul deploys.
 - **2026-10-23 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner direct GPT/root; #1216 and batched#1269 merged into the effort, latest3cc264068; main unchanged. Compile-only gate5889 all8 PASS, Rust382/C384/trim393 compile passes; earlier behavior/media/client evidence retains source attribution. Final integrated adoption, completed-candidate review and qualification remain. Root delivery decision covers HDR/SDR with E explicitly unfinished and truthful L1-only reporting; no full A–F completion. Promotion-test policy awaits user reconciliation; physical acceptance and the excluded full-app FEL EOF lane remain separate.
@@ -78,35 +80,13 @@ unchanged. Use still goes through Mac video processing in Developer. Plan
 identity gains the curve terms, so CUDA HDR and Mac Metal renditions (HLG
 included) are made once more under new keys.
 
-## Live TV station logos on Apple TV, iOS and Android
-
-**Branch `fix/live-tv-station-logos-native`, issue
-[#815](http://forge.lan:3000/noirr/plurx/issues/815).** Paul reported
-2026-10-04 that the Apple TV Live TV guide has no station logos while the web
-guide does. Cause: #755 put the rule that picks a channel's logo in the web
-page (`pages/live-tv.js`) instead of the shared guide reducer and
-`tests/playback/live-tv-guide-cases.json` — the one contract all three guides
-reproduce — so the native clients, which already decode `image_url`, were
-never asked to draw it and no suite could see the gap. The rule is now
-`station_logo` in that fixture (lineup-id match, cold guide, 38 address
-cases; a textual `https://` + plain-host rule so three languages agree),
-answered by `PlurxLiveTv.stationLogoUrl`, Apple's and Android's
-`LiveTvGuideReducer`. Apple (build 209) and Android (versionCode 146) draw it
-in list rows, grid headers, programme details, the picture badge and the
-fullscreen identity, with the callsign until the image decodes. Native
-artwork loads on its own connection with no bearer, cookies or HTTPS→HTTP
-redirects (Android's app-wide Coil loader adds the bearer to every host).
-Adversarial review: no blockers; its five should-fix findings are
-addressed (scheme respelled for Coil, Android failure backoff, Apple lock
-kept off suspension points, grid headers keep their width without artwork,
-wiring pinned by source tests). Not yet on hardware.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17 and 2026-10-19 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19 and 2026-10-26 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-10-04 | Live TV station logos on Apple TV, iOS and Android | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | 2026-10-17 | Agent efficiency: smaller searches, a docs router, paperwork first | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-10-04 | A leader restart no longer ends progressive or Live TV playback | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-05 | Main-merge defects D1–D7 and the red gates: one batched PR | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |

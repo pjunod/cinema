@@ -61,61 +61,61 @@
       },
       {
         "anchor": "pub trait BackgroundJobStore: Send + Sync {",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue protocol trait"
       },
       {
         "anchor": "pub struct JobToken {",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue token schema"
       },
       {
         "anchor": "impl<T: QueueSql> BackgroundJobStore for T {",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 shared queue adapter"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:1495"
       },
       {
         "anchor": "        if request.fence.is_none()",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3465"
       },
       {
         "anchor": "            if token.lease_expires_ms <= request.now_ms {",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3497"
       },
       {
         "anchor": "  AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:532"
       },
       {
         "anchor": "    AND job.lease_expires_ms > now_ms AND job.state = 'running'",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:630"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:636"
       },
       {
         "anchor": "pub const MAX_RETAINED_JOBS: usize = 10_000;",
-        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6",
+        "sha256": "4214859ae690dd98e5c9147ff312caa989520c343f7f59c28fcc7f1bef5ddbbb",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs.rs:50"
       },
@@ -241,13 +241,13 @@
       },
       {
         "anchor": "pub(super) const REPLICATED_STORE_TIMEOUT: &str = \"replicated store operation timed out\";",
-        "sha256": "8e39f192447a48c8a74acb7986144ab65c35b09a272b943632424cac55bedd1c",
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "M2 Hiqlite replicated timeout classification"
       },
       {
         "anchor": "                        super::background_jobs::RETENTION_SCHEMA",
-        "sha256": "8e39f192447a48c8a74acb7986144ab65c35b09a272b943632424cac55bedd1c",
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585"
       },
@@ -409,37 +409,37 @@
       },
       {
         "anchor": "async fn with_fenced_conn<T, F>",
-        "sha256": "1693b7e13c9d86505f11b69f3c0bab89e82df6717654afcbc44afcf9e6612ae3",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "proposal \u00a74.1 SQLite fenced transaction"
       },
       {
         "anchor": "            let execution_time_ms = std::time::SystemTime::now()",
-        "sha256": "1693b7e13c9d86505f11b69f3c0bab89e82df6717654afcbc44afcf9e6612ae3",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1973"
       },
       {
         "anchor": "                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms",
-        "sha256": "1693b7e13c9d86505f11b69f3c0bab89e82df6717654afcbc44afcf9e6612ae3",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1984"
       },
       {
         "anchor": "                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
-        "sha256": "1693b7e13c9d86505f11b69f3c0bab89e82df6717654afcbc44afcf9e6612ae3",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1996"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "1693b7e13c9d86505f11b69f3c0bab89e82df6717654afcbc44afcf9e6612ae3",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:2008"
       },
       {
         "anchor": "    super::background_jobs::RETENTION_SCHEMA,",
-        "sha256": "1693b7e13c9d86505f11b69f3c0bab89e82df6717654afcbc44afcf9e6612ae3",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255"
       },
@@ -451,7 +451,7 @@
       },
       {
         "anchor": "#[path = \"store_contract/formal_publication.rs\"]\nmod formal_publication;",
-        "sha256": "13844ce9f15cd9c85e9460d53417f04ac3845f899ba1f857d635ec85557640be",
+        "sha256": "f1ca435797dec019aa6ae5441f54b12bf9851b6943ff53ebd1dfa532c592a2b4",
         "source": "crates/plurx-core/tests/store_contract.rs",
         "table": "M2 conformance parent module registration"
       },
@@ -595,7 +595,7 @@
       },
       {
         "anchor": " job.state='running' AND job.kind='dv_title_scan' AND job.payload_version=1",
-        "sha256": "19be04dbdf64b7c63febc13af44065527ce4b8d27b4e8e504dbc2919e8b92891",
+        "sha256": "91020a0695986d46b622b6428955b57d3d1c1e05808306a218d364b77c6527ce",
         "source": "crates/plurx-core/src/store/dv_title_jobs.rs",
         "table": "DV extension exclusion: publication remains kind-specific"
       },
@@ -613,13 +613,13 @@
       },
       {
         "anchor": "async fn title_publication_is_atomic_idempotent_and_never_self_enqueues() {",
-        "sha256": "dc7a6b0f7f2dbc53335f9c4056dc35e19219ad8c440cbf806ce18c860c1df8bd",
+        "sha256": "61df9834fa69fc36c9e6eb03a28e6d6741b69b4c462534a6f919f3675de054f2",
         "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
         "table": "DV excluded runtime example: atomic idempotent publication"
       },
       {
         "anchor": "async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yield() {",
-        "sha256": "dc7a6b0f7f2dbc53335f9c4056dc35e19219ad8c440cbf806ce18c860c1df8bd",
+        "sha256": "61df9834fa69fc36c9e6eb03a28e6d6741b69b4c462534a6f919f3675de054f2",
         "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
         "table": "DV excluded runtime example: cancellation rejects stale publication"
       },
@@ -627,7 +627,7 @@
         "table": "caption migration exact-shape recognizer outside selected library model",
         "source": "crates/plurx-core/src/store/subtitle_translation_schema.rs",
         "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2.",
-        "sha256": "edce20a61fe220cdb3b44bce2955cb1318ecd2cc334b58c6aee9b767a2123660"
+        "sha256": "2ddca167f66170b385677f38469df4bdfe9d0520a7d63547f0822baed1c8c7d1"
       },
       {
         "table": "caption retarget queue effects remain kind-scoped outside selected library model",

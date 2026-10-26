@@ -188,7 +188,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
     conn.execute_batch("DROP TRIGGER subtitle_translation_mutate; DROP TRIGGER subtitle_translation_capture_continuity; DROP TRIGGER subtitle_translation_retire_continuity; DROP TRIGGER subtitle_translation_revoke_continuity; DROP TABLE subtitle_translation_range_continuities; ALTER TABLE subtitle_translation_demands DROP COLUMN continuity_id;")
         .expect("downgrade fixture only");
     conn.execute_batch(legacy).expect("published trigger");
-    conn.pragma_update(None, "user_version", 116)
+    conn.pragma_update(None, "user_version", 117)
         .expect("published ordinal");
     drop(conn);
     drop(store);

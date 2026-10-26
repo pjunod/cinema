@@ -175,7 +175,10 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
                 if *fel_contributed {
                     "FEL: full enhancement layer reconstructed into the picture"
                 } else {
-                    "FEL: no enhancement-layer detail in this window"
+                    // Only the selected plan or its served-window receipt can
+                    // say the base layer came from composition; neither did.
+                    "FEL: not confirmed for this play — the processing receipt does not \
+                     report the enhancement layer composed into the picture"
                 },
             ));
             details.push(detail(
@@ -416,6 +419,22 @@ mod tests {
         // applies the rewritten RPU's dynamic metadata.
         assert_eq!(shown.active, [Fel, Rpu, Dyn]);
         assert!(!shown.requires_effective_processing);
+        // Without the plan or receipt confirming composition, FEL is not claimed.
+        let unconfirmed = playback_enhancement(&facts(EnhancementRoute::ReconstructedProfile81 {
+            fel_contributed: false,
+        }))
+        .expect("DV source");
+        assert_eq!(unconfirmed.active, [Rpu, Dyn]);
+        let fel = unconfirmed
+            .details
+            .iter()
+            .find(|d| d.badge == Fel)
+            .expect("FEL row");
+        assert!(
+            !fel.active && fel.text.contains("not confirmed"),
+            "{}",
+            fel.text
+        );
     }
 
     #[test]

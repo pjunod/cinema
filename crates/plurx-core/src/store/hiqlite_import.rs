@@ -594,6 +594,48 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
+    // Playback handoff codes and the tokens they redeemed into; a handoff
+    // token lives only in its own table, never in `tokens`.
+    TablePlan {
+        name: "playback_handoffs",
+        columns: &[
+            "id",
+            "code_hash",
+            "user_id",
+            "file_id",
+            "source_token_hash",
+            "start_ms",
+            "audio",
+            "subtitle",
+            "origin",
+            "created_at",
+            "expires_at",
+            "redeemed_at",
+        ],
+        order_by: "id",
+        minimum_schema: 115,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "playback_handoffs_tokens",
+        columns: &[
+            "token_hash",
+            "handoff_id",
+            "user_id",
+            "file_id",
+            "source_token_hash",
+            "device",
+            "created_at",
+            "expires_at",
+        ],
+        order_by: "token_hash",
+        minimum_schema: 115,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
     TablePlan {
         name: "jellyfin_plays",
         columns: &[

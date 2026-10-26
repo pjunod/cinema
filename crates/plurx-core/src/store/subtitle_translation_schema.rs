@@ -154,6 +154,52 @@ pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreErro
 mod tests {
     use super::*;
     #[test]
+    fn main_v115_handoff_rows_survive_appended_subtitle_migrations() {
+        use crate::store::sqlite::SqliteStore;
+        let directory = tempfile::tempdir().expect("owned migration fixture");
+        let path = directory.path().join("store.db");
+        let conn = rusqlite::Connection::open(&path).expect("historical store");
+        SqliteStore::apply_migrations_for_test(&conn, 115).expect("published main schema");
+        conn.execute_batch("INSERT INTO users(id,username,password_hash,is_admin) VALUES(1,'migration-owner','hash',1); INSERT INTO playback_handoffs(id,code_hash,user_id,file_id,source_token_hash,created_at,expires_at) VALUES('retained-handoff','retained-code',1,17,'source-token',1,9223372036854775806); INSERT INTO playback_handoffs_tokens(token_hash,handoff_id,user_id,file_id,source_token_hash,created_at,expires_at) VALUES('retained-token','retained-handoff',1,17,'source-token',1,9223372036854775806);").expect("published handoff authority");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("published version"),
+            115
+        );
+        drop(conn);
+        let store = SqliteStore::open(&path).expect("upgrade the actual main database");
+        let conn = rusqlite::Connection::open(&path).expect("read upgraded store");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("upgraded version"),
+            119
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT code_hash FROM playback_handoffs WHERE id='retained-handoff'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .expect("retained code"),
+            "retained-code"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT handoff_id FROM playback_handoffs_tokens WHERE token_hash='retained-token'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .expect("retained token"),
+            "retained-handoff"
+        );
+        super::verify_sqlite(&conn).expect("complete progressive schema");
+        crate::store::subtitle_text_translation_schema::verify_sqlite(&conn)
+            .expect("text schema appended");
+        crate::store::shared_caption_schema::verify_sqlite(&conn).expect("shared schema appended");
+        crate::store::playback_handoffs::verify_sqlite(&conn).expect("main schema preserved");
+        drop(store);
+    }
+    #[test]
     fn translation_schema_install_is_atomic_and_refuses_partial_shape() {
         let conn = rusqlite::Connection::open_in_memory().expect("fixture");
         conn.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT);").expect("dependencies");

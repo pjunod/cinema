@@ -89,6 +89,14 @@ impl TranscodeManager {
             processed_preparation_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             #[cfg(target_os = "linux")]
             processed_instance_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            #[cfg(target_os = "linux")]
+            processed_reconstruction_slots: Arc::new(tokio::sync::Semaphore::new(
+                super::LIVE_RECONSTRUCTION_SLOTS,
+            )),
+            #[cfg(target_os = "linux")]
+            reconstruction_qualification: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(target_os = "linux")]
+            fel_requalification_requests: std::sync::Mutex::new(std::collections::HashMap::new()),
             pipeline,
             encoder_override: None,
             admissions: Admissions::new(),
@@ -1274,6 +1282,7 @@ impl TranscodeManager {
                 _heavy: heavy,
                 threads,
                 _permit: permit,
+                extension: std::sync::Mutex::new(None),
             })
     }
 
@@ -1340,8 +1349,40 @@ impl TranscodeManager {
             .map(|permit| FragmentAdmission {
                 _heavy: heavy,
                 threads,
+                extension: std::sync::Mutex::new(None),
                 _permit: permit,
             })
+    }
+
+    /// Admit a heavier bundle for a step of the background job that holds
+    /// `admission` (the FEL qualification's GPU graph inside a title scan),
+    /// as a claim on that admission: [`Self::fragment_worker_idle`] counts it
+    /// as the job's own capacity, so the job does not read its own step as
+    /// foreground pressure. Released by [`FragmentAdmission::release_extension`]
+    /// or with the admission.
+    pub(crate) async fn extend_fragment_admission(
+        &self,
+        admission: &FragmentAdmission,
+        resources: &TranscodeResourceEstimate,
+        software_threads: Option<u32>,
+    ) -> Result<(), String> {
+        if !self.fragment_worker_idle(admission) {
+            return Err("foreground work is waiting for this node's capacity".into());
+        }
+        let permit = crate::vodencode::try_admit_frozen_bundle(
+            &self.admissions,
+            self.max_hw_sessions().await,
+            self.software_budget().await,
+            resources,
+            software_threads,
+            Priority::Background,
+            None,
+        )
+        .map_err(|_| "the GPU slot or CPU this step needs is in use".to_owned())?;
+        if !admission.install_extension(permit) {
+            return Err("this job already holds an extended admission".into());
+        }
+        Ok(())
     }
 
     /// Own the existing heavy-worker lane, not an encoder estimate invented
@@ -1360,9 +1401,10 @@ impl TranscodeManager {
     }
 
     pub(crate) fn fragment_worker_idle(&self, admission: &FragmentAdmission) -> bool {
+        let (hardware, threads) = admission.claimed();
         !self.admissions.live_is_waiting()
-            && self.admissions.in_use() == 0
-            && self.admissions.software_in_use() <= admission.threads
+            && self.admissions.in_use() <= hardware
+            && self.admissions.software_in_use() <= threads
             && !self
                 .offline_waiting
                 .load(std::sync::atomic::Ordering::Acquire)

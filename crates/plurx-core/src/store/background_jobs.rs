@@ -2042,6 +2042,19 @@ pub trait BackgroundJobStore: Send + Sync {
         request: super::background_jobs_probe::ApplyProbeJob,
     ) -> Result<bool, StoreError>;
     async fn dv_title_readiness(&self) -> Result<super::dv_title_jobs::TitleReadiness, StoreError>;
+    async fn put_dv_fel_verdict(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        verdict: &serde_json::Value,
+    ) -> Result<bool, StoreError>;
+    async fn request_dv_fel_requalification(
+        &self,
+        file_id: i64,
+        binding: &str,
+    ) -> Result<bool, StoreError>;
+    async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError>;
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -2580,6 +2593,26 @@ LIMIT 1
     }
     async fn dv_title_readiness(&self) -> Result<super::dv_title_jobs::TitleReadiness, StoreError> {
         super::dv_title_jobs::readiness(self).await
+    }
+    async fn put_dv_fel_verdict(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        verdict: &serde_json::Value,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::put_fel_verdict(self, file_id, source_size, source_mtime, verdict)
+            .await
+    }
+    async fn request_dv_fel_requalification(
+        &self,
+        file_id: i64,
+        binding: &str,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::request_requalification(self, file_id, binding).await
+    }
+    async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError> {
+        super::dv_title_jobs::fel_verdict_counts(self, identity).await
     }
     async fn dv_title_demands(
         &self,

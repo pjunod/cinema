@@ -31,6 +31,7 @@ mod live_tv_resource;
 mod media;
 mod offline;
 mod outbox;
+mod playback_handoffs;
 mod pretranscode;
 mod publication;
 mod reading;
@@ -1314,13 +1315,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::library_annotations_schema::SCHEMA,
     // v114: source-revision title acquisition, independent of ordinary probes.
     super::dv_title_jobs::SCHEMA,
-    // v115: centrally fenced recomputable text subtitle translation slices.
+    // v115: one-time playback handoff codes and their file-scoped tokens.
+    super::playback_handoffs::SCHEMA,
+    // v116: centrally fenced recomputable text subtitle translation slices.
     super::subtitle_text_translation_schema::SCHEMA,
-    // v116: grant-bound read-only progressive caption retention.
+    // v117: grant-bound read-only progressive caption retention.
     super::shared_caption_schema::SCHEMA,
-    // v117: exact progressive v1 producer-incarnation trigger upgrade, preserving cached assets and leases.
+    // v118: exact progressive v1 producer-incarnation trigger upgrade, preserving cached assets and leases.
     super::subtitle_translation_schema::RETARGET_MIGRATION,
-    // v118: explicit playback continuity grants captured by exact range claims.
+    // v119: explicit playback continuity grants captured by exact range claims.
     super::subtitle_translation_schema::CONTINUITY_MIGRATION,
 ];
 
@@ -1851,9 +1854,9 @@ impl SqliteStore {
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
                 || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
-                || (version == 117
-                    && super::subtitle_translation_schema::retarget_already_applied(conn)?)
                 || (version == 118
+                    && super::subtitle_translation_schema::retarget_already_applied(conn)?)
+                || (version == 119
                     && super::subtitle_translation_schema::continuity_already_applied(conn)?);
             let applied = Self::apply_migration_step(conn, version, sql, already_applied);
             conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -1867,6 +1870,7 @@ impl SqliteStore {
         super::dv_title_jobs_schema::verify_sqlite(conn)?;
         super::subtitle_text_translation_schema::verify_sqlite(conn)?;
         super::shared_caption_schema::verify_sqlite(conn)?;
+        super::playback_handoffs::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

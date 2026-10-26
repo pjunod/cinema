@@ -10,7 +10,9 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [LINUX-PLAYER-PLAN.md](LINUX-PLAYER-PLAN.md) | How Dolby Vision plays on Linux through plurx: a web handoff to plurx Player (an mpv launcher), the server playback handoff (§3.1), Profile 7 FEL composed in the player (reconstructed Profile 8.1 from the server for clients that cannot compose), the closed-form mapping in a private mpv, packaging, and the milestones with their acceptance. | open |
 | [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) | Android/TV platform reports, browser peak choices, session boundaries and the synthetic PQ comparison; physical qualification pending. | open |
+| [LINUX-PLAYER-PLAN.md](LINUX-PLAYER-PLAN.md) | How Dolby Vision reaches Linux through plurx: mpv with a launcher, the playback handoff, the caps the player claims, Profile 7 FEL composed in the player, reconstructed P8.1 for other clients (M2), and the milestones. | open |
 | [FRAME-DROP-RECORDER.md](FRAME-DROP-RECORDER.md) | Automatic web incident capture, bounds, privacy, retrieval and attribution limits; production acceptance pending. | built |
 | [AVATAR-WEB-PLAYBACK-STATUS.md](AVATAR-WEB-PLAYBACK-STATUS.md) | Avatar Safari presentation faults, FEL encoder-selection root cause, physical evidence and review state. | open |
 | [Apple TV library row clipping](../apple-builds/1245-tvos-library-row-clipping.md) | Complete movie/show posters and metadata fit while browsing; the preamble scrolls and compact tools retain Back/Down focus. Physical Apple TV acceptance pending. | built |

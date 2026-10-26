@@ -1,0 +1,4 @@
+# plurx Player is built from the plurx repository and published beside it, not
+# uploaded to the Debian or Ubuntu archive, so there is no ITP bug for its
+# first changelog entry to close.
+plurx-player: initial-upload-closes-no-bugs

@@ -171,6 +171,15 @@ async fn revoke_device_for_user(
         }
     }
 
+    // A playback handoff token is listed here but lives in its own table,
+    // and is never a cached admin proof: revoke it there when it is the one.
+    if state
+        .store
+        .revoke_playback_handoff_token_by_prefix(user_id, &prefix)
+        .await?
+    {
+        return Ok(Json(serde_json::json!({ "ok": true })));
+    }
     let proof_revocation = ClusterCacheRevocation::begin_user(state, user_id).await?;
     let outcome = state
         .store
