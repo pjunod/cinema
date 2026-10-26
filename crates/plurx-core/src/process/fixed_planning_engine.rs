@@ -29,7 +29,6 @@ pub(crate) struct FixedEngineNativeProfile {
     pub file_slots: u64,
     pub inherited_child_file_slots: u64,
     pub pipe_readers: u64,
-    pub max_object_bytes: u64,
     pub hash_buffer_bytes: u64,
     pub max_command_output_bytes: u64,
     /// Bounded retained Rust custody and closed-object inventory storage.
@@ -66,7 +65,6 @@ pub(crate) fn fixed_engine_native_profile() -> FixedEngineNativeProfile {
         file_slots: FIXED_PLANNING_ENGINE_MAX_OBJECTS as u64,
         inherited_child_file_slots: 1,
         pipe_readers: 4,
-        max_object_bytes: MAX_OBJECT_BYTES,
         hash_buffer_bytes: HASH_BUFFER_BYTES as u64,
         max_command_output_bytes: MAX_COMMAND_OUTPUT_BYTES as u64,
         retained_custody_bytes: custody_bytes,
