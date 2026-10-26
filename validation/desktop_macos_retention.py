@@ -611,10 +611,7 @@ def current_context(workspace):
     require(current_run.get('id') == run_id and current_run.get('commit_sha') == current
         and adoption.bind_event(current_run,scope) == event, 'Native current API event/head differs')
     live = api.get('/pulls/'+str(scope['pr']))
-    require(live['number'] == scope['pr'] and live['head']['sha'] == current and live['base']['sha'] == pull['base']['sha']
-        and live['draft'] is False and live['state'] == 'open'
-        and live['base']['ref'] == 'main' and live['head']['repo']['id'] == live['base']['repo']['id'] == repo['id'],
-        'Native current PR moved/closed/drafted')
+    adoption.validate_live_pr(live,event,current)
     return api, scope, current, run_id
 
 

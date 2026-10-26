@@ -561,6 +561,18 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
                  mock.patch.object(native,'git',side_effect=lambda w,*a,**k:b'' if a[0]=='diff' else CURRENT.encode()):
                 self.assertEqual(native.current_context(ROOT)[2],CURRENT)
                 original = api.get
+                raw_event=path.read_bytes()
+                for tip in ('b'*40,'d'*40):
+                    def advanced(p,q=None):
+                        response=original(p,q)
+                        if p.startswith('/pulls/'):response['base']['sha']=tip
+                        return response
+                    api.get=advanced
+                    self.assertEqual(native.current_context(ROOT)[2],CURRENT)
+                    native.recheck(ROOT,CURRENT,RUN)
+                    self.assertEqual(path.read_bytes(),raw_event)
+                    self.assertEqual(json.loads(api.runs[RUN]['event_payload'])['pull_request']['base']['sha'],'a'*40)
+                api.get=original
                 def wrong_live_head(p,q=None):
                     response = original(p,q)
                     if p.startswith('/pulls/'):response['head']['sha'] = 'c'*40

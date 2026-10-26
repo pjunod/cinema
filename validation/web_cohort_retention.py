@@ -6,6 +6,7 @@ Unknown dependency/recipe shapes require closure review before any execution.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import io
 import json
@@ -31,6 +32,7 @@ JOB, JOB_ID = 'fast web syntax gate', 'web_compile'
 PRODUCER = 'fbbf4078d48ef894dcd1c154f5e404ac8656a99a'
 ORIGIN_RUN, ORIGIN_JOB, ORIGIN_TASK = 5964, 57771, 23006
 ORIGIN_LOG_SHA256 = '5c99fda5f1b086222032888286cef6f9463a3c067fc63a8044037691395fe6b8'
+PREDECESSOR_ADAPTER_SHA256 = 'fa61446a54fb35cf1c836dd6dac8b5fe90dfb239326345c8bdedcc33aa4485ef'
 BASELINE = 'tests/web/tsc-baseline.tsv'
 RUNTIME = {'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','typescript_lock':'6.0.3'}
 POLICY_VERSION = 2
@@ -356,6 +358,28 @@ def execution_key(inputs):
     return digest(canonical(inputs))
 
 
+def applicability_inputs(inputs):
+    """Compare effective baselines without rewriting raw execution provenance."""
+    require(type(inputs) is dict and type(inputs.get('baseline')) is dict
+        and set(inputs['baseline']) == {'event_base','merge_base','sha256'},
+        'Web applicability baseline shape differs')
+    baseline = inputs['baseline']
+    require(all(type(baseline[name]) is str and re.fullmatch(r'[0-9a-f]{40}',baseline[name])
+        for name in ('event_base','merge_base')) and type(baseline['sha256']) is str
+        and re.fullmatch(r'[0-9a-f]{64}',baseline['sha256']), 'Web applicability baseline identity differs')
+    projected = copy.deepcopy(inputs)
+    del projected['baseline']['event_base']
+    return projected
+
+
+def producer_adapter(workspace,producer,current):
+    """Only the exact reviewed predecessor protocol or this complete source."""
+    own = digest(git(workspace,'show',producer+':'+ADAPTER,limit=256*1024))
+    current_sha = digest(git(workspace,'show',current+':'+ADAPTER,limit=256*1024))
+    require(own in (PREDECESSOR_ADAPTER_SHA256,current_sha),'Web adapter compatibility unknown')
+    return own
+
+
 def runtime():
     require(sys.platform == 'linux' and platform.machine() in ('x86_64','AMD64'), 'Web host must be Linux/X64')
     actual = {name:subprocess.check_output(command,text=True,env=child_environment(),timeout=10).strip()
@@ -386,9 +410,7 @@ def current_context(workspace):
     require(run.get('id') == rid and run.get('commit_sha') == current and adoption.bind_event(run,scope) == event,
         'Web current API event/head differs')
     live = api.get('/pulls/'+str(scope['pr']))
-    require(live['head']['sha'] == current and live['base']['sha'] == pull['base']['sha'] and live['draft'] is False
-        and live['state'] == 'open' and live['base']['ref'] == 'main'
-        and live['head']['repo']['id'] == live['base']['repo']['id'] == repo['id'],'Web current PR moved/closed/drafted')
+    adoption.validate_live_pr(live,event,current)
     jobs = [job for job in api.pages('/actions/runs/'+str(rid)+'/jobs') if job.get('name') == JOB]
     require(len(jobs) == 1,'Web current job missing/ambiguous')
     check_job(jobs[0],scope,rid,False)
@@ -485,7 +507,7 @@ def legacy_result(api,scope,workspace):
     return {'kind':'legacy','run':ORIGIN_RUN,'job':ORIGIN_JOB,'attempt':1,'commit':PRODUCER,
         'log_sha256':digest(raw),'input_key':execution_key(inputs),
         'origin_observed_tools':{'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','typescript':'6.0.3'},
-        'historical_not_recorded':['OS distribution','kernel','Python version','Python cache policy','Make version','immutable host/image identity']},raw
+        'historical_not_recorded':['OS distribution','kernel','Python version','Python cache policy','Make version','immutable host/image identity']},raw,inputs
 
 
 def unpack(data):
@@ -517,8 +539,7 @@ def fresh_log(raw,key):
 def v1_result(api,scope,workspace,rid,jid,current,*,root_only=False):
     run,job,raw,lines,inputs = authenticate_job(api,scope,workspace,rid,jid)
     require(workflow_identity(workspace,run['commit_sha'])['kind'] == 'v1','Web v1 producer job shape differs')
-    require(git(workspace,'show',run['commit_sha']+':'+ADAPTER,limit=256*1024) ==
-        git(workspace,'show',current+':'+ADAPTER,limit=256*1024),'Web adapter compatibility unknown')
+    adapter_sha = producer_adapter(workspace,run['commit_sha'],current)
     name = f'web-cohort-{rid}-1'
     matches = [a for a in api.pages('/actions/artifacts',{'name':name}) if a.get('name') == name and a.get('run_id') == rid and not a.get('expired')]
     require(len(matches) == 1,'Web cohort artifact missing/ambiguous'); artifact = matches[0]
@@ -544,7 +565,7 @@ def v1_result(api,scope,workspace,rid,jid,current,*,root_only=False):
         git(workspace,'rev-parse',run['commit_sha']+'^{tree}',limit=64).decode().strip()
         and receipt['run'] == rid and receipt['job'] == jid and type(receipt['attempt']) is int and receipt['attempt'] == 1
         and receipt['scope'] == scope and receipt['inputs'] == inputs and receipt['input_key'] == key
-        and receipt['policy_sha256'] == policy_fingerprint() and receipt['adapter_sha256'] == digest(git(workspace,'show',current+':'+ADAPTER,limit=256*1024))
+        and receipt['policy_sha256'] == policy_fingerprint() and receipt['adapter_sha256'] == adapter_sha
         and receipt['web_job'] == workflow_identity(workspace,run['commit_sha']) and receipt['log_sha256'] == digest(log),
         'Web receipt API/source/policy/input binding differs')
     marker = 'WEB-COHORT-RECEIPT '+digest(canonical(receipt))
@@ -558,20 +579,24 @@ def v1_result(api,scope,workspace,rid,jid,current,*,root_only=False):
         require(receipt['origin'] is None and receipt['current_test_events'] is True,'Web fresh origin/event claim differs')
         fresh_log(log,key)
         return {'kind':'v1_fresh','run':rid,'job':jid,'attempt':1,'commit':run['commit_sha'],
-            'log_sha256':digest(log),'input_key':key,'artifact_id':aid,'artifact_sha256':sha,'job_log_sha256':digest(raw)},log
+            'log_sha256':digest(log),'input_key':key,'artifact_id':aid,'artifact_sha256':sha,'job_log_sha256':digest(raw)},log,inputs
     require(not root_only and receipt['mode'] == 'retained_prior_execution' and receipt['current_test_events'] is False
         and receipt['python_cache_execution'] is None,
         'Web retained origin must point directly to real execution')
     pointer = receipt['origin']; require(isinstance(pointer,dict),'Web retained origin missing')
-    if pointer.get('kind') == 'legacy': result,original = legacy_result(api,scope,workspace)
+    if pointer.get('kind') == 'legacy': result,original,original_inputs = legacy_result(api,scope,workspace)
     else:
         require(pointer.get('kind') == 'v1_fresh' and (pointer.get('run'),pointer.get('job')) != (rid,jid), 'Web retained origin cycle/chain')
-        result,original = v1_result(api,scope,workspace,pointer['run'],pointer['job'],current,root_only=True)
-    require(result == pointer and original == log and result['input_key'] == key,'Web retained original provenance/input differs')
-    return result,original
+        result,original,original_inputs = v1_result(api,scope,workspace,pointer['run'],pointer['job'],current,root_only=True)
+    require(result == pointer and original == log and result['input_key'] == execution_key(original_inputs)
+        and applicability_inputs(original_inputs) == applicability_inputs(inputs),
+        'Web retained original provenance/input differs')
+    if adapter_sha == PREDECESSOR_ADAPTER_SHA256:
+        require(result['input_key'] == key,'Predecessor web retained raw key differs')
+    return result,original,original_inputs
 
 
-def matching_result(api,scope,workspace,current,current_run,key):
+def matching_result(api,scope,workspace,current,current_run,current_inputs):
     # This protocol recognizes the explicit legacy origin and v1 producers.
     # Older heads without cohort evidence are outside it, not proven passes
     # or source inequalities. Never parse them with today's closure family.
@@ -605,16 +630,14 @@ def matching_result(api,scope,workspace,current,current_run,key):
         require(len(possible_artifacts) == len(artifacts),'Web cohort artifact name malformed; no fallback execution')
         require(workflow_identity(workspace,run['commit_sha'])['kind'] == 'v1',
             'Eligible web producer has unsupported recipe; closure review required')
-        require(git(workspace,'show',run['commit_sha']+':'+ADAPTER,limit=256*1024) ==
-            git(workspace,'show',current+':'+ADAPTER,limit=256*1024),
-            'Eligible web producer adapter compatibility unknown; closure review required')
+        producer_adapter(workspace,run['commit_sha'],current)
         if not artifacts and len(jobs) == 1 and jobs[0].get('status') == 'skipped' and type(jobs[0].get('task_id')) is int and jobs[0]['task_id'] == 0:
             require(jobs[0].get('repo_id') == scope['repository'] and jobs[0].get('run_id') == rid,
                 'Never-started web producer identity differs')
             continue
         adoption.bind_event(run,scope)
         inputs = manifest(workspace,run['commit_sha'],event['pull_request']['base']['sha'])
-        if execution_key(inputs) != key: continue
+        if applicability_inputs(inputs) != applicability_inputs(current_inputs): continue
         require(len(jobs) == 1 and jobs[0].get('status') == 'success',
             'Matching web history is incomplete/ambiguous; no fallback execution')
         require(len(artifacts) == 1 and artifacts[0].get('name') == f'web-cohort-{rid}-1'
@@ -636,7 +659,7 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
     live_inputs(workspace);live_script_resolvers(workspace,current)
     inputs = manifest(workspace,current,base); key = execution_key(inputs)
     origin_inputs = manifest(workspace,PRODUCER,'9bcfa9ca1f792d214122762981c84c85ba5b3e64')
-    original = legacy_result(api,scope,workspace) if scope['repository'] == 1 and scope['pr'] == 1263 and key == execution_key(origin_inputs) else matching_result(api,scope,workspace,current,run['id'],key)
+    original = legacy_result(api,scope,workspace) if scope['repository'] == 1 and scope['pr'] == 1263 and applicability_inputs(inputs) == applicability_inputs(origin_inputs) else matching_result(api,scope,workspace,current,run['id'],inputs)
     receipt = {'schema_version':1,'mode':'retained_prior_execution' if original else 'fresh_execution',
         'commit':current,'tree':git(workspace,'rev-parse',current+'^{tree}',limit=64).decode().strip(),
         'run':run['id'],'job':job['id'],'attempt':1,'scope':scope,'inputs':inputs,'input_key':key,
@@ -650,8 +673,9 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
     live_inputs(workspace);live_script_resolvers(workspace,current)
     require(manifest(workspace,current,base) == inputs and not git(workspace,'diff','--name-only','HEAD'),'Current web source changed before decision')
     if original:
-        receipt['origin'],raw = original
-        require(receipt['origin']['input_key'] == key,'Web retained applicability differs')
+        receipt['origin'],raw,original_inputs = original
+        require(receipt['origin']['input_key'] == execution_key(original_inputs)
+            and applicability_inputs(original_inputs) == applicability_inputs(inputs),'Web retained applicability differs')
         (output/'web-cohort.log').write_bytes(raw)
     else:
         require(fresh_on_new_inputs,'New web inputs require explicit fresh execution policy')
@@ -702,6 +726,7 @@ def refusal_code(error):
             'Web checkout/head changed':'checkout_head_changed',
             'Web current API event/head differs':'api_event_head_changed',
             'Web current PR moved/closed/drafted':'live_pr_changed',
+            'Live ordinary PR identity differs; do not execute stale units':'live_pr_changed',
             'Web decision already attempted; no duplicate fallback':'duplicate_decision'}.get(message,'receipt_guard_failed')
     if isinstance(error,subprocess.SubprocessError): return 'required_command_failed'
     if isinstance(error,zipfile.BadZipFile): return 'archive_invalid'

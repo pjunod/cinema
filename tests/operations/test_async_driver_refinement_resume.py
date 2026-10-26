@@ -435,6 +435,7 @@ class ReuseIdentities(OwnedScratch):
         for path in ('verification/async-driver-refinement/checker.py',
                      'verification/async-driver-refinement/product-schema.json',
                      'validation/async_refinement_resume.py',
+                     'validation/main_preflight_adoption.py',
                      'validation/worker_control_resume.py',
                      *runner.ACTUAL_SETTLEMENT_SOURCE_PATHS):
             changed = dict(sources); changed[path] = 'changed invocation bytes'
@@ -745,6 +746,13 @@ class ExplicitTransportAuthentication(unittest.TestCase):
             with patch.dict(os.environ,env),patch.object(adapter.receipts,'API',return_value=API()), \
                  patch.object(adapter.subprocess,'check_output',side_effect=lambda argv,**kw:commit+'\n' if argv[1]=='rev-parse' else b''):
                 self.assertEqual(adapter.current_context(ROOT,11,2)[4],job)
+                original_event=event_path.read_bytes()
+                for live_base in ('c'*40,'d'*40):
+                    pull['base']['sha']=live_base
+                    self.assertEqual(adapter.current_context(ROOT,11,2)[4],job)
+                    adapter.recheck_current_context(ROOT,11,2,adapter.main_receipts.identity(API(),2,commit),commit,job)
+                    self.assertEqual(event_path.read_bytes(),original_event)
+                    self.assertEqual(json.loads(current['event_payload'])['pull_request']['base']['sha'],'b'*40)
                 for attempt in (0,-1,True,3):
                     with self.subTest(attempt=attempt),self.assertRaises(receipts.ReceiptError):adapter.current_context(ROOT,11,attempt)
                 for change in ({'name':'fast Rust gate'},{'status':'success'},{'repo_id':4}):

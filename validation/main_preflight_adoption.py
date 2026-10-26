@@ -96,6 +96,31 @@ def bind_event(run, scope, ready=True):
     return event
 
 
+def validate_live_pr(live, event, commit):
+    """Ordinary lane authority follows the head; the event baseline stays raw."""
+    message = "Live ordinary PR identity differs; do not execute stale units"
+    try:
+        pull, repo = event["pull_request"], event["repository"]
+        identities = (event["number"], pull["number"], live["number"], repo["id"],
+            pull["head"]["repo"]["id"], pull["base"]["repo"]["id"],
+            live["head"]["repo"]["id"], live["base"]["repo"]["id"])
+        require(all(type(value) is int and value > 0 for value in identities)
+            and event["number"] == pull["number"] == live["number"]
+            and all(value == repo["id"] for value in identities[4:])
+            and isinstance(commit,str) and re.fullmatch(r"[0-9a-f]{40}",commit)
+            and live["head"]["sha"] == pull["head"]["sha"] == commit
+            and isinstance(pull["head"]["ref"],str) and pull["head"]["ref"]
+            and live["head"]["ref"] == pull["head"]["ref"]
+            and live["base"]["ref"] == pull["base"]["ref"] == "main"
+            and live["draft"] is pull["draft"] is False
+            and live["state"] == pull["state"] == "open"
+            and all(isinstance(value,str) and re.fullmatch(r"[0-9a-f]{40}",value)
+                for value in (pull["base"]["sha"],live["base"]["sha"])), message)
+    except (KeyError,TypeError):
+        raise ReceiptError(message) from None
+    return pull["base"]["sha"]
+
+
 def terminal_status(metadata: Mapping[str, object]) -> object:
     """Forgejo has returned both keys; disagreements are ambiguous."""
     values = [metadata[key] for key in ("status", "state") if key in metadata]
@@ -248,10 +273,7 @@ def api_context():
             "Current API run ID/source mismatch")
     require(bind_event(current, scope) == event, "Current API/event payload mismatch")
     live = api.get(f"/pulls/{pull['number']}")
-    require(live["head"]["sha"] == commit and live["base"]["sha"] == pull["base"]["sha"]
-            and live["draft"] is False and live["state"] == "open"
-            and live["head"]["repo"]["id"] == live["base"]["repo"]["id"] == repo["id"]
-            and live["base"]["ref"] == "main", "Live PR moved/closed/drafted; do not execute stale units")
+    validate_live_pr(live,event,commit)
     return api, scope, commit, run_id
 
 

@@ -38,6 +38,13 @@ def zipped(value):
     return buffer.getvalue()
 
 
+def ordinary_event():
+    pull={"number":7,"state":"open","draft":False,
+        "head":{"sha":CURRENT,"ref":"topic","repo":{"id":1}},
+        "base":{"sha":X,"ref":"main","repo":{"id":1}}}
+    return {"number":7,"action":"synchronize","repository":dict(REPO),"pull_request":pull}
+
+
 class Ledger:
     """Forgejo metadata, artifacts, logs and git objects for one PR."""
 
@@ -483,6 +490,56 @@ class MainPreflightAdoptionCase(unittest.TestCase):
         self.assertFalse(adoption.matches_input(".github/workflows/nested/new.yml", ".github/workflows/*.yml"))
         with self.assertRaises(ReceiptError):
             adoption.matches_input("a", "**/" * 9 + "a")
+
+    def test_ordinary_live_pr_advancing_base_preserves_authenticated_event_baseline(self):
+        event=ordinary_event();original=copy.deepcopy(event);live=copy.deepcopy(event["pull_request"])
+        for tip in (X,Y,Z):
+            live["base"]["sha"]=tip
+            self.assertEqual(adoption.validate_live_pr(live,event,CURRENT),X)
+            self.assertEqual(event,original)
+
+    def test_ordinary_live_pr_rejects_changed_or_malformed_authority(self):
+        event=ordinary_event();original=copy.deepcopy(event)
+        changes=((('head','sha'),Y),(('head','ref'),'retargeted'),(('base','ref'),'other'),
+            (('number',),8),(('number',),True),(('head','repo','id'),2),(('base','repo','id'),True),
+            (('draft',),True),(('draft',),0),(('state',),'closed'),(('base','sha'),None),(('base','sha'),'bad'))
+        for path,value in changes:
+            live=copy.deepcopy(event['pull_request']);target=live
+            for name in path[:-1]:target=target[name]
+            target[path[-1]]=value
+            with self.subTest(path=path,value=value),self.assertRaisesRegex(ReceiptError,'Live ordinary PR identity differs'):
+                adoption.validate_live_pr(live,event,CURRENT)
+            self.assertEqual(event,original)
+        for bad in ({**event,'number':True},{**event,'repository':{'id':True}},
+            {**event,'pull_request':{**event['pull_request'],'base':{'sha':'missing','ref':'main','repo':{'id':1}}}}):
+            with self.assertRaisesRegex(ReceiptError,'Live ordinary PR identity differs'):
+                adoption.validate_live_pr(copy.deepcopy(event['pull_request']),bad,CURRENT)
+
+    def test_ordinary_api_context_rechecks_live_head_without_rewriting_event_or_delegation(self):
+        from validation import worker_control_resume as worker
+        from validation import main_unit_receipts as units
+        event=ordinary_event();raw=json.dumps(event);live=copy.deepcopy(event['pull_request'])
+        run={'id':11,'commit_sha':CURRENT,'workflow_id':'main-fast-lane.yml','event':'pull_request',
+            'event_payload':raw,'repository':REPO}
+        class API:
+            def get(self,path):return REPO if path=='' else live if path.startswith('/pulls/') else run
+        api=API();scratch=Path(__file__).resolve().parents[2]/'target/ordinary-pr-context-fixtures'
+        scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            path=Path(directory)/'event.json';path.write_text(raw)
+            env={'GITHUB_EVENT_NAME':'pull_request','GITHUB_EVENT_PATH':str(path),'GITHUB_REPOSITORY':REPO['full_name'],
+                'GITHUB_SHA':CURRENT,'GITHUB_RUN_ID':'11','GITHUB_RUN_ATTEMPT':'1',
+                'GITHUB_API_URL':'https://ci.example/api/v1','GITHUB_SERVER_URL':'https://ci.example'}
+            with mock.patch.dict(os.environ,env),mock.patch.object(adoption,'API',return_value=api), \
+                 mock.patch.object(adoption,'git',side_effect=lambda *args:CURRENT if args[0]=='rev-parse' else ''):
+                self.assertIs(units.adoption,adoption)
+                for tip in (Y,Z):
+                    live['base']['sha']=tip
+                    self.assertEqual(adoption.api_context(),(api,SCOPE,CURRENT,11))
+                    self.assertEqual(worker.current_context()[2:],(CURRENT,11))
+                    self.assertEqual(path.read_text(),raw);self.assertEqual(run['event_payload'],raw)
+                changed=json.loads(raw);changed['pull_request']['base']['sha']=Y;run['event_payload']=json.dumps(changed)
+                with self.assertRaisesRegex(ReceiptError,'Current API/event payload mismatch'):adoption.api_context()
 
     def test_pull_request_sync_aliases_preserve_source_repository_and_readiness_binding(self):
         import json

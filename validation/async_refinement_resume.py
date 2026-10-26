@@ -36,6 +36,7 @@ INVOCATION_PATHS = (
     '.github/workflows/main-fast-lane.yml',
     'verification/durable-jobs/toolchain.json',
     'validation/async_refinement_resume.py',
+    'validation/main_preflight_adoption.py',
     'validation/worker_control_resume.py',
 )
 ARTIFACT_PREFIX = 'async-driver-refinement'
@@ -118,11 +119,7 @@ def current_context(workspace,run,attempt):
     receipts.require(current.get('id') == run and current.get('commit_sha') == commit
       and adoption.bind_event(current,scope) == event,'Async current API event/head differs')
     live = api.get('/pulls/'+str(scope['pr']))
-    receipts.require(live['number'] == scope['pr'] and live['head']['sha'] == commit
-      and live['base']['sha'] == pull['base']['sha'] and live['base']['ref'] == 'main'
-      and live['draft'] is False and live['state'] == 'open'
-      and live['head']['repo']['id'] == live['base']['repo']['id'] == repo['id'],
-      'Async current PR moved/closed/drafted')
+    adoption.validate_live_pr(live,event,commit)
     jobs = [job for job in api.pages('/actions/runs/'+str(run)+'/jobs')
       if job.get('name') == PROOF_JOB and job.get('attempt') == attempt]
     receipts.require(len(jobs) == 1 and type(jobs[0].get('attempt')) is int

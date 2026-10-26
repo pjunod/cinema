@@ -34,6 +34,23 @@ costs separately. It removes only the second parent canonical/domain read
 pair after the demand savepoint. The full first parent checks, replay refusal
 atomicity, successor checks, exact rollback checks and poisoning remain.
 
+## Ordinary PR authority preserves the recorded baseline
+
+The ordinary main fast lane authorizes the checked-out, API-authenticated PR
+head. The shared `main_preflight_adoption.validate_live_pr` check is used by
+preflight/Python/controller context and the async, web and native adapters.
+It requires the same typed PR/repository identities, head SHA and head ref,
+open/non-draft state and base ref `main`. Both recorded and live base SHAs must
+be well formed; a live main advance does not replace the authenticated event
+baseline or require the tips to stay equal. Initial and final run/event/head
+checks remain strict. Effort/manual qualification still binds its expected
+head and base tips separately; this ordinary-lane rule does not alter it.
+
+Async invocation provenance explicitly includes the shared adoption module.
+Historical event authentication is separate from current live authority, and
+an old producer's head is never compared to today's PR head. A head-only pass
+proves that source head; it is not a merged-tree proof of later upstream bytes.
+
 ## Checkpoint before graph-product
 
 `scripts/check-async-driver-refinement build-prefix` derives its cases from
@@ -152,6 +169,25 @@ outside this protocol, not proven passes or input differences; they do not
 poison new-key execution through current-family parsing. A matching v1
 producer with missing, invalid or ambiguous evidence still refuses. Raw source
 manifests and log bytes remain original.
+
+Web producer validation recognizes the exact complete reviewed predecessor
+adapter SHA-256 `fa61446a54fb35cf1c836dd6dac8b5fe90dfb239326345c8bdedcc33aa4485ef`
+and the current complete adapter source. Each receipt's adapter hash binds its
+own producer source. Unknown changed bytes refuse; the execution-policy,
+runtime, recipe, source, archive, upload and raw log/key checks remain exact.
+No arbitrary historical source is made compatible by matching selected text.
+
+Effective-baseline applicability copies each independently reconstructed
+manifest and removes only `baseline.event_base`. It preserves the actual Git
+merge base, baseline byte hash and every other source/member/mode/runtime/
+namespace/policy field. Both baseline commit identities and the exact baseline
+shape are validated first. Different raw event bases still produce different
+raw execution keys; a retained current receipt keeps its own key and points
+directly to the original execution with its unchanged key, receipt and log.
+The authenticated original inputs travel internally alongside that pointer.
+Different effective baselines or other covered inputs cannot match, and
+retained-to-retained chains remain forbidden. The predecessor's stricter raw
+key equality for its own retained receipts is still checked.
 
 Producer eligibility precedes source compatibility: an authenticated terminal
 failed or cancelled web job with a complete artifact listing containing no

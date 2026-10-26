@@ -17,7 +17,11 @@ physical Intel-runtime or daemon-runtime acceptance.
 
 `validation.desktop_macos_retention` authenticates the current ready same-repo
 PR/head, prior API run/event/job/attempt, artifact metadata, actual upload hash,
-fresh checkout and pinned toolchain lines. Legacy ZIP/member/log bounds are 16/64/64 KiB. Version-1 bundles have a
+fresh checkout and pinned toolchain lines. Current authority uses the shared
+ordinary main-lane validator. Live main may advance while the authenticated
+event baseline remains unchanged; head/ref/repository/readiness and immutable
+API-event checks stay strict. Effort/manual expected-base binding is separate.
+Legacy ZIP/member/log bounds are 16/64/64 KiB. Version-1 bundles have a
 separate 128 KiB ZIP, 128 KiB JSON/member and 512 KiB total bound; native/job
 logs remain 64 KiB.
 No committed summary or caller-supplied digest authorizes adoption. Redirects,
