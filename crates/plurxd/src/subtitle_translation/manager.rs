@@ -138,7 +138,7 @@ async fn schedule(state: &AppState) -> Result<bool, StoreError> {
             .ok_or_else(|| StoreError::Task("translation epoch".into()))?;
         let profile: TranslationProfile = serde_json::from_value(op["profile"].clone())
             .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?;
-        if profile != super::profile::selected_profile() {
+        if !super::profile::registered(&profile) {
             continue;
         }
         let source: SourceRevision = serde_json::from_value(op["source"].clone())
@@ -205,7 +205,8 @@ async fn schedule(state: &AppState) -> Result<bool, StoreError> {
                     source: source.clone(),
                     source_sha256: held.sha256().into(),
                     profile: profile.clone(),
-                    audio_index: 0,
+                    audio_index: number(&op["audio_index"])
+                        .ok_or_else(|| StoreError::Task("translation audio identity".into()))?,
                     spoken_language: op["spoken_language"].as_str().unwrap_or_default().into(),
                     duration_ms: duration,
                     core_index: index,
@@ -303,7 +304,7 @@ async fn execute(
         }
         _ => return Ok(false),
     };
-    if selected != &profile::selected_profile() {
+    if !profile::registered(selected) {
         return Err(StoreError::Task("translation_profile_unavailable".into()));
     }
     let file = tokio::time::timeout(
@@ -314,7 +315,12 @@ async fn execute(
     .map_err(|_| StoreError::Task("worker_source_unavailable".into()))??
     .filter(|f| f.size == revision.source_size && f.mtime == revision.source_mtime)
     .ok_or_else(|| StoreError::Task("source_changed".into()))?;
-    super::file_capability(state, &file)
+    let audio_index = match source {
+        JobPayload::SubtitleTranslationPrepare { audio_index, .. } => *audio_index,
+        JobPayload::SubtitleTranslationRange { recipe, .. } => recipe.audio_index,
+        _ => unreachable!(),
+    };
+    super::selected_file_capability(state, &file, audio_index)
         .await
         .map_err(|e| StoreError::Task(e.into()))?;
     let held = match state.subtitle_models.translation.cached(&file).await {
@@ -371,7 +377,7 @@ async fn execute(
             let hash =
                 artifacts::open_model_cancellable(&state.subtitle_models.root, &spec, cancel);
             tokio::pin!(hash);
-            let model = tokio::select! {result=&mut hash=>result.map_err(StoreError::Task)?,()=crate::subtitle_transcription::watch_capacity(&state.transcode,admission)=>{cancel.cancel();let _=hash.await;return Err(StoreError::Task("waiting_for_playback_capacity".into()));}};
+            let model = tokio::select! {result=&mut hash=>result.map_err(StoreError::Task)?,()=crate::subtitle_transcription::watch_speech_capacity(&state.transcode,admission)=>{cancel.cancel();let _=hash.await;return Err(StoreError::Task("waiting_for_playback_capacity".into()));}};
             // The current receipt must match the exact model identity opened
             // AFTER admission; metadata observed before a claim is insufficient.
             if !super::workers_public(state)
@@ -379,9 +385,12 @@ async fn execute(
                 .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
                 .iter()
                 .any(|w| {
-                    w["capabilities"]
-                        .as_array()
-                        .is_some_and(|caps| caps.iter().any(|c| c["status"] == "verified"))
+                    w["capabilities"].as_array().is_some_and(|caps| {
+                        caps.iter().any(|c| {
+                            c["status"] == "verified"
+                                && c["profile_id"].as_str() == selected.id().ok().as_deref()
+                        })
+                    })
                 })
             {
                 return Err(StoreError::Task("translation_unverified".into()));
@@ -453,7 +462,16 @@ async fn automatic_verification(state: &AppState) -> Result<(), StoreError> {
         std::sync::atomic::Ordering::Relaxed,
     );
 
-    let selected = profile::selected_profile();
+    for selected in profile::profiles() {
+        automatic_profile_verification(state, selected).await?;
+    }
+    Ok(())
+}
+
+async fn automatic_profile_verification(
+    state: &AppState,
+    selected: TranslationProfile,
+) -> Result<(), StoreError> {
     let spec = profile::model_spec();
     let profile_id = selected.id()?;
     if state
@@ -498,9 +516,10 @@ async fn automatic_verification(state: &AppState) -> Result<(), StoreError> {
         .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
         .iter()
         .any(|w| {
-            w["capabilities"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(|v| v["status"] == "verified"))
+            w["capabilities"].as_array().is_some_and(|c| {
+                c.iter()
+                    .any(|v| v["status"] == "verified" && v["profile_id"] == profile_id)
+            })
         })
     {
         return Ok(());
@@ -595,6 +614,15 @@ pub(crate) async fn worker_pass(
         .await = candidates.next;
     for candidate in candidates.jobs {
         let source = candidate.supported_payload()?;
+        let selected = match &source {
+            JobPayload::SubtitleModelOperation {
+                translation_profile: Some(profile),
+                ..
+            }
+            | JobPayload::SubtitleTranslationPrepare { profile, .. } => profile.clone(),
+            JobPayload::SubtitleTranslationRange { recipe, .. } => recipe.profile.clone(),
+            _ => profile::selected_profile(),
+        };
         let model = matches!(&source,JobPayload::SubtitleModelOperation{action,..} if action.is_translation());
         if matches!(&source, JobPayload::SubtitleModelOperation { .. }) && !model {
             continue;
@@ -621,7 +649,7 @@ pub(crate) async fn worker_pass(
                 .failures
                 .read()
                 .await
-                .contains_key(&profile::selected_profile().id()?)
+                .contains_key(&selected.id()?)
             {
                 state
                     .store
@@ -652,7 +680,7 @@ pub(crate) async fn worker_pass(
             .any(|r| {
                 accepted_capability(
                     &r,
-                    &profile::selected_profile(),
+                    &selected,
                     &spec.sha256,
                     &artifacts::identity_key(identity),
                 )
@@ -670,7 +698,7 @@ pub(crate) async fn worker_pass(
             let key = plurx_core::store::subtitle_translation::digest(&serde_json::json!([
                 state.node_id,
                 state.subtitle_models.boot_id,
-                profile::selected_profile().id()?,
+                selected.id()?,
                 artifacts::identity_key(identity),
                 artifacts::identity_key(engine.identity)
             ]))?;
@@ -696,15 +724,18 @@ pub(crate) async fn worker_pass(
                 .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
                 .iter()
                 .any(|w| {
-                    w["capabilities"]
-                        .as_array()
-                        .is_some_and(|c| c.iter().any(|v| v["status"] == "verified"))
+                    w["capabilities"].as_array().is_some_and(|c| {
+                        c.iter().any(|v| {
+                            v["status"] == "verified"
+                                && v["profile_id"].as_str() == selected.id().ok().as_deref()
+                        })
+                    })
                 })
             {
                 continue;
             }
-            match state.transcode.admit_fragment().await {
-                Some(a) if state.transcode.fragment_worker_idle(&a) => Some(a),
+            match state.transcode.admit_speech().await {
+                Some(a) if state.transcode.speech_capacity_available(&a) => Some(a),
                 _ => continue,
             }
         };
@@ -770,7 +801,7 @@ pub(crate) async fn worker_pass(
                         .failures
                         .write()
                         .await
-                        .remove(&profile::selected_profile().id()?);
+                        .remove(&selected.id()?);
                 }
             }
             Ok(false) => {
@@ -826,7 +857,7 @@ pub(crate) async fn worker_pass(
                             .failures
                             .write()
                             .await
-                            .insert(profile::selected_profile().id()?, reason.into());
+                            .insert(selected.id()?, reason.into());
                     }
                     let _ = fence
                         .settle(JobSettlement::Fail {

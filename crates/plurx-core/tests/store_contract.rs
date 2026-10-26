@@ -32583,6 +32583,7 @@ async fn downloaded_subtitles_survive_rescan_and_reject_stale_or_duplicate_write
             .expect("subtitle contract fixture")
             .expect("subtitle contract fixture");
         let track = plurx_core::domain::DownloadedSubtitle {
+            text_translation: None,
             source_size: original.size,
             source_mtime: original.mtime,
             provider_file_id: 123,

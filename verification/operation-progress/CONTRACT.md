@@ -228,3 +228,18 @@ wired to the daemon background shutdown token. Abrupt process loss, arbitrary
 boot adoption, per-job starvation freedom, unbounded in-flight writes,
 numeric response time, remote authority internals and Raft liveness require
 separate evidence. No timer or watchdog is proposed as a runtime fix.
+
+## Subtitle completion construction correspondence
+
+The 2026-10-26 mapping refresh compares the source with `origin/main` at
+`087e836d369eb2b8f94ec1d0454ea6c157612df9`. Selected library claim, heartbeat,
+bind/complete and retirement paths remain unchanged. Fragment admission
+remains try-only. New speech work takes two bounded CPU threads through the
+shared heavy gate; read attestation takes one speculative CPU slot without
+producer authority. Those competitors do not establish admission fairness
+for the selected library worker and are outside this model. New caption
+schema installation preserves the mapped store timeout boundary.
+
+Only source correspondence and hashes are refreshed. Model/configuration
+bytes and fairness clauses are unchanged. Final adversarial review,
+current-source runtime checks and TLC qualification remain pending.

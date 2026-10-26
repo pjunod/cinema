@@ -4702,6 +4702,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                 .expect("probe");
             // A provider identity never shares the generated-caption namespace.
             let online = plurx_core::domain::DownloadedSubtitle {
+                text_translation: None,
                 source_size: file.size,
                 source_mtime: file.mtime,
                 provider_file_id: 123,
@@ -4803,6 +4804,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                 panic!("{backend}: claim refused")
             };
             let caption = plurx_core::domain::DownloadedSubtitle {
+                text_translation: None,
                 source_size: file.size,
                 source_mtime: file.mtime,
                 provider_file_id: 0,
@@ -5183,6 +5185,8 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
             .observe_subtitle_job(ObserveSubtitleJob {
                 token: token.clone(),
                 phase: SubtitlePhase::Downloading,
+                completed_cues: None,
+                total_cues: None,
                 now_ms: now + 1
             })
             .await
@@ -5211,6 +5215,8 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
             .observe_subtitle_job(ObserveSubtitleJob {
                 token: token.clone(),
                 phase: SubtitlePhase::Verifying,
+                completed_cues: None,
+                total_cues: None,
                 now_ms: now + 2
             })
             .await
@@ -5321,6 +5327,8 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
                 .observe_subtitle_job(ObserveSubtitleJob {
                     token,
                     phase: SubtitlePhase::Verifying,
+                    completed_cues: None,
+                    total_cues: None,
                     now_ms: now + 3
                 })
                 .await
@@ -5495,6 +5503,7 @@ async fn managed_caption_execution_provenance_survives_publish_reopen_and_legacy
         }),
     };
     let caption = DownloadedSubtitle {
+        text_translation: None,
         source_size: file.size,
         source_mtime: file.mtime,
         provider_file_id: 0,
@@ -5629,6 +5638,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             .expect("save unready");
         assert_eq!(saved["outcome"], "saved", "{backend}");
         let profile = TranslationProfile {
+            task: Default::default(),
             version: 1,
             model_id: "small".into(),
             model_sha256: "a".repeat(64),

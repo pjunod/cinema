@@ -108,6 +108,8 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("player/menus.js",                        WebAsset::BodyScript,  include_str!("../web/player/menus.js")),
     ("player/audio-sync.js",                   WebAsset::BodyScript,  include_str!("../web/player/audio-sync.js")),
     ("player/subtitle-translation.js",          WebAsset::BodyScript,  include_str!("../web/player/subtitle-translation.js")),
+    ("player/subtitle-text-translation.js",      WebAsset::BodyScript,  include_str!("../web/player/subtitle-text-translation.js")),
+    ("player/shared-subtitle-captions.js",       WebAsset::BodyScript,  include_str!("../web/player/shared-subtitle-captions.js")),
     ("player/stats.js",                        WebAsset::BodyScript,  include_str!("../web/player/stats.js")),
     ("player/watch-presentation.js", WebAsset::BodyScript, include_str!("../web/player/watch-presentation.js")),
     ("detail/watch-browser.js", WebAsset::BodyScript, include_str!("../web/detail/watch-browser.js")),

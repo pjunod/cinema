@@ -20,12 +20,65 @@ function translationMs(value){return Number.isSafeInteger(value)&&value>=0&&valu
 function translationClosed(value,keys){return !!value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));}
 function translationLiteral(text){return String(text).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");}
 function translationFailure(code){
-  return ({disabled:"Enable English translation in Settings to request work.",model_missing:"Install the selected multilingual model in Settings.",translation_unverified:"Test this model for English translation in Settings.",source_unverified:"Checking this source is required before new translation can run.",source_changed:"The media source changed. Refresh this title before requesting translation.",source_clock_unsupported:"This source timeline is not supported for progressive translation.",direct_audio_selection_unverified:"This direct playback profile needs one unambiguous audio stream.",delivery_unsupported:"Progressive translation is not qualified for this playback route.",waiting_for_worker:"Waiting for a qualified worker with access to the source.",worker_source_unavailable:"Waiting for a qualified worker with access to the source.",waiting_for_playback_capacity:"Waiting for capacity while the picture keeps playing.",demand_expired:"Translation work is suspended. Cached captions remain available.",demand_conflict:"Translation paused while this player was away. Choose Translate to English to continue.",worker_interrupted:"The translation worker stopped. Retry the affected range.",inference_failed:"Translation failed for this range. Retry is available when reported.",inference_timeout:"Translation exceeded its time limit for this range.",output_invalid:"The translated text failed validation.",segment_too_large:"This translated segment exceeds its supported size.",quota_exceeded:"Translation storage or request limits have been reached.",operation_stopped:"Translation is stopped. Committed captions remain available.",epoch_conflict:"Translation changed. Refresh its status before a new action.",intent_expired:"This action expired. Refresh status and try explicitly again.",request_conflict:"This request conflicts with an earlier action. Refresh status.",translation_snapshot_expired:"Caption coverage changed. Refreshing this playback window.",segment_unavailable:"A committed caption segment is unavailable. Retry reading its coverage.",permission_denied:"You no longer have access to these captions.",profile_unavailable:"No qualified translation profile is currently available.",network_error:"Translation status is unavailable. Retry status; playback continues."})[code]||"Translation is unavailable. Refresh status for current information.";
+  return ({disabled:"Enable AI captions in Settings to request work.",model_missing:"Install the selected speech model in Settings.",translation_unverified:"Test this model for the selected caption task in Settings.",source_unverified:"Checking this source is required before new captions can run.",source_changed:"The media source changed. Refresh this title before requesting captions.",source_clock_unsupported:"This source timeline is not supported for progressive captions.",direct_audio_selection_unverified:"Choose a known audio stream supported for progressive captions.",delivery_unsupported:"Progressive captions are not qualified for this playback route.",waiting_for_worker:"Waiting for a qualified worker with access to the source.",worker_source_unavailable:"Waiting for a qualified worker with access to the source.",waiting_for_playback_capacity:"Waiting for capacity while the picture keeps playing.",demand_expired:"Caption work is suspended. Cached captions remain available.",demand_conflict:"Caption work paused while this player was away. Start it again to continue.",worker_interrupted:"The speech worker stopped. Retry the affected range.",inference_failed:"Speech processing failed for this range. Retry is available when reported.",inference_timeout:"Speech processing exceeded its time limit for this range.",output_invalid:"The generated caption text failed validation.",segment_too_large:"This caption segment exceeds its supported size.",quota_exceeded:"Caption storage or request limits have been reached.",operation_stopped:"Caption generation is stopped. Committed captions remain available.",epoch_conflict:"Caption work changed. Refresh its status before a new action.",intent_expired:"This action expired. Refresh status and try explicitly again.",request_conflict:"This request conflicts with an earlier action. Refresh status.",translation_snapshot_expired:"Caption coverage changed. Refreshing this playback window.",segment_unavailable:"A committed caption segment is unavailable. Retry reading its coverage.",permission_denied:"You no longer have access to these captions.",profile_unavailable:"No qualified speech profile is currently available.",source_verifying:"Checking the media identity before reading captions. Playback continues.",network_error:"Caption status is unavailable. Retry status; playback continues."})[code]||"AI captions are unavailable. Refresh status for current information.";
 }
 function translationCapture(){return {auth:AUTH_GENERATION,token:TOKEN,page:PAGE_RENDER_GENERATION,route:location.hash};}
 function translationAuthCurrent(state){return !!state&&!state.retired&&state.capture.auth===AUTH_GENERATION&&state.capture.token===TOKEN&&!!ME;}
 function translationPageCurrent(state){return translationAuthCurrent(state)&&state.capture.page===PAGE_RENDER_GENERATION&&state.capture.route===location.hash;}
-function translationCurrent(state){return translationPageCurrent(state)&&PLAYER===state.player&&document.getElementById("video")===state.video&&state.player.mediaAttachment===state.attachment&&state.player.fileId===state.fileId&&state.player.curAudio===state.audioChoice;}
+function translationAudioOrdinal(player){
+  const track=Number.isSafeInteger(player?.curAudio)&&player.curAudio>=0?player.audio?.[player.curAudio]:null;
+  if(!track||!Number.isSafeInteger(track.index)||track.index<0)return null;
+  const ordinal=typeof selectedAudioIndex==="function"?selectedAudioIndex(player):track.index;
+  return Number.isSafeInteger(ordinal)&&ordinal>=0&&ordinal===track.index?ordinal:null;
+}
+function translationAttachedAudioOrdinal(player){return Number.isSafeInteger(player?.mediaAttachment?.audioOrdinal)?player.mediaAttachment.audioOrdinal:translationAudioOrdinal(player);}
+function translationOwnsPlayer(state){
+  if(PLAYER===state.player)return true;
+  // Preparation has not committed a replacement attachment. The predecessor
+  // still owns the element and its captions, including on a refused open.
+  return PLAYER?.mediaPredecessor===state.player&&!PLAYER.mediaAttachment;
+}
+function translationCurrent(state){return translationPageCurrent(state)&&translationOwnsPlayer(state)&&!state.handoffTarget&&document.getElementById("video")===state.video&&state.player.mediaAttachment===state.attachment&&String(state.player.fileId)===state.fileId&&translationAttachedAudioOrdinal(state.player)===state.audioIndex;}
+function translationSameSourceAudio(state,player){return translationAuthCurrent(state)&&String(player?.fileId)===state.fileId&&player?.fileContext?.source_ref?.kind==="local"&&translationAudioOrdinal(player)===state.audioIndex;}
+function translationHidePresentation(state){
+  const track=state.video?._translationTrack;if(!track)return;
+  track.mode="disabled";try{while(track.cues?.length)track.removeCue(track.cues[0]);}catch(error){void error;}
+}
+function translationAttachmentWillChange(player){
+  const state=SUBTITLE_TRANSLATION;if(!state)return;
+  if(!translationSameSourceAudio(state,player)){translationRetire("playback source or audio changed");return;}
+  if(state.handoffTarget===player)return;
+  if(player!==state.player&&player.captionIntent==null){player.captionIntent=state.player.captionIntent?{...state.player.captionIntent}:{kind:"off"};player.captionIntentSerial=state.player.captionIntentSerial||0;}
+  state.handoffTarget=player;state.positionReady=false;state.presentationValidated=false;state.rebinding=true;state.sourceValidated=false;
+  state.windowGeneration++;state.requestGeneration=(state.requestGeneration||0)+1;state.etag=null;state.lease=null;state.manifestWindow=null;
+  clearTimeout(state.timer);clearTimeout(state.heartbeatTimer);state.heartbeatTimer=null;
+  for(const controller of state.controllers)controller.abort();state.controllers.clear();
+  translationHidePresentation(state);
+}
+function translationAttachmentDidBegin(player,token){
+  const state=SUBTITLE_TRANSLATION;if(!state)return;
+  if(!translationSameSourceAudio(state,player)){translationRetire("playback source or audio changed");return;}
+  state.player=player;state.audioChoice=player.curAudio;state.attachment=token;state.handoffTarget=null;state.positionReady=false;state.rebinding=true;state.sourceValidated=false;
+  const generation=state.windowGeneration;
+  void (async()=>{
+    try{
+      const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/options`);
+      if(!state.current()||state.attachment!==token||state.windowGeneration!==generation)return;
+      translationValidateOptions(data,state);
+      const profile=state.profile&&translationProfile(data,state.profile.profile_id);
+      if(data.source_size!==state.options?.source_size||data.source_mtime!==state.options?.source_mtime||state.profile&&(!profile||profile.model_sha256!==state.profile.model_sha256||profile.timeline_contract!==state.profile.timeline_contract||translationTask(profile)!==translationTask(state.profile))){translationRetire("caption source or profile changed");return;}
+      state.options=data;state.sourceValidated=true;
+      translationAttachmentPositionReady(player,token);
+    }catch(error){if(state.current()&&state.attachment===token&&state.windowGeneration===generation){state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
+  })();
+}
+function translationAttachmentPositionReady(player,token){
+  const state=SUBTITLE_TRANSLATION;if(!state||state.player!==player||state.attachment!==token||!state.current()||!token?.captionPositionReady||!state.sourceValidated)return;
+  state.positionReady=true;state.rebinding=false;
+  if(state.assetId||state.operation)void translationPoll(state,true);
+  else translationRenderStatus(state);
+  if(state.demand&&!state.stopped&&!state.stopIntent){void translationHeartbeat(state).catch(()=>{});translationArmHeartbeat(state);}
+}
 function translationClock(state,now,started=performance.now()){
   if(Number.isSafeInteger(now)&&now>=0)state.clock={server:now,at:performance.now(),transit:Math.max(0,performance.now()-started)};
 }
@@ -46,7 +99,7 @@ async function translationReadBytes(response,max){
 async function translationRequest(state,path,{method="GET",body=null,headers={},max=TRANSLATION_READ_MAX,raw=false}={}){
   if(!state.current())throw Error("Retired translation request");
   const controller=new AbortController();state.controllers.add(controller);
-  const started=performance.now(),auth=state.capture.auth,token=state.capture.token;
+  const started=performance.now(),auth=state.capture.auth,token=state.capture.token,requestGeneration=state.requestGeneration||0;
   const deadline=setTimeout(()=>controller.abort(),state.limits?.retry_max_ms||30000);
   const readAfter=typeof readAfterRequest==="function"?readAfterRequest():null;
   const requestHeaders={authorization:"Bearer "+token,...headers};
@@ -54,14 +107,14 @@ async function translationRequest(state,path,{method="GET",body=null,headers={},
   if(body)requestHeaders["content-type"]="application/json";
   try{
     const response=await fetch(API+path,{method,body:body?JSON.stringify(body):null,headers:requestHeaders,signal:controller.signal,cache:"no-store"});
-    if(!state.current()||auth!==AUTH_GENERATION||token!==TOKEN)throw Error("Retired translation response");
+    if(!state.current()||auth!==AUTH_GENERATION||token!==TOKEN||requestGeneration!==(state.requestGeneration||0))throw Error("Retired translation response");
     if(readAfter){const commit=response.headers.get("x-plurx-commit-index");if(commit)observeReadAfter(commit,readAfter);else if(method!=="GET")forgetReadAfter(readAfter);}
     const headerNow=Number(response.headers.get("X-Translation-Server-Now-Ms"));
     const headerClock=response.headers.has("X-Translation-Server-Now-Ms")&&Number.isSafeInteger(headerNow)&&headerNow>=0;
     if(headerClock)translationClock(state,headerNow,started);
     if(response.status===304)return {response,data:null,started};
     const bytes=await translationReadBytes(response,max);
-    if(!state.current())throw Error("Retired translation response");
+    if(!state.current()||requestGeneration!==(state.requestGeneration||0))throw Error("Retired translation response");
     if(!response.ok){
       let code="network_error",legacySetupError=false;try{const error=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes));if(typeof error.code==="string")code=error.code;else legacySetupError=path.startsWith("/subtitle-transcription/")&&typeof error.error==="string";if(!headerClock)translationClock(state,error.server_now_ms,started);}catch(error){void error;}
       if(response.status===401&&auth===AUTH_GENERATION&&token===TOKEN&&typeof logout==="function")void logout({revoke:false});
@@ -74,8 +127,10 @@ async function translationRequest(state,path,{method="GET",body=null,headers={},
   }finally{clearTimeout(deadline);state.controllers.delete(controller);}
 }
 function translationDirectReason(player,video){
-  if(!player||!video||!player.started||!player.mediaAttachment||player.method!=="direct_play"||player.sessionId||player.burnedSub!=null||player.pendingMediaChange||player.pendingOpenAttempt||player.retiringOpenAttempt||player.libraryChannel)return "delivery_unsupported";
-  if(player.audio?.length!==1)return "direct_audio_selection_unverified";
+  if(!player||!video||!player.started||!player.mediaAttachment||player.burnedSub!=null||player.pendingMediaChange||player.pendingOpenAttempt||player.retiringOpenAttempt||player.libraryChannel)return "delivery_unsupported";
+  if(!["direct_play","remux","transcode"].includes(player.method))return "delivery_unsupported";
+  if(!Number.isFinite(player.offset))return "source_clock_unsupported";
+  if(translationAudioOrdinal(player)==null)return "direct_audio_selection_unverified";
   if(player.fileContext?.source_ref?.kind!=="local")return "delivery_unsupported";
   return null;
 }
@@ -98,7 +153,12 @@ function translationRetire(reason="retired"){
   state.reason=reason;SUBTITLE_TRANSLATION=null;
   if(state.panel?.isConnected){state.panel.hidden=true;state.panel.replaceChildren();}
 }
+function translationTask(profile){return profile?.task==="transcribe"?"transcribe":"translate";}
+function translationOutputLanguage(profile,spokenLanguage){return translationTask(profile)==="transcribe"?spokenLanguage:"en";}
+function translationTaskLabel(task){return task==="transcribe"?"Generate captions in the spoken language":"Translate speech to English";}
+function translationTaskNoun(task){return task==="transcribe"?"captions":"translation";}
 function translationProfile(options,id){return (options.models||[]).find(profile=>profile.profile_id===id);}
+function translationTaskProfiles(options,task){return (options.models||[]).filter(profile=>translationTask(profile)===task);}
 function translationProfileLimits(profile){
   const limits=profile?.limits;if(!limits)return null;
   const keys=["segment_bytes","segment_cues","page_bytes","page_entries","coverage_intervals","concurrent_fetches","cue_memory_bytes","cue_count","cue_window_before_ms","cue_window_after_ms","poll_min_ms","poll_max_ms","retry_max_ms","heartbeat_interval_ms"];
@@ -117,18 +177,19 @@ function translationRangeStatus(coverage,position){
 function translationPosition(state){const ms=Math.round(((state.player.offset||0)+state.video.currentTime)*1000);return translationMs(ms)?ms:0;}
 function translationRenderStatus(state){
   const operation=state.operation,position=translationPosition(state),coverage=translationRangeStatus(state.coverage,position);
-  let message=operation?.state==="checking_source"?"Checking source before translation…":operation?.reason?translationFailure(operation.reason):"Preparing English translation…";
+  const task=state.task||translationTask(state.profile),noun=translationTaskNoun(task),output=state.outputLanguage||translationOutputLanguage(state.profile,state.spokenLanguage),outputName=output?(typeof subtitleLanguageName==="function"?subtitleLanguageName(output):output):"spoken language";
+  let message=operation?.state==="checking_source"?`Checking source before ${noun}…`:operation?.reason?translationFailure(operation.reason):`Preparing AI ${noun}…`;
   if(state.assetId){
-    if(state.stopped)message="Translation stopped. Committed captions remain available.";
-    else if(coverage.covered)message=operation?.state==="complete"?"Translation complete.":"Partial English captions available.";
-    else message=ME?.is_admin&&state.demand?"Translating this part. Playback continues.":"Not translated here yet. Ask an administrator to translate this part.";
+    if(state.stopped)message=`${noun[0].toUpperCase()+noun.slice(1)} stopped. Committed captions remain available.`;
+    else if(coverage.covered)message=operation?.state==="complete"?`AI ${noun} complete.`:`Partial ${outputName} captions available.`;
+    else message=ME?.is_admin&&state.demand?`Processing this part. Playback continues.`:`Not available here yet. Ask an administrator to process this part.`;
   }
   if(state.stopIntent&&!state.stopped)message="Stop is unconfirmed. Retry Stop; cached captions remain available.";
   if(state.error)message=state.error;
   translationStatus(state,message);
   const panel=translationPanel(state);if(!panel)return;
   const clock=panel.querySelector("[data-translation-clock]");if(clock)clock.textContent=coverage.covered?`Coverage ahead: ${Math.floor(coverage.runway_ms/1000)} seconds.`:`Uncovered here · lag ${Math.floor(coverage.lag_ms/1000)} seconds.`;
-  const use=/** @type {HTMLButtonElement|null} */(panel.querySelector("[data-translation-use]"));if(use){use.disabled=!state.assetId||!state.coverage.length;use.textContent=translationSelected(state.player)&&state.player.captionIntent.asset_id===state.assetId?"Translated captions selected":"Use translated captions";}
+  const use=/** @type {HTMLButtonElement|null} */(panel.querySelector("[data-translation-use]"));if(use){use.disabled=!state.assetId||!state.coverage.length;use.textContent=translationSelected(state.player)&&state.player.captionIntent.asset_id===state.assetId?"AI captions selected":"Use AI captions";}
   const stop=/** @type {HTMLButtonElement|null} */(panel.querySelector("[data-translation-stop]"));if(stop)stop.hidden=!ME?.is_admin||!state.options.permissions?.stop||!state.operation||state.stopped;
   const resume=/** @type {HTMLButtonElement|null} */(panel.querySelector("[data-translation-resume]"));if(resume)resume.hidden=!ME?.is_admin||!state.options.permissions?.resume||!state.operation||!(state.operation.state==="stopped"||state.operation.state==="failed"&&state.operation.retryable);
   const failures=panel.querySelector("[data-translation-failures]");
@@ -162,11 +223,13 @@ function translationSwitchAsset(state){
   state.windowGeneration++;state.etag=null;state.lease=null;clearTimeout(state.timer);
   for(const controller of state.controllers)controller.abort();
   if(state.demand)void translationRelease(state).catch(()=>{});
-  state.coverage=[];state.segments.clear();translationClearCues(state);state.operation=null;state.failurePage=null;state.assetId=null;state.contentRevision=null;state.spokenLanguage=null;state.stopIntent=null;state.resumeIntent=null;state.rangeIntent=null;state.stopKey=null;state.resumeKey=null;state.rangeKey=null;state.stopped=false;
+  state.coverage=[];state.segments.clear();translationClearCues(state);state.operation=null;state.failurePage=null;state.assetId=null;state.contentRevision=null;state.spokenLanguage=null;state.outputLanguage=null;state.createIntent=null;state.createKey=null;state.stopIntent=null;state.resumeIntent=null;state.rangeIntent=null;state.stopKey=null;state.resumeKey=null;state.rangeKey=null;state.stopped=false;
 }
 function translationValidateOptions(options,state){
-  if(options?.version!==1||options.file_id!==state.fileId||typeof options.source_size!=="string"||typeof options.source_mtime!=="string"||!translationMs(options.duration_ms)||!Array.isArray(options.audio_tracks)||options.audio_tracks.length!==1||options.audio_tracks[0].index!==state.audioIndex)throw Error(translationFailure("direct_audio_selection_unverified"));
-  if(options.capability?.supported!==true)throw Error(translationFailure(options.capability?.reason));
+  if(options?.version!==1||options.file_id!==state.fileId||typeof options.source_size!=="string"||typeof options.source_mtime!=="string"||!translationMs(options.duration_ms)||!Array.isArray(options.audio_tracks)||!Array.isArray(options.models))throw Error(translationFailure("direct_audio_selection_unverified"));
+  const matches=options.audio_tracks.filter(track=>track.audio_ordinal===state.audioIndex),selected=matches[0];if(matches.length!==1||!Number.isSafeInteger(selected.index)||selected.index<0)throw Error(translationFailure("direct_audio_selection_unverified"));
+  if(selected.capability?.supported!==true)throw Error(translationFailure(selected.capability?.reason||"direct_audio_selection_unverified"));
+  const sourceOriginMs=selected.source_origin_ms??options.source_origin_ms;if(sourceOriginMs!=null&&(!Number.isSafeInteger(sourceOriginMs)||Math.abs(sourceOriginMs)>604800000))throw Error(translationFailure("source_clock_unsupported"));
 }
 async function translationOpen(button){
   const player=PLAYER,video=document.getElementById("video"),reason=translationDirectReason(player,video);
@@ -174,15 +237,24 @@ async function translationOpen(button){
   const previous=SUBTITLE_TRANSLATION;if(previous&&translationCurrent(previous)){previous.panel?.scrollIntoView({block:"nearest"});return;}
   translationRetire();
   const panel=document.getElementById("watch-subtitle-translation");if(!panel)return;
-  const state={capture:translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:String(player.fileId),audioChoice:player.curAudio,audioIndex:player.audio[0].index,controllers:new Set(),listeners:[],heartbeatTimer:null,heartbeatAttempt:0,segments:new Map(),cues:new Map(),coverage:[],operation:null,assetId:null,demand:null,playbackId:translationUuid(),queue:Promise.resolve(),timer:null,windowGeneration:0,retired:false,error:null};
-  state.current=()=>translationCurrent(state);SUBTITLE_TRANSLATION=state;panel.hidden=false;panel.textContent="Loading translation choices…";
+  const state={capture:translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:String(player.fileId),audioChoice:player.curAudio,audioIndex:translationAttachedAudioOrdinal(player),positionReady:player.mediaAttachment.captionPositionReady!==false,presentationValidated:true,requestGeneration:0,task:"translate",controllers:new Set(),listeners:[],heartbeatTimer:null,heartbeatAttempt:0,segments:new Map(),cues:new Map(),coverage:[],operation:null,assetId:null,demand:null,playbackId:translationUuid(),queue:Promise.resolve(),timer:null,windowGeneration:0,retired:false,error:null};
+  state.current=()=>translationCurrent(state);SUBTITLE_TRANSLATION=state;panel.hidden=false;panel.textContent="Loading AI caption choices…";
   try{
     const {data:options}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/options`);translationValidateOptions(options,state);state.options=options;
     if(!translationPanel(state))return;
-    panel.innerHTML=`<div class="card" style="padding:16px"><h3>Translate speech to English</h3><p>English AI translation is an estimate and may be wrong. The picture keeps playing; original captions and Off stay available.</p>${ME?.is_admin?'<p><a href="#/settings/playback/enable-subtitle-translation">Translation settings</a></p>':""}<p>Spoken audio: ${esc(options.audio_tracks[0].title||options.audio_tracks[0].language||"Untagged audio")} · stream ${esc(String(state.audioIndex))}</p><label>Translation model <select data-translation-profile></select></label><label>Spoken language <select data-translation-language></select></label><p class="hint">Confirm the language spoken in the attached audio. Metadata can be wrong; correct it here.</p><label class="chk"><input type="checkbox" data-translation-confirm> I confirm this is the spoken language.</label><button class="sm" data-translation-start>Translate to English</button> <button class="ghost sm" data-translation-use disabled>Use translated captions</button> <button class="ghost sm" data-translation-stop hidden>Stop translation for everyone</button> <button class="ghost sm" data-translation-resume hidden>Resume translation</button> <button class="ghost sm" data-translation-refresh>Refresh status</button><div data-translation-assets></div><div data-translation-failures></div><p data-translation-status role="status" aria-live="polite"></p><p class="hint" data-translation-clock aria-live="off"></p></div>`;
-    const profiles=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-profile]"));profiles.innerHTML=(options.models||[]).map(profile=>`<option value="${esc(profile.profile_id)}">${esc(profile.label||profile.model_id)}</option>`).join("");
-    const updateLanguage=()=>{const profile=translationProfile(options,profiles.value),select=panel.querySelector("[data-translation-language]"),tag=options.audio_tracks[0].normalized_language;select.innerHTML=`<option value="">Choose spoken language</option>`+(profile?.input_languages||[]).map(code=>`<option value="${esc(code)}"${code===tag?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");};
-    profiles.addEventListener("change",updateLanguage);updateLanguage();
+    const audio=options.audio_tracks.find(track=>track.audio_ordinal===state.audioIndex);
+    const availableTasks=["translate","transcribe"].filter(task=>translationTaskProfiles(options,task).length);
+    if(!availableTasks.length)throw Error(translationFailure("profile_unavailable"));
+    state.task=availableTasks.includes("translate")?"translate":"transcribe";
+    panel.innerHTML=`<div class="card" style="padding:16px"><h3 data-translation-heading>${translationTaskLabel(state.task)}</h3><p data-translation-description>AI captions are an estimate and may be wrong. The picture keeps playing; original captions and Off stay available.</p>${ME?.is_admin?'<p><a href="#/settings/playback/enable-subtitle-translation">AI caption settings</a></p>':""}<p>Spoken audio: ${esc(audio.title||audio.language||"Untagged audio")} · stream ${esc(String(state.audioIndex+1))}</p><label>Caption task <select data-translation-task>${availableTasks.map(task=>`<option value="${task}">${translationTaskLabel(task)}</option>`).join("")}</select></label><label>Speech model <select data-translation-profile></select></label><label>Spoken language <select data-translation-language></select></label><p class="hint">Confirm the language spoken in the attached audio. Metadata can be wrong; correct it here.</p><label class="chk"><input type="checkbox" data-translation-confirm> I confirm this is the spoken language.</label><button class="sm" data-translation-start>${translationTaskLabel(state.task)}</button> <button class="ghost sm" data-translation-use disabled>Use generated captions</button> <button class="ghost sm" data-translation-stop hidden>Stop caption work for everyone</button> <button class="ghost sm" data-translation-resume hidden>Resume caption work</button> <button class="ghost sm" data-translation-refresh>Refresh status</button><div data-translation-assets></div><div data-translation-failures></div><p data-translation-status role="status" aria-live="polite"></p><p class="hint" data-translation-clock aria-live="off"></p></div>`;
+    const taskSelect=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-task]")),profiles=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-profile]"));
+    const updateLanguage=()=>{const profile=translationProfile(options,profiles.value),select=panel.querySelector("[data-translation-language]"),previous=select.value,tag=audio.normalized_language,choices=profile?.input_languages||[],chosen=choices.includes(previous)?previous:choices.includes(tag)?tag:"";select.innerHTML=`<option value="">Choose spoken language</option>`+choices.map(code=>`<option value="${esc(code)}"${code===chosen?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");select.value=chosen;panel.querySelector("[data-translation-heading]").textContent=translationTaskLabel(state.task);panel.querySelector("[data-translation-start]").textContent=translationTaskLabel(state.task);};
+    const updateProfiles=(preferred)=>{const rows=translationTaskProfiles(options,state.task),active=rows.find(profile=>profile.profile_id===preferred)||rows.find(profile=>profile.activation_state==="active")||rows[0];profiles.innerHTML=rows.map(profile=>`<option value="${esc(profile.profile_id)}">${esc(profile.label||profile.model_id)}</option>`).join("");profiles.value=active?.profile_id||"";updateLanguage();};
+    updateProfiles(null);
+    taskSelect.value=state.task;
+    taskSelect.addEventListener("change",()=>{const prior=profiles.value;state.task=taskSelect.value;translationSwitchAsset(state);updateProfiles(prior);translationRenderStatus(state);});
+    profiles.addEventListener("change",()=>{translationSwitchAsset(state);updateLanguage();translationRenderStatus(state);});
+    panel.querySelector("[data-translation-language]").addEventListener("change",()=>{translationSwitchAsset(state);translationRenderStatus(state);});
     /** @type {HTMLButtonElement} */(panel.querySelector("[data-translation-start]")).hidden=!options.permissions?.demand||!ME?.is_admin;
     panel.querySelector("[data-translation-start]").addEventListener("click",()=>translationStart(state));
     panel.querySelector("[data-translation-use]").addEventListener("click",()=>translationUse(state));
@@ -199,8 +271,8 @@ function translationAssetChoices(state,entries,cursor){
   const root=translationPanel(state)?.querySelector("[data-translation-assets]");if(!root)return;
   if(!Array.isArray(entries)||entries.length>64||cursor!=null&&(typeof cursor!=="string"||cursor.length>1024))throw Error("Invalid existing translation page");
   root.replaceChildren();
-  for(const asset of entries){if(!translationDigest(asset.asset_id))throw Error("Invalid existing translation identity");const button=document.createElement("button");button.className="ghost sm";button.textContent="Read existing English translation";button.addEventListener("click",()=>translationReadAsset(state,asset));root.appendChild(button);}
-  if(cursor){const more=document.createElement("button");more.className="ghost sm";more.textContent="More existing translations";more.addEventListener("click",()=>translationAssetPage(state,cursor,more));root.appendChild(more);}
+  for(const asset of entries){if(!translationDigest(asset.asset_id))throw Error("Invalid existing caption identity");const profile=translationProfile(state.options,asset.profile_id),task=asset.task||translationTask(profile),outputLanguage=asset.output_language||translationOutputLanguage(profile,asset.spoken_language),outputName=typeof subtitleLanguageName==="function"?subtitleLanguageName(outputLanguage):outputLanguage;const button=document.createElement("button");button.className="ghost sm";button.textContent=`Read existing ${outputName} ${task==="transcribe"?"captions":"translation"}`;button.addEventListener("click",()=>translationReadAsset(state,asset));root.appendChild(button);}
+  if(cursor){const more=document.createElement("button");more.className="ghost sm";more.textContent="More existing captions";more.addEventListener("click",()=>translationAssetPage(state,cursor,more));root.appendChild(more);}
 }
 async function translationAssetPage(state,cursor,button){
   if(!state.current()||state.assetPageLoading)return;state.assetPageLoading=true;button.disabled=true;
@@ -229,7 +301,7 @@ function translationValidateFailures(rows,cursor){
   for(const range of rows)if(!Number.isSafeInteger(range.core_index)||range.core_index<0||!translationCounter(range.range_revision)||typeof range.retryable!=="boolean")throw Error("Invalid failed range identity");
 }
 function translationAdoptReceipt(state,receipt){
-  if(receipt?.version!==1||!translationId(receipt.operation_id)||!translationCounter(receipt.operation_epoch)||!translationCounter(receipt.view_revision)||receipt.asset_id!=null&&!translationDigest(receipt.asset_id))throw Error("Invalid translation operation receipt");
+  if(receipt?.version!==1||!translationId(receipt.operation_id)||!translationCounter(receipt.operation_epoch)||!translationCounter(receipt.view_revision)||receipt.asset_id!=null&&!translationDigest(receipt.asset_id)||receipt.task!=null&&receipt.task!==translationTask(state.profile)||receipt.output_language!=null&&receipt.output_language!==translationOutputLanguage(state.profile,receipt.spoken_language||state.spokenLanguage))throw Error("Invalid caption operation receipt");
   if(state.operation&&receipt.operation_id!==state.operation.operation_id)throw Error("Translation receipt belongs to another operation");
   if(state.operation&&(translationCompare(receipt.operation_epoch,state.operation.operation_epoch)<0||receipt.operation_epoch===state.operation.operation_epoch&&translationCompare(receipt.view_revision,state.operation.view_revision)<0))return false;
   state.operation={...state.operation,...receipt};state.stopped=receipt.state==="stopped";
@@ -242,21 +314,22 @@ async function translationStart(state){
   if(!translationPanel(state)||!ME?.is_admin||!state.options.permissions?.demand)return;
   const reason=translationDirectReason(state.player,state.video);if(reason){state.error=translationFailure(reason);translationRenderStatus(state);return;}
   const profile=translationProfile(state.options,state.panel.querySelector("[data-translation-profile]").value),language=state.panel.querySelector("[data-translation-language]").value;
-  if(profile?.activation_state!=="active"||!translationProfileLimits(profile)){state.error=translationFailure("profile_unavailable");translationRenderStatus(state);return;}
+  const task=state.panel.querySelector("[data-translation-task]").value,outputLanguage=translationOutputLanguage(profile,language);
+  if(!profile||translationTask(profile)!==task||profile.activation_state!=="active"||!translationProfileLimits(profile)){state.error=translationFailure("profile_unavailable");translationRenderStatus(state);return;}
   if(!profile.input_languages.includes(language)||!state.panel.querySelector("[data-translation-confirm]").checked){state.error="Choose and confirm the language spoken in this audio stream.";translationRenderStatus(state);return;}
   if(state.starting)return;state.starting=true;state.error=null;let generation=state.windowGeneration;
   try{
-    const intentKey=JSON.stringify([state.fileId,state.options.source_size,state.options.source_mtime,state.audioIndex,language,profile.profile_id]);
-    if(state.createKey!==intentKey){state.createIntent=null;state.createKey=intentKey;if((state.operation||state.assetId)&&(state.profile?.profile_id!==profile.profile_id||state.spokenLanguage&&state.spokenLanguage!==language))translationSwitchAsset(state);}
-    state.profile=profile;state.spokenLanguage=language;state.limits=translationProfileLimits(profile);generation=state.windowGeneration;
-    const body=state.createIntent||(state.createIntent={...translationEnvelope(state),source_size:state.options.source_size,source_mtime:state.options.source_mtime,audio_index:state.audioIndex,spoken_language:language,output_language:"en",task:"translate",model_id:profile.model_id,profile_id:profile.profile_id,playback_id:state.playbackId,position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
+    const intentKey=JSON.stringify([state.fileId,state.options.source_size,state.options.source_mtime,state.audioIndex,task,language,outputLanguage,profile.profile_id]);
+    if(state.createKey!==intentKey){const changed=state.createKey!=null;if(changed&&(state.operation||state.assetId))translationSwitchAsset(state);state.createIntent=null;state.createKey=intentKey;}
+    state.task=task;state.profile=profile;state.spokenLanguage=language;state.outputLanguage=outputLanguage;state.limits=translationProfileLimits(profile);generation=state.windowGeneration;
+    const body=state.createIntent||(state.createIntent={...translationEnvelope(state),source_size:state.options.source_size,source_mtime:state.options.source_mtime,audio_index:state.audioIndex,spoken_language:language,output_language:outputLanguage,task,model_id:profile.model_id,profile_id:profile.profile_id,playback_id:state.playbackId,position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
     const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-translation`,{method:"POST",body});
     if(!state.current()||state.windowGeneration!==generation)return;translationAdoptReceipt(state,data);state.error=null;state.createIntent=null;await translationPoll(state,true);
   }catch(error){if(state.current()&&state.windowGeneration===generation){translationRejectIntent(state,"createIntent",error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
   finally{state.starting=false;}
 }
 function translationValidateOperation(state,operation){
-  if(operation?.version!==1||operation.operation_id!==state.operation.operation_id||operation.file_id!==state.fileId||operation.source_size!==state.options.source_size||operation.source_mtime!==state.options.source_mtime||operation.audio_index!==state.audioIndex||operation.output_language!=="en"||operation.task!=="translate"||operation.profile_id!==state.profile.profile_id||!translationCounter(operation.operation_epoch)||!translationCounter(operation.view_revision))throw Error("Translation operation identity changed");
+  if(operation?.version!==1||operation.operation_id!==state.operation.operation_id||operation.file_id!==state.fileId||operation.source_size!==state.options.source_size||operation.source_mtime!==state.options.source_mtime||operation.audio_index!==state.audioIndex||operation.output_language!==translationOutputLanguage(state.profile,operation.spoken_language)||operation.task!==translationTask(state.profile)||operation.profile_id!==state.profile.profile_id||!translationCounter(operation.operation_epoch)||!translationCounter(operation.view_revision))throw Error("Caption operation identity changed");
   if(operation.model_id!==state.profile.model_id||operation.model_sha256!==state.profile.model_sha256||operation.timeline_contract!==state.profile.timeline_contract||!state.profile.input_languages.includes(operation.spoken_language)||state.spokenLanguage&&operation.spoken_language!==state.spokenLanguage)throw Error("Translation profile or spoken language changed");
   if(operation.asset_id!=null&&(!translationDigest(operation.asset_id)||!translationDigest(operation.content_revision)))throw Error("Invalid translation asset");
   const states=["checking_source","waiting_model","waiting_capacity","translating","partial","suspended","stopped","complete","failed"];
@@ -267,7 +340,12 @@ function translationValidateOperation(state,operation){
 async function translationReadAsset(state,asset){
   if(!state.current()||!state.options.permissions?.read||!translationDigest(asset.asset_id))return;
   const profile=translationProfile(state.options,asset.profile_id);if(!translationProfileLimits(profile)){state.error=translationFailure("profile_unavailable");translationRenderStatus(state);return;}
+  const task=asset.task||translationTask(profile),spokenLanguage=asset.spoken_language||null,outputLanguage=asset.output_language||translationOutputLanguage(profile,spokenLanguage);
+  if(asset.task!=null&&asset.task!==task||asset.output_language!=null&&asset.output_language!==outputLanguage||!spokenLanguage||!profile.input_languages.includes(spokenLanguage)){state.error="Caption asset task or language does not match its speech profile.";translationRenderStatus(state);return;}
   translationSwitchAsset(state);state.profile=profile;state.limits=translationProfileLimits(profile);state.assetId=asset.asset_id;state.spokenLanguage=asset.spoken_language||null;state.lease=null;state.etag=null;state.error=null;
+  state.task=task;state.outputLanguage=outputLanguage;
+  const taskSelect=state.panel.querySelector("[data-translation-task]"),profileSelect=state.panel.querySelector("[data-translation-profile]"),rows=translationTaskProfiles(state.options,task);if(taskSelect)taskSelect.value=task;if(profileSelect){profileSelect.innerHTML=rows.map(row=>`<option value="${esc(row.profile_id)}">${esc(row.label||row.model_id)}</option>`).join("");profileSelect.value=profile.profile_id;}const heading=state.panel.querySelector("[data-translation-heading]"),start=state.panel.querySelector("[data-translation-start]");if(heading)heading.textContent=translationTaskLabel(task);if(start)start.textContent=translationTaskLabel(task);
+  const languageSelect=state.panel.querySelector("[data-translation-language]");if(languageSelect){languageSelect.innerHTML=`<option value="">Choose spoken language</option>`+profile.input_languages.map(code=>`<option value="${esc(code)}"${code===spokenLanguage?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");languageSelect.value=spokenLanguage;}
   if(translationId(asset.operation_id))state.operation={operation_id:asset.operation_id,operation_epoch:asset.operation_epoch||"0",view_revision:"0"};
   await translationPoll(state,true);
 }
@@ -310,7 +388,8 @@ async function translationManifest(state,force){
   if(response.status===304){if(!translationLeaseCurrent(state)){state.etag=null;state.lease=null;}return;}
   if(data?.version!==1||data.asset_id!==state.assetId||data.file_id!==state.fileId||data.profile_id!==state.profile.profile_id||data.audio_index!==state.audioIndex||!translationDigest(data.content_revision)||!translationCounter(data.manifest_revision)||!translationCounter(data.view_revision)||!data.operation||!translationCounter(data.operation.epoch))throw Error("Caption manifest identity changed");
   if(state.operation&&data.operation.operation_id!==state.operation.operation_id)throw Error("Caption manifest belongs to another operation");
-  if(data.output_language!=="en"||data.timeline_contract!==state.profile.timeline_contract||state.spokenLanguage&&data.spoken_language!==state.spokenLanguage||!state.profile.input_languages.includes(data.spoken_language)||state.operation?.content_revision&&state.operation.content_revision!==data.content_revision)throw Error("Caption manifest source or language changed");
+  const task=translationTask(state.profile),outputLanguage=translationOutputLanguage(state.profile,data.spoken_language);
+  if(data.task!==task||data.output_language!==outputLanguage||data.timeline_contract!==state.profile.timeline_contract||state.spokenLanguage&&data.spoken_language!==state.spokenLanguage||!state.profile.input_languages.includes(data.spoken_language)||state.operation?.content_revision&&state.operation.content_revision!==data.content_revision)throw Error("Caption manifest source or language changed");
   if(state.operation&&translationCompare(data.operation.epoch,state.operation.operation_epoch)<0)return;
   translationAcceptLease(state,data,response,started);const lease=state.lease;
   const segments=await translationPages(state,"segments",data.segments,data.segment_next_cursor,lease,windowGeneration);if(!segments)return;
@@ -322,7 +401,7 @@ async function translationManifest(state,force){
   // Stop/Retry/status can settle while snapshot pages are in flight. A valid
   // old lease does not grant authority to roll the operation view backward.
   if(state.operation&&(state.operation.operation_id!==data.operation.operation_id||translationCompare(data.operation.epoch,state.operation.operation_epoch)<0||data.operation.epoch===state.operation.operation_epoch&&translationCompare(data.view_revision,state.operation.view_revision)<0))return;
-  state.coverage=coverage;state.spokenLanguage=data.spoken_language;state.contentRevision=data.content_revision;state.etag=response.headers.get("ETag");state.manifestWindow=windowGeneration;
+  state.presentationValidated=true;state.coverage=coverage;state.spokenLanguage=data.spoken_language;state.outputLanguage=outputLanguage;state.task=task;state.contentRevision=data.content_revision;state.etag=response.headers.get("ETag");state.manifestWindow=windowGeneration;
   state.operation={...state.operation,operation_id:data.operation.operation_id,operation_epoch:data.operation.epoch,view_revision:data.view_revision,state:data.operation.state,reason:data.operation.reason};state.stopped=data.operation.state==="stopped";if(state.stopped)state.demand=null;
   const low=Math.max(0,position-state.limits.cue_window_before_ms),high=position+state.limits.cue_window_after_ms;
   translationPrune(state);
@@ -336,7 +415,7 @@ async function translationManifest(state,force){
   translationPrune(state);translationApplyCues(state);translationRenderStatus(state);
 }
 async function translationSegment(state,reference,lease,windowGeneration){
-  const {bytes}=await translationRequest(state,`/subtitle-translation/assets/${state.assetId}/segments/${reference.segment_id}`,{headers:{"X-Translation-Read-Lease":lease.id},max:state.limits.segment_bytes,raw:true});
+  const {bytes}=state.segmentRead?await state.segmentRead(reference,lease):await translationRequest(state,`/subtitle-translation/assets/${state.assetId}/segments/${reference.segment_id}`,{headers:{"X-Translation-Read-Lease":lease.id},max:state.limits.segment_bytes,raw:true});
   const digest=Array.from(new Uint8Array(await cinemaDiagnosticSHA256(bytes)),byte=>byte.toString(16).padStart(2,"0")).join("");
   if(!state.current()||state.windowGeneration!==windowGeneration||state.lease!==lease||!translationLeaseCurrent(state))return;
   if(digest!==reference.digest)throw Error("Caption segment digest mismatch");
@@ -364,8 +443,8 @@ function translationPrune(state){
   state.cues=cues;
 }
 function translationApplyCues(state){
-  if(!state.current()||!translationSelected(state.player)||state.player.captionIntent.asset_id!==state.assetId)return;
-  const video=state.video;if(!video._translationTrack)video._translationTrack=video.addTextTrack("subtitles","English · AI translation","en");
+  if(!state.current()||state.positionReady===false||state.rebinding||state.presentationValidated===false||!translationSelected(state.player)||state.player.captionIntent.asset_id!==state.assetId)return;
+  const video=state.video,outputLanguage=state.outputLanguage||translationOutputLanguage(state.profile,state.spokenLanguage),task=state.task||translationTask(state.profile);if(!video._translationTrack||video._translationTrackTask!==task||video._translationTrackLanguage!==outputLanguage){if(video._translationTrack)video._translationTrack.mode="disabled";video._translationTrack=video.addTextTrack("subtitles",`${task==="transcribe"?"AI captions":"AI translation"} · ${outputLanguage}`,outputLanguage);video._translationTrackTask=task;video._translationTrackLanguage=outputLanguage;}
   const track=video._translationTrack;track.mode="hidden";
   try{while(track.cues?.length)track.removeCue(track.cues[0]);}catch(error){void error;}
   const Cue=window.VTTCue||window.TextTrackCue;
@@ -376,7 +455,7 @@ function translationApplyCues(state){
   track.mode="showing";
 }
 async function translationUse(state){
-  if(!state.current()||!state.assetId||!state.coverage.length)return;
+  if(!state.current()||PLAYER!==state.player||state.rebinding||state.positionReady===false||!state.assetId||!state.coverage.length)return;
   const reason=translationDirectReason(state.player,state.video);if(reason){state.error=translationFailure(reason);translationRenderStatus(state);return;}
   // The source owner disables old native/script captions first. Its serial
   // also makes A→translation→A reject the first A's late response.
@@ -387,7 +466,8 @@ async function translationUse(state){
   translationApplyCues(state);pbSyncSubIcon();if(typeof watchRenderLedger==="function")watchRenderLedger();translationRenderStatus(state);
 }
 function translationMediaEvent(state,kind){
-  if(!state.current()){translationRetire("playback changed");return;}
+  if(!state.current()){if(state.handoffTarget||translationOwnsPlayer(state))return;translationRetire("playback changed");return;}
+  if(state.rebinding||state.positionReady===false)return;
   if(kind==="seeking"){
     state.windowGeneration++;state.etag=null;state.coverage=[];state.cues=new Map();
     if(state.video._translationTrack){const track=state.video._translationTrack;track.mode="hidden";try{while(track.cues?.length)track.removeCue(track.cues[0]);}catch(error){void error;}}
@@ -399,7 +479,7 @@ function translationMediaEvent(state,kind){
   translationRenderStatus(state);
 }
 async function translationHeartbeat(state){
-  if(!state.current()||!ME?.is_admin||!state.options.permissions?.demand||!state.demand||state.stopped||state.pendingStop||state.stopIntent)return;
+  if(!state.current()||state.rebinding||state.positionReady===false||!ME?.is_admin||!state.options.permissions?.demand||!state.demand||state.stopped||state.pendingStop||state.stopIntent)return;
   // Coalesce media-event storms into the one current mutation. The next poll
   // samples the latest media clock; it never queues an unbounded seek history.
   if(state.heartbeatTask)return state.heartbeatTask;
@@ -463,7 +543,7 @@ async function translationRetry(state,body,key){
   catch(error){if(state.current()&&state.windowGeneration===generation&&state.operation?.operation_id===operationId){translationRejectIntent(state,key,error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
 }
 async function translationPoll(state,force=false){
-  if(!state.current()||!state.limits)return;const generation=state.windowGeneration;if(state.polling){state.pollAgain=state.pollAgain||force;return;}
+  if(!state.current()||state.rebinding||state.positionReady===false||!state.limits)return;const generation=state.windowGeneration;if(state.polling){state.pollAgain=state.pollAgain||force;return;}
   clearTimeout(state.timer);state.polling=true;
   try{
     if(state.operation){const {data}=await translationRequest(state,`/subtitle-translation/operations/${state.operation.operation_id}`);if(!state.current()||state.windowGeneration!==generation)return;translationValidateOperation(state,data);if(translationCompare(data.operation_epoch,state.operation.operation_epoch)>0||translationCompare(data.operation_epoch,state.operation.operation_epoch)===0&&translationCompare(data.view_revision,state.operation.view_revision)>=0){const page=state.failurePage;if(page&&page.operation_id===data.operation_id&&page.operation_epoch===data.operation_epoch&&page.view_revision===data.view_revision){data.failed_ranges=page.entries;data.failed_ranges_next_cursor=page.next_cursor;}else state.failurePage=null;state.operation=data;state.spokenLanguage=data.spoken_language;state.assetId=data.asset_id;state.stopped=data.state==="stopped";if(state.stopped)state.demand=null;}}
@@ -488,19 +568,21 @@ function translationSetupCurrent(setup){return TRANSLATION_SETUP===setup&&transl
 function translationInput(root,selector){return /** @type {HTMLInputElement} */(root.querySelector(selector));}
 function translationProfileChoices(profiles,selected){
   const rows=profiles.slice();if(selected&&!rows.some(row=>row.profile_id===selected))rows.unshift({profile_id:selected,model_id:"Saved model",activation_state:"unavailable"});
-  return '<option value="">Not configured</option>'+rows.map(row=>`<option value="${esc(row.profile_id)}"${row.profile_id===selected?" selected":""}>${esc(row.label||row.model_id)} · ${esc(row.activation_state||"unavailable")}</option>`).join("");
+  return '<option value="">Not configured</option>'+rows.map(row=>`<option value="${esc(row.profile_id)}"${row.profile_id===selected?" selected":""}>${esc(row.label||row.model_id)} · ${translationTaskLabel(translationTask(row))} · ${esc(row.activation_state||"unavailable")}</option>`).join("");
 }
 function translationSetupChoices(setup){
   const profiles=setup.catalog?.profiles||[],profileInput=translationInput(setup.panel,"[data-translation-setting-profile]"),languageInput=translationInput(setup.panel,"[data-translation-setting-language]");
   let selected=profileInput.value;
   if(!setup.choicesLoaded&&!setup.edit&&!setup.saved.profile_id&&!selected){const active=profiles.filter(row=>row.activation_state==="active");if(active.length===1)selected=active[0].profile_id;}
-  const language=languageInput.value,languages=[...new Set(profiles.flatMap(row=>row.input_languages||[]))];if(language&&!languages.includes(language))languages.push(language);
+  const chosenProfile=profiles.find(row=>row.profile_id===selected),language=languageInput.value,languages=[...new Set((chosenProfile?.input_languages?.length?chosenProfile.input_languages:profiles.flatMap(row=>row.input_languages||[])))],keptLanguage=languages.includes(language)?language:!chosenProfile?language:"";if(keptLanguage&&!languages.includes(keptLanguage))languages.push(keptLanguage);
   profileInput.innerHTML=translationProfileChoices(profiles,selected);profileInput.value=selected;
-  languageInput.innerHTML='<option value="">Choose for each movie</option>'+languages.map(code=>`<option value="${esc(code)}"${code===language?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");languageInput.value=language;
+  languageInput.innerHTML='<option value="">Choose for each movie</option>'+languages.map(code=>`<option value="${esc(code)}"${code===keptLanguage?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");languageInput.value=keptLanguage;
+  const task=translationTask(chosenProfile),test=setup.panel.querySelector("[data-translation-test]");if(test)test.textContent=task==="transcribe"?"Test speech captions":"Test English translation";
+  const enabled=setup.panel.querySelector("[data-translation-setting-enabled]");if(enabled){const label=enabled.parentElement;if(label)label.childNodes[1].textContent=" Enable progressive AI captions";}
   if(profiles.length)setup.choicesLoaded=true;
 }
 function translationSetupReason(code){
-  const reasons={output_invalid:"The model test could not prepare or validate captions. Check server storage and logs, then retry Test.",inference_failed:"The model speech test could not run recognition. Retry Test; if it fails again, update or repair this server package.",inference_timeout:"The model speech test exceeded its time limit. Retry when this server has capacity.",decode_failed:"The model speech test could not decode its sample audio. Update or repair this server package, then retry Test.",model_download_failed:"The model download failed. Check this server’s network access, then retry Download and test.",model_verification_failed:"The model failed its integrity or speech test. Retry Download and test.",model_self_test_failed:"The English translation test failed. Retry Download and test.",translation_unverified:"Test this model for English translation.",engine_unavailable:"This server’s packaged speech engine is unavailable. Update or repair its server package, then retry.",packaged_engine_unqualified:"This server’s packaged speech engine is unavailable. Update or repair its server package, then retry.",missing_model:"Download and test this model on a compatible server.",model_missing:"Download and test this model on a compatible server.",model_unavailable:"Download and test this model on a compatible server.",insufficient_disk:"Free space on this server, then retry Download and test.",waiting_for_playback_capacity:"Waiting for playback capacity. The test runs when this server has capacity.",worker_interrupted:"The worker stopped. Retry Download and test.",waiting_for_worker:"Waiting for a compatible server.",worker_source_unavailable:"Waiting for a compatible server with source access.",worker_not_current:"This server is no longer current. Refresh worker status and choose a current server.",unavailable_worker:"The server is unavailable. Refresh worker status and retry.",unsupported_worker:"This server cannot run the packaged speech engine. Choose a compatible server.",queue_full:"The background queue is full. Retry after current jobs finish.",quota_exceeded:"The background work limit was reached. Retry after current jobs finish.",conflict:"Another request changed this work. Refresh worker status before retrying.",configuration_conflict:"The configuration changed. Reload saved settings before retrying.",disabled:"Model setup is paused. Check the server and retry.",unknown:"Worker status is unknown. Refresh worker status.",network_error:"Model status is unavailable. Retry status or check Activity."};
+  const reasons={output_invalid:"The model test could not prepare or validate captions. Check server storage and logs, then retry Test.",inference_failed:"The model speech test could not run. Retry Test; if it fails again, update or repair this server package.",inference_timeout:"The model speech test exceeded its time limit. Retry when this server has capacity.",decode_failed:"The model speech test could not decode its sample audio. Update or repair this server package, then retry Test.",model_download_failed:"The model download failed. Check this server’s network access, then retry Download and test.",model_verification_failed:"The model failed its integrity or speech test. Retry Download and test.",model_self_test_failed:"The model's caption task test failed. Retry Download and test.",translation_unverified:"Test this model for its selected caption task.",engine_unavailable:"This server’s packaged speech engine is unavailable. Update or repair its server package, then retry.",packaged_engine_unqualified:"This server’s packaged speech engine is unavailable. Update or repair its server package, then retry.",missing_model:"Download and test this model on a compatible server.",model_missing:"Download and test this model on a compatible server.",model_unavailable:"Download and test this model on a compatible server.",insufficient_disk:"Free space on this server, then retry Download and test.",waiting_for_playback_capacity:"Waiting for playback capacity. The test runs when this server has capacity.",worker_interrupted:"The worker stopped. Retry Download and test.",waiting_for_worker:"Waiting for a compatible server.",worker_source_unavailable:"Waiting for a compatible server with source access.",worker_not_current:"This server is no longer current. Refresh worker status and choose a current server.",unavailable_worker:"The server is unavailable. Refresh worker status and retry.",unsupported_worker:"This server cannot run the packaged speech engine. Choose a compatible server.",queue_full:"The background queue is full. Retry after current jobs finish.",quota_exceeded:"The background work limit was reached. Retry after current jobs finish.",conflict:"Another request changed this work. Refresh worker status before retrying.",configuration_conflict:"The configuration changed. Reload saved settings before retrying.",disabled:"Model setup is paused. Check the server and retry.",unknown:"Worker status is unknown. Refresh worker status.",network_error:"Model status is unavailable. Retry status or check Activity."};
   if(!Object.hasOwn(reasons,code))return "Model setup could not finish. Refresh worker status and check Activity before retrying.";
   return reasons[code];
 }
@@ -524,11 +606,12 @@ function translationWorkerStatus(setup,worker,modelId,profileId){
 function translationSetupEvidence(setup){
   if(!translationSetupCurrent(setup))return;
   const selected=translationInput(setup.panel,"[data-translation-setting-profile]").value,profile=setup.catalog?.profiles?.find(row=>row.profile_id===selected),model=setup.catalog?.models?.find(row=>row.id===(profile?.model_id||setup.saved.model_id));
+  const taskName=translationTask(profile)==="transcribe"?"speech captions":"English translation";
   if(setup.workerProfile!==selected){setup.workerProfile=selected;setup.workerSelectionInitialized=false;}
   const old=new Set([...setup.panel.querySelectorAll('[name="translation-worker"]:checked')].map(node=>node.value));
   const evidence=setup.panel.querySelector("[data-translation-workers]");if(!evidence)return;
-  const label={unknown:"Readiness unknown",missing:"Model missing",unverified_cache:"Download cached · Install or Test to finish",installing:"Installing",verifying:"Testing English translation",installed:"Downloaded · Test to finish",verified:"Verified for English translation",verification_failed:"Translation test failed",engine_unavailable:"Packaged engine unavailable"};
-  evidence.innerHTML=(model?`<p>${esc(model.label)} · ${esc(typeof fmtSize==="function"?fmtSize(model.download_bytes):String(model.download_bytes)+" bytes")} · ${esc(model.license)}</p>`:"")+(profile&&profile.activation_state!=="active"?'<p class="hint">This translation model is not yet available for playback. Saved enablement remains editable.</p>':"")+(setup.catalog?.workers||[]).map(worker=>{
+  const label={unknown:"Readiness unknown",missing:"Model missing",unverified_cache:"Download cached · Install or Test to finish",installing:"Installing",verifying:`Testing ${taskName}`,installed:"Downloaded · Test to finish",verified:`Verified for ${taskName}`,verification_failed:`${taskName} test failed`,engine_unavailable:"Packaged engine unavailable"};
+  evidence.innerHTML=(model?`<p>${esc(model.label)} · ${esc(typeof fmtSize==="function"?fmtSize(model.download_bytes):String(model.download_bytes)+" bytes")} · ${esc(model.license)}</p>`:"")+(profile&&profile.activation_state!=="active"?'<p class="hint">This speech model profile is not yet available for playback. Saved enablement remains editable.</p>':"")+(setup.catalog?.workers||[]).map(worker=>{
     const fresh=translationWorkerFresh(setup,worker),compatible=!!profile&&worker.eligible&&fresh&&worker.engine?.adapter_contract===profile?.adapter_contract&&translationDigest(worker.engine?.binary_sha256),status=translationWorkerStatus(setup,worker,profile?.model_id,selected);
     const checked=setup.workerSelectionInitialized?old.has(worker.node_id):compatible;
     const capability=worker.capabilities?.find(row=>row.model_id===profile?.model_id&&row.profile_id===selected),reason=!fresh?"unknown":!worker.eligible?"unsupported_worker":!worker.engine?"engine_unavailable":profile&&!compatible?"engine_unavailable":capability?.reason;
@@ -547,8 +630,8 @@ async function openTranslationSettings(){
     try{setup.catalog=(await translationRequest(setup,"/subtitle-translation/models")).data;}catch(error){if(!setup.current())return;setup.catalogError=error.message;}
     if(!setup.current())return;
     const profiles=setup.catalog?.profiles||[],languages=[...new Set(profiles.flatMap(profile=>profile.input_languages||[]))];if(saved.preferred_spoken_language&&!languages.includes(saved.preferred_spoken_language))languages.push(saved.preferred_spoken_language);
-    panel.innerHTML=`<form data-translation-settings><label class="chk"><input type="checkbox" data-translation-setting-enabled${saved.enabled?" checked":""}> Enable progressive English translation</label><p class="hint">1. Download and test the model. 2. Enable translation and Save. Then choose Translate to English in the player.</p><label>Model <select data-translation-setting-profile>${translationProfileChoices(profiles,saved.profile_id)}</select></label><label>Preferred spoken language <select data-translation-setting-language><option value="">Choose for each movie</option>${languages.map(code=>`<option value="${esc(code)}"${code===saved.preferred_spoken_language?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("")}</select></label><div data-translation-workers></div><button type="button" class="sm" data-translation-install>Download and test</button> <button type="button" class="ghost sm" data-translation-test>Test English translation</button> <button type="button" class="ghost sm" data-translation-worker-refresh>Refresh worker status</button><p data-translation-model-status role="status" aria-live="polite"></p><button type="submit" class="sm">Save</button><p data-translation-save-status role="status" aria-live="polite"></p></form>`;
-    for(const input of panel.querySelectorAll("[data-translation-settings] input,[data-translation-settings] select"))input.addEventListener("change",translationSetupChanged);
+    panel.innerHTML=`<form data-translation-settings><label class="chk"><input type="checkbox" data-translation-setting-enabled${saved.enabled?" checked":""}> Enable progressive AI captions</label><p class="hint">1. Download and test the selected speech model. 2. Enable captions and Save. Then choose a caption task in the player.</p><label>Speech model <select data-translation-setting-profile>${translationProfileChoices(profiles,saved.profile_id)}</select></label><label>Preferred spoken language <select data-translation-setting-language><option value="">Choose for each movie</option>${languages.map(code=>`<option value="${esc(code)}"${code===saved.preferred_spoken_language?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("")}</select></label><div data-translation-workers></div><button type="button" class="sm" data-translation-install>Download and test</button> <button type="button" class="ghost sm" data-translation-test>Test speech model</button> <button type="button" class="ghost sm" data-translation-worker-refresh>Refresh worker status</button><p data-translation-model-status role="status" aria-live="polite"></p><button type="submit" class="sm">Save</button><p data-translation-save-status role="status" aria-live="polite"></p></form>`;
+    for(const input of panel.querySelectorAll("[data-translation-settings] input,[data-translation-settings] select"))input.addEventListener("change",()=>{if(input===panel.querySelector("[data-translation-setting-profile]"))translationSetupChoices(setup);translationSetupChanged();});
     panel.querySelector("form").addEventListener("submit",event=>{event.preventDefault();void saveTranslationSettings();});
     panel.querySelector("[data-translation-install]").addEventListener("click",()=>translationSetupModel("install"));
     panel.querySelector("[data-translation-test]").addEventListener("click",()=>translationSetupModel("verify"));
@@ -578,8 +661,8 @@ async function translationRefreshSetup(){
   catch(error){if(setup.current()&&setup.refresh===request&&setup.operation===operation)setup.panel.querySelector("[data-translation-model-status]").textContent="Worker status unavailable. Refresh to retry; saved controls remain editable.";return false;}
 }
 function translationSetupModelRows(setup){
-  const status=setup.panel.querySelector("[data-translation-model-status]");status.replaceChildren();
-  const phases={queued:"Queued",running:"Running model test",waiting_for_capacity:"Waiting for server capacity",downloading:"Downloading model",verifying:"Testing English translation",decoding:"Decoding test audio",transcribing:"Running speech test",validating:"Validating",publishing:"Publishing",succeeded:"Download and test complete",failed:"Failed",cancelled:"Cancelled"};
+  const status=setup.panel.querySelector("[data-translation-model-status]");status.replaceChildren();const profileId=setup.rows?.[0]?.profile_id||translationInput(setup.panel,"[data-translation-setting-profile]").value,profile=setup.catalog?.profiles?.find(item=>item.profile_id===profileId),task=translationTask(profile),testLabel=task==="transcribe"?"speech test":"caption translation test";
+  const phases={queued:"Queued",running:"Running model test",waiting_for_capacity:"Waiting for server capacity",downloading:"Downloading model",verifying:`Testing ${testLabel}`,decoding:"Decoding test audio",transcribing:"Running speech test",validating:"Validating",publishing:"Publishing",succeeded:"Download and test complete",failed:"Failed",cancelled:"Cancelled"};
   for(const row of setup.rows){const paragraph=document.createElement("p"),worker=setup.catalog?.workers?.find(worker=>worker.node_id===row.node_id),phase=row.job?.phase||row.job?.state,reason=row.job?.reason||row.reason||(!["accepted","existing"].includes(row.outcome)?row.outcome:null);paragraph.textContent=`${worker?.label||row.node_id}: ${phases[phase]||phases[row.job?.state]||(["accepted","existing"].includes(row.outcome)?"Queued":"Not accepted")}. ${reason?translationSetupReason(reason)+" ":""}`;if(translationId(row.job_id)){const link=document.createElement("a");link.href="#/activity/jobs/"+row.job_id;link.textContent="Follow this job in Activity";paragraph.appendChild(link);}status.appendChild(paragraph);}
 }
 async function translationSetupModel(action){
@@ -588,7 +671,7 @@ async function translationSetupModel(action){
   const status=setup.panel.querySelector("[data-translation-model-status]");
   if(!profile||!translationProfileLimits(profile)||!nodeIds.length||nodeIds.length>16){status.textContent="Choose a model and current named worker.";return;}
   const key=JSON.stringify([action,profile.model_id,profileId,nodeIds]);if(setup.modelKey!==key){setup.modelIntent=null;setup.modelKey=key;}
-  const operation=setup.operation={};clearTimeout(setup.timer);setup.modelAction=action;translationSetupBusy(setup,true);status.textContent=action==="install"?"Requesting model download and test…":"Requesting English translation test…";
+  const operation=setup.operation={};clearTimeout(setup.timer);setup.modelAction=action;translationSetupBusy(setup,true);status.textContent=action==="install"?"Requesting model download and test…":`Requesting ${translationTask(profile)==="transcribe"?"speech caption":"caption translation"} test…`;
   try{
     if(translationSetupNeedsClock(setup,setup.modelIntent)&&!await translationRefreshSetup())throw Error("Worker status is unavailable. Refresh worker status before downloading or testing.");
     if(!setup.current()||setup.operation!==operation)return;
@@ -619,9 +702,10 @@ function translationReset(){
 }
 function translationMenuChoice(){
   const state=SUBTITLE_TRANSLATION;if(!translationCurrent(state)||!state.assetId||!state.coverage.length)return "";
-  return `<button class="${translationSelected(state.player)&&state.player.captionIntent.asset_id===state.assetId?"sel":""}" onclick="translationUse(SUBTITLE_TRANSLATION)">English · AI translation · ${state.operation?.state==="complete"?"complete":"partial"}</button>`;
+  const output=state.outputLanguage||translationOutputLanguage(state.profile,state.spokenLanguage),task=state.task||translationTask(state.profile),name=typeof subtitleLanguageName==="function"?subtitleLanguageName(output):output;
+  return `<button class="${translationSelected(state.player)&&state.player.captionIntent.asset_id===state.assetId?"sel":""}" onclick="translationUse(SUBTITLE_TRANSLATION)">${esc(name)} · AI ${task==="transcribe"?"captions":"translation"} · ${state.operation?.state==="complete"?"complete":"partial"}</button>`;
 }
 function translationWatchChanged(){
-  const state=SUBTITLE_TRANSLATION;if(!state||translationCurrent(state))return;
+  const state=SUBTITLE_TRANSLATION;if(!state||translationCurrent(state)||state.handoffTarget&&translationSameSourceAudio(state,state.handoffTarget))return;
   translationRetire("watch source changed");const panel=document.getElementById("watch-subtitle-translation");if(panel===state.panel){panel.hidden=true;panel.replaceChildren();}
 }

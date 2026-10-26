@@ -287,3 +287,18 @@ The abandoned two-job ten-event run is incomplete cost evidence, kept outside
 the required registry. README gives its observed counts and the precise
 eleven-action path. A predeclared single-job ten-event fallback would cover
 commit only and must be labeled explicitly if used; it is not yet selected.
+
+## Subtitle completion construction correspondence
+
+The 2026-10-26 source mapping is reconciled against `origin/main` at
+`087e836d369eb2b8f94ec1d0454ea6c157612df9`. Text-caption admission is scoped to
+its new job kinds. The selected library claim/binding/token/publication
+predicates retain their base behavior; the new schema extensions do not alter
+the mapped Hiqlite timeout or SQLite fenced-publication transaction. Text
+translation, speech tasks and audio ordinals, caption leases, and content
+read attestation are outside this finite model. The mapping notes identify
+the changed source files without expanding the modeled guarantees.
+
+This is authored construction correspondence. Final adversarial review and
+current-source qualification remain pending; refreshing hashes does not
+relabel historical model receipts or execute any runtime regression.

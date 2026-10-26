@@ -1451,7 +1451,7 @@ pub(crate) async fn worker_pass(
                     Some(admission) => admission,
                     None => admit_model_test(state, &fence, &cancel).await?,
                 };
-                if !state.transcode.fragment_worker_idle(&admission) {
+                if !state.transcode.speech_capacity_available(&admission) {
                     return Err(StoreError::Task("waiting_for_playback_capacity".into()));
                 }
                 if !fence
@@ -1660,7 +1660,7 @@ async fn admit_model_test(
     }
     let admission = state
         .transcode
-        .admit_fragment_queued(cancel)
+        .admit_speech_queued(cancel)
         .await
         .ok_or_else(|| StoreError::Task("waiting_for_playback_capacity".into()))?;
     if cancel.is_cancelled() {
@@ -1678,7 +1678,7 @@ async fn hash_admitted_model(
     cancel: &tokio_util::sync::CancellationToken,
     admission: &crate::transcode::FragmentAdmission,
 ) -> Result<artifacts::ManagedModel, StoreError> {
-    if !state.transcode.fragment_worker_idle(admission) {
+    if !state.transcode.speech_capacity_available(admission) {
         return Err(StoreError::Task("waiting_for_playback_capacity".into()));
     }
     let operation = artifacts::open_model_cancellable(&state.subtitle_models.root, spec, cancel);
@@ -1687,7 +1687,7 @@ async fn hash_admitted_model(
         tokio::select! {
             result=&mut operation=>return result.map_err(StoreError::Task),
             ()=tokio::time::sleep(Duration::from_millis(250))=>{
-                if cancel.is_cancelled() || !state.transcode.fragment_worker_idle(admission) {
+                if cancel.is_cancelled() || !state.transcode.speech_capacity_available(admission) {
                     let reason = if cancel.is_cancelled() { "worker_interrupted" } else { "waiting_for_playback_capacity" };
                     cancel.cancel();
                     let _ = operation.await;

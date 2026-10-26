@@ -121,6 +121,7 @@ Previous: [Live TV playback method](245-live-tv-playback-method.md).
 
 | Note | Answers | |
 |---|---|---|
+| [Subtitle text translation and shared captions](1283-subtitle-completion.md) | What does Apple build 276 add to subtitle translation and shared playback? | open |
 | [Display target session source contract follow-up](1216-display-target-session-contract.md) | What model-boundary contract coverage accompanies the display-target session work? | built |
 | [SDR display target contract follow-up](1216-sdr-display-target-contract.md) | What typed SDR processing contracts follow the display-target session work? | built |
 | [Ratings, watchlist and favorites](1205-ratings-watchlist-favorites.md) | What do the ratings and list controls add to iOS and tvOS? | built |

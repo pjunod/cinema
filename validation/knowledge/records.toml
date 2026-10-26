@@ -114,12 +114,18 @@ selector = ["Python unit receipts — one success per test per PR", "The rule", 
 digest = "sha256:529564a4da73f68d0399fefe9ea9a15d9f697ddf02af42606d9461db1b242ccf"
 excerpt = "The bespoke recoveries\nare gone. One rule covers every case."
 
+# Construction symbol correspondence 2026-10-26: all six functions are unchanged
+# from origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9. Compared with the
+# original knowledge snapshot, decide/decide_forced only revise the existing DV
+# compatibility explanation and comments; verdict/force control flow is retained.
+# The other four governed function bodies are byte-identical to that snapshot.
+# Independent adversarial review and current-source execution remain pending.
 [[anchors]]
 id = "plurx:symbol:reviewed.server.capability-profile"
 path = "crates/plurxd/src/http/stream.rs"
 kind = "symbol"
 selector = "fn profile(&self, now_ms: i64) -> playback::DeviceProfile"
-digest = "sha256:da33b9e0ee62f48826342b5586a05bf7e7a235e03165d4796ffde7e10e2a046e"
+digest = "sha256:9d7cd39032ef279a8d40162cb319989e495a269218bb9b2b866b8ad7342561ba"
 owner_module = "crates/plurxd/src/http/stream.rs"
 
 [[anchors]]
@@ -127,7 +133,7 @@ id = "plurx:symbol:reviewed.server.learned-decode-limit"
 path = "crates/plurx-core/src/playback/mod.rs"
 kind = "symbol"
 selector = "fn matching_learned_limit("
-digest = "sha256:1534f573e0de8bb00b611523676898482d1526073e2241c372d586dcd6f4f24b"
+digest = "sha256:c10157371b180b4f4a4cf0d8c580765604f10202e5c87fad821259f338a9db7e"
 owner_module = "crates/plurx-core/src/playback/mod.rs"
 
 [[anchors]]
@@ -135,7 +141,7 @@ id = "plurx:symbol:reviewed.server.learned-decode-limit-expiry"
 path = "crates/plurx-core/src/playback/caps.rs"
 kind = "symbol"
 selector = "pub fn applies_at("
-digest = "sha256:8e58b7a58850951af1267f384cca1365a8b3e622382d790355cc03f89926b2b0"
+digest = "sha256:4f67597c6d25d38ca1b181bc82282eb70f55e76f804deebf1bc55eaa4721475a"
 owner_module = "crates/plurx-core/src/playback/caps.rs"
 
 [[anchors]]
@@ -143,7 +149,7 @@ id = "plurx:symbol:reviewed.server.verdict"
 path = "crates/plurx-core/src/playback/mod.rs"
 kind = "symbol"
 selector = "pub fn decide("
-digest = "sha256:1534f573e0de8bb00b611523676898482d1526073e2241c372d586dcd6f4f24b"
+digest = "sha256:c10157371b180b4f4a4cf0d8c580765604f10202e5c87fad821259f338a9db7e"
 owner_module = "crates/plurx-core/src/playback/mod.rs"
 
 [[anchors]]
@@ -151,7 +157,7 @@ id = "plurx:symbol:reviewed.server.manual-quality"
 path = "crates/plurx-core/src/playback/mod.rs"
 kind = "symbol"
 selector = "pub fn decide_forced("
-digest = "sha256:1534f573e0de8bb00b611523676898482d1526073e2241c372d586dcd6f4f24b"
+digest = "sha256:c10157371b180b4f4a4cf0d8c580765604f10202e5c87fad821259f338a9db7e"
 owner_module = "crates/plurx-core/src/playback/mod.rs"
 
 [[anchors]]
@@ -159,7 +165,7 @@ id = "plurx:symbol:reviewed.server.execution-plan"
 path = "crates/plurxd/src/http/stream.rs"
 kind = "symbol"
 selector = "fn delivery_plan("
-digest = "sha256:da33b9e0ee62f48826342b5586a05bf7e7a235e03165d4796ffde7e10e2a046e"
+digest = "sha256:9d7cd39032ef279a8d40162cb319989e495a269218bb9b2b866b8ad7342561ba"
 owner_module = "crates/plurxd/src/http/stream.rs"
 
 [[anchors]]
@@ -223,7 +229,7 @@ action = "For a change to this routing rule, preserve the cited policy and inspe
 authority = "plurx:section:routing.server.capability-profile"
 disposition = "open"
 responsible_role = "change author and reviewer"
-remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change."
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
 
 [[records]]
 id = "plurx:contract:routing.server.learned-decode-limit"
@@ -262,7 +268,7 @@ action = "For a change to this routing rule, preserve the cited policy and inspe
 authority = "plurx:section:routing.server.learned-decode-limit"
 disposition = "open"
 responsible_role = "change author and reviewer"
-remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change."
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
 
 [[records]]
 id = "plurx:contract:routing.server.learned-decode-limit-expiry"
@@ -301,7 +307,7 @@ action = "For a change to this routing rule, preserve the cited policy and inspe
 authority = "plurx:section:routing.server.learned-decode-limit-expiry"
 disposition = "open"
 responsible_role = "change author and reviewer"
-remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change."
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
 
 [[records]]
 id = "plurx:contract:routing.server.verdict"
@@ -340,7 +346,7 @@ action = "For a change to this routing rule, preserve the cited policy and inspe
 authority = "plurx:section:routing.server.verdict"
 disposition = "open"
 responsible_role = "change author and reviewer"
-remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change."
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
 
 [[records]]
 id = "plurx:contract:routing.server.manual-quality"
@@ -379,7 +385,7 @@ action = "For a change to this routing rule, preserve the cited policy and inspe
 authority = "plurx:section:routing.server.manual-quality"
 disposition = "open"
 responsible_role = "change author and reviewer"
-remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change."
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
 
 [[records]]
 id = "plurx:contract:routing.server.execution-plan"
@@ -418,7 +424,7 @@ action = "For a change to this routing rule, preserve the cited policy and inspe
 authority = "plurx:section:routing.server.execution-plan"
 disposition = "open"
 responsible_role = "change author and reviewer"
-remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change."
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
 
 [[records]]
 id = "plurx:decision:routing.profile-claims"
@@ -452,7 +458,7 @@ origin = "plurx:section:routing.decision.plan-ceiling"
 source_digest = "sha256:7f4c0107dcc93c20e40519125b3a0fd61d04971e0a3fcd002c8fcb3851df151f"
 revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
 [records.attributes]
-rationale = "The recorded ruling treats the server plan as a ceiling: upward claims clamp with diagnostics and downward echoes remain the client choice; a mismatch warns rather than refusing functionality."
+rationale = "The recorded ruling treats the server plan as a ceiling: upward claims clamp with diagnostics and downward echoes remain the client choice; a mismatch warns rather than refusing functionality. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: caption sidecar classification and stable artifact identity add delivery metadata; the six selected routing function bodies and plan-clamp behavior remain unchanged from that base. Source inspection is not final adversarial review or execution evidence."
 status = "accepted"
 source_section = "plurx:section:routing.decision.plan-ceiling"
 

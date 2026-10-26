@@ -1,5 +1,7 @@
 # Progressive subtitle translation — review ledger and completion record
 
+**Completion effort, 2026-10-26:** [current implementation and final qualification](SUBTITLE-COMPLETION-STATUS.md) extends the initial scope with progressive transcription, native clients, multiple audio tracks, additional delivery routes and existing-text translation. The evidence below retains its original candidate and scope. The user owns deployment after the new merge.
+
 **Status:** built — first route accepted on 2026-10-17; follow-ups are listed at the end of §2.
 
 **Setup repair — 2026-10-25; [implementation, qualification and landing](SUBTITLE-SETUP-REPAIR-STATUS.md).**

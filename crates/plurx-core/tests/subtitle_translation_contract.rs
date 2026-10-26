@@ -7,6 +7,7 @@ use plurx_core::store::{
 };
 fn profile() -> TranslationProfile {
     TranslationProfile {
+        task: Default::default(),
         version: 1,
         model_id: "small".into(),
         model_sha256: "a".repeat(64),
@@ -1229,5 +1230,222 @@ async fn publication_global_byte_cap_is_atomic_and_revision_max_minus_one_settle
         )
         .expect("bounded"),
         i64::MAX
+    );
+}
+
+#[tokio::test]
+async fn shared_grant_reads_reuse_fixed_lease_and_never_create_compute_authority() {
+    use plurx_core::store::{
+        shared_caption_read::{GrantCaptionPrincipal, GrantCaptionQuery as Q, GrantCaptionRead},
+        subtitle_translation_publication::PublishTranslationSegment,
+    };
+    let (_dir, store, conn) = fixture();
+    let recipe = prepared(&store).await;
+    let job = range(&store, &recipe, "shared-read", 1300).await;
+    assert!(store
+        .publish_translation_segment(PublishTranslationSegment {
+            token: job.token.clone().expect("token"),
+            source: job.supported_payload().expect("source"),
+            segment: draft(&recipe, job.fence, "Published caption"),
+            now_ms: 1400
+        })
+        .await
+        .expect("publish"));
+    let principal = GrantCaptionPrincipal {
+        grant_id: uuid::Uuid::new_v4().to_string(),
+        binding_sha256: "f".repeat(64),
+        file_id: 1,
+    };
+    let counts = || {
+        conn.query_row("SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM background_jobs),(SELECT count(*) FROM subtitle_translation_demands), (SELECT sum(generation) FROM subtitle_translation_demands)",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?))).expect("authority counts")
+    };
+    let before = counts();
+    let read = |principal: GrantCaptionPrincipal, query, now_ms| GrantCaptionRead {
+        principal,
+        query,
+        now_ms,
+    };
+    let lease = store
+        .read_shared_captions(read(
+            principal.clone(),
+            Q::AcquireLease {
+                asset_id: recipe.asset_id.clone(),
+            },
+            1700,
+        ))
+        .await
+        .expect("lease")
+        .remove(0);
+    let id = lease["lease_id"].as_str().expect("ID").to_owned();
+    let repeated = store
+        .read_shared_captions(read(
+            principal.clone(),
+            Q::AcquireLease {
+                asset_id: recipe.asset_id.clone(),
+            },
+            4700,
+        ))
+        .await
+        .expect("repeat")
+        .remove(0);
+    assert_eq!(
+        lease, repeated,
+        "polling reuses fixed expiry, not a sliding TTL"
+    );
+    let window = store
+        .read_shared_captions(read(
+            principal.clone(),
+            Q::Window {
+                asset_id: recipe.asset_id.clone(),
+                lease_id: id.clone(),
+                position_ms: 0,
+            },
+            4800,
+        ))
+        .await
+        .expect("window");
+    assert_eq!(window.len(), 1);
+    let segment = window[0]["segment_id"]
+        .as_str()
+        .expect("segment")
+        .to_owned();
+    assert_eq!(
+        store
+            .read_shared_captions(read(
+                principal.clone(),
+                Q::Segment {
+                    asset_id: recipe.asset_id.clone(),
+                    lease_id: id.clone(),
+                    segment_id: segment
+                },
+                4900
+            ))
+            .await
+            .expect("bytes")
+            .len(),
+        1
+    );
+    conn.execute("UPDATE files SET size=101 WHERE id=1", [])
+        .expect("source replacement");
+    assert!(store
+        .read_shared_captions(read(
+            principal.clone(),
+            Q::Lease {
+                asset_id: recipe.asset_id.clone(),
+                lease_id: id.clone()
+            },
+            4950
+        ))
+        .await
+        .expect("changed source cannot retain read authority")
+        .is_empty());
+    conn.execute("UPDATE files SET size=100 WHERE id=1", [])
+        .expect("restore fixture");
+    let mut wrong = principal.clone();
+    wrong.grant_id = uuid::Uuid::new_v4().to_string();
+    let mut wrong_binding = principal.clone();
+    wrong_binding.binding_sha256 = "e".repeat(64);
+    let mut wrong_file = principal.clone();
+    wrong_file.file_id = 2;
+    for other in [wrong, wrong_binding, wrong_file] {
+        assert!(store
+            .read_shared_captions(read(
+                other,
+                Q::Lease {
+                    asset_id: recipe.asset_id.clone(),
+                    lease_id: id.clone()
+                },
+                5000
+            ))
+            .await
+            .expect("refuse mismatched authority")
+            .is_empty());
+    }
+    assert!(store
+        .read_shared_captions(read(
+            principal.clone(),
+            Q::Lease {
+                asset_id: recipe.asset_id.clone(),
+                lease_id: id
+            },
+            31700
+        ))
+        .await
+        .expect("expiry")
+        .is_empty());
+    assert_eq!(
+        counts(),
+        before,
+        "read grants cannot mint users/jobs/demands or heartbeat computation"
+    );
+    let held = store
+        .read_shared_captions(read(
+            principal,
+            Q::AcquireLease {
+                asset_id: recipe.asset_id.clone(),
+            },
+            100000000,
+        ))
+        .await
+        .expect("new read lease");
+    assert_eq!(held.len(), 1);
+    conn.execute(
+        "UPDATE subtitle_translation_snapshots SET created_at_ms=0",
+        [],
+    )
+    .expect("age snapshot");
+    assert!(store
+        .acquire_translation_lease(
+            plurx_core::store::subtitle_translation_read::AcquireTranslationLease {
+                user_id: 1,
+                asset_id: "0".repeat(64),
+                now_ms: 100000001
+            }
+        )
+        .await
+        .expect("account lease cleanup")
+        .is_none());
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_snapshots",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("grant protected snapshot"),
+        1
+    );
+
+    conn.execute("UPDATE subtitle_translation_demands SET released=1", [])
+        .expect("release computation");
+    conn.execute(
+        "UPDATE subtitle_translation_assets SET last_read_at_ms=0,created_at_ms=0",
+        [],
+    )
+    .expect("age cache");
+    store
+        .maintain_translation_cache(100000001)
+        .await
+        .expect("collect protected");
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_assets WHERE retired_at_ms IS NULL",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("held"),
+        1
+    );
+    store
+        .maintain_translation_cache(100040000)
+        .await
+        .expect("collect expired");
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_assets WHERE retired_at_ms IS NULL",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("retired"),
+        0
     );
 }

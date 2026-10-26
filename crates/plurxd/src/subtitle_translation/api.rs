@@ -20,7 +20,7 @@ use plurx_core::{
     domain::MediaFile,
     store::{
         background_jobs::{BackgroundJob, JobPayload, JobState},
-        subtitle_translation::{valid_digest, SourceRevision, TranslationProfile},
+        subtitle_translation::{valid_digest, SourceRevision, SpeechTask, TranslationProfile},
         subtitle_translation_mutation::{TranslationAction, TranslationMutation},
         subtitle_translation_read::{AcquireTranslationLease, TranslationQuery, TranslationRead},
     },
@@ -109,27 +109,21 @@ fn private_headers(response: &mut Response, now: i64, expiry: Option<i64>) -> Re
     Ok(())
 }
 fn languages() -> Vec<String> {
-    super::profile::model_spec()
-        .languages
-        .into_iter()
-        .filter(|code| code != "en")
-        .collect()
+    super::profile::model_spec().languages.into_iter().collect()
 }
 fn selected_profile(model: &str, profile_id: &str) -> Result<TranslationProfile, ApiError> {
-    let profile = super::profile::selected_profile();
-    if model != profile.model_id || profile_id != profile.id()? {
-        return Err(invalid());
-    }
-    Ok(profile)
+    super::profile::profiles()
+        .into_iter()
+        .find(|p| model == p.model_id && p.id().is_ok_and(|id| id == profile_id))
+        .ok_or_else(invalid)
 }
-fn profile_summary() -> Result<Value, ApiError> {
-    let profile = super::profile::selected_profile();
+fn profile_summary(profile: TranslationProfile) -> Result<Value, ApiError> {
     Ok(
         json!({"profile_id":profile.id()?,"model_id":profile.model_id,"model_sha256":profile.model_sha256,
-        "task":"translate","output_language":"en","input_languages":languages(),"adapter_contract":profile.adapter_contract,
+        "task":profile.task.name(),"output_language":if profile.task.is_translation(){Some("en")}else{None},"input_languages":languages().into_iter().filter(|language| !profile.task.is_translation() || language != "en").collect::<Vec<_>>(),"adapter_contract":profile.adapter_contract,
         "pipeline_revision":profile.pipeline_revision,"timeline_contract":profile.timeline_contract,
         "window":{"core_ms":profile.core_ms,"left_context_ms":profile.left_context_ms,"right_context_ms":profile.right_context_ms},
-        "eligibility":{"delivery":["direct"],"max_source_audio_streams":1,"clock_contract":profile.timeline_contract},
+        "eligibility":{"delivery":["direct","remux","transcode"],"max_source_audio_streams":256,"clock_contract":profile.timeline_contract},
         "limits":{"segment_bytes":16384,"segment_cues":128,"page_bytes":65536,"page_entries":64,"coverage_intervals":64,
             "concurrent_fetches":2,"cue_memory_bytes":524288,"cue_count":1024,"cue_window_before_ms":30000,"cue_window_after_ms":90000,
             "poll_min_ms":1000,"poll_max_ms":5000,"retry_max_ms":30000,"heartbeat_interval_ms":5000,"demand_ttl_ms":15000,"max_following_cores":3},
@@ -167,7 +161,7 @@ pub async fn models(
     response(
         json!({"version":1,"catalog_revision":"plurx-managed-subtitle-models-v2",
         "models":[{"id":model.id,"label":model.label,"download_bytes":model.download_bytes,"sha256":model.sha256,"source":model.source,"license":model.license}],
-        "profiles":[profile_summary()?],"workers":worker_rows(super::workers_public(&state).await?)?,"server_now_ms":crate::state::clock_ms()}),
+        "profiles":super::profile::profiles().into_iter().map(profile_summary).collect::<Result<Vec<_>,_>>()?,"workers":worker_rows(super::workers_public(&state).await?)?,"server_now_ms":crate::state::clock_ms()}),
     )
 }
 fn worker_rows(rows: Vec<Value>) -> Result<Vec<Value>, ApiError> {
@@ -192,9 +186,9 @@ fn worker_rows(rows: Vec<Value>) -> Result<Vec<Value>, ApiError> {
             if !valid_digest(model_sha) || !valid_digest(profile_id) { return Err(observation_error()); }
             let engine_sha = nullable_digest(cap, "engine_sha256")?;
             let verified = if cap["verified_at_ms"].is_null() { Value::Null } else { cap["verified_at_ms"].as_i64().filter(|n| *n>=0).ok_or_else(observation_error)?.into() };
-            Ok(json!({"model_id":field(cap,"model_id")?,"profile_id":profile_id,"status":status,"reason":safe_reason(cap["reason"].as_str()),"verified_at_ms":verified,"model_sha256":model_sha,"engine_sha256":engine_sha}))
+            Ok(json!({"task":cap["task"],"model_id":field(cap,"model_id")?,"profile_id":profile_id,"status":status,"reason":safe_reason(cap["reason"].as_str()),"verified_at_ms":verified,"model_sha256":model_sha,"engine_sha256":engine_sha}))
         }).collect::<Result<Vec<_>,ApiError>>()?;
-        Ok(json!({"node_id":node,"label":label,"current":row["current"].as_bool().ok_or_else(observation_error)?,"eligible":row["eligible"].as_bool().ok_or_else(observation_error)?,"observed_at_ms":row["observed_at_ms"].as_i64().ok_or_else(observation_error)?,"expires_at_ms":row["expires_at_ms"].as_i64().ok_or_else(observation_error)?,"engine":engine,"capabilities":capabilities}))
+        Ok(json!({"node_id":node,"label":label,"current":row["current"].as_bool().ok_or_else(observation_error)?,"eligible":row["eligible"].as_bool().ok_or_else(observation_error)?,"observed_at_ms":row["observed_at_ms"].as_i64().ok_or_else(observation_error)?,"expires_at_ms":row["expires_at_ms"].as_i64().ok_or_else(observation_error)?,"engine":engine,"capacity":row["capacity"],"capabilities":capabilities}))
     }).collect()
 }
 async fn file(state: &AppState, file_id: i64) -> Result<MediaFile, ApiError> {
@@ -267,6 +261,8 @@ struct AssetSummary {
     audio_index: i64,
     spoken_language: String,
     output_language: String,
+    #[serde(default)]
+    task: SpeechTask,
     timeline_contract: String,
     manifest_revision: String,
     duration_ms: i64,
@@ -278,8 +274,8 @@ fn asset_summary(value: Value) -> Result<AssetSummary, ApiError> {
     if !valid_digest(&row.asset_id)
         || !valid_digest(&row.content_revision)
         || !valid_digest(&row.profile_id)
-        || row.output_language != "en"
-        || row.audio_index != 0
+        || row.output_language != row.task.output_language(&row.spoken_language)
+        || !(0..=255).contains(&row.audio_index)
     {
         return Err(observation_error());
     }
@@ -306,14 +302,27 @@ pub async fn options(
     ApiPath(file_id): ApiPath<i64>,
 ) -> Result<Response, ApiError> {
     let file = file(&state, file_id).await?;
-    let capability = super::file_capability(&state, &file).await;
     let (assets, next) = asset_page(&state, user.id, file.id, None).await?;
-    let audio=file.audio_streams.iter().map(|track|json!({"index":track.index,"language":track.language,"normalized_language":normalized_language(track.language.as_deref()),"title":track.title,"default":track.default})).collect::<Vec<_>>();
+    let mut audio = Vec::new();
+    let mut any_supported = false;
+    let mut source_origin_ms = None;
+    let mut capability_reason = "direct_audio_selection_unverified";
+    for track in &file.audio_streams {
+        let clock = super::selected_file_capability(&state, &file, track.index).await;
+        if let Ok(clock) = clock {
+            any_supported = true;
+            source_origin_ms = Some(clock.origin_samples.div_euclid(16));
+        }
+        if let Err(reason) = clock {
+            capability_reason = reason;
+        }
+        audio.push(json!({"index":track.index,"audio_ordinal":track.index,"source_index":clock.as_ref().ok().and_then(|clock|clock.source_index),"source_start_ms":clock.as_ref().ok().map(|clock|clock.audio_start_samples.div_euclid(16)),"duration_ms":clock.as_ref().ok().map(|clock|clock.duration_ms),"capability":{"supported":clock.is_ok(),"reason":clock.err()},"language":track.language,"normalized_language":normalized_language(track.language.as_deref()),"title":track.title,"default":track.default}));
+    }
     response(
         json!({"version":1,"file_id":file.id.to_string(),"source_size":file.size.to_string(),"source_mtime":file.mtime.to_string(),
-        "content_revision":null,"duration_ms":file.duration_ms,"timeline_contract":super::profile::selected_profile().timeline_contract,
-        "audio_tracks":audio,"subtitle_streams":file.subtitle_streams,"models":[profile_summary()?],
-        "capability":{"supported":capability.is_ok(),"reason":capability.err()},
+        "content_revision":null,"duration_ms":file.duration_ms,"source_origin_ms":source_origin_ms,"timeline_contract":super::profile::selected_profile().timeline_contract,
+        "audio_tracks":audio,"subtitle_streams":file.subtitle_streams,"models":super::profile::profiles().into_iter().map(profile_summary).collect::<Result<Vec<_>,_>>()?,
+        "capability":{"supported":any_supported,"reason":if any_supported{None}else{Some(capability_reason)}},
         "permissions":{"read":true,"demand":user.is_admin,"stop":user.is_admin,"resume":user.is_admin},
         "assets":assets,"assets_next_cursor":next,"server_now_ms":crate::state::clock_ms()}),
     )
@@ -449,7 +458,8 @@ pub(crate) struct CreateRequest {
     audio_index: i64,
     spoken_language: String,
     output_language: String,
-    task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task: Option<SpeechTask>,
     model_id: String,
     profile_id: String,
     playback_id: String,
@@ -656,13 +666,18 @@ pub async fn create(
 ) -> Result<Response, ApiError> {
     envelope(input.version, &input.request_id, input.intent_expires_at_ms)?;
     window(&input.playback_id, input.position_ms, input.playback_rate)?;
-    if input.task != "translate"
-        || input.output_language != "en"
-        || input.audio_index != 0
+    let task = input.task.unwrap_or_else(|| {
+        super::profile::profiles()
+            .into_iter()
+            .find(|profile| profile.id().is_ok_and(|id| id == input.profile_id))
+            .map_or(SpeechTask::default(), |profile| profile.task)
+    });
+    if input.output_language != task.output_language(&input.spoken_language)
+        || !(0..=255).contains(&input.audio_index)
         || !plurx_core::store::background_jobs_transcription::whisper_language(
             &input.spoken_language,
         )
-        || input.spoken_language == "en"
+        || (task.is_translation() && input.spoken_language == "en")
         || file_id <= 0
         || !valid_digest(&input.profile_id)
         || input.model_id.is_empty()
@@ -700,6 +715,9 @@ pub async fn create(
     }
     config::fresh_intent(input.intent_expires_at_ms, now)?;
     let profile = selected_profile(&input.model_id, &input.profile_id)?;
+    if profile.task != task {
+        return Err(invalid());
+    }
     if !languages().contains(&input.spoken_language) {
         return Err(invalid());
     }
@@ -711,7 +729,7 @@ pub async fn create(
             crate::state::clock_ms(),
         ));
     }
-    let duration = super::file_capability(&state, &file)
+    let duration = super::selected_file_capability(&state, &file, input.audio_index)
         .await
         .map_err(|code| config::failure(StatusCode::CONFLICT, code, crate::state::clock_ms()))?;
     let target = super::eligible_worker(&state, &file, &profile).await?;
@@ -730,7 +748,7 @@ pub async fn create(
             profile,
             audio_index: input.audio_index,
             spoken_language: input.spoken_language,
-            duration_ms: duration,
+            duration_ms: duration.duration_ms,
             target_node_id: target,
             playback_id: input.playback_id,
             position_ms: input.position_ms,
@@ -1081,7 +1099,7 @@ async fn operation_projection(state: &AppState, row: &Value) -> Result<Value, Ap
     };
     let audio = row["audio_index"]
         .as_i64()
-        .filter(|n| *n == 0)
+        .filter(|n| (0..=255).contains(n))
         .ok_or_else(observation_error)?;
     let spoken = field(row, "spoken_language")?;
     if !languages().iter().any(|language| language == spoken) {
@@ -1097,6 +1115,8 @@ async fn operation_projection(state: &AppState, row: &Value) -> Result<Value, Ap
     if !asset.is_null() && content.is_none() {
         return Err(observation_error());
     }
+    let capacity_wait =
+        active["state"] == "queued" && !state.transcode.speech_capacity_observation().await.2;
     let source_state = if content.is_some() {
         read = total.clone();
         "verified"
@@ -1106,11 +1126,11 @@ async fn operation_projection(state: &AppState, row: &Value) -> Result<Value, Ap
         "checking"
     };
     Ok(
-        json!({"version":1,"operation_id":operation_id,"operation_epoch":epoch,"view_revision":view,"state":state_name,
-        "reason":safe_reason(row["reason"].as_str()),"retryable":row["retryable"].as_bool().ok_or_else(observation_error)?,
+        json!({"version":1,"operation_id":operation_id,"operation_epoch":epoch,"view_revision":view,"state":if capacity_wait{"waiting_capacity"}else{state_name},
+        "reason":if capacity_wait{Some("waiting_for_playback_capacity")}else{safe_reason(row["reason"].as_str())},"retryable":row["retryable"].as_bool().ok_or_else(observation_error)?,
         "asset_id":asset,"manifest_revision":manifest,"file_id":counter(row,"file_id",true)?,
         "source_size":total,"source_mtime":mtime,"content_revision":content,"audio_index":audio,
-        "spoken_language":spoken,"output_language":"en","task":"translate","model_id":profile.model_id,
+        "spoken_language":spoken,"output_language":profile.task.output_language(spoken),"task":profile.task.name(),"model_id":profile.model_id,
         "model_sha256":profile.model_sha256,"profile_id":profile.id()?,"timeline_contract":profile.timeline_contract,
         "source_check":{"state":source_state,"bytes_read":read,"total_bytes":counter(row,"source_size",true)?},
         "active_job":active,"failed_ranges":[],"failed_ranges_next_cursor":null,"server_now_ms":crate::state::clock_ms()}),
@@ -1466,10 +1486,10 @@ pub async fn manifest(
         return Err(invalid());
     }
     let asset = asset_row(&state, user.id, &asset_id).await?;
-    let profile = super::profile::selected_profile();
-    if asset.profile_id != profile.id()? {
-        return Err(observation_error());
-    }
+    let profile = super::profile::profiles()
+        .into_iter()
+        .find(|p| p.id().is_ok_and(|id| id == asset.profile_id))
+        .ok_or_else(observation_error)?;
     let operation = operation_row(&state, user.id, &asset.operation_id).await?;
     let mut reused = false;
     let lease = if query.renew_lease.is_none() && headers.contains_key(LEASE_HEADER) {
@@ -1542,7 +1562,7 @@ pub async fn manifest(
     }
     let mut answer = response(
         json!({"version":1,"asset_id":asset.asset_id,"file_id":asset.file_id,"content_revision":asset.content_revision,
-        "profile_id":asset.profile_id,"audio_index":asset.audio_index,"spoken_language":asset.spoken_language,"output_language":"en","timeline_contract":asset.timeline_contract,
+        "profile_id":asset.profile_id,"audio_index":asset.audio_index,"spoken_language":asset.spoken_language,"output_language":asset.output_language,"task":asset.task.name(),"timeline_contract":asset.timeline_contract,
         "manifest_revision":lease.revision,"view_revision":counter(&operation,"view_revision",true)?,
         "operation":{"operation_id":asset.operation_id,"epoch":counter(&operation,"operation_epoch",true)?,"state":field(&operation,"state")?,"reason":safe_reason(operation["reason"].as_str()),"retry_after_ms":null},
         "snapshot":{"lease_id":lease.id,"revision":lease.revision,"expires_in_ms":lease.expires-now},"coverage":coverage,"segments":segments,
@@ -1773,7 +1793,7 @@ mod tests {
             audio_index: 0,
             spoken_language: "de".into(),
             output_language: "en".into(),
-            task: "translate".into(),
+            task: Some(SpeechTask::TranslateToEnglish),
             model_id: profile.model_id.clone(),
             profile_id: profile.id().expect("selected profile identity"),
             playback_id: uuid::Uuid::new_v4().to_string(),

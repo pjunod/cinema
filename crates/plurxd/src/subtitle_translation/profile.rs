@@ -1,6 +1,6 @@
 //! Server-owned experimental profile, not a claim of general language quality.
 use crate::subtitle_models::artifacts::CatalogModel;
-use plurx_core::store::subtitle_translation::{TranslationCue, TranslationProfile};
+use plurx_core::store::subtitle_translation::{SpeechTask, TranslationCue, TranslationProfile};
 
 pub(crate) const MODEL_SHA256: &str =
     "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b";
@@ -29,6 +29,7 @@ pub(crate) fn self_test_notice() -> String {
 
 pub(crate) fn selected_profile() -> TranslationProfile {
     TranslationProfile {
+        task: SpeechTask::TranslateToEnglish,
         version: 1,
         model_id: "small".into(),
         model_sha256: MODEL_SHA256.into(),
@@ -39,6 +40,48 @@ pub(crate) fn selected_profile() -> TranslationProfile {
         right_context_ms: 5_000,
         timeline_contract: "source-audio-clock-v1".into(),
     }
+}
+
+pub(crate) fn for_task(task: SpeechTask) -> TranslationProfile {
+    TranslationProfile {
+        task,
+        ..selected_profile()
+    }
+}
+pub(crate) fn profiles() -> [TranslationProfile; 2] {
+    [selected_profile(), for_task(SpeechTask::Transcribe)]
+}
+pub(crate) fn registered(profile: &TranslationProfile) -> bool {
+    *profile == for_task(profile.task)
+}
+/// Task-specific production-path evidence using the publisher's German words.
+/// This is a bounded smoke qualification, not a broad recognition quality claim.
+pub(crate) fn transcription_self_test(cues: &[TranslationCue]) -> bool {
+    if cues.is_empty() || cues.len() > 128 {
+        return false;
+    }
+    let text = cues
+        .iter()
+        .map(|cue| cue.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.len() > 16 * 1024 {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    let words = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .collect::<std::collections::BTreeSet<_>>();
+    [
+        "slalom",
+        "ersten",
+        "lauf",
+        "teilnehmer",
+        "rennen",
+        "ergebnis",
+    ]
+    .iter()
+    .all(|word| words.contains(word))
 }
 
 /// Vocabulary51865 has99 language codes. These are technical model facts,
@@ -88,6 +131,32 @@ pub(crate) fn english_self_test(cues: &[TranslationCue]) -> bool {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn tasks_keep_legacy_profile_bytes_and_qualify_independently() {
+        let translation = selected_profile();
+        let mut legacy = serde_json::to_value(&translation).expect("profile JSON");
+        assert!(legacy.get("task").is_none());
+        let restored: TranslationProfile =
+            serde_json::from_value(legacy.clone()).expect("legacy profile");
+        assert_eq!(
+            restored.id().expect("restored identity"),
+            translation.id().expect("translation identity")
+        );
+        legacy["task"] = serde_json::json!("transcribe");
+        let transcription: TranslationProfile =
+            serde_json::from_value(legacy).expect("transcription profile");
+        assert!(registered(&transcription));
+        assert_ne!(
+            translation.id().expect("translation identity"),
+            transcription.id().expect("transcription identity")
+        );
+        assert_eq!(transcription.task.output_language("de"), "de");
+        let cue = TranslationCue { cue_id: "unused".into(), start_ms: 0, end_ms: 1_000,
+            text: "Ihr erstes war der Slalom, bei dem sie in ihrem ersten Lauf ein Did not Finish erhielt. 36 der 116 Teilnehmer erzielten in diesem Rennen das gleiche Ergebnis.".into() };
+        assert!(transcription_self_test(std::slice::from_ref(&cue)));
+        assert!(!english_self_test(&[cue]));
+    }
 
     #[test]
     fn selected_profile_and_fixture_match_qualified_pins_without_yue() {

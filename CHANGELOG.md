@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Progressive text subtitle translation can create and observe durable jobs,
+  and shared playback can read committed caption assets from the Source under
+  its existing import grant. Apple build 277, Android versionCode 182.
+
 - Optional display-targeted HDR10-E selects a supported downward bucket from
   the viewer's reported peak, with platform/viewer provenance, complete-title
   L1 eligibility and master elision. The independent Developer preference is

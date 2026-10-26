@@ -2340,6 +2340,31 @@ first-use intent; retained exact receipts replay without starting fresh work.
 Responses carry a fresh `X-Translation-Server-Now-Ms` even when receipt bodies
 retain their original clock.
 
+### Text subtitle translation and shared captions
+
+Text translation creates a durable job from an existing subtitle track and
+returns its result as a cached subtitle asset. Shared playback exposes only
+committed caption metadata and bounded manifest/segment reads through the
+existing import grant; it does not start work on the Source.
+
+| Method | Path | Credential | Meaning |
+|---|---|---|---|
+| GET, PUT | `/api/v1/subtitle-text-translation/config` | bearer; admin for PUT | Saved enable/model preferences and revision. |
+| GET | `/api/v1/subtitle-text-translation/models` | bearer | Model catalog and worker availability. |
+| POST | `/api/v1/subtitle-text-translation/models/install` | admin bearer | Enqueue model installation. |
+| POST | `/api/v1/subtitle-text-translation/models/verify` | admin bearer | Enqueue model verification. |
+| GET | `/api/v1/files/{id}/subtitle-text-translation/options` | bearer | Current subtitle tracks, supported models and available results. |
+| POST | `/api/v1/files/{id}/subtitles/{index}/translation` | admin bearer | Create a durable text translation job. |
+| GET | `/api/v1/subtitle-text-translation/jobs/{id}` | bearer | Observe a translation job. |
+| POST | `/api/v1/subtitle-text-translation/jobs/{id}/retry` | admin bearer | Retry a failed job. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions` | import grant | Cursor page of committed captions for shared playback. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/manifest?position_ms={ms}` | import grant | Playback-window coverage and segment descriptors. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/segments/{segment}?lease={uuid}` | import grant | Bounded caption segment under the manifest read lease. |
+
+Shared caption reads are grant-bound and revalidate the Source asset authority.
+Expired snapshots require refreshing the caption page and manifest; the reads
+remain independent of playback session creation.
+
 Page and segment requests use `X-Translation-Read-Lease`. A matching ETag/304
 does not renew that lease. Expired leases or moved cursors require resynchronizing
 the manifest; playback position and effective operation state participate in its

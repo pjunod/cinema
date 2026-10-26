@@ -1590,6 +1590,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/analysis-coverage.test.js
 	@node tests/web/settings-sections.test.js
 	@node --test tests/web/subtitle-generation.test.js tests/web/subtitle-translation.test.js
+	@node --test tests/web/subtitle-text-translation.test.js tests/web/shared-subtitle-captions.test.js
+	@node --test tests/web/caption-controls.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
 	@node --test tests/web/hdr-display-peak.test.js

@@ -177,7 +177,10 @@ pub(crate) async fn save(
     match (&request.model_id, &request.profile_id) {
         (None, None) => {}
         (Some(model), Some(id))
-            if model == &profile.model_id && id == &profile.id().map_err(ApiError::from)? => {}
+            if model == &profile.model_id
+                && super::profile::profiles()
+                    .iter()
+                    .any(|p| p.id().is_ok_and(|candidate| candidate == *id)) => {}
         _ => return Err(invalid()),
     }
     if request

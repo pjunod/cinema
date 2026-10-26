@@ -1055,6 +1055,8 @@ function preparePlayOutgoing(attempt,decision){
   const retireOutgoing=()=>{
     if(retired) return;retired=true;
     const incoming=PLAYER;
+    if(typeof translationAttachmentWillChange==="function")translationAttachmentWillChange(incoming);
+    if(typeof sharedCaptionAttachmentWillChange==="function")sharedCaptionAttachmentWillChange(incoming);
     if(outgoing){
       // Reopens and multipart transitions share the exact pending command.
       // A different title retires it while its old callbacks are fenced.
@@ -1209,7 +1211,7 @@ function presentPlayerChrome(attempt,decided,prepared,openIsAttached){
   const defSub=PLAYER.subs.find(s=>s.default);
   if(defSub && !skipDefaultSub && wantSub==null && decision.method!=='transcode'){
     setTimeout(()=>{
-      if(openIsAttached()&&PLAYER.curSub<0&&PLAYER.preplay?.subtitle==null) setSub(defSub.index);
+      if(openIsAttached()&&PLAYER.curSub<0&&PLAYER.preplay?.subtitle==null&&!(typeof translationSelected==="function"&&translationSelected(PLAYER))) setSub(defSub.index);
     }, 400);
   }
   return initialAudio;
@@ -1232,7 +1234,7 @@ function choosePlayRoute(attempt,decided,prepared,initialAudio){
   // offset. The Source re-derives that decision at Start and refuses anything
   // else; there is no burn, grade or segment capability for raw bytes to need.
   if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"
-    &&preBurn==null&&decision.method==='direct_play'&&initialRoute==='direct'){
+    &&preBurn==null&&decision.method==='direct_play'&&initialRoute==='direct'&&(decision.audio?.length||0)<=1){
     initialRoute='shared_direct';
   }else if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"){
     // A burn always encodes (the Source owns its sidecar and fonts), and an
@@ -1386,8 +1388,7 @@ function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,in
     video.onloadedmetadata=()=>{
       if(!openIsAttached()) return;
       video.onloadedmetadata=null;
-      if(!isRemux)
-        applyPlaybackAttachmentPosition(video,openedPlayer,attachment,startSec); };
+      applyPlaybackAttachmentPosition(video,openedPlayer,attachment,isRemux?0:startSec); };
     applyPlaybackTransportIntent(video,openedPlayer);
   }
   return true;
@@ -1428,7 +1429,7 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
 function playbackInitialRoute(decision,audio,nativeHls,segmentedRemux,audioOffsetMs,hlsAvailable){
   return PlaybackPolicy.initialRoute({
     method:audioOffsetMs&&decision.method==='direct_play'?'remux':decision.method,
-    selectedAudioIndex:audio,nativeHls,segmentedRemux,
+    selectedAudioIndex:audio,audioTrackCount:decision.audio?.length||1,nativeHls,segmentedRemux,
     requiresHls:!!(decision.delivery&&decision.delivery.requires_hls),hlsAvailable
   });
 }
@@ -1529,6 +1530,8 @@ async function executePlaybackMediaChange(p,change){
       teardownHls(); resetMediaSource(v); clearSubs(v);
       p.started=false; p.method='remux'; p.copyHls=false; p.offset=pos;
       p.probeUrl=playbackFileUrl(playbackFileContextForPlayer(p),"stream.mp4");
+      const attachment=beginPlaybackMediaAttachment(p);
+      v.onloadedmetadata=()=>{if(!attachment.current())return;v.onloadedmetadata=null;applyPlaybackAttachmentPosition(v,p,attachment,0);};
       setPlaybackMediaSource(v,remuxUrl(playbackFileContextForPlayer(p),audio,pos));
       markPlaybackControlSeekExecuted(p,pos);
       armStall(pos,20000); applyPlaybackTransportIntent(v,p);
@@ -1657,6 +1660,8 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       detail:"the HLS index is still building — remuxing without segmentation"});
     resetMediaSource(v);
     if(live && !live()) return false;
+    const player=PLAYER,attachment=beginPlaybackMediaAttachment(player);
+    v.onloadedmetadata=()=>{if(!attachment.current())return;v.onloadedmetadata=null;applyPlaybackAttachmentPosition(v,player,attachment,0);};
     setPlaybackMediaSource(v,remuxUrl(context,aidx,from));
     markPlaybackControlSeekExecuted(PLAYER,from);
     armStall(from,20000); applyPlaybackTransportIntent(v,PLAYER);
@@ -1925,7 +1930,10 @@ function queuePlaybackFrame(v,p,callback,renewingSeek=false){
     id=v.requestVideoFrameCallback((now,meta)=>{
       if(registration!==generation) return;
       id=null;clear();
-      if(PLAYER===p&&p.mediaAttachment===attachment) callback(now,meta,epoch,{attachment,intent,epoch});
+      if(PLAYER===p&&p.mediaAttachment===attachment){
+        if(typeof playbackCaptionAttachmentPositionReady==="function")playbackCaptionAttachmentPositionReady(v,p,attachment,true);
+        callback(now,meta,epoch,{attachment,intent,epoch});
+      }
     });
   };
   p.controlFrameCancel=clear;v._plurxFrameCancel=clear;

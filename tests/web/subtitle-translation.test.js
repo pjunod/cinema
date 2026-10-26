@@ -15,18 +15,18 @@ function harness(){
  let now=1000,nextTimer=0;const timers=new Map(),calls=[],nodes={},video=node(),panel=node();
  video.currentTime=5;video.playbackRate=1;video.paused=false;video.textTracks=[];video.domTracks=[];
  video.querySelectorAll=selector=>selector==='track'?video.domTracks.slice():[];
- video.addTextTrack=()=>{const t=track();video.textTracks.push(t);return t;};
+ video.addTextTrack=(_kind,label,language)=>{const t=track();t.label=label;t.language=language;video.textTracks.push(t);return t;};
  video.removeEventListener=()=>{};
  video.appendChild=tr=>{video.domTracks.push(tr);video.textTracks.push(tr.track);tr.remove=()=>video.domTracks.splice(video.domTracks.indexOf(tr),1);};
  nodes.video=video;nodes['watch-subtitle-translation']=panel;
- const controls={};for(const key of ['profile','language','confirm','status','clock','use','stop','resume','failures'])controls[`[data-translation-${key}]`]=node();
- controls['[data-translation-profile]'].value=P;controls['[data-translation-language]'].value='de';controls['[data-translation-confirm]'].checked=true;panel.fields=controls;
+ const controls={};for(const key of ['profile','language','confirm','status','clock','use','stop','resume','failures','task','heading','description','start','assets'])controls[`[data-translation-${key}]`]=node();
+ controls['[data-translation-profile]'].value=P;controls['[data-translation-language]'].value='de';controls['[data-translation-confirm]'].checked=true;controls['[data-translation-task]'].value='translate';panel.fields=controls;
  const ctx=vm.createContext({console,Uint8Array,TextEncoder,TextDecoder,Response,AbortController,URLSearchParams,Map,Set,BigInt,crypto:webcrypto,performance:{now:()=>now},Date,API:'/api/v1',AUTH_GENERATION:1,TOKEN:'private-fixture',PAGE_RENDER_GENERATION:1,ME:{is_admin:true},location:{hash:'#/item/1'},window:{VTTCue:class{constructor(start,end,text){this.startTime=start;this.endTime=end;this.text=text;}}},document:{getElementById:id=>nodes[id]||null,createElement:tag=>{const el=node();if(tag==='track')el.track=track();return el;}},setTimeout:(fn,ms)=>{const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),esc:x=>String(x).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),toast(){},closeMenu(){},endWait(){},PlaybackPolicy:{subtitleBurnAction:()=>"native"},subNeedsBurn:()=>false,positionForPlaybackIntent:()=>0,supersedePlaybackControlIntent:p=>p.controlIntentGeneration=(p.controlIntentGeneration||0)+1,notifyPlaybackControl(){},restartPendingPlaybackOpen:()=>false,nativeHlsSubtitleOrdinal:()=>-1,pbSyncSubIcon(){},tok:x=>x,playbackFileContextForPlayer:p=>p.fileContext,playbackFileUrl:(_c,s)=>'/source/'+s,subLabelMenu:()=>"Original",fetch:async(url,init)=>{calls.push({url,init});return ctx.respond(url,init);},respond:()=>{throw Error('Unexpected request');}});
  vm.runInContext(fs.readFileSync(path.join(WEB,'core/diagnostics-hash.js'),'utf8'),ctx);
  vm.runInContext(fs.readFileSync(path.join(WEB,'player/subtitle-translation.js'),'utf8'),ctx);
  vm.runInContext(fs.readFileSync(path.join(WEB,'player/audio-sync.js'),'utf8'),ctx);
  const player={fileId:'9007199254740993',started:true,mediaAttachment:{id:1},audio:[{index:0,language:'deu'}],curAudio:0,curSub:-1,offset:0,subs:[{index:0,text:true,language:'de'}],method:'direct_play',fileContext:{source_ref:{kind:'local',file_id:'9007199254740993'}}};ctx.PLAYER=player;
- const state={capture:ctx.translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:player.fileId,audioChoice:0,audioIndex:0,controllers:new Set(),listeners:[],segments:new Map(),cues:new Map(),coverage:[{start_ms:0,end_ms:20000}],operation:{operation_id:OP,operation_epoch:'1',view_revision:'1',state:'partial',failed_ranges:[]},assetId:A,playbackId:'44444444-4444-4444-8444-444444444444',queue:Promise.resolve(),windowGeneration:0,profile:structuredClone(profile),limits:{...limits},options:{version:1,file_id:player.fileId,source_size:'9007199254740995',source_mtime:'9007199254740997',duration_ms:120000,audio_tracks:[{index:0,normalized_language:'de'}],models:[structuredClone(profile)],permissions:{read:true,demand:true,stop:true,resume:true}},lease:{id:LEASE,revision:'7',deadline:31000},contentRevision:S,retired:false,clock:{server:100000,at:now,transit:0}};
+ const state={capture:ctx.translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:player.fileId,audioChoice:0,audioIndex:0,task:'translate',outputLanguage:'en',controllers:new Set(),listeners:[],segments:new Map(),cues:new Map(),coverage:[{start_ms:0,end_ms:20000}],operation:{operation_id:OP,operation_epoch:'1',view_revision:'1',state:'partial',failed_ranges:[]},assetId:A,playbackId:'44444444-4444-4444-8444-444444444444',queue:Promise.resolve(),windowGeneration:0,profile:structuredClone(profile),limits:{...limits},options:{version:1,file_id:player.fileId,source_size:'9007199254740995',source_mtime:'9007199254740997',duration_ms:120000,source_origin_ms:0,audio_tracks:[{index:0,audio_ordinal:0,normalized_language:'de',capability:{supported:true}}],models:[structuredClone(profile)],permissions:{read:true,demand:true,stop:true,resume:true}},lease:{id:LEASE,revision:'7',deadline:31000},contentRevision:S,retired:false,clock:{server:100000,at:now,transit:0}};
  state.current=()=>ctx.translationCurrent(state);ctx.seed=state;vm.runInContext('SUBTITLE_TRANSLATION=seed',ctx);
  return {ctx,state,player,video,panel,controls,calls,timers,nodes,clock:value=>now=value,fire(ms){for(const [id,t]of [...timers])if(t.ms===ms){timers.delete(id);t.fn();}}};
 }
@@ -34,16 +34,36 @@ function segment(h,text='A & B <b>word</b> <00:01>\nnext line'){
  const body={version:1,asset_id:A,segment_id:B,core_index:0,start_ms:0,end_ms:20000,cues:[{cue_id:'1'.repeat(64),start_ms:0,end_ms:11000,text}],provenance:{engine_sha256:E,model_sha256:M,operation_epoch:'1',platform:'fixture',profile_id:P,source_sha256:S,worker_fence:'1'}};
  const bytes=Buffer.from(canonical(body));return {body,bytes,reference:{segment_id:B,digest:sha(bytes),start_ms:0,end_ms:20000}};
 }
-function operation(h,fields={}){return {version:1,...h.state.operation,file_id:h.state.fileId,source_size:h.state.options.source_size,source_mtime:h.state.options.source_mtime,audio_index:0,spoken_language:'de',model_id:profile.model_id,model_sha256:M,timeline_contract:profile.timeline_contract,content_revision:S,output_language:'en',task:'translate',profile_id:P,asset_id:A,failed_ranges:[],...fields};}
-function manifest(h,fields={}){return {version:1,asset_id:A,file_id:h.state.fileId,profile_id:P,audio_index:0,spoken_language:'de',output_language:'en',timeline_contract:profile.timeline_contract,content_revision:S,manifest_revision:'7',view_revision:'2',operation:{operation_id:OP,epoch:'1',state:'partial'},snapshot:{lease_id:LEASE,revision:'7',expires_in_ms:30000},coverage:[{start_ms:0,end_ms:20000}],segments:[],coverage_next_cursor:null,segment_next_cursor:null,...fields};}
+function operation(h,fields={}){const p=h.state.profile;return {version:1,...h.state.operation,file_id:h.state.fileId,source_size:h.state.options.source_size,source_mtime:h.state.options.source_mtime,audio_index:0,spoken_language:'de',model_id:p.model_id,model_sha256:p.model_sha256,timeline_contract:p.timeline_contract,content_revision:S,output_language:p.task==='transcribe'?'de':'en',task:p.task||'translate',profile_id:p.profile_id,asset_id:A,failed_ranges:[],...fields};}
+function manifest(h,fields={}){const p=h.state.profile;return {version:1,asset_id:A,file_id:h.state.fileId,profile_id:P,audio_index:0,spoken_language:'de',output_language:p.task==='transcribe'?'de':'en',task:p.task||'translate',timeline_contract:p.timeline_contract,content_revision:S,manifest_revision:'7',view_revision:'2',operation:{operation_id:OP,epoch:'1',state:'partial'},snapshot:{lease_id:LEASE,revision:'7',expires_in_ms:30000},coverage:[{start_ms:0,end_ms:20000}],segments:[],coverage_next_cursor:null,segment_next_cursor:null,...fields};}
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 test('exact counters and supplied profile limits never invent an activated model',()=>{
  const h=harness();assert.equal(h.ctx.translationNext('9007199254740993'),'9007199254740994');assert.throws(()=>h.ctx.translationNext('9223372036854775807'));
  assert.equal(h.ctx.translationProfileLimits({}),null);const incomplete=structuredClone(profile);delete incomplete.limits.poll_max_ms;assert.equal(h.ctx.translationProfileLimits(incomplete),null);
  h.state.profile.activation_state='pending';h.state.options.models=[h.state.profile];return h.ctx.translationStart(h.state).then(()=>{assert.equal(h.calls.length,0);assert.match(h.state.error,/No qualified/);});
 });
-test('one actual audio and direct attachment capability rejects optimistic alternate selection',()=>{
- const h=harness();assert.equal(h.ctx.translationDirectReason(h.player,h.video),null);h.player.audio.push({index:1});assert.equal(h.ctx.translationDirectReason(h.player,h.video),'direct_audio_selection_unverified');h.player.audio.pop();h.player.pendingMediaChange={};assert.equal(h.ctx.translationDirectReason(h.player,h.video),'delivery_unsupported');
+test('local direct, remux and encoded attachments allow a known selected audio ordinal',()=>{
+ const h=harness();for(const method of ['direct_play','remux','transcode']){h.player.method=method;if(method==='remux')h.player.sessionId='owned-session';assert.equal(h.ctx.translationDirectReason(h.player,h.video),null);}
+ h.player.curAudio=-1;assert.equal(h.ctx.translationDirectReason(h.player,h.video),'direct_audio_selection_unverified');h.player.curAudio=0;h.player.burnedSub=1;assert.equal(h.ctx.translationDirectReason(h.player,h.video),'delivery_unsupported');h.player.burnedSub=null;h.player.pendingMediaChange={};assert.equal(h.ctx.translationDirectReason(h.player,h.video),'delivery_unsupported');
+});
+test('transcription request, operation and manifest retain spoken-language output identity',async()=>{
+ const h=harness(),p={...structuredClone(profile),task:'transcribe',input_languages:['de','en']};h.state.options.models=[p];h.state.profile=p;h.state.task='transcribe';h.controls['[data-translation-task]'].value='transcribe';h.controls['[data-translation-language]'].value='de';h.ctx.translationPoll=async()=>{};h.ctx.respond=()=>response({version:1,operation_id:OP,operation_epoch:'1',view_revision:'1',asset_id:A,state:'checking_source',demand_id:DEMAND,demand_generation:'1',server_now_ms:100000});
+ await h.ctx.translationStart(h.state);const body=JSON.parse(h.calls[0].init.body);assert.equal(body.task,'transcribe');assert.equal(body.spoken_language,'de');assert.equal(body.output_language,'de');assert.doesNotThrow(()=>h.ctx.translationValidateOperation(h.state,operation(h)));h.ctx.respond=()=>response(manifest(h));await h.ctx.translationManifest(h.state,true);assert.equal(h.state.outputLanguage,'de');
+});
+test('options validate selected audio ordinal independently of other unsupported tracks',()=>{
+ const h=harness();h.state.options.audio_tracks.push({index:4,audio_ordinal:1,normalized_language:'ja',capability:{supported:false,reason:'source_clock_unsupported'}});h.ctx.translationValidateOptions(h.state.options,h.state);h.state.player.curAudio=1;h.state.audioIndex=1;assert.throws(()=>h.ctx.translationValidateOptions(h.state.options,h.state),/timeline is not supported/);
+});
+test('task selector switches among task-qualified profiles and retains valid language choices',async()=>{
+ const h=harness(),transcribe={...structuredClone(profile),profile_id:A,task:'transcribe',input_languages:['de','en']};h.ctx.respond=()=>response({version:1,file_id:h.player.fileId,source_size:'9007199254740995',source_mtime:'9007199254740997',duration_ms:120000,source_origin_ms:0,audio_tracks:[{index:0,audio_ordinal:0,normalized_language:'de',title:'German',capability:{supported:true}}],models:[structuredClone(profile),transcribe],permissions:{read:true,demand:true,stop:true,resume:true},assets:[],assets_next_cursor:null});
+ await h.ctx.translationOpen(node());const selector=h.controls['[data-translation-task]'];assert.equal(selector.value,'translate');selector.value='transcribe';selector.listeners.change();assert.equal(vm.runInContext('SUBTITLE_TRANSLATION.task',h.ctx),'transcribe');assert.equal(h.controls['[data-translation-profile]'].value,A);assert.equal(h.controls['[data-translation-language]'].value,'de');assert.match(h.panel.innerHTML,/Generate captions in the spoken language/);
+});
+test('existing caption assets remain readable and bind their task to the matching profile',async()=>{
+ const h=harness(),p={...structuredClone(profile),profile_id:A,task:'transcribe',input_languages:['de','en']};h.state.options.models.push(p);h.ctx.translationPoll=async()=>{};await h.ctx.translationReadAsset(h.state,{asset_id:A,profile_id:A,task:'transcribe',spoken_language:'de',output_language:'de'});assert.equal(h.state.task,'transcribe');assert.equal(h.state.outputLanguage,'de');
+ await h.ctx.translationReadAsset(h.state,{asset_id:B,profile_id:P,task:'translate',spoken_language:'de',output_language:'en'});assert.equal(h.state.task,'translate');assert.equal(h.state.outputLanguage,'en');
+});
+test('transcription cue presentation uses its output language and source-offset seconds',()=>{
+ const h=harness();h.state.profile={...structuredClone(profile),task:'transcribe',input_languages:['de','en']};h.state.task='transcribe';h.state.outputLanguage='de';h.state.spokenLanguage='de';h.player.offset=2;h.player.captionIntent={kind:'translation',asset_id:A};h.state.cues.set('1'.repeat(64),{cue_id:'1'.repeat(64),start_ms:3000,end_ms:7000,text:'spoken'});h.ctx.translationApplyCues(h.state);
+ assert.equal(h.video._translationTrackLanguage,'de');assert.match(h.video._translationTrack.label,/AI captions · de/);assert.equal(h.video._translationTrack.cues[0].startTime,1);assert.equal(h.video._translationTrack.cues[0].endTime,5);
 });
 test('digest is checked before decoding or parsing and never client reserialization',async()=>{
  const h=harness();h.ctx.respond=()=>response(new Uint8Array([255]));await assert.rejects(h.ctx.translationSegment(h.state,{segment_id:B,digest:'0'.repeat(64),start_ms:0,end_ms:20000},h.state.lease,0),/digest mismatch/);
@@ -190,7 +210,7 @@ test('catalog refresh recovers initial choices and keeps newer unsaved model lan
  h.ctx.respond=()=>response({profiles:[profile],models:[],workers:[],server_now_ms:100000});await h.ctx.translationRefreshSetup();
  assert.equal(s.fields['[data-translation-setting-profile]'].value,P);assert.match(s.fields['[data-translation-setting-profile]'].innerHTML,/measured-model-fixture/);assert.match(s.fields['[data-translation-setting-language]'].innerHTML,/value="ja"/);assert.equal(s.setup.saved.profile_id,null);assert.equal(s.fields['[data-translation-setting-enabled]'].checked,false);assert.equal(h.calls.some(call=>call.init.method==='PUT'),false);
  const other={...profile,profile_id:A,model_id:'Other model',input_languages:['ja']};s.fields['[data-translation-setting-profile]'].value=A;s.fields['[data-translation-setting-language]'].value='fr';s.fields['[data-translation-setting-enabled]'].checked=true;s.setup.edit++;
- h.ctx.respond=()=>response({profiles:[other],models:[],workers:[],server_now_ms:100000});await h.ctx.translationRefreshSetup();assert.equal(s.fields['[data-translation-setting-profile]'].value,A);assert.equal(s.fields['[data-translation-setting-language]'].value,'fr');assert.match(s.fields['[data-translation-setting-language]'].innerHTML,/value="fr" selected/);assert.equal(s.fields['[data-translation-setting-enabled]'].checked,true);
+ h.ctx.respond=()=>response({profiles:[other],models:[],workers:[],server_now_ms:100000});await h.ctx.translationRefreshSetup();assert.equal(s.fields['[data-translation-setting-profile]'].value,A);assert.equal(s.fields['[data-translation-setting-language]'].value,'');assert.doesNotMatch(s.fields['[data-translation-setting-language]'].innerHTML,/value="fr" selected/);assert.equal(s.fields['[data-translation-setting-enabled]'].checked,true);
  s.fields['[data-translation-setting-profile]'].value='';await h.ctx.translationRefreshSetup();assert.equal(s.fields['[data-translation-setting-profile]'].value,'');
 });
 test('first-use model suggestion requires exactly one active profile and never replaces a saved profile',()=>{
@@ -296,4 +316,64 @@ test("a refused heartbeat keeps the acknowledged generation and a demand conflic
  const puts=h.calls.filter(call=>call.init.method==="PUT").map(call=>JSON.parse(call.init.body).demand_generation);
  assert.deepEqual(puts,["2","2"],"the next heartbeat is still the acknowledged generation plus one");
  assert.equal(h.state.demand,null);assert.notEqual(h.state.stopped,true,"a lapsed demand is not a Stop");
+});
+
+test('same-audio quality handoff preserves durable intent and reprojects only after fresh source and owned position',async()=>{
+ const h=harness(),s=segment(h,'same committed caption');s.body.cues[0].start_ms=18000;s.body.cues[0].end_ms=19000;s.bytes=Buffer.from(canonical(s.body));s.reference.digest=sha(s.bytes);
+ h.state.segments.set(B,{...s.reference,cues:s.body.cues});h.ctx.translationPrune(h.state);h.player.captionIntent={kind:'translation',asset_id:A};h.ctx.translationApplyCues(h.state);
+ assert.equal(h.video._translationTrack.cues[0].startTime,18);
+ const demand={id:DEMAND,generation:'4',epoch:'1'},stopIntent={version:1,request_id:DEMAND};h.state.demand=demand;h.state.stopIntent=stopIntent;
+ const refreshed=structuredClone(h.state.options);h.ctx.respond=url=>url.endsWith('/options')?response(refreshed):url.includes('/operations/')?response(operation(h)):url.includes('/manifest?')?response(manifest(h,{segments:[s.reference]})):Promise.reject(Error('Unexpected handoff read'));
+ h.ctx.translationAttachmentWillChange(h.player);assert.equal(h.video._translationTrack.cues.length,0);assert.equal(h.video._translationTrack.mode,'disabled');
+ h.player.offset=10;const token={id:2,audioOrdinal:0,captionPositionReady:false};h.player.mediaAttachment=token;h.ctx.translationAttachmentDidBegin(h.player,token);await settle();
+ assert.equal(h.state.demand,demand);assert.equal(h.state.stopIntent,stopIntent);assert.equal(h.state.assetId,A);assert.equal(h.state.positionReady,false);assert.equal(h.video._translationTrack.cues.length,0);
+ token.captionPositionReady=true;h.ctx.translationAttachmentPositionReady(h.player,token);await settle();await settle();
+ assert.equal(h.state.positionReady,true);assert.equal(h.player.captionIntent.asset_id,A);assert.equal(h.video._translationTrack.cues[0].startTime,8);assert.equal(h.video._translationTrack.cues[0].endTime,9);
+ assert.equal(h.calls.some(call=>['POST','PUT','DELETE'].includes(call.init.method)),false,'a quality handoff must not create, release or stop work');
+});
+test('uncommitted replacement and rollback leave predecessor captions and demand owned by the attached decoder',()=>{
+ const h=harness(),demand={id:DEMAND,generation:'1',epoch:'1'};h.state.demand=demand;h.player.captionIntent={kind:'translation',asset_id:A};
+ const candidate={...h.player,started:false,mediaAttachment:null,mediaPredecessor:h.player,captionIntent:undefined};h.ctx.PLAYER=candidate;
+ assert.equal(h.ctx.translationCurrent(h.state),true);h.ctx.translationMediaEvent(h.state,'timeupdate');h.ctx.translationWatchChanged();
+ assert.equal(vm.runInContext('SUBTITLE_TRANSLATION',h.ctx),h.state);assert.equal(h.state.demand,demand);assert.equal(h.player.captionIntent.asset_id,A);
+ h.ctx.PLAYER=h.player;assert.equal(h.ctx.translationCurrent(h.state),true);assert.equal(h.state.retired,false);assert.equal(h.player.captionIntent.kind,'translation');
+});
+test('new player quality commit transfers explicit caption intent but source and audio commits retire it',async()=>{
+ const h=harness();h.state.stopped=true;h.player.captionIntent={kind:'translation',asset_id:A};const original=h.player;
+ const candidate={...original,started:false,mediaAttachment:null,mediaPredecessor:original,captionIntent:undefined};h.ctx.PLAYER=candidate;
+ h.ctx.respond=()=>response(structuredClone(h.state.options));h.ctx.translationAttachmentWillChange(candidate);
+ assert.equal(candidate.captionIntent.asset_id,A);const token={id:2,audioOrdinal:0,captionPositionReady:false};candidate.mediaAttachment=token;candidate.mediaPredecessor=null;h.ctx.translationAttachmentDidBegin(candidate,token);await settle();
+ assert.equal(h.state.player,candidate);assert.equal(h.state.stopped,true);assert.equal(h.state.assetId,A);
+ candidate.audio=[{index:0},{index:3}];candidate.curAudio=1;h.ctx.translationAttachmentWillChange(candidate);assert.equal(h.state.retired,true);assert.equal(candidate.captionIntent.kind,'off');
+ const changed=harness();changed.state.stopped=true;changed.ctx.translationAttachmentWillChange({...changed.player,fileId:'123',fileContext:{source_ref:{kind:'local',file_id:'123'}}});assert.equal(changed.state.retired,true);
+});
+test('late prior-attachment bytes cannot become current again after a same-player rebind',async()=>{
+ const h=harness();let finish;h.ctx.respond=url=>url.endsWith('/prior')?new Promise(resolve=>finish=resolve):response(structuredClone(h.state.options));
+ const prior=h.ctx.translationRequest(h.state,'/prior');h.ctx.translationAttachmentWillChange(h.player);const token={id:2,audioOrdinal:0,captionPositionReady:false};h.player.mediaAttachment=token;h.ctx.translationAttachmentDidBegin(h.player,token);
+ finish(response({version:1,server_now_ms:100000}));await assert.rejects(prior,/Retired translation response/);await settle();assert.equal(h.state.attachment,token);
+});
+test('Off survives delayed rebind validation and changed source metadata never reuses cached captions',async()=>{
+ const h=harness();h.player.captionIntent={kind:'translation',asset_id:A};let finish;h.ctx.respond=()=>new Promise(resolve=>finish=resolve);
+ h.ctx.translationAttachmentWillChange(h.player);const token={id:2,audioOrdinal:0,captionPositionReady:true};h.player.mediaAttachment=token;h.ctx.translationAttachmentDidBegin(h.player,token);h.ctx.translationSelectSource(h.player,-1);
+ h.ctx.translationPoll=async()=>{};finish(response(structuredClone(h.state.options)));await settle();assert.equal(h.player.captionIntent.kind,'off');h.ctx.translationApplyCues(h.state);assert.notEqual(h.video._translationTrack?.mode,'showing');
+ const changed=harness();changed.state.stopped=true;changed.player.captionIntent={kind:'translation',asset_id:A};changed.ctx.respond=()=>response({...structuredClone(changed.state.options),source_size:'999'});changed.ctx.translationAttachmentWillChange(changed.player);const next={id:2,audioOrdinal:0,captionPositionReady:true};changed.player.mediaAttachment=next;changed.ctx.translationAttachmentDidBegin(changed.player,next);await settle();assert.equal(changed.state.retired,true);assert.equal(changed.player.captionIntent.kind,'off');
+});
+test('audio selection uses the source ordinal rather than its array position and permits signed container origins',async()=>{
+ const h=harness();vm.runInContext('SUBTITLE_TRANSLATION=null',h.ctx);h.player.offset=-1.5;h.video.currentTime=.25;h.player.audio=[{index:2,language:'de'},{index:7,language:'ja'}];h.player.curAudio=1;h.player.mediaAttachment.audioOrdinal=7;
+ h.ctx.selectedAudioIndex=p=>p.audio[p.curAudio].index;h.ctx.respond=()=>response({...structuredClone(h.state.options),source_origin_ms:-1500,audio_tracks:[{index:7,audio_ordinal:7,source_index:9,normalized_language:'ja',capability:{supported:true}}],assets:[],assets_next_cursor:null});
+ await h.ctx.translationOpen(node());assert.equal(vm.runInContext('SUBTITLE_TRANSLATION.audioIndex',h.ctx),7);assert.equal(h.ctx.translationPosition(h.state),0);h.video.currentTime=1.75;assert.equal(h.ctx.translationPosition(h.state),250);
+});
+test('accepted attachment position waits for current data and rejects obsolete readiness events',()=>{
+ const h=harness();h.ctx.PlaybackPolicy.DECODE_LIMIT_DEFAULTS={ttlMs:1000,retestMs:1000};h.ctx.clearEffectiveProcessing=()=>{};h.ctx.playbackSurfaceStep=()=>{};h.ctx.playbackSurfaceGeneration=()=>({});h.ctx.translationAttachmentWillChange=()=>{};h.ctx.translationAttachmentDidBegin=()=>{};
+ const ready=[];h.ctx.translationAttachmentPositionReady=(_p,token)=>ready.push(token.id);h.ctx.sharedCaptionAttachmentPositionReady=()=>{};vm.runInContext(fs.readFileSync(path.join(WEB,'player/decode-margin.js'),'utf8'),h.ctx);
+ h.player.offset=10;h.player.controlSeek={targetMs:12000};h.video.readyState=1;h.video.seeking=false;const attachment=h.ctx.beginPlaybackMediaAttachment(h.player);h.ctx.applyPlaybackAttachmentPosition(h.video,h.player,attachment,0);assert.equal(h.video.currentTime,2);assert.deepEqual(ready,[]);
+ h.video.readyState=2;h.video.seeking=true;h.video.listeners.seeked();assert.deepEqual(ready,[]);h.video.seeking=false;h.video.listeners.seeked();assert.deepEqual(ready,[2]);
+ const old=h.video.listeners.seeked;h.ctx.beginPlaybackMediaAttachment(h.player);old();assert.deepEqual(ready,[2]);
+});
+
+test('opaque transport delegation reuses the exact byte and provenance validation without local file addressing',async()=>{
+ const h=harness(),s=segment(h);h.state.fileId=undefined;let reads=0;h.state.current=()=>true;
+ h.state.segmentRead=async(reference,lease)=>{reads++;assert.equal(reference.segment_id,B);assert.equal(lease,h.state.lease);return {bytes:s.bytes};};
+ await h.ctx.translationSegment(h.state,s.reference,h.state.lease,0);assert.equal(reads,1);assert.equal(h.calls.length,0);assert.equal(h.state.segments.size,1);
+ h.state.segmentRead=async()=>({bytes:Buffer.from('untrusted bytes')});await assert.rejects(h.ctx.translationSegment(h.state,s.reference,h.state.lease,0),/digest mismatch/);
 });

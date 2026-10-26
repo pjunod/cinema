@@ -538,6 +538,8 @@ fun PlayerScreen(
     var playbackSubtitle by remember(itemId, fileId) {
         mutableStateOf(preplayTracks.subtitle)
     }
+    val progressiveCaptionIntent = remember(itemId, fileId) { ProgressiveCaptionIntent() }
+    val subtitleTextIntent = remember(itemId, fileId) { SubtitleTextTranslationIntent() }
     // Identity and outstanding destination belong to the presentation. A
     // quality change replaces both the plan and Controller, but not the viewer
     // or the seek that caused the replacement.
@@ -638,6 +640,8 @@ fun PlayerScreen(
                 retainedAudio = plan!!.deliveryAudio ?: playbackAudio,
                 onAudioChanged = { playbackAudio = it },
                 retainedSubtitle = playbackSubtitle,
+                progressiveCaptionIntent = progressiveCaptionIntent,
+                subtitleTextIntent = subtitleTextIntent,
                 onSubtitleChanged = { playbackSubtitle = SubtitleChoice(it) },
                 onReload = { position, reason, quality ->
                     resumeAt = position
@@ -810,6 +814,8 @@ private fun PlayerContent(
     retainedAudio: Long?,
     onAudioChanged: (Long) -> Unit,
     retainedSubtitle: SubtitleChoice?,
+    progressiveCaptionIntent: ProgressiveCaptionIntent,
+    subtitleTextIntent: SubtitleTextTranslationIntent,
     onSubtitleChanged: (Long?) -> Unit,
     onReload: (Long, String, PlaybackQuality) -> Unit,
     onPlayNext: (PlaybackTarget) -> Unit,
@@ -852,6 +858,8 @@ private fun PlayerContent(
             initialAudioOffsetMs = audioOffsetMs,
             retainedAudio = retainedAudio,
             retainedSubtitle = retainedSubtitle,
+            progressiveCaptionIntent = progressiveCaptionIntent,
+            subtitleTextIntent = subtitleTextIntent,
             replan = onReload,
         )
     }
@@ -1216,7 +1224,7 @@ private fun PlayerContent(
             }
         }
         if (plan.subtitles.isNotEmpty()) {
-            result += OwnedTrack("subtitles", "subtitles-off", "Off", controller.selectedSubtitle == null) { if (controller.switchSubtitle(null)) { onSubtitleChanged(null); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
+            result += OwnedTrack("subtitles", "subtitles-off", "Off", controller.selectedSubtitle == null && controller.progressiveCaptions.selected == null) { if (controller.switchSubtitle(null)) { onSubtitleChanged(null); RemoteOutcome.Applied } else RemoteOutcome.Unavailable }
             plan.subtitles.forEach { track -> result += OwnedTrack("subtitles", "server-subtitle:${track.index}", track.title ?: track.language ?: "Subtitle ${track.index}", controller.selectedSubtitle == track.index) {
                 if (controller.switchSubtitle(track.index)) { onSubtitleChanged(track.index); RemoteOutcome.Applied } else RemoteOutcome.Unavailable
             } }
@@ -1601,6 +1609,14 @@ private fun PlayerContent(
             modifier = Modifier.fillMaxSize(),
         )
 
+        if (!isInPip && controller.progressiveCaptions.text.isNotEmpty()) {
+            Box(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 48.dp)) {
+                Text(controller.progressiveCaptions.text, modifier = Modifier.align(Alignment.BottomCenter)
+                    .background(Color.Black.copy(alpha = 0.75f)).padding(8.dp), color = Color.White,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    style = MaterialTheme.typography.headlineSmall)
+            }
+        }
         if (!isInPip) {
             PGSBitmapOverlay(
                 frame = controller.pgsOverlayFrame,
@@ -1776,9 +1792,13 @@ private fun PlayerContent(
                 player = controller.player,
                 serverAudio = plan.audio,
                 serverSubtitles = plan.subtitles,
-                serverControlledAudio = controller.deliveryMode != "direct",
+                serverControlledAudio = true,
                 selectedServerAudio = controller.selectedAudio,
                 selectedServerSubtitle = controller.selectedSubtitle,
+                progressiveCaptions = controller.progressiveCaptions,
+                onGenerateCaptions = { onSubtitleChanged(null); controller.generateCaptions(it) },
+                subtitleTextTranslation = controller.subtitleTextTranslation,
+                onUseTranslatedCaption = { onSubtitleChanged(it); controller.reloadTranslatedCaption() },
                 onServerAudio = {
                     onAudioChanged(it)
                     controller.switchAudio(it)
@@ -2378,7 +2398,9 @@ private fun PlayerInfo(
     val selectedAudio = player.audioFormat?.let(::audioLabel)
         ?: plan.audio.firstOrNull { it.index == controller.selectedAudio }?.let(::serverAudioLabel)
         ?: plan.audio.firstOrNull { it.default }?.let(::serverAudioLabel)
-    val selectedSubtitle = selectedSubtitleLabel(
+    val selectedSubtitle = controller.progressiveCaptions.selected?.let {
+        "${if (it.task == "transcribe") "Generated captions" else "English translation"} (${it.spokenLanguage}) · ${controller.progressiveCaptions.status}"
+    } ?: selectedSubtitleLabel(
         player,
         plan.subtitles,
         controller.selectedSubtitle,
@@ -3388,12 +3410,19 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
         // points at it.
         val surface by controller.surfacePlayer.collectAsStateWithLifecycle()
         val retired by controller.retired.collectAsStateWithLifecycle()
-        AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = surface } },
-            update = { view -> if (view.player !== surface) view.player = surface; if (retired != null) controller.collectRetired(view.player) },
-            modifier = Modifier.weight(1f).fillMaxWidth())
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = surface } },
+                update = { view -> if (view.player !== surface) view.player = surface; if (retired != null) controller.collectRetired(view.player) },
+                modifier = Modifier.fillMaxSize())
+            if (controller.sharedCaptions.text.isNotEmpty()) Text(controller.sharedCaptions.text,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp).background(Color.Black.copy(alpha = 0.75f)).padding(8.dp),
+                color = Color.White, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                style = MaterialTheme.typography.headlineSmall)
+        }
         if (starting) Text("Starting Shared playback")
         statusSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         failure?.let { Text(it) }
+        if (controller.sharedCaptions.selected != null) Text(controller.sharedCaptions.status, style = MaterialTheme.typography.bodySmall)
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.seekBy(-10_000) }, enabled = !starting) { Text("−10 s") }
             androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.togglePlaying() }, enabled = !starting) { Text(if (playing) "Pause" else "Play") }
@@ -3404,11 +3433,38 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
                 if (audio.size > 1) SharedChoiceMenu("Audio", audio.firstOrNull { it.index.toInt() == current.audio }?.let(::sharedTrackLabel) ?: "Default",
                     audio.filter { it.index in 0..1024 }.map { sharedTrackLabel(it) to current.copy(audio = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
                 val subtitles = plan.decision.presentation.subtitles.filter { it.native == true && it.index in 0..1024 }
-                if (subtitles.isNotEmpty()) SharedChoiceMenu("Subtitles", subtitles.firstOrNull { it.index.toInt() == current.subtitle }?.let { sharedTrackLabel(it.language, it.title, it.codec) } ?: "Off",
-                    listOf("Off" to current.copy(subtitle = null)) + subtitles.map { sharedTrackLabel(it.language, it.title, it.codec) to current.copy(subtitle = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
+                if (subtitles.isNotEmpty()) SharedChoiceMenu("Source subtitles", subtitles.firstOrNull { it.index.toInt() == current.subtitle }?.let { sharedTrackLabel(it.language, it.title, it.codec) } ?: "Off",
+                    listOf("Off" to current.copy(subtitle = null)) + subtitles.map { sharedTrackLabel(it.language, it.title, it.codec) to current.copy(subtitle = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.changeSourceSubtitle(choice) })
             }
+            SharedCachedCaptionMenu(controller, !starting)
             tv.plurx.app.diagnostics.DiagnosticReportButton(category="playback")
             androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.beginStop(); onExit() }) { Text("Close") }
+        }
+    }
+}
+
+@Composable
+private fun SharedCachedCaptionMenu(controller: SharedPlayerController, enabled: Boolean) {
+    var open by remember(controller) { mutableStateOf(false) }
+    val captions = controller.sharedCaptions
+    val remoteClient = LocalRemoteClient.current
+    RemoteRestricted(open)
+    Box {
+        androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); open = true; captions.loadCatalog() }, enabled = enabled) {
+            Text(if (captions.selected == null) "Cached generated captions" else "Cached captions: ${captions.selected!!.output_language}")
+        }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            androidx.compose.material3.DropdownMenuItem(text = { Text("Off") }, onClick = { remoteClient?.physicalInput(); captions.off(); open = false })
+            captions.assets.forEach { asset ->
+                androidx.compose.material3.DropdownMenuItem(text = { Text("${if (asset.task == "transcribe") "Spoken-language captions" else "English speech translation"} · ${asset.spoken_language}") },
+                    onClick = { remoteClient?.physicalInput(); controller.chooseSharedCaption(asset); open = false })
+            }
+            if (captions.nextAsset != null) androidx.compose.material3.DropdownMenuItem(text = { Text("More cached captions") }, onClick = { captions.loadCatalog(more = true) })
+            if (captions.selected != null) {
+                androidx.compose.material3.DropdownMenuItem(text = { Text("Caption delay ${captions.offsetMs} ms: −250 ms") }, onClick = { captions.setOffset(captions.offsetMs - 250) })
+                androidx.compose.material3.DropdownMenuItem(text = { Text("Caption delay: +250 ms") }, onClick = { captions.setOffset(captions.offsetMs + 250) })
+            }
+            Text(captions.status, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp))
         }
     }
 }

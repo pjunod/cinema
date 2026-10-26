@@ -41,7 +41,6 @@ fn interrupted(cancel: &CancellationToken) -> Result<(), StoreError> {
 
 fn action(source: &JobPayload, node_id: &str) -> Result<ModelAction, StoreError> {
     source.validate()?;
-    let selected = profile::selected_profile();
     let spec = profile::model_spec();
     let JobPayload::SubtitleModelOperation {
         translation_profile: Some(accepted),
@@ -56,11 +55,10 @@ fn action(source: &JobPayload, node_id: &str) -> Result<ModelAction, StoreError>
         return Err(failure("translation_unverified"));
     };
     if !action.is_translation()
-        || accepted != &selected
-        || accepted.id()? != selected.id()?
+        || !profile::registered(accepted)
         || model_id != &spec.id
         || model_sha256 != &spec.sha256
-        || adapter_contract != &selected.adapter_contract
+        || adapter_contract != &accepted.adapter_contract
         || catalog_revision != CATALOG_REVISION
         || target_node_id != node_id
     {
@@ -97,9 +95,9 @@ async fn admit(
     phase(fence, SubtitlePhase::WaitingForCapacity, cancel).await?;
     let admitted = state
         .transcode
-        .admit_fragment_queued(cancel)
+        .admit_speech_queued(cancel)
         .await
-        .filter(|admission| state.transcode.fragment_worker_idle(admission))
+        .filter(|admission| state.transcode.speech_capacity_available(admission))
         .ok_or_else(|| failure("waiting_for_playback_capacity"))?;
     interrupted(cancel)?;
     phase(fence, SubtitlePhase::Verifying, cancel).await?;
@@ -112,7 +110,7 @@ async fn hash_admitted(
     admission: &FragmentAdmission,
 ) -> Result<ManagedModel, StoreError> {
     interrupted(cancel)?;
-    if !state.transcode.fragment_worker_idle(admission) {
+    if !state.transcode.speech_capacity_available(admission) {
         return Err(failure("waiting_for_playback_capacity"));
     }
     let spec = profile::model_spec();
@@ -120,7 +118,7 @@ async fn hash_admitted(
     tokio::pin!(hash);
     tokio::select! {
         result = &mut hash => result.map_err(StoreError::Task),
-        () = crate::subtitle_transcription::watch_capacity(&state.transcode, admission) => {
+        () = crate::subtitle_transcription::watch_speech_capacity(&state.transcode, admission) => {
             cancel.cancel();
             // This await is mandatory: the blocking hash checks its token at
             // each 128KiB chunk and must retire before admission is released.
@@ -144,7 +142,13 @@ pub(crate) async fn execute(
     let cancel = manager_cancel.child_token();
     interrupted(&cancel)?;
     let action = action(source, &state.node_id)?;
-    let selected = profile::selected_profile();
+    let selected = match source {
+        JobPayload::SubtitleModelOperation {
+            translation_profile: Some(profile),
+            ..
+        } => profile.clone(),
+        _ => return Err(failure("translation_unverified")),
+    };
     let spec = profile::model_spec();
     if engine.adapter_contract != selected.adapter_contract {
         return Err(failure("packaged_engine_unqualified"));
@@ -168,7 +172,7 @@ pub(crate) async fn execute(
         _ => return Err(failure("translation_unverified")),
     };
     interrupted(&cancel)?;
-    if !state.transcode.fragment_worker_idle(&admission) {
+    if !state.transcode.speech_capacity_available(&admission) {
         return Err(failure("waiting_for_playback_capacity"));
     }
     crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;

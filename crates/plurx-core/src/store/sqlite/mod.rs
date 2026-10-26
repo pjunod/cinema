@@ -1314,6 +1314,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::library_annotations_schema::SCHEMA,
     // v114: source-revision title acquisition, independent of ordinary probes.
     super::dv_title_jobs::SCHEMA,
+    // v115: centrally fenced recomputable text subtitle translation slices.
+    super::subtitle_text_translation_schema::SCHEMA,
+    // v116: grant-bound read-only progressive caption retention.
+    super::shared_caption_schema::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1853,6 +1857,8 @@ impl SqliteStore {
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
         super::dv_title_jobs_schema::verify_sqlite(conn)?;
+        super::subtitle_text_translation_schema::verify_sqlite(conn)?;
+        super::shared_caption_schema::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

@@ -109,9 +109,9 @@ impl TranslationMutation {
             } => {
                 source.validate()?;
                 profile.validate()?;
-                if *audio_index != 0
+                if !(0..=255).contains(audio_index)
                     || !super::background_jobs_transcription::whisper_language(spoken_language)
-                    || spoken_language == "en"
+                    || (profile.task.is_translation() && spoken_language == "en")
                     || !(1..=14400000).contains(duration_ms)
                     || target_node_id.is_empty()
                     || target_node_id.len() > 128
