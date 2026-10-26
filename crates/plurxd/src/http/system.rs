@@ -303,6 +303,10 @@ fn copy_cleanup_holds(
                         "terminal_identity_mismatch",
                         "Parser start and terminal records disagree",
                     ),
+                    CopyCleanupHoldReason::ValidationRejected => (
+                        "validation_rejected",
+                        "Copy cleanup records could not be validated",
+                    ),
                 };
                 CopyCleanupHoldDto {
                     preparation_id: hold.preparation_id,
