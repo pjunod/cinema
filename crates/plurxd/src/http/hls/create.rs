@@ -4,7 +4,7 @@ use super::*;
 #[path = "create/adaptive_retry.rs"]
 mod adaptive_retry;
 #[cfg(target_os = "linux")]
-use adaptive_retry::{AdaptiveOriginContext, AdaptiveOriginFailure};
+use adaptive_retry::{AdaptiveOriginContext, AdaptiveOriginFailure, AdaptivePrepareFailure};
 
 #[cfg(target_os = "linux")]
 struct AdaptiveOriginPrepared {
@@ -397,17 +397,25 @@ async fn prepare_adaptive_origin(
     match result {
         Ok(Ok(prepared)) => Ok(prepared),
         failed => {
-            let error = match failed {
-                Ok(Err(error)) => error,
-                Err(_) => ApiError::ServiceUnavailable(
-                    "adaptive Prepare exceeded its original deadline".into(),
+            let (error, may_retry) = match failed {
+                Ok(Err(AdaptivePrepareFailure::Retry(error))) => (error, true),
+                Ok(Err(AdaptivePrepareFailure::Hold(error))) => (error, false),
+                Err(_) => (
+                    ApiError::ServiceUnavailable(
+                        "adaptive Prepare exceeded its original deadline".into(),
+                    ),
+                    false,
                 ),
                 Ok(Ok(_)) => unreachable!("success handled above"),
             };
             // No legacy fallback or new Claim until the SAME original row is
             // known fenced. Winner/unknown/deadline holds are returned intact.
             adaptive_retry::fence_original(state, context, &claim, deadline).await?;
-            Err(AdaptiveOriginFailure::NextWorker(error))
+            Err(if may_retry {
+                AdaptiveOriginFailure::NextWorker(error)
+            } else {
+                AdaptiveOriginFailure::Hold(error)
+            })
         }
     }
 }
@@ -419,7 +427,7 @@ async fn prepare_claimed_adaptive_origin(
     recipe: RemoteStartRequest,
     serving_generation: u64,
     deadline: tokio::time::Instant,
-) -> Result<AdaptiveOriginPrepared, ApiError> {
+) -> Result<AdaptiveOriginPrepared, AdaptivePrepareFailure> {
     use plurx_core::store::adaptive_resource_attempts::{
         AttemptMutation, AttemptPhase, MutationContext, WinnerSelection,
     };
@@ -480,9 +488,7 @@ async fn prepare_claimed_adaptive_origin(
                     break;
                 }
             } else if answer.status != reqwest::StatusCode::ACCEPTED {
-                return Err(ApiError::ServiceUnavailable(
-                    "adaptive peer refused Prepare".into(),
-                ));
+                return Err(adaptive_retry::prepare_http_refusal(answer.status));
             }
         }
         let current = state
@@ -496,7 +502,8 @@ async fn prepare_claimed_adaptive_origin(
         {
             return Err(ApiError::ServiceUnavailable(
                 "adaptive Prepare lost its original Store row".into(),
-            ));
+            )
+            .into());
         }
     }
     let prepared = prepared.ok_or_else(|| {
@@ -515,18 +522,19 @@ async fn prepare_claimed_adaptive_origin(
         .as_deref()
             != Some(prepared.worker.selected_recipe_digest.as_str())
     {
-        return Err(ApiError::ServiceUnavailable(
+        return Err(AdaptivePrepareFailure::Hold(ApiError::ServiceUnavailable(
             "adaptive Prepared binding is invalid".into(),
-        ));
+        )));
     }
-    let preview: RemoteStartResponse = serde_json::from_str(&prepared.preview_json)?;
+    let preview: RemoteStartResponse =
+        serde_json::from_str(&prepared.preview_json).map_err(ApiError::from)?;
     if !preview.is_valid()
         || preview.session_id != claim.key.session_id.to_string()
         || preview.activation_generation != Some(serving_generation)
     {
-        return Err(ApiError::ServiceUnavailable(
+        return Err(AdaptivePrepareFailure::Hold(ApiError::ServiceUnavailable(
             "adaptive preview differs from the original attempt".into(),
-        ));
+        )));
     }
     let status = state
         .store
@@ -545,9 +553,7 @@ async fn prepare_claimed_adaptive_origin(
         || attempt.phase != AttemptPhase::Prepared
         || attempt.worker.as_ref() != Some(&prepared.worker)
     {
-        return Err(ApiError::ServiceUnavailable(
-            "adaptive Prepared row changed".into(),
-        ));
+        return Err(ApiError::ServiceUnavailable("adaptive Prepared row changed".into()).into());
     }
     let selection = WinnerSelection {
         context: MutationContext {
@@ -572,7 +578,8 @@ async fn prepare_claimed_adaptive_origin(
         _ => {
             return Err(ApiError::ServiceUnavailable(
                 "adaptive Winner selection is uncertain".into(),
-            ))
+            )
+            .into())
         }
     }
     Ok(AdaptiveOriginPrepared {

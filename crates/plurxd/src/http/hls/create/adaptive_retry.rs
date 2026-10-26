@@ -15,6 +15,25 @@ impl From<ApiError> for AdaptiveOriginFailure {
         Self::Hold(error)
     }
 }
+/// Explicit advertised-protocol/authentication refusals are not capacity.
+/// Their original row is still fenced, but placement must hold afterwards.
+pub(super) enum AdaptivePrepareFailure {
+    Retry(ApiError),
+    Hold(ApiError),
+}
+impl From<ApiError> for AdaptivePrepareFailure {
+    fn from(error: ApiError) -> Self {
+        Self::Retry(error)
+    }
+}
+pub(super) fn prepare_http_refusal(status: reqwest::StatusCode) -> AdaptivePrepareFailure {
+    let error = held("adaptive peer refused Prepare");
+    match status.as_u16() {
+        400 | 401 | 403 | 404 | 405 | 413 | 415 | 422 => AdaptivePrepareFailure::Hold(error),
+        _ => AdaptivePrepareFailure::Retry(error),
+    }
+}
+
 pub(super) struct AdaptiveOriginContext {
     pub binding: RequestBinding,
     // Cardinality is bounded by the durable three-attempt contract. This is

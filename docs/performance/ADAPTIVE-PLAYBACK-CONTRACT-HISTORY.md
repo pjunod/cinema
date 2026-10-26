@@ -21,6 +21,14 @@ a foreign committed fence only after its original native/application owners
 settle. Bounded coordinator retry is connected: it retains original Claim/Fence operations, confirms a fresh durable predecessor phase, and re-fetches each quote within the common deadline. Worker stale/foreign-fence cleanup remains under correction; behavioral qualification has not run.
 Worker-node domains remain the only available identity; shared source/storage
 domains and a production consumer for unclosed provisional rows remain open.
+The integrator preserves the stricter plan §7.1 boundary where the design's
+blanket HTTP-failure retry would classify authentication/protocol failures as
+load: explicit 400/401/403/404/405/413/415/422 responses and deterministic
+Prepared protocol/owner/digest/preview mismatches Fence the original attempt
+and then hold. Ambiguous 409/429/500/503/local-string or transport failures
+still require a confirmed original Fence before retry. This implementation
+delta awaits final Fable review; no new wire error classification is invented.
+
 This decision is design evidence, not complete-candidate review or execution.
 
 ## M0 proposed exact contracts for manager check

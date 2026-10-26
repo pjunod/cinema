@@ -308,3 +308,20 @@ async fn original_retry_cannot_claim_or_fence_after_actual_store_winner() {
         "winner never creates a retry Fence"
     );
 }
+
+#[test]
+fn explicit_prepare_auth_and_protocol_refusals_hold_instead_of_retrying_as_capacity() {
+    for status in [400, 401, 403, 404, 405, 413, 415, 422] {
+        assert!(
+            matches!(
+                prepare_http_refusal(reqwest::StatusCode::from_u16(status).expect("status")),
+                AdaptivePrepareFailure::Hold(_)
+            ),
+            "explicit auth/protocol status {status} must hold"
+        );
+    }
+    for status in [409, 429, 500, 503] {
+        assert!(matches!(prepare_http_refusal(reqwest::StatusCode::from_u16(status).expect("status")),
+            AdaptivePrepareFailure::Retry(_)), "ambiguous capacity/ownership status {status} still requires the original Fence before retry");
+    }
+}
