@@ -118,7 +118,7 @@ class WebCohortRetentionTests(unittest.TestCase):
             text = 'jobs:\n'+block+'  rust_compile:\n    run: arbitrary unrelated Rust change\n'
             self.assertEqual(web.web_job(text.encode()),block)
         for change in ('node-version: "24"','timeout-minutes: 11','runs-on: [self-hosted, Linux, ARM64]'):
-            changed = web.adapted_job().replace('node-version: "22"',change) if change.startswith('node-version') else (
+            changed = web.adapted_job().replace('node-version: "22.23.4"',change) if change.startswith('node-version') else (
                 web.adapted_job().replace('timeout-minutes: 10',change) if change.startswith('timeout') else
                 web.adapted_job().replace('runs-on: [self-hosted, Linux, X64, lab, general]',change))
             with mock.patch.object(web,'git',return_value=('jobs:\n'+changed).encode()):
@@ -127,6 +127,40 @@ class WebCohortRetentionTests(unittest.TestCase):
         self.assertIn('make web-unit-check',web.COMMANDS)
         self.assertIn('GITHUB_TOKEN: ${{ github.token }}',web.WRAPPER)
         self.assertNotIn('make web-unit-check',web.WRAPPER)
+
+    def test_current_node_provisioning_matches_exact_runtime_and_legacy_stays_historical(self):
+        self.assertEqual(web.LEGACY_JOB.count('node-version: "22"'),1)
+        self.assertEqual(web.adapted_job().count('node-version: "22.23.4"'),1)
+        self.assertNotIn('node-version: "22"',web.adapted_job())
+        self.assertEqual(web.web_job((ROOT/web.WORKFLOW).read_bytes()),web.adapted_job())
+        for version in ('22','22.23.3'):
+            changed=web.adapted_job().replace('node-version: "22.23.4"','node-version: "'+version+'"')
+            with self.subTest(version=version),mock.patch.object(web,'git',return_value=('jobs:\n'+changed).encode()):
+                with self.assertRaisesRegex(receipts.ReceiptError,'job/command/environment shape'):
+                    web.workflow_identity(ROOT,COMMIT)
+        observed={'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','make':'GNU Make 4.4'}
+        with mock.patch.object(web.sys,'platform','linux'),mock.patch.object(web.platform,'machine',return_value='x86_64'), \
+             mock.patch.object(web.subprocess,'check_output',side_effect=lambda command,**kw:observed[command[0]]+'\n'):
+            self.assertEqual(web.runtime()['job_recorded'],{k:v for k,v in web.RUNTIME.items() if k!='typescript_lock'})
+            observed['node']='v22.23.3'
+            with self.assertRaisesRegex(receipts.ReceiptError,'Unsupported web concrete runtime family'):
+                web.runtime()
+
+    def test_cli_refusal_diagnostics_expose_only_static_stage_and_allowlisted_reason(self):
+        for stage,error,reason in (
+            ('runtime',receipts.ReceiptError('Unsupported web concrete runtime family'),'runtime_family_mismatch'),
+            ('context',receipts.ReceiptError('private-token-value raw API object'),'receipt_guard_failed'),
+            ('context',KeyError('private-token-value'),'metadata_shape_invalid'),
+            ('context',receipts.ReceiptError({'token':'private-token-value'}),'receipt_guard_failed'),
+            ('runtime',web.subprocess.CalledProcessError(1,['private-token-value']),'required_command_failed')):
+            output=io.StringIO()
+            with self.subTest(stage=stage,reason=reason),mock.patch.object(web,'current_context',
+                    side_effect=error if stage=='context' else None,return_value=object()), \
+                 mock.patch.object(web,'runtime',side_effect=error if stage=='runtime' else None), \
+                 mock.patch.object(web,'run_gate') as gate,mock.patch.object(web.sys,'stderr',output):
+                self.assertEqual(web.main([]),1)
+                self.assertEqual(output.getvalue(),'Whole web cohort refused: stage='+stage+' reason='+reason+'; no fallback execution\n')
+                self.assertNotIn('private-token-value',output.getvalue());gate.assert_not_called()
 
     def context(self):
         repo={'id':1,'full_name':'example/project'}
@@ -394,6 +428,42 @@ class WebCohortRetentionTests(unittest.TestCase):
                     web.manifest(ROOT,COMMIT,BASE)
                 contents[helper]=original_helper
 
+    def test_terminal_failed_nonproducer_history_is_classified_before_source_compatibility(self):
+        api,pull,event,run,job=self.context()
+        state={'artifacts':[],'jobs':[job]}
+        def pages(path,query=None,field=None):
+            return state['jobs'] if path.endswith('/jobs') else state['artifacts'] if path.endswith('/artifacts') else [run]
+        api.pages=pages
+        with mock.patch.object(web,'git',return_value=b'validation.web_cohort_retention unsupported old wrapper/adapter') as source, \
+             mock.patch.object(web,'manifest') as manifest,mock.patch.object(web,'v1_result') as result, \
+             mock.patch.object(web.subprocess,'run') as launch,mock.patch('builtins.print') as report:
+            for status in ('failure','cancelled'):
+                job.update(status=status,attempt=1)
+                self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key'))
+                report.assert_called_with('Web history: no accepted whole-cohort result; execution unknown',flush=True)
+            source.assert_not_called();manifest.assert_not_called();result.assert_not_called();launch.assert_not_called()
+            for change in ({'attempt':0},{'attempt':2},{'attempt':True},{'task_id':0},{'repo_id':2},{'run_id':1},{'id':0}):
+                saved=job.copy();job.update(change)
+                with self.subTest(change=change),self.assertRaisesRegex(receipts.ReceiptError,'repository/run/task/attempt'):
+                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key')
+                job.clear();job.update(saved)
+            for status in ('success','running','queued'):
+                job['status']=status
+                with self.subTest(status=status),self.assertRaisesRegex(receipts.ReceiptError,'Web job shape missing/ambiguous'):
+                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key')
+            job['status']='failure'
+            for artifacts in ([{'name':'web-cohort-6000-1'}],[{'name':'web-cohort-malformed'}]):
+                state['artifacts']=artifacts
+                with self.subTest(artifacts=artifacts),self.assertRaisesRegex(receipts.ReceiptError,'Web job shape missing/ambiguous|artifact name malformed'):
+                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key')
+            state['artifacts']=[{'name':None}]
+            with self.assertRaisesRegex(receipts.ReceiptError,'artifact listing has malformed names'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key')
+            state['artifacts']=[];state['jobs']=[job,job.copy()]
+            with self.assertRaisesRegex(receipts.ReceiptError,'Web job shape missing/ambiguous'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key')
+            launch.assert_not_called();result.assert_not_called()
+
     def test_history_excludes_pre_v1_but_missing_matching_v1_never_becomes_fresh(self):
         api,pull,event,run,job=self.context();job['status']='success'
         inputs={'files':[]};key=web.execution_key(inputs)
@@ -419,7 +489,7 @@ class WebCohortRetentionTests(unittest.TestCase):
                     web.matching_result(api,SCOPE,ROOT,COMMIT,7000,key)
             state['artifacts']=[artifact]
             self.assertEqual(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,key),({'kind':'v1_fresh'},b'original log'))
-            state['workflow']=state['workflow'].replace(b'node-version: "22"',b'node-version: "24"')
+            state['workflow']=state['workflow'].replace(b'node-version: "22.23.4"',b'node-version: "24"')
             with self.assertRaisesRegex(receipts.ReceiptError,'job/command/environment shape'):
                 web.matching_result(api,SCOPE,ROOT,COMMIT,7000,key)
 

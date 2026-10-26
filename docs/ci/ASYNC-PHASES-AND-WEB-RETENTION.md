@@ -115,6 +115,10 @@ completed cohort as fallback.
 
 The versioned runtime contract requires Linux/X64 host execution and the
 recorded Node 22.23.4, npm 10.9.9, Git 2.55.0 and locked TypeScript 6.0.3.
+The current setup-node recipe provisions exactly 22.23.4; the legacy recipe
+remains its historical major-22 declaration, authenticated by the observed
+22.23.4 execution. A cached different patch is unsupported. CLI refusals expose
+only a fixed stage and allowlisted reason code, without exception or API text.
 Python stdlib orchestration and Make's fixed dispatch use an explicit
 compatibility contract. Historical distro/kernel, Python/Make versions and
 immutable host/image identity were not recorded and remain unknown. Current
@@ -135,5 +139,16 @@ outside this protocol, not proven passes or input differences; they do not
 poison new-key execution through current-family parsing. A matching v1
 producer with missing, invalid or ambiguous evidence still refuses. Raw source
 manifests and log bytes remain original.
+
+Producer eligibility precedes source compatibility: an authenticated terminal
+failed or cancelled web job with a complete artifact listing containing no
+cohort artifact offers no accepted whole-cohort result. Its execution remains
+unknown; this classification claims neither zero execution nor passing cases.
+It permits inspection of older eligible evidence without requiring a failed
+nonproducer's old adapter to match the current one. Success with missing
+evidence, malformed or artifact-bearing producers, ambiguous metadata and
+active jobs retain the refusal rules. Positive result authentication and
+source compatibility remain unchanged.
+
 The receipt reports current applicability, policy/adapter identity and origin
 provenance. It does not fabricate current build products or test events.

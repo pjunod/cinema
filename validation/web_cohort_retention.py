@@ -173,7 +173,10 @@ def web_job(raw):
 
 
 def adapted_job():
-    return LEGACY_JOB[:LEGACY_JOB.index('      - name: Parse every shipped JavaScript surface\n')] + WRAPPER
+    prefix = LEGACY_JOB[:LEGACY_JOB.index('      - name: Parse every shipped JavaScript surface\n')]
+    version = '          node-version: "22"\n'
+    require(prefix.count(version) == 1,'Reviewed web setup-node version row missing/ambiguous')
+    return prefix.replace(version,'          node-version: "22.23.4"\n',1) + WRAPPER
 
 
 def workflow_identity(workspace,commit):
@@ -344,7 +347,8 @@ def policy_fingerprint():
     return digest(canonical({'version':POLICY_VERSION,'roots':ROOTS,'helpers':HELPERS,'shape_families':SHAPE_FAMILIES,
         'runtime':RUNTIME,'python_policy':PYTHON_POLICY,'fresh_python_cache':PYTHON_CACHE_POLICY,'cache_roots':CACHE_ROOTS,
         'cache_bounds':[MAX_CACHE_FILES,MAX_CACHE_BYTES],'node_package_scopes':NODE_PACKAGE_SCOPES,'node_package_pins':NODE_PACKAGE_PINS,'script_resolver_families':SCRIPTS_RESOLVER_FAMILIES,'commands':COMMANDS,'legacy_job':digest(LEGACY_JOB.encode()),
-        'adapter_job':digest(adapted_job().encode()),'baseline':'event-base+merge-base+bytes',
+        'adapter_job':digest(adapted_job().encode()),
+        'producer_eligibility':'terminal-failure-cancelled-no-cohort-artifact-execution-unknown-v1','baseline':'event-base+merge-base+bytes',
         'host':'Linux/X64 host; python3 stdlib and fixed Make recipe compatibility v1'}))
 
 
@@ -568,17 +572,30 @@ def matching_result(api,scope,workspace,current,current_run,key):
         seen.add(rid)
         run = api.get('/actions/runs/'+str(rid)); event = adoption.bind_event(run,scope,ready=False)
         require(run.get('id') == rid and run.get('commit_sha') == listed.get('commit_sha'),'Web history metadata changed')
-        artifacts = [item for item in api.pages('/actions/runs/'+str(rid)+'/artifacts')
+        all_artifacts = api.pages('/actions/runs/'+str(rid)+'/artifacts')
+        require(all(type(item.get('name')) is str and item['name'] for item in all_artifacts),
+            'Web artifact listing has malformed names; no fallback execution')
+        artifacts = [item for item in all_artifacts
             if re.fullmatch(r'web-cohort-'+str(rid)+r'-[1-9][0-9]*',str(item.get('name','')))]
-        workflow = git(workspace,'show',run['commit_sha']+':'+WORKFLOW,limit=128*1024)
-        if not artifacts and b'validation.web_cohort_retention' not in workflow:
+        possible_artifacts = [item for item in all_artifacts if str(item.get('name','')).startswith('web-cohort-')]
+        jobs = [j for j in api.pages('/actions/runs/'+str(rid)+'/jobs') if j.get('name') == JOB]
+        # Eligibility is separate from applicability: a terminal failed job
+        # without any cohort artifact offers no accepted whole-cohort result.
+        # Its individual execution history remains unknown; claim no zero/pass.
+        if not possible_artifacts and len(jobs) == 1 and jobs[0].get('status') in ('failure','cancelled'):
+            adoption.bind_event(run,scope)
+            check_job(jobs[0],scope,rid,False)
+            print('Web history: no accepted whole-cohort result; execution unknown',flush=True)
             continue
+        workflow = git(workspace,'show',run['commit_sha']+':'+WORKFLOW,limit=128*1024)
+        if not possible_artifacts and b'validation.web_cohort_retention' not in workflow:
+            continue
+        require(len(possible_artifacts) == len(artifacts),'Web cohort artifact name malformed; no fallback execution')
         require(workflow_identity(workspace,run['commit_sha'])['kind'] == 'v1',
             'Eligible web producer has unsupported recipe; closure review required')
         require(git(workspace,'show',run['commit_sha']+':'+ADAPTER,limit=256*1024) ==
             git(workspace,'show',current+':'+ADAPTER,limit=256*1024),
             'Eligible web producer adapter compatibility unknown; closure review required')
-        jobs = [j for j in api.pages('/actions/runs/'+str(rid)+'/jobs') if j.get('name') == JOB]
         if not artifacts and len(jobs) == 1 and jobs[0].get('status') == 'skipped' and type(jobs[0].get('task_id')) is int and jobs[0]['task_id'] == 0:
             require(jobs[0].get('repo_id') == scope['repository'] and jobs[0].get('run_id') == rid,
                 'Never-started web producer identity differs')
@@ -663,21 +680,43 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
     return receipt
 
 
+def refusal_code(error):
+    # Map only reviewed literals to public codes. Never render exception text,
+    # response objects, tokens or arbitrary dictionary keys.
+    if isinstance(error,receipts.ReceiptError):
+        message = error.args[0] if error.args and type(error.args[0]) is str else None
+        return {'Unsupported web concrete runtime family':'runtime_family_mismatch',
+            'Web host must be Linux/X64':'unsupported_host',
+            'Web checkout/head changed':'checkout_head_changed',
+            'Web current API event/head differs':'api_event_head_changed',
+            'Web current PR moved/closed/drafted':'live_pr_changed',
+            'Web decision already attempted; no duplicate fallback':'duplicate_decision'}.get(message,'receipt_guard_failed')
+    if isinstance(error,subprocess.SubprocessError): return 'required_command_failed'
+    if isinstance(error,zipfile.BadZipFile): return 'archive_invalid'
+    if isinstance(error,OSError): return 'required_io_failed'
+    return 'metadata_shape_invalid'
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fresh-on-new-inputs',action='store_true'); args = parser.parse_args(argv)
-    workspace = Path.cwd().resolve(); context = current_context(workspace); actual = runtime()
-    output = workspace/OUTPUT
-    require(not any(p.is_symlink() for p in (output,*output.parents)),'Web output contains symlink')
-    output.parent.mkdir(parents=True,exist_ok=True)
-    require(not output.exists(),'Web decision already attempted; no duplicate fallback')
-    output.mkdir(mode=0o700)
-    run_gate(workspace,context,output,actual,args.fresh_on_new_inputs)
+    stage = 'context'
+    try:
+        workspace = Path.cwd().resolve(); context = current_context(workspace)
+        stage = 'runtime'; actual = runtime()
+        stage = 'output'; output = workspace/OUTPUT
+        require(not any(p.is_symlink() for p in (output,*output.parents)),'Web output contains symlink')
+        output.parent.mkdir(parents=True,exist_ok=True)
+        require(not output.exists(),'Web decision already attempted; no duplicate fallback')
+        output.mkdir(mode=0o700)
+        stage = 'cohort'; run_gate(workspace,context,output,actual,args.fresh_on_new_inputs)
+    except (receipts.ReceiptError,KeyError,TypeError,ValueError,OSError,UnicodeError,
+            zipfile.BadZipFile,subprocess.SubprocessError) as error:
+        print('Whole web cohort refused: stage='+stage+' reason='+refusal_code(error)
+            +'; no fallback execution',file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == '__main__':
-    try: main()
-    except (receipts.ReceiptError,KeyError,TypeError,ValueError,OSError,zipfile.BadZipFile):
-        # Never expose token-bearing response objects or uncontrolled exception text.
-        print('Whole web cohort refused: evidence/source/runtime/recipe authentication failed; no fallback execution',file=sys.stderr)
-        raise SystemExit(1)
+    raise SystemExit(main())
