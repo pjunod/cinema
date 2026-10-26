@@ -92,7 +92,7 @@ impl FiniteEngineSnapshot {
         Ok(snapshot)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(in crate::adaptive_resources::runtime) fn is_current(&self) -> bool {
         self.checked_current() == Some(true)
     }
