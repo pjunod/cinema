@@ -43,7 +43,6 @@ use plurx_core::store::background_jobs_library::{
 use plurx_core::store::background_jobs_resources::StorageDomainMapping;
 use plurx_core::store::Store;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 /// Queue lease length from `background_jobs.rs` (`JOB_LEASE_MS`), pinned so
 /// an expiry example cannot silently drift with the constant.
@@ -1202,7 +1201,7 @@ mod replicated {
         install, Acknowledgement, InsertionAttempt, InsertionSeam,
     };
     use plurx_core::store::{HiqliteAuthStore, PublicationFence, PublicationStore};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     /// Error text production reports when a replicated reply never arrives
     /// (`hiqlite.rs`, `REPLICATED_STORE_TIMEOUT`); the seam's `Lose` maps to

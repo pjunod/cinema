@@ -2227,7 +2227,7 @@ async fn restart_guarded_adoption<T>(
 
 /// Runs only from the existing selected-store/native finite fixture. The
 /// factory supplies the SAME original pending owner, never a DTO close proof.
-#[cfg(test)]
+#[cfg(all(test, feature = "cluster-integration-tests"))]
 impl super::TranscodeManager {
     pub(crate) async fn foreign_fence_cleanup_regression<F, Fut>(
         self: &Arc<Self>,
