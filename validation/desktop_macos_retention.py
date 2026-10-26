@@ -48,7 +48,17 @@ MAKEFILE_FAMILY = (
 )
 CANONICAL_MAKEFILE = MAKEFILE_FAMILY[0]
 APPLICABILITY_PROJECTION = 'exact-reviewed-make-pair-v1'
-RECIPE_COMPATIBILITY = 'exact legacy workflow plus bounded Apple-only adapter delta v1; exact reviewed Makefile pair v1'
+RECIPE_COMPATIBILITY = 'exact protected native workflow scope v1; exact reviewed Makefile pair v1'
+MAX_WORKFLOW_BYTES, MAX_WORKFLOW_JOBS = 128*1024, 64
+WORKFLOW_SCOPE_PINS = {
+    'preamble':'4d7d1fba026f898d1f9f809414bd2a43e78744aab0ecda3f92e0ced06139742d',
+    'paperwork':'56d0a2b952493c4f167a13941b3aebac1a20b44862cbcf3f5809e633701d0a31',
+    'scope':'2ee2d0586a98a440b0e44800c44ba35286baad0e5c01d49808e62b7fdba3199d',
+    'preflight':'054ad52683b711f4b286557d88f5f4999de0cfa20f3645043f484f2c9629c27c',
+    'legacy_apple':'c6bd7e2361ac9055999c183f2f53b36b4a40fdf72b7cf1167a5990d271639e19',
+    'adapted_apple':'519df6d3b88a2ba381cd1633379b1a040ea04ce962471c7783f124d8fd887194',
+}
+PROTECTED_DEPENDENCIES = ('paperwork','scope','preflight')
 RECIPE_PINS = {
     'Cargo.toml':('100644','72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f'),
     'clients/server-tray/macos/build':('100755','b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0'),
@@ -225,11 +235,58 @@ def transformed_workflow(legacy):
     return text.encode()
 
 
-def workflow_identity(workspace, commit, legacy):
-    require(isinstance(commit,str) and re.fullmatch('[0-9a-f]{40}',commit), 'Invalid native workflow commit')
-    current = git(workspace,'show',commit+':'+WORKFLOW,limit=128*1024)
-    require(current == legacy or current == transformed_workflow(legacy), 'Unsupported native workflow delta')
-    return digest(current)
+def workflow_parts(raw):
+    """Bounded plain block job map; protected YAML is never normalized."""
+    require(isinstance(raw,bytes) and 0 < len(raw) <= MAX_WORKFLOW_BYTES,
+        'Native workflow size/type unsupported')
+    try: text = raw.decode('utf-8')
+    except UnicodeDecodeError: raise receipts.ReceiptError('Native workflow is not UTF-8') from None
+    require(not any(ch in text for ch in '\r\t\v\f\x85\u2028\u2029'),'Native workflow requires LF lines without tabs')
+    lines = text.splitlines(keepends=True)
+    markers = [i for i,line in enumerate(lines) if line in ('jobs:\n','jobs:')]
+    require(len(markers) == 1,'Native workflow jobs marker missing/ambiguous')
+    marker = markers[0];headers = []
+    for i in range(marker+1,len(lines)):
+        line = lines[i]
+        if not line.strip() or line.lstrip(' ').startswith('#'): continue
+        indent = len(line)-len(line.lstrip(' '))
+        if indent == 2:
+            match = re.fullmatch(r'  ([A-Za-z_][A-Za-z0-9_-]*):\n?',line)
+            require(match is not None,'Unsupported native plain job-map key')
+            require(match[1] not in {name for name,_ in headers},'Duplicate native workflow job')
+            headers.append((match[1],i))
+            require(len(headers) <= MAX_WORKFLOW_JOBS,'Native workflow job count exceeds bound')
+        else:
+            require(indent >= 4 and headers,'Unsupported native workflow top-level/indentation content')
+    require(headers,'Native workflow job map is empty')
+    blocks = {name:''.join(lines[i:headers[n+1][1] if n+1 < len(headers) else len(lines)]).encode()
+        for n,(name,i) in enumerate(headers)}
+    return ''.join(lines[:marker+1]).encode(),blocks
+
+
+def workflow_scope(workspace,commit,legacy):
+    require(isinstance(commit,str) and re.fullmatch('[0-9a-f]{40}',commit),'Invalid native workflow commit')
+    require(digest(legacy) == PRODUCER_WORKFLOW,'Unrecognized native producer workflow')
+    preamble,baseline = workflow_parts(legacy)
+    adapted_preamble,adapted = workflow_parts(transformed_workflow(legacy))
+    require(digest(preamble) == WORKFLOW_SCOPE_PINS['preamble'] and adapted_preamble == preamble
+        and all(digest(baseline[name]) == WORKFLOW_SCOPE_PINS[name] for name in PROTECTED_DEPENDENCIES)
+        and digest(baseline['apple_compile']) == WORKFLOW_SCOPE_PINS['legacy_apple']
+        and digest(adapted['apple_compile']) == WORKFLOW_SCOPE_PINS['adapted_apple'],
+        'Reviewed native workflow scope identities differ')
+    current = git(workspace,'show',commit+':'+WORKFLOW,limit=MAX_WORKFLOW_BYTES)
+    current_preamble,blocks = workflow_parts(current)
+    require(current_preamble == preamble and all(name in blocks and blocks[name] == baseline[name]
+        for name in PROTECTED_DEPENDENCIES),'Unsupported native workflow preamble/dependency scope')
+    apple = blocks.get('apple_compile')
+    require(apple in (baseline['apple_compile'],adapted['apple_compile']),
+        'Unsupported native Apple job scope')
+    return {'sha256':digest(current),'kind':'legacy' if apple == baseline['apple_compile'] else 'adapted'}
+
+
+def workflow_identity(workspace,commit,legacy):
+    # This remains actual complete bytes, never a scoped/canonical digest.
+    return workflow_scope(workspace,commit,legacy)['sha256']
 
 
 def unpack(data):
@@ -463,7 +520,7 @@ def history_before_fresh(api, scope, workspace, current, current_run, current_ke
         event = adoption.bind_event(prior,scope,ready=False)
         require(event['pull_request']['head']['ref'] == scope['branch'], 'Prior native branch is unknown')
         commit = prior['commit_sha']
-        invocation = workflow_identity(workspace,commit,legacy)
+        invocation = workflow_scope(workspace,commit,legacy)
         entries, contents = manifest(workspace,commit)
         key = execution_key(entries,case_inventory(contents))
         jobs = api.pages('/actions/runs/'+str(rid)+'/jobs')
@@ -486,7 +543,7 @@ def history_before_fresh(api, scope, workspace, current, current_run, current_ke
                 # A source/recipe comparison must also bind actual checkout;
                 # missing/truncated old logs cannot manufacture a different key.
                 raw = download_log(api,job['id'])
-                if invocation == PRODUCER_WORKFLOW:
+                if invocation['kind'] == 'legacy':
                     lines, _ = checkout_evidence(raw,commit,scope,job)
                 else:
                     require(git(workspace,'show',commit+':validation/desktop_macos_retention.py') ==
@@ -573,8 +630,8 @@ def run_gate(api, scope, workspace, current, run_id, output, toolchain, fresh_on
     require(os.environ.get('GITHUB_JOB') == 'apple_compile', 'Native adapter must run in the Apple job')
     legacy = git(workspace,'show',PRODUCER+':'+WORKFLOW,limit=128*1024)
     require(digest(legacy) == PRODUCER_WORKFLOW, 'Known native workflow object differs')
-    consumer_workflow = workflow_identity(workspace,current,legacy)
-    require(consumer_workflow == digest(transformed_workflow(legacy)), 'Current native job lacks reviewed adapter recipe')
+    consumer_workflow = workflow_scope(workspace,current,legacy)
+    require(consumer_workflow['kind'] == 'adapted', 'Current native job lacks reviewed adapter recipe')
     live_recipe_selectors(workspace)
     entries, contents = manifest(workspace,current); expected = case_inventory(contents)
     key = execution_key(entries,expected)
@@ -587,7 +644,7 @@ def run_gate(api, scope, workspace, current, run_id, output, toolchain, fresh_on
         'native_execution_key':key,'source_manifest_kind':'reconstructed_from_authenticated_checkout',
         'current_source_manifest':entries,'expected_case_ids':sorted(expected),'toolchain_contract':toolchain,
         'adapter_environment':{'python':list(sys.version_info[:3]),'platform':sys.platform},
-        'producer_workflow_sha256':PRODUCER_WORKFLOW,'consumer_workflow_sha256':consumer_workflow,
+        'producer_workflow_sha256':PRODUCER_WORKFLOW,'consumer_workflow_sha256':consumer_workflow['sha256'],
         'recipe_compatibility':RECIPE_COMPATIBILITY,
         'adapter_sha256':digest(git(workspace,'show',current+':validation/desktop_macos_retention.py')),
         'policy_sha256':policy_fingerprint(),
@@ -667,7 +724,9 @@ def policy_fingerprint():
     return digest(canonical({'version':1,'origin_commit':PRODUCER,'origin_run':ORIGIN_RUN,
         'origin_job':ORIGIN_JOB,'origin_artifact':ORIGIN_ARTIFACT,'archive_sha256':ORIGIN_ZIP_SHA,
         'job_log_sha256':ORIGIN_JOB_SHA,'roots':ROOTS,'command':COMMAND,
-        'workflow_sha256':PRODUCER_WORKFLOW,'recipe_version':RECIPE_VERSION,'recipe_pins':RECIPE_PINS,
+        'workflow_sha256':PRODUCER_WORKFLOW,
+        'workflow_scope':{'version':1,'grammar':'bounded-plain-job-map-LF-UTF8-v1','pins':WORKFLOW_SCOPE_PINS,
+            'protected_dependencies':PROTECTED_DEPENDENCIES,'apple_job':'apple_compile','max_bytes':MAX_WORKFLOW_BYTES,'max_jobs':MAX_WORKFLOW_JOBS},'recipe_version':RECIPE_VERSION,'recipe_pins':RECIPE_PINS,
         'makefile_family':MAKEFILE_FAMILY,'canonical_makefile':CANONICAL_MAKEFILE,'applicability_projection':APPLICABILITY_PROJECTION,
         'forbidden_make_selectors':['GNUmakefile','makefile'],'forbidden_package_selectors':['Package@*','Package.resolved','.swiftpm'],
         'upload_section_limits':[32,16*1024],'live_selector_policy':{'actual_names':True,'casefold':True,'allow_root_spelling':'Makefile','directory_limit':MAX_ROOT_ENTRIES},'committed_selector_policy':{'nonrecursive_root_bytes':MAX_ROOT_BYTES,'root_entries':MAX_ROOT_ENTRIES,'casefold':True,'allow_root_spelling':'Makefile'},
@@ -747,7 +806,8 @@ def v1_envelope(api,scope,workspace,run_id,job_id,current,legacy):
     require(prior.get('id') == run_id, 'Native v1 run ID differs')
     adoption.bind_event(prior,scope);main_receipts.authenticate_run(scope,prior)
     commit = prior['commit_sha']
-    require(workflow_identity(workspace,commit,legacy) == digest(transformed_workflow(legacy)), 'Native v1 producer workflow unsupported')
+    invocation = workflow_scope(workspace,commit,legacy)
+    require(invocation['kind'] == 'adapted','Native v1 producer workflow unsupported')
     require(git(workspace,'show',commit+':validation/desktop_macos_retention.py') ==
         git(workspace,'show',current+':validation/desktop_macos_retention.py'), 'Native v1 adapter source compatibility differs')
     jobs = [j for j in api.pages('/actions/runs/'+str(run_id)+'/jobs') if j.get('name') == JOB]
@@ -776,7 +836,7 @@ def v1_envelope(api,scope,workspace,run_id,job_id,current,legacy):
         < lines.index('🏁  Job succeeded'), 'Native v1 toolchain/action/upload order differs')
     require(any(re.fullmatch(r'Runner [0-9a-f-]+ \(version:[^)]*\) received task '+str(job['task_id'])+
         r' of job apple_compile, triggered by event: pull_request',line) for line in lines), 'Native v1 task binding differs')
-    return {'run':prior,'job':job,'artifact':artifact,'archive':data,'job_log':raw,'lines':lines}
+    return {'run':prior,'job':job,'artifact':artifact,'archive':data,'job_log':raw,'lines':lines,'workflow':invocation}
 
 
 def checked_attestation(lines,commit,tree,run_id,job,entries,key):
@@ -817,7 +877,7 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
         and receipt.get('adapter_sha256') == digest(git(workspace,'show',commit+':validation/desktop_macos_retention.py'))
         and receipt.get('policy_sha256') == policy_fingerprint()
         and receipt.get('producer_workflow_sha256') == PRODUCER_WORKFLOW
-        and receipt.get('consumer_workflow_sha256') == digest(transformed_workflow(legacy))
+        and receipt.get('consumer_workflow_sha256') == result['workflow']['sha256']
         and receipt.get('source_manifest_kind') == 'reconstructed_from_authenticated_checkout'
         and receipt.get('recipe_compatibility') == RECIPE_COMPATIBILITY
         and receipt.get('build_product_digests') is None
@@ -891,7 +951,7 @@ def matching_v1(api,scope,workspace,current,current_run,key,legacy):
             if row.get('workflow_id') != 'main-fast-lane.yml' or row.get('prettyref') != '#'+str(scope['pr']): continue
             prior = api.get('/actions/runs/'+str(rid));adoption.bind_event(prior,scope,ready=False)
             commit = prior['commit_sha']
-            if workflow_identity(workspace,commit,legacy) != digest(transformed_workflow(legacy)): continue
+            if workflow_scope(workspace,commit,legacy)['kind'] != 'adapted': continue
             entries,contents = manifest(workspace,commit)
             if execution_key(entries,case_inventory(contents)) != key: continue
             jobs = [j for j in api.pages('/actions/runs/'+str(rid)+'/jobs') if j.get('name') == JOB and j.get('status') == 'success']

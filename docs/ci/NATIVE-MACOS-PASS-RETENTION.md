@@ -75,9 +75,21 @@ A v1 upload hash belongs to its unique native uploader transaction, bounded to
 name, ID and final size must agree with the API archive. A separate TV upload in
 the same Apple job supplies no native hash and does not invalidate one.
 
-Only the exact legacy workflow plus the reviewed Apple-only adapter replacement,
-full Git checkout and evidence-upload path are supported. Scope selection,
-Main promotion dependencies and mobile/TV steps are unchanged. The current job
+Workflow applicability pins the complete original preamble (triggers, global
+environment and concurrency), the complete transitive `paperwork`, `scope` and
+`preflight` jobs, and the complete original or reviewed adapted `apple_compile`
+job. Current execution and v1 producers require the adapted kind. The bounded
+UTF-8/LF plain-job-map splitter rejects tabs, duplicate or complex keys, late
+globals, unsupported indentation and more than 64 jobs within 128 KiB.
+Unrelated job bodies may change without changing the protected native scope.
+Receipts still record the SHA-256 of the actual complete producer/consumer
+workflow bytes; scoped kind is separate and never replaces raw provenance.
+The scope version and protected identities enter the policy fingerprint;
+older v1 adapter/policy receipts receive no compatibility waiver. Existing
+source, API, checkout, toolchain and upload authentication remain exact.
+Workflow text does not additionally pin source helpers invoked by prerequisite
+jobs. The native command, full checkout, evidence-upload path and all protected
+mobile/TV steps remain unchanged. The current job
 rechecks Xcode and records its actual output. API auth tokens remain in the
 parent client and are removed from Git, toolchain and native child environments.
 

@@ -242,11 +242,83 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             with mock.patch.object(native.subprocess,'check_output',side_effect=['Xcode 27.0\nBuild version old\n',native.SWIFT]):
                 with self.assertRaises(native.receipts.ReceiptError): native.verify_toolchain()
 
+    def test_native_workflow_scope_accepts_unrelated_jobs_with_distinct_raw_provenance(self):
+        legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
+        adapted = native.transformed_workflow(legacy)
+        actual = (ROOT/native.WORKFLOW).read_bytes()
+        self.assertNotEqual(native.digest(actual),native.digest(adapted))
+        for raw,kind in ((legacy,'legacy'),(adapted,'adapted'),(actual,'adapted')):
+            with mock.patch.object(native,'git',return_value=raw):
+                self.assertEqual(native.workflow_scope(ROOT,CURRENT,legacy),{'sha256':native.digest(raw),'kind':kind})
+                self.assertEqual(native.workflow_identity(ROOT,CURRENT,legacy),native.digest(raw))
+        _,blocks = native.workflow_parts(actual)
+        for name in ('rust_compile','async_refinement','web_compile'):
+            block=blocks[name];changed=block.replace(b'    steps:\n',b'    steps:\n      - run: echo unrelated-body\n',1)
+            self.assertNotEqual(block,changed)
+            raw=actual.replace(block,changed,1)
+            with self.subTest(name=name),mock.patch.object(native,'git',return_value=raw):
+                self.assertEqual(native.workflow_scope(ROOT,CURRENT,legacy),{'sha256':native.digest(raw),'kind':'adapted'})
+        added=actual+b'\n  unrelated_job:\n    runs-on: unused\n    steps:\n      - run: echo unrelated\n'
+        with mock.patch.object(native,'git',return_value=added):
+            self.assertEqual(native.workflow_identity(ROOT,CURRENT,legacy),native.digest(added))
+
+    def test_native_workflow_scope_refuses_protected_globals_jobs_and_ambiguous_maps(self):
+        legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
+        actual = (ROOT/native.WORKFLOW).read_bytes();preamble,blocks=native.workflow_parts(actual)
+        changes=[actual.replace(b'CARGO_TERM_COLOR: always',b'CARGO_TERM_COLOR: never',1),
+            actual.replace(b'branches: [main]',b'branches: [other]',1),
+            actual.replace(b'cancel-in-progress: false',b'cancel-in-progress: true',1)]
+        for global_value in (b'defaults:\n  run:\n    shell: unsafe\n',b'permissions:\n  contents: write\n'):
+            changes.append(actual.replace(b'jobs:\n',global_value+b'jobs:\n',1))
+        for name in (*native.PROTECTED_DEPENDENCIES,'apple_compile'):
+            block=blocks[name]
+            changes.append(actual.replace(block,block.replace(b'    steps:\n',b'    steps:\n      - run: echo changed-protected-command\n',1),1))
+            changes.append(actual.replace(block,b'',1))
+        for suffix in (b'env:\n  BAD: value\n',b'jobs:\n',b'---\n',b'%YAML 1.2\n',
+            b'  apple_compile:\n    runs-on: other\n',b'  "apple_compile":\n',b'  apple_compile: &anchor\n',
+            b'  <<: *anchor\n',b'  ? [apple_compile]\n',b'  flow: {runs-on: other}\n',
+            b'   unknown: value\n',b' invalid: value\n'):
+            changes.append(actual+suffix)
+        changes += [actual.replace(b'\n',b'\r\n',1),actual+b'\t# tab\n',actual+b'\xff',
+            actual+'\u2028'.encode(),actual+b'#'+b'x'*native.MAX_WORKFLOW_BYTES,
+            actual+b''.join(('  extra_'+str(i)+':\n    runs-on: unused\n').encode() for i in range(native.MAX_WORKFLOW_JOBS))]
+        for raw in changes:
+            self.assertNotEqual(raw,actual)
+            with self.subTest(sha=native.digest(raw)),mock.patch.object(native,'git',return_value=raw), \
+                 self.assertRaisesRegex(native.receipts.ReceiptError,'[Nn]ative.*(workflow|job|scope)|[Uu]nsupported native'):
+                native.workflow_identity(ROOT,CURRENT,legacy)
+
+    def test_current_native_execution_refuses_legacy_scope_without_launch(self):
+        legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
+        with mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile'}), \
+             mock.patch.object(native,'git',return_value=legacy),mock.patch.object(native.subprocess,'run') as launch:
+            with self.assertRaisesRegex(native.receipts.ReceiptError,'Current native job lacks reviewed adapter recipe'):
+                native.run_gate(self.api,SCOPE,ROOT,CURRENT,RUN,ROOT/'target/unrun-native-fixture',{},True)
+            launch.assert_not_called()
+
+    def test_v1_native_receipt_binds_actual_raw_workflow_when_scope_matches(self):
+        api,envelope,payload,receipt,key,legacy,packed = self.v1_fixture()
+        actual = (ROOT/native.WORKFLOW).read_bytes();raw_sha=native.digest(actual)
+        transformed_sha=native.digest(native.transformed_workflow(legacy))
+        self.assertNotEqual(raw_sha,transformed_sha)
+        envelope['workflow']={'sha256':raw_sha,'kind':'adapted'}
+        receipt['consumer_workflow_sha256']=raw_sha
+        payload['receipt.json']=native.canonical(receipt);envelope['archive']=packed(payload)
+        with mock.patch.object(native,'v1_envelope',return_value=envelope), \
+             mock.patch.object(native,'manifest',return_value=(self.entries,self.contents)), \
+             mock.patch.object(native,'git',side_effect=lambda w,*a,**k:b'd'*40 if a[0]=='rev-parse' else b'adapter'):
+            self.assertEqual(native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)['key'],key)
+            for wrong in (transformed_sha,'0'*64):
+                receipt['consumer_workflow_sha256']=wrong
+                payload['receipt.json']=native.canonical(receipt);envelope['archive']=packed(payload)
+                with self.subTest(raw_sha=wrong),self.assertRaisesRegex(native.receipts.ReceiptError,'Native v1 source/receipt/policy identity differs'):
+                    native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)
+
     def test_history_matching_partial_running_missing_or_manual_scope_blocks_fresh(self):
         legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
         key = native.execution_key(self.entries,self.expected)
         with mock.patch.object(native,'manifest',return_value=(self.entries,self.contents)), \
-             mock.patch.object(native,'workflow_identity',return_value=native.PRODUCER_WORKFLOW), \
+             mock.patch.object(native,'workflow_scope',return_value={'sha256':native.PRODUCER_WORKFLOW,'kind':'legacy'}), \
              mock.patch.object(native,'download_log',return_value=self.log):
             for change in (lambda a:None,lambda a:a.jobs[5943][0].update(status='running'),
                 lambda a:a.jobs.update({5943:[]}),lambda a:a.runs[5943].update(workflow_id='ci.yml'),
@@ -261,7 +333,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
     def test_complete_first_run_history_allows_only_the_explicit_fresh_option(self):
         scope = {**SCOPE,'pr':2};api = FakeAPI();api.runs = {RUN:run_record(RUN,CURRENT,scope)}
         with mock.patch.object(native,'manifest',return_value=(self.entries,self.contents)), \
-             mock.patch.object(native,'workflow_identity',return_value=native.PRODUCER_WORKFLOW):
+             mock.patch.object(native,'workflow_scope',return_value={'sha256':native.PRODUCER_WORKFLOW,'kind':'legacy'}):
             result = native.history_before_fresh(api,scope,ROOT,CURRENT,RUN,'new',b'legacy')
             self.assertTrue(result['pagination_complete']);self.assertEqual(result['attempts'],[])
         api.pages = mock.Mock(side_effect=native.receipts.ReceiptError('pagination truncated'))
@@ -319,7 +391,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         def git_value(workspace,*args,**kwargs):
             return legacy if args[-1] == native.PRODUCER+':'+native.WORKFLOW else b'identity'
         with tempfile.TemporaryDirectory() as directory,mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile'}), \
-             mock.patch.object(native,'git',side_effect=git_value),mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+             mock.patch.object(native,'git',side_effect=git_value),mock.patch.object(native,'workflow_scope',return_value={'sha256':native.digest(native.transformed_workflow(legacy)),'kind':'adapted'}), \
              mock.patch.object(native,'manifest',return_value=(self.entries,self.contents)),mock.patch.object(native,'current_job',return_value=self.api.jobs[RUN][0]), \
              mock.patch.object(native,'legacy_result',side_effect=native.receipts.ReceiptError('known evidence missing')), \
              mock.patch.object(native,'recheck'),mock.patch.object(native.subprocess,'run') as make:
@@ -373,6 +445,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         api = FakeAPI();api.runs[rid] = run_record(rid,commit);api.jobs[rid] = [{**api.jobs[5943][0],
             'id':jid,'run_id':rid,'task_id':22}]
         envelope = {'run':api.runs[rid],'job':api.jobs[rid][0],
+            'workflow':{'sha256':receipt['consumer_workflow_sha256'],'kind':'adapted'},
             'artifact':{'id':5100,'run_id':rid,'name':'desktop-macos-check-6100-1','size_in_bytes':1,'expired':False},
             'archive':packed(payload),'job_log':b'authenticated-v1-job',
             'lines':['[command]/usr/bin/git log -1 --format=%H',commit,*native.TOOLCHAIN,native.SWIFT,
@@ -439,7 +512,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         rows,read_git = source_tree();supported_rows = rows.copy()
         revised_make = subprocess.check_output(['git','show','9bcfa9ca1f792d214122762981c84c85ba5b3e64:Makefile'],cwd=ROOT)
         with tempfile.TemporaryDirectory() as directory,mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile','GITHUB_TOKEN':'never-child','PATH':'/tools'}), \
-             mock.patch.object(native,'git',side_effect=git_value),mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+             mock.patch.object(native,'git',side_effect=git_value),mock.patch.object(native,'workflow_scope',return_value={'sha256':native.digest(native.transformed_workflow(legacy)),'kind':'adapted'}), \
              mock.patch.object(native,'manifest',side_effect=sources),mock.patch.object(native,'current_job',return_value=self.api.jobs[RUN][0]), \
              mock.patch.object(native,'matching_v1',return_value=None),mock.patch.object(native,'recheck'), \
              mock.patch.object(native,'live_recipe_selectors'), \
@@ -508,7 +581,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             *upload_lines('tv-navigation-6100-1',5101,2048,'e'*64),'🏁  Job succeeded']
         raw = ('\n'.join(lines)+'\n').encode()
         def git_value(w,*a,**k):return b'd'*40 if a[0]=='rev-parse' else b'adapter'
-        with mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+        with mock.patch.object(native,'workflow_scope',return_value={'sha256':native.digest(native.transformed_workflow(legacy)),'kind':'adapted'}), \
              mock.patch.object(native,'git',side_effect=git_value),mock.patch.object(native,'manifest',return_value=(self.entries,self.contents)), \
              mock.patch.object(native,'download_log',return_value=raw) as log, \
              mock.patch.object(native.transport,'archive_bytes',return_value=envelope['archive']) as fetch:
@@ -526,7 +599,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             fetch.return_value = envelope['archive'];log.return_value = raw.replace(b'c'*40,b'a'*40)
             with self.assertRaises(native.receipts.ReceiptError):native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)
         def changed_adapter(w,*a,**k):return b'changed' if a[-1].startswith('c'*40+':') else b'adapter'
-        with mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+        with mock.patch.object(native,'workflow_scope',return_value={'sha256':native.digest(native.transformed_workflow(legacy)),'kind':'adapted'}), \
              mock.patch.object(native,'git',side_effect=changed_adapter),self.assertRaisesRegex(native.receipts.ReceiptError,'adapter source compatibility'):
             native.v1_envelope(api,SCOPE,ROOT,6100,61001,CURRENT,legacy)
 
@@ -553,7 +626,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         api,envelope,payload,receipt,key,legacy,packed = self.v1_fixture()
         rows,read_git = source_tree();supported = rows.copy()
         with mock.patch.object(native,'git',side_effect=read_git), \
-             mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+             mock.patch.object(native,'workflow_scope',return_value={'sha256':native.digest(native.transformed_workflow(legacy)),'kind':'adapted'}), \
              mock.patch.object(native,'v1_envelope',return_value=envelope), \
              mock.patch.object(native.subprocess,'run') as launch:
             for shape in ('outside helper','case alias'):
@@ -584,7 +657,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             with self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):native.live_recipe_selectors(root)
             with mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile'}), \
                  mock.patch.object(native,'git',return_value=legacy), \
-                 mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+                 mock.patch.object(native,'workflow_scope',return_value={'sha256':native.digest(native.transformed_workflow(legacy)),'kind':'adapted'}), \
                  mock.patch.object(native,'manifest') as source,mock.patch.object(native,'legacy_result') as retain, \
                  mock.patch.object(native.subprocess,'run') as launch:
                 with self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
@@ -644,7 +717,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile'}), \
              mock.patch.object(native,'git',side_effect=read_git), \
-             mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+             mock.patch.object(native,'workflow_scope',return_value={'sha256':native.digest(native.transformed_workflow(legacy)),'kind':'adapted'}), \
              mock.patch.object(native,'recheck'),mock.patch.object(native,'live_recipe_selectors'), \
              mock.patch.object(native,'download_log',return_value=self.log), \
              mock.patch.object(native.transport,'archive_bytes',return_value=self.zip), \
