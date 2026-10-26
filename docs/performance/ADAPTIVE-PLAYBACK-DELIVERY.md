@@ -44,11 +44,14 @@ plus one static catalog-only commit. Pinned Rust1.97.1, source stable,
 622.959s; log SHA-256
 `43d5ef03106a485d4f5ddb8a45806d0b362b3c75ab398032ae6f90eea5640357`.
 Default-feature Linux-cfg strict also passed that source (check-only stubs,
-no executable). The copy-launch and timed-opener tasks passed separate host
-and Linux-cfg strict checks; their joined native candidate still needs its
-own checks. Local compilers run sequentially at j1 after an actual host
+no executable). The joined copy-launch/timed-opener source `4de016221d93` passed native
+strict Clippy in503.932s, source stable; log SHA-256
+`03e22f142c69b0c69665cececa7a1790a71f520548fa674311f4d50717c31c90`.
+Their separate host/Linux-cfg strict checks also passed; the authored copy
+wait watchdog and same-fence diagnostic are included in the native pin. Local compilers run sequentially at j1 after an actual host
 file-handle failure. Published-source paperwork passed15/15;622 declared
 regression anchors resolve, including the original490 unchanged fields.
+Task paperwork also passed15/15 with its four new regression declarations.
 These are static/compile facts, not behavioral execution or completed review.
 
 Bounded direct recovery retains positive old-daemon completion and held-lock
