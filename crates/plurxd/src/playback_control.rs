@@ -3032,19 +3032,20 @@ impl PreparationGate for RollingControlHandle {
         deadline: i64,
     ) -> StagedObservationAnswer<'a> {
         Box::pin(async move {
-            let (reply, response) = tokio::sync::oneshot::channel();
-            if self
-                .enqueue_command(RollingControlCommand::StagedObservationIsCurrent {
+            let response = match self
+                .request_command(|reply| RollingControlCommand::StagedObservationIsCurrent {
                     fence,
                     incarnation,
                     deadline,
                     reply,
                 })
                 .await
-                .is_err()
             {
-                return None;
-            }
+                Ok(response) => response,
+                Err(_) => {
+                    return None;
+                }
+            };
             response.await.ok().flatten()
         })
     }
@@ -3053,8 +3054,11 @@ impl PreparationGate for RollingControlHandle {
         identity: AcceptedControlIdentity,
     ) -> ObservationAnswer<'a> {
         Box::pin(async move {
-            let (reply, response) = tokio::sync::oneshot::channel();
-            self.enqueue_command(RollingControlCommand::AcceptedObservation { identity, reply })
+            let response = self
+                .request_command(|reply| RollingControlCommand::AcceptedObservation {
+                    identity,
+                    reply,
+                })
                 .await
                 .ok()?;
             response.await.ok().flatten()
@@ -3063,14 +3067,18 @@ impl PreparationGate for RollingControlHandle {
 
     fn observation_is_current<'a>(&'a self, fence: AcceptedControlFence) -> GateAnswer<'a> {
         Box::pin(async move {
-            let (reply, response) = tokio::sync::oneshot::channel();
-            if self
-                .enqueue_command(RollingControlCommand::ObservationIsCurrent { fence, reply })
+            let response = match self
+                .request_command(|reply| RollingControlCommand::ObservationIsCurrent {
+                    fence,
+                    reply,
+                })
                 .await
-                .is_err()
             {
-                return false;
-            }
+                Ok(response) => response,
+                Err(_) => {
+                    return false;
+                }
+            };
             response.await.unwrap_or(false)
         })
     }
@@ -8952,7 +8960,6 @@ impl RollingDecisionTransport {
     }
 
     async fn poll_after(&self, after_sequence: u64) -> DecisionTransportPoll {
-        let (reply, response) = tokio::sync::oneshot::channel();
         let permit = match self.sender.reserve().await {
             Ok(permit) => permit,
             Err(_) => {
@@ -8963,6 +8970,7 @@ impl RollingDecisionTransport {
                     });
             }
         };
+        let (reply, response) = tokio::sync::oneshot::channel();
         let transition = self
             .producer_transition
             .lock()
@@ -8987,12 +8995,12 @@ impl RollingDecisionTransport {
     }
 
     async fn register_executor(&self) -> Result<(), ProducerAttemptRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
         let permit = self
             .sender
             .reserve()
             .await
             .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        let (reply, response) = tokio::sync::oneshot::channel();
         let transition = self
             .producer_transition
             .lock()
@@ -9008,12 +9016,12 @@ impl RollingDecisionTransport {
     }
 
     async fn settle_executor_expected(&self) -> Result<(), ProducerAttemptRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
         let permit = self
             .sender
             .reserve()
             .await
             .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        let (reply, response) = tokio::sync::oneshot::channel();
         let transition = self
             .producer_transition
             .lock()
@@ -13259,16 +13267,55 @@ impl RollingControlHandle {
     /// facts. Capacity is reserved before either synchronous fence is taken;
     /// after the transition fence is acquired there is no await or fallible
     /// mailbox operation before the sealed envelope is sent.
+    /// The mailbox permit and publication fence precede command-owned clones,
+    /// boxed requests and oneshot allocation. Awaiting callers may still own
+    /// their input DTOs; replies and trait-object future allocations remain a
+    /// separate, explicitly unknown lifetime/accounting boundary.
+    async fn request_command<R>(
+        &self,
+        build: impl FnOnce(tokio::sync::oneshot::Sender<R>) -> RollingControlCommand,
+    ) -> Result<tokio::sync::oneshot::Receiver<R>, ()> {
+        self.enqueue_command_factory(|| {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            (build(reply), response)
+        })
+        .await
+    }
+
+    async fn request_command_before<R>(
+        &self,
+        build: impl FnOnce(tokio::sync::oneshot::Sender<R>) -> RollingControlCommand,
+        deadline: Instant,
+    ) -> Result<tokio::sync::oneshot::Receiver<R>, RollingCommandAdmissionError> {
+        self.enqueue_command_factory_before(
+            || {
+                let (reply, response) = tokio::sync::oneshot::channel();
+                (build(reply), response)
+            },
+            deadline,
+        )
+        .await
+    }
+
+    #[cfg(test)]
     async fn enqueue_command(&self, command: RollingControlCommand) -> Result<(), ()> {
+        self.enqueue_command_factory(|| (command, ())).await
+    }
+
+    async fn enqueue_command_factory<R>(
+        &self,
+        build: impl FnOnce() -> (RollingControlCommand, R),
+    ) -> Result<R, ()> {
         let permit = self.sender.reserve().await.map_err(|_| ())?;
         let transition = self
             .producer_transition
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (command, result) = build();
         let envelope = self.producer_events.seal_command(command);
         permit.send(envelope);
         drop(transition);
-        Ok(())
+        Ok(result)
     }
 
     /// Publish one command without allowing mailbox pressure or the
@@ -13276,11 +13323,11 @@ impl RollingControlHandle {
     /// deadline. Response commands carry the same deadline into actor dispatch;
     /// Terminal instead treats successful enqueue as the irreversible handoff
     /// and waits for settlement without a second deadline.
-    async fn enqueue_command_before(
+    async fn enqueue_command_factory_before<R>(
         &self,
-        command: RollingControlCommand,
+        build: impl FnOnce() -> (RollingControlCommand, R),
         deadline: Instant,
-    ) -> Result<(), RollingCommandAdmissionError> {
+    ) -> Result<R, RollingCommandAdmissionError> {
         if rolling_now() >= deadline {
             return Err(RollingCommandAdmissionError::Deadline);
         }
@@ -13301,10 +13348,16 @@ impl RollingControlHandle {
                         drop(transition);
                         return Err(RollingCommandAdmissionError::Deadline);
                     }
+                    let (command, result) = build();
+                    // Payload construction is synchronous but may consume the
+                    // remaining budget; never publish it after admission ends.
+                    if rolling_now() >= deadline {
+                        return Err(RollingCommandAdmissionError::Deadline);
+                    }
                     let envelope = self.producer_events.seal_command(command);
                     permit.send(envelope);
                     drop(transition);
-                    return Ok(());
+                    return Ok(result);
                 }
                 Err(std::sync::TryLockError::Poisoned(error)) => {
                     let transition = error.into_inner();
@@ -13312,10 +13365,16 @@ impl RollingControlHandle {
                         drop(transition);
                         return Err(RollingCommandAdmissionError::Deadline);
                     }
+                    let (command, result) = build();
+                    // Payload construction is synchronous but may consume the
+                    // remaining budget; never publish it after admission ends.
+                    if rolling_now() >= deadline {
+                        return Err(RollingCommandAdmissionError::Deadline);
+                    }
                     let envelope = self.producer_events.seal_command(command);
                     permit.send(envelope);
                     drop(transition);
-                    return Ok(());
+                    return Ok(result);
                 }
                 Err(std::sync::TryLockError::WouldBlock) => {
                     // The match temporary may contain a non-Send mutex
@@ -13558,18 +13617,19 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     async fn renew(&self, kind: &'static str, source: RollingRenewalSource) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::Renew {
+        let response = match self
+            .request_command(|reply| RollingControlCommand::Renew {
                 kind,
                 source,
                 reply,
             })
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         response.await.unwrap_or(false)
     }
 
@@ -13711,8 +13771,8 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     pub(crate) async fn begin_producer_attempt(&self) -> Result<u64, ProducerAttemptRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::BeginProducerAttempt { reply })
+        let response = self
+            .request_command(|reply| RollingControlCommand::BeginProducerAttempt { reply })
             .await
             .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
         response
@@ -13724,8 +13784,11 @@ impl RollingControlHandle {
         &self,
         policy: InitialProducerPolicy,
     ) -> Result<u64, ProducerAttemptRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::BeginInitialProducerAttempt { policy, reply })
+        let response = self
+            .request_command(|reply| RollingControlCommand::BeginInitialProducerAttempt {
+                policy,
+                reply,
+            })
             .await
             .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
         response
@@ -13743,14 +13806,16 @@ impl RollingControlHandle {
         presentation_contract_fingerprint: String,
         failure_fence: Arc<AtomicBool>,
     ) -> Result<(), ResponsePublicationRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::BindResponsePublicationContract {
-            presentation_contract_fingerprint,
-            failure_fence,
-            reply,
-        })
-        .await
-        .map_err(|_| ResponsePublicationRejection::ControlUnavailable)?;
+        let response = self
+            .request_command(
+                |reply| RollingControlCommand::BindResponsePublicationContract {
+                    presentation_contract_fingerprint,
+                    failure_fence,
+                    reply,
+                },
+            )
+            .await
+            .map_err(|_| ResponsePublicationRejection::ControlUnavailable)?;
         response
             .await
             .unwrap_or(Err(ResponsePublicationRejection::ControlUnavailable))
@@ -13762,18 +13827,18 @@ impl RollingControlHandle {
         handoff: Option<RollingFirstMediaPublicationHandoff>,
         deadline: Instant,
     ) -> Result<RollingResponseAuthorization, ResponsePublicationRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command_before(
-            RollingControlCommand::AuthorizeResponsePublication {
-                publication,
-                handoff,
+        let response = self
+            .request_command_before(
+                |reply| RollingControlCommand::AuthorizeResponsePublication {
+                    publication,
+                    handoff,
+                    deadline,
+                    reply,
+                },
                 deadline,
-                reply,
-            },
-            deadline,
-        )
-        .await
-        .map_err(|_| ResponsePublicationRejection::ControlUnavailable)?;
+            )
+            .await
+            .map_err(|_| ResponsePublicationRejection::ControlUnavailable)?;
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
             .await
             .ok()
@@ -13786,14 +13851,14 @@ impl RollingControlHandle {
         decision_sequence: u64,
         recipe_fingerprint: &str,
     ) -> Result<u64, ProducerAttemptRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::AdmitProducerRetry {
-            decision_sequence,
-            recipe_fingerprint: recipe_fingerprint.to_owned(),
-            reply,
-        })
-        .await
-        .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        let response = self
+            .request_command(|reply| RollingControlCommand::AdmitProducerRetry {
+                decision_sequence,
+                recipe_fingerprint: recipe_fingerprint.to_owned(),
+                reply,
+            })
+            .await
+            .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
         response
             .await
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
@@ -13804,14 +13869,14 @@ impl RollingControlHandle {
         decision_sequence: u64,
         installed_attempt: Option<u64>,
     ) -> Result<(), ProducerAttemptRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::DecisionApplied {
-            decision_sequence,
-            installed_attempt,
-            reply,
-        })
-        .await
-        .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        let response = self
+            .request_command(|reply| RollingControlCommand::DecisionApplied {
+                decision_sequence,
+                installed_attempt,
+                reply,
+            })
+            .await
+            .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
         response
             .await
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
@@ -13833,20 +13898,21 @@ impl RollingControlHandle {
         producer_attempt: u64,
         deadline: Instant,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command_before(
-                RollingControlCommand::SettleProducerFlowSignal {
+        let response = match self
+            .request_command_before(
+                |reply| RollingControlCommand::SettleProducerFlowSignal {
                     producer_attempt,
                     reply,
                 },
                 deadline,
             )
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
             .await
             .ok()
@@ -13867,10 +13933,9 @@ impl RollingControlHandle {
         desired_hold: bool,
         deadline: Instant,
     ) -> ProducerFlowIntentionOutcome {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command_before(
-                RollingControlCommand::ApplyProducerFlow {
+        let response = match self
+            .request_command_before(
+                |reply| RollingControlCommand::ApplyProducerFlow {
                     producer_attempt,
                     desired_hold,
                     reply,
@@ -13878,10 +13943,12 @@ impl RollingControlHandle {
                 deadline,
             )
             .await
-            .is_err()
         {
-            return ProducerFlowIntentionOutcome::Rejected;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return ProducerFlowIntentionOutcome::Rejected;
+            }
+        };
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
             .await
             .ok()
@@ -13894,17 +13961,17 @@ impl RollingControlHandle {
         evidence: RollingProducerCompletionEvidence,
         deadline: Instant,
     ) -> Result<RollingProducerCompletionDisposition, ProducerAttemptRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command_before(
-            RollingControlCommand::ClassifyProducerExit {
-                evidence,
+        let response = self
+            .request_command_before(
+                |reply| RollingControlCommand::ClassifyProducerExit {
+                    evidence,
+                    deadline,
+                    reply,
+                },
                 deadline,
-                reply,
-            },
-            deadline,
-        )
-        .await
-        .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+            )
+            .await
+            .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
             .await
             .ok()
@@ -13921,18 +13988,18 @@ impl RollingControlHandle {
         classification: CopyProducerExitClassification,
         deadline: Instant,
     ) -> Result<(), ProducerAttemptRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command_before(
-            RollingControlCommand::ClassifyCopyProducerExit {
-                producer_attempt,
-                classification,
+        let response = self
+            .request_command_before(
+                |reply| RollingControlCommand::ClassifyCopyProducerExit {
+                    producer_attempt,
+                    classification,
+                    deadline,
+                    reply,
+                },
                 deadline,
-                reply,
-            },
-            deadline,
-        )
-        .await
-        .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+            )
+            .await
+            .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
             .await
             .ok()
@@ -13958,14 +14025,18 @@ impl RollingControlHandle {
         &self,
         decision: ProducerDecision,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::InstallProducerDecision { decision, reply })
+        let response = match self
+            .request_command(|reply| RollingControlCommand::InstallProducerDecision {
+                decision,
+                reply,
+            })
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         response.await.unwrap_or(false)
     }
 
@@ -14023,17 +14094,18 @@ impl RollingControlHandle {
         &self,
         producer_attempt: u64,
     ) -> Result<ProducerInstallAuthorization, ProducerAttemptRejection> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::AuthorizeProducerInstall {
+        let response = match self
+            .request_command(|reply| RollingControlCommand::AuthorizeProducerInstall {
                 producer_attempt,
                 reply,
             })
             .await
-            .is_err()
         {
-            return Err(ProducerAttemptRejection::ControlUnavailable);
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return Err(ProducerAttemptRejection::ControlUnavailable);
+            }
+        };
         response
             .await
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
@@ -14081,18 +14153,19 @@ impl RollingControlHandle {
         &self,
         observation: RollingPublicationObservation,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::ObservePublication {
+        let response = match self
+            .request_command(|reply| RollingControlCommand::ObservePublication {
                 observation,
                 deadline: None,
                 reply,
             })
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         response.await.unwrap_or(false)
     }
 
@@ -14106,10 +14179,9 @@ impl RollingControlHandle {
         observation: RollingPublicationObservation,
         deadline: Instant,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command_before(
-                RollingControlCommand::ObservePublication {
+        let response = match self
+            .request_command_before(
+                |reply| RollingControlCommand::ObservePublication {
                     observation,
                     deadline: Some(deadline),
                     reply,
@@ -14117,10 +14189,12 @@ impl RollingControlHandle {
                 deadline,
             )
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
             .await
             .ok()
@@ -14137,10 +14211,9 @@ impl RollingControlHandle {
         handoff: Option<RollingMediaCommitHandoff>,
         deadline: Instant,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command_before(
-                RollingControlCommand::CommitMedia {
+        let response = match self
+            .request_command_before(
+                |reply| RollingControlCommand::CommitMedia {
                     kind,
                     producer_attempt,
                     segment_index,
@@ -14152,10 +14225,12 @@ impl RollingControlHandle {
                 deadline,
             )
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
             .await
             .ok()
@@ -14169,10 +14244,9 @@ impl RollingControlHandle {
         kind: &'static str,
         deadline: Instant,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command_before(
-                RollingControlCommand::CommitGenerationMetadata {
+        let response = match self
+            .request_command_before(
+                |reply| RollingControlCommand::CommitGenerationMetadata {
                     presentation_contract_fingerprint: presentation_contract_fingerprint.to_owned(),
                     kind,
                     deadline,
@@ -14181,10 +14255,12 @@ impl RollingControlHandle {
                 deadline,
             )
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
             .await
             .ok()
@@ -14207,32 +14283,36 @@ impl RollingControlHandle {
         terminal_admission: Option<Arc<dyn RollingTerminalAdmission>>,
         preparation_admission: Option<Arc<dyn PreparationSettlementAdmission>>,
     ) -> Result<RollingControlOutcome, ControlStateError> {
-        let request = OwnedLocalControlRequest {
-            generation: request.generation.to_owned(),
-            owner_epoch: request.owner_epoch,
-            client_instance_id: request.client_instance_id.to_owned(),
-            sequence: request.sequence,
-            snapshot: request.snapshot,
-            prepared_successor: request.prepared_successor,
-        };
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::Control {
-            request: Box::new(request),
-            deadline_unix_ms,
-            terminal_admission,
-            preparation_admission,
-            reply,
-        })
-        .await
-        .map_err(|_| ControlStateError::Unavailable)?;
+        let response = self
+            .request_command(|reply| RollingControlCommand::Control {
+                request: Box::new(OwnedLocalControlRequest {
+                    generation: request.generation.to_owned(),
+                    owner_epoch: request.owner_epoch,
+                    client_instance_id: request.client_instance_id.to_owned(),
+                    sequence: request.sequence,
+                    snapshot: request.snapshot,
+                    prepared_successor: request.prepared_successor,
+                }),
+                deadline_unix_ms,
+                terminal_admission,
+                preparation_admission,
+                reply,
+            })
+            .await
+            .map_err(|_| ControlStateError::Unavailable)?;
         response.await.map_err(|_| ControlStateError::Unavailable)?
     }
 
     /// The durable desired row now names this ask.
     pub(crate) async fn record_desired_persisted(&self, digest: &str) {
         let _ = self
-            .enqueue_command(RollingControlCommand::RecordDesiredPersisted {
-                digest: digest.to_owned(),
+            .enqueue_command_factory(|| {
+                (
+                    RollingControlCommand::RecordDesiredPersisted {
+                        digest: digest.to_owned(),
+                    },
+                    (),
+                )
             })
             .await;
     }
@@ -14267,9 +14347,8 @@ impl RollingControlHandle {
         expected_owner_epoch: i64,
         desired_digest: Option<String>,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::StagePreparation {
+        let response = match self
+            .request_command(|reply| RollingControlCommand::StagePreparation {
                 staged_incarnation_id,
                 predecessor_incarnation_id,
                 deadline_ms,
@@ -14278,10 +14357,12 @@ impl RollingControlHandle {
                 reply,
             })
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         response.await.unwrap_or(false)
     }
 
@@ -14299,18 +14380,19 @@ impl RollingControlHandle {
         staged_incarnation_id: &str,
         expected_owner_epoch: i64,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::MayCommitPreparation {
+        let response = match self
+            .request_command(|reply| RollingControlCommand::MayCommitPreparation {
                 staged_incarnation_id: staged_incarnation_id.to_owned(),
                 expected_owner_epoch,
                 reply,
             })
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         response.await.unwrap_or(false)
     }
 
@@ -14319,18 +14401,19 @@ impl RollingControlHandle {
         staged_incarnation_id: &str,
         expected_owner_epoch: i64,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::BeginAbortPreparation {
+        let response = match self
+            .request_command(|reply| RollingControlCommand::BeginAbortPreparation {
                 staged_incarnation_id: staged_incarnation_id.to_owned(),
                 expected_owner_epoch,
                 reply,
             })
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         response.await.unwrap_or(false)
     }
 
@@ -14339,18 +14422,19 @@ impl RollingControlHandle {
         staged_incarnation_id: &str,
         expected_owner_epoch: i64,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::RejectPreparationCommit {
+        let response = match self
+            .request_command(|reply| RollingControlCommand::RejectPreparationCommit {
                 staged_incarnation_id: staged_incarnation_id.to_owned(),
                 expected_owner_epoch,
                 reply,
             })
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         response.await.unwrap_or(false)
     }
 
@@ -14360,18 +14444,19 @@ impl RollingControlHandle {
         staged_incarnation_id: &str,
         now_unix_ms: i64,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::ReservePreparationCommit {
+        let response = match self
+            .request_command(|reply| RollingControlCommand::ReservePreparationCommit {
                 staged_incarnation_id: staged_incarnation_id.to_owned(),
                 now_unix_ms,
                 reply,
             })
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         response.await.unwrap_or(false)
     }
 
@@ -14396,33 +14481,34 @@ impl RollingControlHandle {
         committed: bool,
         expected_owner_epoch: i64,
     ) -> bool {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        if self
-            .enqueue_command(RollingControlCommand::SettlePreparation {
+        let response = match self
+            .request_command(|reply| RollingControlCommand::SettlePreparation {
                 staged_incarnation_id: staged_incarnation_id.to_owned(),
                 committed,
                 expected_owner_epoch,
                 reply,
             })
             .await
-            .is_err()
         {
-            return false;
-        }
+            Ok(response) => response,
+            Err(_) => {
+                return false;
+            }
+        };
         response.await.unwrap_or(false)
     }
 
     pub(crate) async fn snapshot(&self) -> Option<RollingLeaseSnapshot> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::Snapshot { reply })
+        let response = self
+            .request_command(|reply| RollingControlCommand::Snapshot { reply })
             .await
             .ok()?;
         response.await.ok()
     }
 
     pub(crate) async fn claim_expiry(&self) -> Result<RollingExpiryClaim, ControlStateError> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::ClaimExpiry { reply })
+        let response = self
+            .request_command(|reply| RollingControlCommand::ClaimExpiry { reply })
             .await
             .map_err(|_| ControlStateError::Unavailable)?;
         response.await.map_err(|_| ControlStateError::Unavailable)
@@ -14432,8 +14518,8 @@ impl RollingControlHandle {
         &self,
         cause: RollingTerminalCause,
     ) -> Result<RollingTerminalOutcome, ControlStateError> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::Terminal { cause, reply })
+        let response = self
+            .request_command(|reply| RollingControlCommand::Terminal { cause, reply })
             .await
             .map_err(|_| ControlStateError::Unavailable)?;
         response.await.map_err(|_| ControlStateError::Unavailable)
@@ -14448,8 +14534,11 @@ impl RollingControlHandle {
         cause: RollingTerminalCause,
         deadline: Instant,
     ) -> Result<RollingTerminalOutcome, RollingTerminalRequestError> {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command_before(RollingControlCommand::Terminal { cause, reply }, deadline)
+        let response = self
+            .request_command_before(
+                |reply| RollingControlCommand::Terminal { cause, reply },
+                deadline,
+            )
             .await
             .map_err(|error| match error {
                 RollingCommandAdmissionError::Deadline => {
@@ -14728,8 +14817,8 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     pub(crate) async fn set_renewal_for_test(&self, at: Instant, kind: &'static str) {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::SetRenewalForTest { at, kind, reply })
+        let response = self
+            .request_command(|reply| RollingControlCommand::SetRenewalForTest { at, kind, reply })
             .await
             .expect("rolling actor available");
         response.await.expect("rolling actor reply");
@@ -14737,8 +14826,8 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     pub(crate) async fn mark_startup_presented_for_test(&self) {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::MarkStartupPresented { reply })
+        let response = self
+            .request_command(|reply| RollingControlCommand::MarkStartupPresented { reply })
             .await
             .expect("rolling actor available");
         response.await.expect("rolling actor reply");

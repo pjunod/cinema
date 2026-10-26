@@ -234,4 +234,112 @@ mod tests {
         assert_eq!(receiver.recv().await, Some(30));
         assert_eq!(receiver.recv().await, Some(40));
     }
+
+    // Real private request transport with no spawned actor/native fixture.
+    // These contracts cover admission ordering, not whole actor memory peak.
+    fn isolated_request_transport() -> (
+        RollingControlHandle,
+        tokio::sync::mpsc::Receiver<RollingControlEnvelope>,
+    ) {
+        let mut handle = RollingControlHandle::unavailable_for_test();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        handle.sender = sender;
+        (handle, receiver)
+    }
+
+    #[tokio::test]
+    async fn closed_mailbox_never_constructs_request_payload_or_reply() {
+        let (handle, receiver) = isolated_request_transport();
+        drop(receiver);
+        let built = AtomicBool::new(false);
+        assert!(handle
+            .request_command(|reply| {
+                built.store(true, Ordering::Release);
+                RollingControlCommand::Terminal {
+                    cause: RollingTerminalCause::End,
+                    reply,
+                }
+            })
+            .await
+            .is_err());
+        assert!(!built.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cancelled_full_mailbox_wait_never_constructs_request_payload_or_reply() {
+        let (handle, _receiver) = isolated_request_transport();
+        let occupied = handle.sender.reserve().await.expect("fill only permit");
+        let built = AtomicBool::new(false);
+        let request = handle.request_command(|reply| {
+            built.store(true, Ordering::Release);
+            RollingControlCommand::Terminal {
+                cause: RollingTerminalCause::End,
+                reply,
+            }
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(1), request)
+            .await
+            .is_err());
+        assert!(!built.load(Ordering::Acquire));
+        drop(occupied);
+        assert_eq!(handle.sender.capacity(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_admission_never_constructs_request_payload_or_reply() {
+        let (handle, _receiver) = isolated_request_transport();
+        let built = AtomicBool::new(false);
+        let result = handle
+            .request_command_before(
+                |reply| {
+                    built.store(true, Ordering::Release);
+                    RollingControlCommand::Terminal {
+                        cause: RollingTerminalCause::End,
+                        reply,
+                    }
+                },
+                rolling_now(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(RollingCommandAdmissionError::Deadline)
+        ));
+        assert!(!built.load(Ordering::Acquire));
+        assert_eq!(handle.sender.capacity(), 1);
+    }
+
+    #[tokio::test]
+    async fn admitted_builder_owns_permit_and_cancelled_receiver_stays_closed() {
+        let (handle, mut receiver) = isolated_request_transport();
+        let response = handle
+            .request_command(|reply| {
+                assert_eq!(
+                    handle.sender.capacity(),
+                    0,
+                    "builder cannot race outside its mailbox permit"
+                );
+                assert!(
+                    handle.producer_transition.try_lock().is_err(),
+                    "publication fence precedes builder"
+                );
+                RollingControlCommand::Terminal {
+                    cause: RollingTerminalCause::End,
+                    reply,
+                }
+            })
+            .await
+            .expect("admitted");
+        drop(response);
+        let envelope = receiver.recv().await.expect("same admitted command");
+        assert_eq!(handle.sender.capacity(), 1);
+        let RollingControlCommand::Terminal { cause, reply } = envelope.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(cause, RollingTerminalCause::End);
+        assert!(
+            reply.is_closed(),
+            "cancellation remains observable before actor application"
+        );
+    }
 }
