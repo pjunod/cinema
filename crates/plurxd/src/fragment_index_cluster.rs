@@ -434,6 +434,38 @@ pub(crate) async fn open_source_fence(
     }
 }
 
+// This observes only whether the original opener returned its native result.
+// Its absence is uncertainty, never a no-acquisition or physical-close fact.
+struct PlaybackOpenObservation {
+    keeper: Option<std::sync::Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper>>,
+    native_result_observed: bool,
+}
+impl Drop for PlaybackOpenObservation {
+    fn drop(&mut self) {
+        if self.native_result_observed {
+            return;
+        }
+        let Some(keeper) = &self.keeper else {
+            return;
+        };
+        keeper.retain_uncertainty(
+            plurx_core::process::bounded::OriginalWorkUncertainty::CollectorDropped,
+        );
+        tracing::debug!(
+            "original playback source opener result unobserved; cleanup remains unknown"
+        );
+    }
+}
+
+#[cfg(test)]
+type PlaybackOpenAfterOpen = std::sync::Arc<dyn Fn(&std::fs::File) + Send + Sync>;
+#[cfg(test)]
+tokio::task_local! {
+    // Per-call fixture gate AFTER the actual native open, inside the SAME
+    // blocking job. No production hook/frame field or replacement opener.
+    static PLAYBACK_OPEN_AFTER_OPEN: PlaybackOpenAfterOpen;
+}
+
 /// Source playback always checks the scanner facts and refuses link traversal.
 /// The held descriptor, rather than reopening an unchecked pathname, feeds
 /// the media process. Local opening policy remains on open_source_fence.
@@ -441,13 +473,33 @@ pub(crate) async fn open_source_playback_fence(
     file: &MediaFile,
     expected_object_version: Option<&str>,
 ) -> Result<SourceFence, String> {
+    // Install observation BEFORE the existing job starts. A deadline/Stop can
+    // discard its JoinHandle but cannot release the same admitted keeper from
+    // its actual queued input, worker, or unclaimed File result.
+    let mut observation = PlaybackOpenObservation {
+        keeper: plurx_core::process::bounded::original_keeper(),
+        native_result_observed: false,
+    };
     let path = file.path.clone();
-    let source = tokio::task::spawn_blocking(move || {
-        plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+    #[cfg(test)]
+    let after_open = PLAYBACK_OPEN_AFTER_OPEN
+        .try_with(std::sync::Arc::clone)
+        .ok();
+    let native_result = crate::subtitle_models::admitted_work::spawn_blocking(move || {
+        let source = plurx_core::fs_secure::open_read_nofollow_blocking(&path)?;
+        #[cfg(test)]
+        if let Some(after_open) = after_open {
+            after_open(&source);
+        }
+        Ok::<_, std::io::Error>(source)
     })
     .await
-    .map_err(|_| "Source file open task failed".to_owned())?
-    .map_err(|_| "Source file cannot be opened without following links".to_owned())?;
+    .map_err(|_| "Source file open task failed".to_owned())?;
+    // Disarm ONLY this lost-result observation. Neither a known native error
+    // nor a returned File proves FD closure or clears any prior Unknown.
+    observation.native_result_observed = true;
+    let source = native_result
+        .map_err(|_| "Source file cannot be opened without following links".to_owned())?;
     let metadata = source
         .metadata()
         .map_err(|_| "Source file cannot be stated".to_owned())?;
@@ -1568,6 +1620,9 @@ pub(crate) fn unix_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    mod timed_opener;
+
     /// The refusal has to say which component moved, because the three things
     /// it covers need opposite responses and the sentence in front of it —
     /// "source changed" — is only true for one of them.
