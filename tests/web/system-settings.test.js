@@ -47,6 +47,15 @@ test('Capability enablement follows configuration facts rather than acceptance w
   assert.equal((additional.match(/>Available<\/span>/g)||[]).length,4);
   assert.doesNotMatch(additional,/>Enabled</);
 });
+test('Auto names the server-selected encoder in parentheses',()=>{
+  const h=harness();
+  for(const [name,encoder] of [['macos','Apple VideoToolbox'],['linux','Intel Quick Sync'],['unavailable','CPU']]){
+    const sys=fixture(name);
+    sys.hwaccel_pref='auto';sys.hwaccel_requested='auto';
+    sys.encoder_selected=encoder;
+    assert.ok(h.transcoderCard(sys).includes(`<option value="auto" selected>Auto (${encoder})</option>`));
+  }
+});
 test('Unavailable media remains neutral Disabled without invented devices or timings',()=>{
   const h=harness(),html=h.systemPanel(fixture('unavailable'));
   assert.equal((html.match(/>Disabled<\/span>/g)||[]).length,6);
