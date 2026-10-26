@@ -53,6 +53,13 @@ pub(super) struct OutputOrigin {
 }
 
 impl OutputOrigin {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     fn requested_heap_bytes(&self) -> Option<usize> {
         self.source_version
             .capacity()
@@ -64,6 +71,13 @@ impl OutputOrigin {
 }
 
 impl OutputObservation {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     fn requested_heap_bytes(&self) -> Option<usize> {
         self.preimage
             .requested_heap_bytes()?
@@ -79,6 +93,13 @@ impl OutputObservation {
 }
 
 impl PublishedOutputMeasurement {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
         self.observation
             .as_ref()
@@ -89,6 +110,13 @@ impl PublishedOutputMeasurement {
 /// Conservative projection for the optional full-output observation retained
 /// after the first finite publication. It uses the profile's bounded entry
 /// count and precomputed immutable string capacities.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+    )
+)]
 pub(super) fn projected_observation_bytes(
     source_version_capacity: usize,
     recipe_key_capacity: usize,
@@ -241,6 +269,10 @@ impl PublishedOutputMeasurement {
     /// directly, without creating a viewer rendition or reopening a source.
     /// The caller may invoke this only for core post-publication events.
     #[cfg(target_os = "linux")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "One post-publication observation binds the original recipe, playlist, plan, init, epoch, output member and source identity; keep borrowed facts together without an extra allocation."
+    )]
     pub(super) fn observe_static(
         &mut self,
         recipe_key: &str,
@@ -264,6 +296,10 @@ impl PublishedOutputMeasurement {
         );
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "One post-publication observation binds the original recipe, playlist, plan, init, epoch, output member and source identity; keep borrowed facts together without an extra allocation."
+    )]
     fn observe_parts(
         &mut self,
         recipe_key: &str,

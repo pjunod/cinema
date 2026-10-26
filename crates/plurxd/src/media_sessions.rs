@@ -43,14 +43,49 @@ pub(crate) const ACTIVATE_PATH: &str = "/internal/cluster/media/sessions/activat
 pub(crate) const ABORT_PATH: &str = "/internal/cluster/media/sessions/abort";
 /// Versioned physical-attempt worker protocol. Store rows remain the
 /// authority for phase and identity; these bodies carry no native proof.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "The physical-attempt transport is currently entered only by Linux native workers; keep stable protocol names for unsupported-platform routing and compatibility."
+    )
+)]
 pub(crate) const ADAPTIVE_ATTEMPT_PREPARE_PATH: &str =
     "/internal/cluster/media/adaptive-attempts/prepare";
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "The physical-attempt transport is currently entered only by Linux native workers; keep stable protocol names for unsupported-platform routing and compatibility."
+    )
+)]
 pub(crate) const ADAPTIVE_ATTEMPT_ADOPT_PATH: &str =
     "/internal/cluster/media/adaptive-attempts/adopt";
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "The physical-attempt transport is currently entered only by Linux native workers; keep stable protocol names for unsupported-platform routing and compatibility."
+    )
+)]
 pub(crate) const ADAPTIVE_ATTEMPT_CANCEL_PATH: &str =
     "/internal/cluster/media/adaptive-attempts/cancel";
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "The physical-attempt transport is currently entered only by Linux native workers; keep stable protocol names for unsupported-platform routing and compatibility."
+    )
+)]
 pub(crate) const ADAPTIVE_ATTEMPT_STATUS_PATH: &str =
     "/internal/cluster/media/adaptive-attempts/status";
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "The physical-attempt transport is currently entered only by Linux native workers; keep stable protocol names for unsupported-platform routing and compatibility."
+    )
+)]
 pub(crate) const ADAPTIVE_ATTEMPT_VERSION: u16 = 1;
 pub(crate) const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
 pub(crate) const CONTROL_PATH: &str = "/internal/cluster/media/sessions/control";

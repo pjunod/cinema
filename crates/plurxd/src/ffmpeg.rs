@@ -425,6 +425,13 @@ static EXECUTABLE_CAPTURE_CACHE: std::sync::OnceLock<tokio::sync::Mutex<Executab
     std::sync::OnceLock::new();
 
 impl EncodedExecutable {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         let mut bytes = self
             .path
@@ -441,6 +448,13 @@ impl EncodedExecutable {
     /// This does not open or attest the path; the prearmed source cell later
     /// verifies the exact held file against this identity and digest.
     #[cfg(unix)]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The native finite software preparation consumer is Linux-only; preserve cached identity validation as a portable Unix planning projection and its fixtures."
+        )
+    )]
     pub(crate) fn finite_software_plan(
         &self,
     ) -> Result<plurx_core::adaptive_resources::runtime::finite_vod::SoftwareAvcExecutable, String>
@@ -2445,6 +2459,13 @@ impl EncodedEngine {
         engine.objects = objects.into();
         Ok((executable, engine, attestation.build_line().to_owned()))
     }
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         let mut bytes = self
             .digest
@@ -2481,6 +2502,13 @@ impl EncodedEngine {
     /// Own a bounded copy of the attested dependency/reporter versions for
     /// core's fixed finite command. This carries drift facts, not proof of
     /// native custody or child closure.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite software preparation enters only on Linux; preserve the original attested dependency snapshot projection without opening or replacing native objects."
+        )
+    )]
     pub(crate) fn finite_software_snapshot(
         &self,
         executable: &EncodedExecutable,

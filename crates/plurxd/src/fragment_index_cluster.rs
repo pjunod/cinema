@@ -67,6 +67,7 @@ const SAMPLE_DOMAIN: &[u8] = b"plurx/source-attestation/sampled-v1\0";
 /// node re-attests — two seconds now, rather than the forty-three minutes
 /// that made this change necessary — and the upsert replaces the row. Move
 /// this token whenever [`SAMPLE_DOMAIN`] or the extent layout moves.
+#[cfg(any(windows, test))]
 const ATTESTATION_REGIME: &str = "s1";
 
 /// The byte ranges a sampled digest covers, ascending, as `(offset, len)`.
@@ -172,6 +173,10 @@ pub(crate) struct AttestedSource {
 pub(crate) enum SourceHandle {
     Legacy(std::fs::File),
     #[cfg(unix)]
+    #[expect(
+        dead_code,
+        reason = "The held-source cluster-index handoff is not wired to the finite direct-source lease yet. Preserve the move-only original lease variant; reopening by path cannot replace its native ownership."
+    )]
     Retained(plurx_core::adaptive_resources::runtime::RetainedSourceLease),
 }
 
@@ -234,6 +239,10 @@ pub(crate) struct SourceFence {
 
 impl SourceFence {
     #[cfg(unix)]
+    #[expect(
+        dead_code,
+        reason = "The cluster-index reader still enters through legacy source fences; the retained-source handoff is not connected. Preserve its exact original-lease identity guard rather than substitute a path reopen."
+    )]
     pub(crate) fn from_retained(
         lease: plurx_core::adaptive_resources::runtime::RetainedSourceLease,
         expected_object_version: &str,
@@ -253,6 +262,13 @@ impl SourceFence {
         })
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     pub(crate) fn requested_heap_bytes(&self) -> usize {
         self.object_version.capacity()
     }

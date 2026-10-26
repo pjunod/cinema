@@ -88,7 +88,21 @@ pub enum WaitOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FiniteFailureKind {
     Capacity,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Finite native producer/publication failures currently originate only on Linux; retain the shared waiter diagnostic classification and payload owner."
+        )
+    )]
     Producer,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Finite native producer/publication failures currently originate only on Linux; retain the shared waiter diagnostic classification and payload owner."
+        )
+    )]
     Publication,
 }
 
@@ -116,10 +130,38 @@ impl PartialEq for FiniteWaitFailure {
 impl Eq for FiniteWaitFailure {}
 
 impl FiniteWaitFailure {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The original client-slot-backed finite failure constructor is used by Linux native workers; preserve payload lifetime and portable HTTP diagnostic accessors."
+        )
+    )]
     pub(crate) const MESSAGE_BYTES: usize = 512;
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The original client-slot-backed finite failure constructor is used by Linux native workers; preserve payload lifetime and portable HTTP diagnostic accessors."
+        )
+    )]
     const WIRE_MESSAGE_BYTES: usize = Self::MESSAGE_BYTES + 64;
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The original client-slot-backed finite failure constructor is used by Linux native workers; preserve payload lifetime and portable HTTP diagnostic accessors."
+        )
+    )]
     const BODY_BYTES: usize = 4096;
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The original client-slot-backed finite failure constructor is used by Linux native workers; preserve payload lifetime and portable HTTP diagnostic accessors."
+        )
+    )]
     pub(crate) fn required_payload_bytes() -> Option<usize> {
         std::mem::size_of::<Self>()
             .checked_add(2 * std::mem::size_of::<usize>())?
@@ -128,6 +170,13 @@ impl FiniteWaitFailure {
             .checked_add(Self::BODY_BYTES)
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The original client-slot-backed finite failure constructor is used by Linux native workers; preserve payload lifetime and portable HTTP diagnostic accessors."
+        )
+    )]
     pub(crate) fn new(
         kind: FiniteFailureKind,
         message: String,

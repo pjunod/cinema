@@ -189,6 +189,13 @@ pub(crate) struct FontEnvironment {
 }
 
 impl FontEnvironment {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         let mut bytes = self
             .dir

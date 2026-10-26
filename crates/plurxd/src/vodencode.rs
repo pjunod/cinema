@@ -304,6 +304,13 @@ impl Encoding {
     /// Requested dynamic heap capacity retained by this immutable recipe.
     /// Mutable admission maps, production windows, and shared service pools
     /// are owned separately and are not covered by this metadata estimate.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         // The fixed finite software profile has no runtime DV shader state.
         // Such state has independently growing ownership and is not counted
@@ -981,6 +988,13 @@ impl Encoding {
 
     /// Durable finite output updates service diagnostics independently of the
     /// legacy recipe-proof window. It cannot mint compatibility or admission.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Durable finite publication currently reports service progress only from Linux workers; retain the same diagnostic window update without minting admission or compatibility evidence."
+        )
+    )]
     pub(crate) fn note_finite_resource_segment(
         &self,
         generation: u64,

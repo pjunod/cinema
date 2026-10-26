@@ -147,6 +147,13 @@ impl Manifest {
     /// Requested dynamic heap capacity retained by this manifest, excluding
     /// its inline value. This is a payload-capacity measure, not an allocator
     /// or process-RSS measurement.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         self.plan.requested_heap_bytes()?.checked_add(
             self.states

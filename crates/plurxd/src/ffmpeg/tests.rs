@@ -10,7 +10,9 @@ fn cached_executable_identity_becomes_a_finite_planning_value() {
         linux_binding: None,
     };
 
-    let plan = executable.finite_software_plan().unwrap();
+    let plan = executable
+        .finite_software_plan()
+        .expect("valid cached finite executable");
     assert_eq!(plan.path(), std::path::Path::new("/usr/bin/ffmpeg"));
     assert_eq!(
         plan.source_identity(),
@@ -39,9 +41,12 @@ fn malformed_cached_executable_identity_is_refused() {
 fn finite_loader_environment_is_optional_and_bounded() {
     use super::*;
 
-    assert!(finite_loader_environment(None).unwrap().is_empty());
+    assert!(finite_loader_environment(None)
+        .expect("absent loader environment")
+        .is_empty());
     assert_eq!(
-        finite_loader_environment(Some(std::ffi::OsString::from("/opt/ffmpeg/lib"))).unwrap(),
+        finite_loader_environment(Some(std::ffi::OsString::from("/opt/ffmpeg/lib")))
+            .expect("bounded loader environment"),
         vec![("LD_LIBRARY_PATH".to_owned(), "/opt/ffmpeg/lib".to_owned())]
     );
     let too_long = Some(std::ffi::OsString::from("x".repeat(4097)));
@@ -2713,7 +2718,7 @@ async fn finite_software_engine_identity_is_same_boot_and_tracks_held_reporter()
     std::fs::write(&media, b"same attested media image").expect("media image");
     std::fs::write(&reporter, b"reporter version one").expect("reporter image");
 
-    let first = EncodedEngine::capture_test_objects(&[media.clone()], "process one")
+    let first = EncodedEngine::capture_test_objects(std::slice::from_ref(&media), "process one")
         .await
         .expect("first engine");
     let second = EncodedEngine::capture_test_objects(&[media], "process two")

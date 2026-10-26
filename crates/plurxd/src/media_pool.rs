@@ -201,6 +201,13 @@ pub(crate) struct AdaptiveWorkerQuote {
 }
 
 impl AdaptiveWorkerQuote {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Advisory quote validation serves Linux physical-attempt selection and portable quote fixtures; it never grants native capacity."
+        )
+    )]
     pub(crate) fn valid(&self) -> bool {
         self.version == 1 && !self.owner_id.is_nil()
     }
@@ -795,6 +802,13 @@ impl MediaPool {
     /// Advisory worker identity from the same bounded snapshot cache used by
     /// placement. The worker rechecks its actual owner and generation when it
     /// receives Claim; this cached quote never grants native authority.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The physical-attempt selection consumer is Linux-only; retain the same advisory worker-identity snapshot API on other platforms."
+        )
+    )]
     pub(crate) async fn adaptive_worker_quote(
         &self,
         state: &AppState,

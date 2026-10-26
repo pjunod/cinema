@@ -474,6 +474,13 @@ pub struct SessionRecoveryIdentity {
 }
 
 impl SessionRecoveryIdentity {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive consumers are Linux-only; preserve this requested-capacity projection and portable metadata API for other platform callers."
+        )
+    )]
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         self.principal
             .requested_heap_bytes()?
