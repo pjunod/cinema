@@ -1,6 +1,12 @@
 use super::*;
 
 #[cfg(target_os = "linux")]
+#[path = "create/adaptive_retry.rs"]
+mod adaptive_retry;
+#[cfg(target_os = "linux")]
+use adaptive_retry::{AdaptiveOriginContext, AdaptiveOriginFailure};
+
+#[cfg(target_os = "linux")]
 struct AdaptiveOriginPrepared {
     claim: plurx_core::store::adaptive_resource_attempts::AttemptClaim,
     worker: plurx_core::store::adaptive_resource_attempts::WorkerBinding,
@@ -264,14 +270,14 @@ fn adaptive_digest<T: serde::Serialize>(value: &T) -> Result<String, ApiError> {
     crate::media_sessions::bounded_adaptive_digest(value).map_err(ApiError::ServiceUnavailable)
 }
 
-/// The existing root request claim is the durable starting authority. A
-/// distinct route incarnation belongs to this one physical worker attempt.
-/// Every uncertain Store/peer answer remains in that original namespace; a
-/// caller never retries by minting another native owner.
+/// Every candidate shares one immutable request binding and original deadline.
+/// Retry requires a fresh durable predecessor fence; physical closure remains
+/// exclusively with the original worker's native/application owners.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 async fn prepare_adaptive_origin(
     state: &AppState,
+    context: &mut Option<AdaptiveOriginContext>,
     owner_node_id: &str,
     quote: crate::media_pool::AdaptiveWorkerQuote,
     source: &MediaFile,
@@ -286,15 +292,15 @@ async fn prepare_adaptive_origin(
     desired_revision: Option<i64>,
     original_claim_deadline_ms: i64,
     deadline: tokio::time::Instant,
-) -> Result<AdaptiveOriginPrepared, ApiError> {
+) -> Result<AdaptiveOriginPrepared, AdaptiveOriginFailure> {
     use plurx_core::store::adaptive_resource_attempts::{
-        AttemptClaim, AttemptKey, AttemptMutation, AttemptPhase, MutationContext, RequestBinding,
-        RequestKey, WinnerSelection,
+        AttemptClaim, AttemptKey, MutationContext, RequestBinding, RequestKey,
     };
     if !quote.valid() || tokio::time::Instant::now() >= deadline {
         return Err(ApiError::ServiceUnavailable(
             "adaptive worker quote or deadline expired".into(),
-        ));
+        )
+        .into());
     }
     let root_id = uuid::Uuid::parse_str(root_incarnation_id)
         .map_err(|_| ApiError::ServiceUnavailable("adaptive root incarnation is invalid".into()))?;
@@ -314,35 +320,46 @@ async fn prepare_adaptive_origin(
     {
         return Err(ApiError::ServiceUnavailable(
             "adaptive source intent changed before Claim".into(),
-        ));
+        )
+        .into());
     }
     let key = RequestKey {
         request_id: request_claim_id.to_owned(),
         request_incarnation_id: root_id,
     };
-    let binding = RequestBinding {
-        version: 1,
-        key: key.clone(),
-        principal: recipe.principal.clone(),
-        request_fingerprint: request_fingerprint.to_owned(),
-        playback_id: recipe.request.playback_id.clone(),
-        recovery_epoch: recovery_id,
-        planning_generation: snapshot.generation,
-        planning_source_digest: adaptive_digest(&(source.id, source.size, source.mtime))?,
-        settings_digest: adaptive_digest(&snapshot.settings)?,
-        intent_digest,
-        original_deadline_ms: original_claim_deadline_ms,
-        expected_predecessor_incarnation_id: expected_predecessor_incarnation_id
-            .map(uuid::Uuid::parse_str)
-            .transpose()
-            .map_err(|_| {
-                ApiError::ServiceUnavailable("adaptive predecessor identity is invalid".into())
-            })?,
-        expected_predecessor_owner_epoch: expected_predecessor_incarnation_id
-            .and_then(|expected| predecessor.filter(|route| route.incarnation_id == expected))
-            .map(|route| route.owner_epoch),
-        expected_desired_revision: desired_revision,
-    };
+    if context.is_none() {
+        let binding = RequestBinding {
+            version: 1,
+            key: key.clone(),
+            principal: recipe.principal.clone(),
+            request_fingerprint: request_fingerprint.to_owned(),
+            playback_id: recipe.request.playback_id.clone(),
+            recovery_epoch: recovery_id,
+            planning_generation: snapshot.generation,
+            planning_source_digest: adaptive_digest(&(source.id, source.size, source.mtime))?,
+            settings_digest: adaptive_digest(&snapshot.settings)?,
+            intent_digest: intent_digest.clone(),
+            original_deadline_ms: original_claim_deadline_ms,
+            expected_predecessor_incarnation_id: expected_predecessor_incarnation_id
+                .map(uuid::Uuid::parse_str)
+                .transpose()
+                .map_err(|_| {
+                    ApiError::ServiceUnavailable("adaptive predecessor identity is invalid".into())
+                })?,
+            expected_predecessor_owner_epoch: expected_predecessor_incarnation_id
+                .and_then(|expected| predecessor.filter(|route| route.incarnation_id == expected))
+                .map(|route| route.owner_epoch),
+            expected_desired_revision: desired_revision,
+        };
+        *context = Some(AdaptiveOriginContext::new(binding));
+    }
+    let context = context.as_mut().expect("original adaptive context");
+    if context.binding.intent_digest != intent_digest {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive request intent changed between candidates".into(),
+        )
+        .into());
+    }
     let key = AttemptKey {
         request: key,
         attempt_id: uuid::Uuid::new_v4(),
@@ -359,37 +376,54 @@ async fn prepare_adaptive_origin(
             expected_attempt_sequence: 0,
             now_ms: unix_ms(),
         },
-        binding,
+        binding: context.binding.clone(),
         key,
         worker_instance_id: quote.owner_id,
         serving_generation: quote.serving_generation,
         domains: vec![owner_node_id.to_owned()],
     };
-    claim.validate().map_err(|error| {
-        ApiError::ServiceUnavailable(format!("adaptive Claim contract is invalid: {error}"))
-    })?;
-    let claimed = state
-        .store
-        .claim_adaptive_attempt(&claim)
-        .await
-        .map_err(|error| session_store_error("claiming adaptive worker", error))?;
-    let status = match claimed {
-        AttemptMutation::Applied(status) | AttemptMutation::Replay(status)
-            if status.binding == claim.binding
-                && status
-                    .attempts
-                    .iter()
-                    .any(|row| row.key == claim.key && row.phase == AttemptPhase::Provisional) =>
-        {
-            status
+    let claim = adaptive_retry::claim_original(state, context, claim, deadline).await?;
+    let result = tokio::time::timeout_at(
+        deadline,
+        prepare_claimed_adaptive_origin(
+            state,
+            claim.clone(),
+            recipe,
+            quote.serving_generation,
+            deadline,
+        ),
+    )
+    .await;
+    match result {
+        Ok(Ok(prepared)) => Ok(prepared),
+        failed => {
+            let error = match failed {
+                Ok(Err(error)) => error,
+                Err(_) => ApiError::ServiceUnavailable(
+                    "adaptive Prepare exceeded its original deadline".into(),
+                ),
+                Ok(Ok(_)) => unreachable!("success handled above"),
+            };
+            // No legacy fallback or new Claim until the SAME original row is
+            // known fenced. Winner/unknown/deadline holds are returned intact.
+            adaptive_retry::fence_original(state, context, &claim, deadline).await?;
+            Err(AdaptiveOriginFailure::NextWorker(error))
         }
-        _ => {
-            return Err(ApiError::ServiceUnavailable(
-                "adaptive Claim was refused or changed".into(),
-            ))
-        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn prepare_claimed_adaptive_origin(
+    state: &AppState,
+    claim: plurx_core::store::adaptive_resource_attempts::AttemptClaim,
+    recipe: RemoteStartRequest,
+    serving_generation: u64,
+    deadline: tokio::time::Instant,
+) -> Result<AdaptiveOriginPrepared, ApiError> {
+    use plurx_core::store::adaptive_resource_attempts::{
+        AttemptMutation, AttemptPhase, MutationContext, WinnerSelection,
     };
-    let _ = status; // The exact row is checked again before Winner.
+    let owner_node_id = claim.key.worker_node_id.clone();
     let prepare = crate::media_sessions::AdaptiveAttemptPrepareV1 {
         version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
         claim: claim.clone(),
@@ -431,17 +465,15 @@ async fn prepare_adaptive_origin(
             let answer = state
                 .media_sessions
                 .adaptive_attempt_peer_request(
-                    owner_node_id,
+                    &owner_node_id,
                     crate::media_sessions::ADAPTIVE_ATTEMPT_PREPARE_PATH,
                     &prepare,
                     deadline,
                 )
-                .await
-                .map_err(|error| {
-                    ApiError::ServiceUnavailable(format!(
-                        "adaptive peer Prepare remains uncertain: {error:?}"
-                    ))
-                })?;
+                .await;
+            let Ok(answer) = answer else {
+                continue;
+            };
             if answer.status == reqwest::StatusCode::OK {
                 prepared = serde_json::from_slice(&answer.body).ok();
                 if prepared.is_some() {
@@ -490,7 +522,7 @@ async fn prepare_adaptive_origin(
     let preview: RemoteStartResponse = serde_json::from_str(&prepared.preview_json)?;
     if !preview.is_valid()
         || preview.session_id != claim.key.session_id.to_string()
-        || preview.activation_generation != Some(quote.serving_generation)
+        || preview.activation_generation != Some(serving_generation)
     {
         return Err(ApiError::ServiceUnavailable(
             "adaptive preview differs from the original attempt".into(),
@@ -4604,6 +4636,8 @@ async fn create_with_purpose_inner(
     let mut last_error = None;
     #[cfg(target_os = "linux")]
     let mut adaptive_selection: Option<AdaptiveOriginPrepared> = None;
+    #[cfg(target_os = "linux")]
+    let mut adaptive_context: Option<AdaptiveOriginContext> = None;
     for candidate in owner_candidates {
         if tokio::time::Instant::now() >= placement_deadline {
             last_error = Some(ApiError::ServiceUnavailable(
@@ -4613,10 +4647,16 @@ async fn create_with_purpose_inner(
         }
         #[cfg(target_os = "linux")]
         let adaptive_quote = if adaptive_software_offers.contains(&candidate) {
-            state
-                .media_pool
-                .adaptive_worker_quote(&state, &candidate)
-                .await
+            tokio::time::timeout_at(
+                placement_deadline,
+                state.media_pool.adaptive_worker_quote(&state, &candidate),
+            )
+            .await
+            .map_err(|_| {
+                ApiError::ServiceUnavailable(
+                    "adaptive worker quote exceeded the original placement deadline".into(),
+                )
+            })?
         } else {
             None
         };
@@ -4634,6 +4674,7 @@ async fn create_with_purpose_inner(
             request_guard.disarm();
             let selection = prepare_adaptive_origin(
                 &state,
+                &mut adaptive_context,
                 &candidate,
                 quote,
                 source.as_ref().expect("adaptive source was checked"),
@@ -4651,12 +4692,27 @@ async fn create_with_purpose_inner(
                 now_ms.saturating_add(60_000),
                 placement_deadline,
             )
-            .await?;
+            .await;
+            let selection = match selection {
+                Ok(selection) => selection,
+                Err(AdaptiveOriginFailure::NextWorker(error)) => {
+                    last_error = Some(error);
+                    continue;
+                }
+                Err(AdaptiveOriginFailure::Hold(error)) => return Err(error),
+            };
             let info = selection.preview.clone();
             let generation = selection.worker.serving_generation;
             adaptive_selection = Some(selection);
             started = Some((candidate, info, None, Some(generation), None));
             break;
+        }
+        #[cfg(target_os = "linux")]
+        if adaptive_context.is_some() {
+            last_error = Some(ApiError::ServiceUnavailable(
+                "adaptive request has no further eligible quoted worker".into(),
+            ));
+            continue;
         }
         let result = if candidate == state.node_id {
             if !ingress_serving_authority.is_current(ingress_serving_generation) {
@@ -6481,7 +6537,9 @@ pub(super) async fn stop_owned_session_because(
             .transcode()
             .begin_session_terminal(&route.session_id, terminal, reason)
             .await;
-        state.transcode().complete_session_release(&route.session_id);
+        state
+            .transcode()
+            .complete_session_release(&route.session_id);
         Ok(())
     } else {
         state
