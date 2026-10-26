@@ -254,6 +254,36 @@ fn retain_fence(original: &mut OriginalAttempt, status: &RequestStatus) -> Resul
     Ok(())
 }
 
+/// Counts possible worker application as well as direct Store calls. Only
+/// definite StaleBinding permits one replacement operation, never an unknown.
+struct FenceApplications {
+    remaining: u8,
+    corrected: bool,
+}
+impl FenceApplications {
+    fn new(offered_to_worker: bool) -> Self {
+        Self {
+            remaining: 2 - u8::from(offered_to_worker),
+            corrected: false,
+        }
+    }
+    fn take(&mut self) -> bool {
+        let Some(remaining) = self.remaining.checked_sub(1) else {
+            return false;
+        };
+        self.remaining = remaining;
+        true
+    }
+    fn correct_after_definite_stale(&mut self) -> bool {
+        if self.corrected {
+            return false;
+        }
+        self.corrected = true;
+        self.remaining = 2;
+        true
+    }
+}
+
 pub(super) async fn fence_original(
     state: &AppState,
     context: &mut AdaptiveOriginContext,
@@ -283,11 +313,14 @@ pub(super) async fn fence_original(
     let fence = original.fence.as_ref().expect("retained original Fence");
     // First let the original worker retain and drive its own native cleanup.
     // Transport uncertainty never establishes that the worker reserved nothing.
+    let mut offered_application = false;
     if claim.key.worker_node_id == state.node_id {
         if let Ok(receiver) = state.transcode.begin_adaptive_cancel(fence.clone()) {
+            offered_application = true;
             let _ = tokio::time::timeout_at(deadline, receiver).await;
         }
     } else {
+        offered_application = true;
         let cancel = crate::media_sessions::AdaptiveAttemptCancelV1 {
             version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
             fence: fence.clone(),
@@ -302,8 +335,7 @@ pub(super) async fn fence_original(
             )
             .await;
     }
-    let mut rebuilt = false;
-    let mut applications = 0;
+    let mut applications = FenceApplications::new(offered_application);
     loop {
         let status = current_status(state, &context.binding, deadline)
             .await?
@@ -314,10 +346,9 @@ pub(super) async fn fence_original(
         if fenced(&status, claim) {
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline || applications >= 2 {
+        if tokio::time::Instant::now() >= deadline || !applications.take() {
             return Err(held("adaptive Fence acknowledgement remains unknown"));
         }
-        applications += 1;
         let fence = original.fence.as_ref().expect("same retained Fence");
         let answer =
             tokio::time::timeout_at(deadline, state.store.fence_adaptive_attempt(fence)).await;
@@ -334,7 +365,9 @@ pub(super) async fn fence_original(
                 // A fresh read, rather than this acknowledgement alone, gates
                 // the next worker. It also observes a concurrent winner.
             }
-            Ok(Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding))) if !rebuilt => {
+            Ok(Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding)))
+                if !applications.corrected =>
+            {
                 let status = current_status(state, &context.binding, deadline)
                     .await?
                     .ok_or_else(|| held("adaptive stale Fence row disappeared"))?;
@@ -344,9 +377,10 @@ pub(super) async fn fence_original(
                 if fenced(&status, claim) {
                     return Ok(());
                 }
-                rebuilt = true;
+                if !applications.correct_after_definite_stale() {
+                    return Err(held("adaptive Fence stale correction budget exhausted"));
+                }
                 retain_fence(original, &status)?;
-                applications = 0;
             }
             Ok(Ok(AttemptMutation::Refused(_))) => return Err(held("adaptive Fence was refused")),
             Ok(Err(_)) | Err(_) => {} // Same operation only; no new owner or Close.

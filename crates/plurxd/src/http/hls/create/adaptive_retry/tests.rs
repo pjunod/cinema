@@ -325,3 +325,44 @@ fn explicit_prepare_auth_and_protocol_refusals_hold_instead_of_retrying_as_capac
             AdaptivePrepareFailure::Retry(_)), "ambiguous capacity/ownership status {status} still requires the original Fence before retry");
     }
 }
+
+#[test]
+fn original_fence_budget_counts_unknown_worker_offer_and_all_stale_reply_traces() {
+    // Exhaust bounded success/unknown-vs-definite-stale reply histories using
+    // the SAME admission counter guarding every production Store Fence call.
+    for offered in [false, true] {
+        for replies in 0u8..128 {
+            let mut budget = FenceApplications::new(offered);
+            let mut applications = [usize::from(offered), 0];
+            let mut operation = 0;
+            for step in 0..7 {
+                if !budget.take() {
+                    break;
+                }
+                applications[operation] += 1;
+                assert!(
+                    applications[operation] <= 2,
+                    "worker offer plus direct calls exceeds the original operation budget"
+                );
+                if replies & (1 << step) != 0 {
+                    if !budget.correct_after_definite_stale() {
+                        break;
+                    }
+                    operation += 1;
+                    assert!(
+                        operation <= 1,
+                        "only one definite stale correction is allowed"
+                    );
+                }
+            }
+            while budget.take() {
+                applications[operation] += 1;
+                assert!(applications[operation] <= 2);
+            }
+            assert!(!budget.take());
+            if budget.corrected {
+                assert!(!budget.correct_after_definite_stale());
+            }
+        }
+    }
+}
