@@ -1039,6 +1039,10 @@ async function handOffToPlayer(fileId,title,resumeMs,knownDurMs,meta){
     renderPlayerHandoff("failed",title,"the server sent no handoff code");
     return false;
   }
+  // This navigation runs after the mint round trip, still inside Chrome's
+  // transient user activation from the Play click (about 5 s), which an
+  // external-protocol launch needs. Keep the mint cheap: a slow mint would
+  // push this past the window and the scheme would silently not open.
   location.href=playerHandoffUrl(location.origin,minted.code);
   const opened=await pollPlayerHandoff(minted.id,isCurrent);
   if(opened==null||!isCurrent()) return false;
