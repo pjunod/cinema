@@ -364,3 +364,119 @@ async fn copy_constructor_error_after_r_never_becomes_before_reservation_provena
             > family_counter
     );
 }
+
+#[tokio::test]
+async fn selected_copy_named_arm_starts_same_root_replays_release_and_fully_joins_originals() {
+    let root = tempfile::tempdir().expect("actual selected-copy launch fixture");
+    let (runtime, mut owner) = actual_owner(root.path(), false).await;
+    let charged = runtime
+        .accounting()
+        .expect("original admitted copy charge")
+        .used;
+    assert_ne!(charged, ResourceVector::default());
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024 * 1024)
+        .expect("same original rich application lease");
+
+    // Actual verified FFmpeg SourceV1, inherited source descriptors, named
+    // root, registered ChildJob, and original parser. No software launch or
+    // software FixedImage/closure substitutes for this copy operation.
+    owner
+        .start(deadline())
+        .await
+        .expect("original selected copy native start");
+    let original = runtime
+        .fixture_copy_launch_identity(&owner.preparation)
+        .await
+        .expect("original copy root/task/control and acknowledged source observations");
+    runtime
+        .start_copy_vod(&owner.preparation, 0, deadline())
+        .await
+        .expect("same operation replays without taking a second start sender");
+    let replay = runtime
+        .fixture_copy_launch_identity(&owner.preparation)
+        .await
+        .expect("same original registrations after release replay");
+    assert_eq!(
+        replay, original,
+        "replay replaced an original root, parser, or observation"
+    );
+
+    // A real parser terminal may report media failure under this fixture's
+    // small immutable limits. Neither outcome is native-close evidence.
+    let parser = owner
+        .wait_producer_result(deadline())
+        .await
+        .expect("actual original parser terminal, not latch-delivery inference");
+    let producer = owner
+        .stop_producer(false)
+        .await
+        .expect("join original copy producer");
+    assert_eq!(producer.segments, parser.segments);
+    assert!(!producer.completed || parser.completed);
+    runtime
+        .fixture_copy_joined_identity(&owner.preparation, &original)
+        .await
+        .expect("actual CopyProcessClosure after original root/parser/pipes/source parent joins");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("joined role remains charged")
+            .used,
+        charged
+    );
+
+    let mut ticket = owner
+        .prepare_retirement(false, deadline())
+        .await
+        .expect("same copy-specific full native and scratch retirement");
+    drop(owner);
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "live original output/application aliases permitted a refund"
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("actual aliases remain charged")
+            .used,
+        charged
+    );
+    drop(output);
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "the final original application alias permitted a refund"
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("last actual alias remains charged")
+            .used,
+        charged
+    );
+    drop(application);
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("same original typed settlement after final aliases drop");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("one matching original refund")
+            .used,
+        ResourceVector::default()
+    );
+    drop(ticket);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("no original owner remains")
+        .drain()
+        .expect("join actual custody journal");
+}

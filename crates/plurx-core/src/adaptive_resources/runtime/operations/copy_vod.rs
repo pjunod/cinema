@@ -20,6 +20,9 @@ pub(super) struct CopyLaunch {
     pub(super) task: Option<GraphCopyTask>,
     pub(super) task_observation: Uuid,
     pub(super) task_observed_committed: bool,
+    // Successful delivery of the ORIGINAL parser latch, not parser/native
+    // entry or cleanup evidence. Used only for same-task release replay.
+    start_released: bool,
     pub(super) fixed_image: Option<CopyFixedImage>,
     pub(super) process_closure: Option<CopyProcessClosure>,
     pub(super) never_root_closure: Option<FiniteVodNeverRootClosure>,
@@ -196,6 +199,7 @@ impl NodeResourceRuntime {
             task: None,
             task_observation: Uuid::new_v4(),
             task_observed_committed: false,
+            start_released: false,
             fixed_image: None,
             process_closure: None,
             never_root_closure: None,
@@ -547,18 +551,25 @@ impl NodeResourceRuntime {
     }
 
     async fn release_copy_task(&self, role: &mut OwnedRole) -> Result<(), OperationError> {
-        let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+        let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
         if !copy.task_observed_committed {
             return Err(OperationError::State);
         }
         let task = copy.task.ok_or(OperationError::State)?;
+        if copy.start_released {
+            return Ok(());
+        }
         let start = role
             .graph
             .as_ref()
             .ok_or(OperationError::State)?
             .take_copy_start(task)
             .await?;
-        self.release_native_entry(role.binding, start)
+        self.release_native_entry(role.binding, start)?;
+        // No suspension separates successful send from its delivery record.
+        // A refused send never grants replay success or a fresh sender.
+        copy.start_released = true;
+        Ok(())
     }
 
     /// Join the original registered parser, root and source parents. A
@@ -670,4 +681,116 @@ pub(super) fn acknowledge_task(
     }
     copy.task_observed_committed = true;
     Ok(())
+}
+
+/// Test-only diagnostics from the original registered copy. These selectors
+/// cannot construct a native owner, start sender, or closure receipt.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::adaptive_resources::runtime) struct CopyLaunchFixtureIdentity {
+    root_member: Uuid,
+    task_member: Uuid,
+    acquisition_id: Uuid,
+    root: GraphRoot,
+    task: GraphCopyTask,
+    task_observation: Uuid,
+    source_observations: [Uuid; 2],
+}
+
+#[cfg(test)]
+impl NodeResourceRuntime {
+    pub(in crate::adaptive_resources::runtime) async fn fixture_copy_launch_identity(
+        &self,
+        owner: &OwnedPreparation,
+    ) -> Result<CopyLaunchFixtureIdentity, OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        let role = bundle.roles.get_mut(0).ok_or(OperationError::State)?;
+        let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+        if role.finite_vod.is_some()
+            || role.refunded
+            || role.transition.is_some()
+            || !copy.entered
+            || !copy.task_observed_committed
+            || !copy.start_released
+            || role.roots.len() != 1
+            || role.sources.len() != 2
+            || !role.armed.contains(&copy.root_member)
+            || !role.armed.contains(&copy.task_member)
+            || !role.invoked.contains(&copy.root_member)
+            || !role.invoked.contains(&copy.task_member)
+        {
+            return Err(OperationError::State);
+        }
+        let mut identity = CopyLaunchFixtureIdentity {
+            root_member: copy.root_member,
+            task_member: copy.task_member,
+            acquisition_id: copy.acquisition_id,
+            root: *role
+                .roots
+                .get(&copy.root_member)
+                .ok_or(OperationError::State)?,
+            task: copy.task.ok_or(OperationError::State)?,
+            task_observation: copy.task_observation,
+            source_observations: [Uuid::nil(); 2],
+        };
+        if identity.root.registered_control().is_none() {
+            return Err(OperationError::State);
+        }
+        let sources = copy.source_members;
+        for (index, member) in sources.into_iter().enumerate() {
+            let inherited = role
+                .sources
+                .get_mut(&member)
+                .ok_or(OperationError::State)?
+                .inherited_source(identity.root_member)?;
+            if !inherited.acknowledged || inherited.acquisition_id.uuid() != identity.acquisition_id
+            {
+                return Err(OperationError::State);
+            }
+            identity.source_observations[index] = inherited.observation_id;
+        }
+        Ok(identity)
+    }
+
+    /// Verify the existing copy-specific receipt after actual joins. Never
+    /// manufacture a software fixed-image proof or a replacement native owner.
+    pub(in crate::adaptive_resources::runtime) async fn fixture_copy_joined_identity(
+        &self,
+        owner: &OwnedPreparation,
+        expected: &CopyLaunchFixtureIdentity,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let bundle = owner.state.lock().await;
+        let role = bundle.roles.first().ok_or(OperationError::State)?;
+        let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+        let graph = role.sealed.as_ref().ok_or(OperationError::State)?;
+        let closure = copy.process_closure.as_ref().ok_or(OperationError::State)?;
+        if role.finite_vod.is_some()
+            || copy.terminal.is_none()
+            || !closure.matches(graph)
+            || closure.root_member() != expected.root_member
+            || closure.root() != expected.root
+            || closure.task() != expected.task
+            || closure.acquisition_id() != expected.acquisition_id
+            || role.sources.len() != 2
+        {
+            return Err(OperationError::State);
+        }
+        for source in role.sources.values() {
+            if !source.parent_closed() {
+                return Err(OperationError::State);
+            }
+            let _ = source.copy_closed_fact(closure)?;
+        }
+        let native = graph.snapshot().await;
+        if native.roots != 0
+            || native.writers != 1
+            || native.joined_writers != 1
+            || native.abandoned_writers != 0
+        {
+            return Err(OperationError::State);
+        }
+        Ok(())
+    }
 }

@@ -1124,6 +1124,52 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
+        // Only named adapters select a retained entered bit. Resolve and
+        // validate the original registration BEFORE queuing its durable arm.
+        // Ordinary unnamed launches retain their existing path.
+        #[cfg(unix)]
+        #[derive(Clone, Copy)]
+        enum NamedAdapter {
+            Finite,
+            #[cfg(target_os = "linux")]
+            Copy,
+        }
+        #[cfg(unix)]
+        let named_adapter = if let Some(acquisition) = named_arm {
+            #[cfg(target_os = "linux")]
+            {
+                match (role.finite_vod.as_ref(), role.copy_vod.as_ref()) {
+                    (Some(finite), None)
+                        if finite.root_member == member && finite.acquisition_id == acquisition =>
+                    {
+                        Some(NamedAdapter::Finite)
+                    }
+                    (None, Some(copy))
+                        if copy.root_member == member && copy.acquisition_id == acquisition =>
+                    {
+                        Some(NamedAdapter::Copy)
+                    }
+                    _ => return Err(OperationError::State),
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                match role.finite_vod.as_ref() {
+                    Some(finite)
+                        if finite.root_member == member && finite.acquisition_id == acquisition =>
+                    {
+                        Some(NamedAdapter::Finite)
+                    }
+                    _ => return Err(OperationError::State),
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        if named_arm.is_some() {
+            return Err(OperationError::State);
+        }
         if !role.armed.contains(&member) {
             if role.transition.is_none() {
                 start_named_transition(
@@ -1171,12 +1217,21 @@ impl NodeResourceRuntime {
         let launched = if named_arm.is_some() {
             #[cfg(unix)]
             {
-                let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
-                if finite.root_member != member || Some(finite.acquisition_id) != named_arm {
-                    return Err(OperationError::State);
-                }
+                let entered = match named_adapter.ok_or(OperationError::State)? {
+                    NamedAdapter::Finite => {
+                        &mut role
+                            .finite_vod
+                            .as_mut()
+                            .ok_or(OperationError::State)?
+                            .entered
+                    }
+                    #[cfg(target_os = "linux")]
+                    NamedAdapter::Copy => {
+                        &mut role.copy_vod.as_mut().ok_or(OperationError::State)?.entered
+                    }
+                };
                 graph
-                    .spawn_selected_durable_root(command, work, arm, &mut finite.entered)
+                    .spawn_selected_durable_root(command, work, arm, entered)
                     .await
             }
             #[cfg(not(unix))]
@@ -1208,7 +1263,9 @@ impl NodeResourceRuntime {
         };
         role.roots.insert(member, root);
         #[cfg(unix)]
-        if named_arm.is_some() {
+        if matches!(named_adapter, Some(NamedAdapter::Finite)) {
+            // Copy keeps the actual registered control in this GraphRoot and
+            // its original ChildJob; it needs no separate finite control cell.
             let control = root.registered_control().ok_or(OperationError::State)?;
             role.finite_vod
                 .as_ref()
