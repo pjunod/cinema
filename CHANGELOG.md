@@ -78,6 +78,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Copy startup cancellation retains its original process, task and journal
+  operations through cleanup. Unknown outcomes keep their reservation, and
+  System resource ownership reports the held charge and cleanup reason.
+- Finished direct Source sessions release the cached actor's application
+  reference at its original retirement handoff. Active reads and the original
+  retirement ticket continue to retain capacity until they actually finish.
+- Source producer starts use the existing planned-outage admission and retain
+  that same guard through their original cleanup and settlement.
 - Selected Linux finite software VOD retains client controls, terminal replies
   and HTTP failure bodies within explicit memory partitions until their final
   owners drop. Cancellation drains the original driver and native jobs before
