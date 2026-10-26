@@ -453,6 +453,15 @@ class Mapper(LauncherCase):
 
 
 class NoTokenOnDisk(LauncherCase):
+    def test_mpv_gets_no_dynamic_loader_overrides(self):
+        # LD_LIBRARY_PATH would beat the private mpv's rpath and pick up the
+        # system libplacebo; LD_PRELOAD and LD_AUDIT inject code.
+        self.close_at(6)
+        loader = {"LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu", "LD_PRELOAD": "", "LD_AUDIT": ""}
+        with mock.patch.dict(os.environ, loader):
+            self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.mpv.env(), {})
+
     def test_the_token_never_reaches_a_file_or_mpv_argv(self):
         self.server.decision = transcode_decision(method="direct_play", delivery={
             "mode": "direct", "url": f"/api/v1/files/{FILE_ID}/direct"})
