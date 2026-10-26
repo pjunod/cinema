@@ -387,6 +387,18 @@ function transcoderCard(sys){
     <p class="system-pref-status muted" id="node-hwaccel-status" aria-live="polite">${!available?"The saved backend is unavailable. Choose and save an available option. ":""}${pending?"Saved choice is waiting for this node to restart.":"Changes take effect after restarting Cinema."}</p>
     ${systemGraphicsHtml(sys)}${rows}</section>`;
 }
+function systemCopyCleanupHtml(holds){
+  if(holds===undefined)return ""; // Older servers do not report this inventory.
+  if(!Array.isArray(holds))return "<p>Copy cleanup details are unavailable; no empty inventory is implied.</p>";
+  if(!holds.length)return "<p>No copy cleanup holds were observed.</p>";
+  const count=value=>Number.isSafeInteger(value)&&value>=0?String(value):"Unknown";
+  // Exact reserved units, without rounding away small nonzero charges.
+  const rows=holds.map(hold=>{
+    const charge=hold.held_resources||{};
+    return `<li><p>Copy preparation <code>${esc(hold.preparation_id||"Unknown")}</code>${hold.graph_id?` · graph <code>${esc(hold.graph_id)}</code>`:" · graph identity unavailable"}: held for reconciliation — ${esc(hold.reason||"Cleanup outcome is unknown")}.</p><dl><dt>Reserved CPU (ns per second)</dt><dd>${count(charge.cpu_ns_per_second)}</dd><dt>Reserved memory (bytes)</dt><dd>${count(charge.peak_memory_bytes)}</dd><dt>Reserved handles</dt><dd>${count(charge.handles)}</dd><dt>Reserved processes</dt><dd>${count(charge.processes)}</dd><dt>Reserved hardware slots</dt><dd>${count(charge.hardware_slots)}</dd><dt>Reserved tuner slots</dt><dd>${count(charge.tuner_slots)}</dd><dt>Reserved storage (bytes)</dt><dd>${count(charge.scratch_bytes)}</dd></dl></li>`;
+  }).join("");
+  return `<div class="system-copy-cleanup"><h3>Copy cleanup</h3><p>These allocations remain reserved until their owners and custody can be reconciled. A restart alone does not release this charge.</p><ul>${rows}</ul></div>`;
+}
 // Snapshot of the actual node owner. Unknown observations and missing owners
 // stay visible; this card neither starts work nor changes saved settings.
 function systemResourceOwnershipCard(sys){
@@ -403,7 +415,7 @@ function systemResourceOwnershipCard(sys){
   const latest=history&&history.latest;
   const observations=history?`<p>Service history: ${esc(history.classes)} classes, ${esc(history.recent_classes)} recent (${esc(history.storage)}).</p>${latest?`<p>Latest ${esc(latest.phase)} observation: ${esc(latest.summary.max_cpu_ns_per_unit)} CPU ns per segment; observed root RSS ${esc(latest.summary.max_observed_resident_bytes)} bytes; sample age ${metric(latest.age_ms)} ms.</p>`:"<p>No service sample has been recorded.</p>"}`:"<p>Service history is unknown.</p>";
   const unresolved=owner.unreconciled_custody===true?"Unreconciled custody remains held and prevents competing startup work.":owner.unreconciled_custody===false?"No unreconciled startup custody.":"Startup custody status is unknown.";
-  return `<section class="card system-card" id="system-resource-ownership-card"><h2>Resource ownership</h2><p class="muted">This node’s selected Linux producers and counted direct reads. Other playback paths are outside this accounting scope.</p>${detail}${planning}${planningDetail}${overage}${observations}<p>${esc(unresolved)}</p><p class="muted">Reserved allocations are not measured RSS. Unknown producer peaks serialize producers; an unknown peak has no proven hard bound.</p></section>`;
+  return `<section class="card system-card" id="system-resource-ownership-card"><h2>Resource ownership</h2><p class="muted">This node’s selected Linux producers and counted direct reads. Other playback paths are outside this accounting scope.</p>${detail}${planning}${planningDetail}${systemCopyCleanupHtml(owner.copy_cleanup)}${overage}${observations}<p>${esc(unresolved)}</p><p class="muted">Reserved allocations are not measured RSS. Unknown producer peaks serialize producers; an unknown peak has no proven hard bound.</p></section>`;
 }
 function systemCapacityCard(settings){
   const report=settings?.transcode_capacity_settings;
