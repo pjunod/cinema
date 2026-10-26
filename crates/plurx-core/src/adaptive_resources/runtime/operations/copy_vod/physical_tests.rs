@@ -121,6 +121,7 @@ async fn unsent_latch_is_dropped_under_seal_and_same_task_joins_never_entered() 
         charge
     );
     drop(graph);
+    drop(preparation); // final settlement requires destruction of SAME selector aliases
     finish_positive(owner, runtime).await;
 }
 
@@ -175,6 +176,7 @@ async fn taken_unsent_latch_cancelled_join_resumes_same_disposition_and_handle()
         Some(CopyStartDisposition::TakenBeforeSeal)
     );
     drop(graph);
+    drop(preparation); // final settlement requires destruction of SAME selector aliases
     finish_positive(owner, runtime).await;
 }
 
@@ -235,6 +237,7 @@ async fn root_only_closure_consumes_actual_unclaimed_pipes_without_inventing_tas
             .root_only_closure = Some(closure);
     }
     drop(graph);
+    drop(preparation); // final settlement requires destruction of SAME selector aliases
     finish_positive(owner, runtime).await;
 }
 
@@ -464,7 +467,7 @@ async fn parser_failure_kills_same_epipe_ignoring_root_before_stderr_join() {
         .expect("real entered parser and native child");
     let charge = runtime.accounting().expect("full R").used;
     // Natural policy: no preemptive driver abort masks the parser-failure kill.
-    let result = bounded(owner.output().stop_producer(false, deadline()))
+    let result = bounded(owner.stop_producer(false))
         .await
         .expect("same native task and child naturally joined after failure kill");
     assert!(!result.completed);
@@ -496,6 +499,7 @@ async fn parser_failure_kills_same_epipe_ignoring_root_before_stderr_join() {
             .used,
         charge
     );
+    drop(preparation); // final settlement requires destruction of SAME selector aliases
     finish_positive(owner, runtime).await;
 }
 
@@ -507,7 +511,7 @@ async fn actual_entered_sink_can_publish_while_join_holds_only_graph_members() {
         .await
         .expect("real original FFmpeg/parser entry");
     let charge = runtime.accounting().expect("original R").used;
-    let result = bounded(owner.output().stop_producer(false, deadline()))
+    let result = bounded(owner.stop_producer(false))
         .await
         .expect("no bundle/members inversion during actual publication");
     assert!(
@@ -539,6 +543,7 @@ async fn actual_entered_sink_can_publish_while_join_holds_only_graph_members() {
             .used,
         charge
     );
+    drop(preparation); // final settlement requires destruction of SAME selector aliases
     finish_positive(owner, runtime).await;
 }
 
