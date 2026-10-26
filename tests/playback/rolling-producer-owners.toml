@@ -4863,7 +4863,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # observation deadlines grants reap, publication or admission-release evidence.
 # Frame-MDCV repair: +1 awaited creation-budget timeout around held-source
 # metadata resolution; expiry refuses preparation and creates no recovery owner.
-expected_occurrences = 1852
+# +2 with the FEL P8.1 qualification (claude/lp-fel-p81): the 20 s deadline
+# around each child of `ffmpeg::has_hevc_main10_vaapi_decode` (spawned once
+# per process at startup through `status_job_owned`, kill-on-drop, so the
+# deadline drops and kills it), and `STAGE_DEADLINE` in
+# `source_probe/fel_qualification.rs::supervised`, which bounds one window
+# stage; on expiry or cancel the stage kills and reaps its children.
+expected_occurrences = 1854
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5330,7 +5336,18 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # vodencode_manager_tests.rs:610, assert_native_sdr_window. Its output future
 # is directly awaited with kill-on-drop; no separate timeout/group-reap claim
 # or production launcher is added by this ignored physical qualification helper.
-expected_occurrences = 297
+# +6 with the FEL P8.1 qualification (claude/lp-fel-p81). Two startup probe
+# children in `ffmpeg::has_hevc_main10_vaapi_decode` (clip encode, VA-API
+# decode): spawned by `status_job_owned` as background ChildWork, kill-on-drop,
+# awaited under a 20 s deadline. Three in `source_probe/fel_qualification.rs`
+# (helper render, its FFmpeg consumer/encoder, the served-window decoder):
+# spawned with `spawn_job_owned` as background ChildWork (listed and
+# stoppable in Activity Processes) inside the `dv_title_scan` job; the stage
+# owns and waits them; a deadline, the job's cancel or foreground preemption
+# makes the stage `start_kill` and `wait` each one before returning, and
+# kill-on-drop backs that up. One test-only ffprobe in the ignored physical
+# qualification test, run through `output_job_owned`.
+expected_occurrences = 303
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6261,7 +6278,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # the existing supervisor result, not an OS process. The other five are the
 # two test helper children's actual wait/start_kill sites (three in the shared
 # capture fixture, two in the backpressure fixture); each child is awaited.
-expected_occurrences = 347
+# +4 with the FEL P8.1 qualification (claude/lp-fel-p81), all in
+# `source_probe/fel_qualification.rs`: the helper's `wait` and the consumer's
+# `wait` in `finish` (normal reaping), and `start_kill` + `wait` in `reap`,
+# which a failed, expired or cancelled stage runs on each of its children.
+expected_occurrences = 351
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6479,7 +6500,13 @@ pattern = "kill_on_drop\\s*\\("
 # vodencode_manager_tests.rs:613, assert_native_sdr_window. The test directly
 # awaits the output future. Dropping requests a kill; the guard alone proves
 # neither confirmed reap nor process-group cleanup. No shipped owner is added.
-expected_occurrences = 112
+# +4 with the FEL P8.1 qualification (claude/lp-fel-p81): the two startup
+# probe children of `ffmpeg::has_hevc_main10_vaapi_decode` (one shared
+# `run` closure) and the three window-stage children in
+# `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
+# counts once). Each is also explicitly waited, or killed and waited, by its
+# owner; kill-on-drop is the backstop, not the settlement.
+expected_occurrences = 116
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
