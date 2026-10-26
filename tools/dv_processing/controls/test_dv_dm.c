@@ -138,29 +138,50 @@ static void check_range(const char *name, const dv_dm_frame *f, double nits, int
   free(l); free(lo);
 }
 
-// CM v2.9 near black, as the reference renderer does: the chroma of saturated colours below the
-// shot's crush (letterbox noise) is scaled by at most 2 x the near-black gain (the intensity ratio
-// is capped at 2), and is removed where they map to PQ 0 (gain 0 there). Before, the
-// scale (Ib/I)^0.9385 grew without bound as I -> 0. Mid-tone colours keep their chroma.
-static void near_black_chroma_is_neutral(const rpu *c29) {
-  const struct { double nits; enum dm_prim prim; } t[] = {{600, DM_P3D65}, {2000, DM_P3D65}, {1000, DM_BT2020}, {100, DM_BT709}};
-  float in[6 * 4] = {0.018f, 0, 0, 1, 0, 0.018f, 0, 1, 0, 0, 0.018f, 1, 0.015f, 0.008f, 0, 1,
-                     0.20f, 0.12f, 0.10f, 1, 0.50f, 0.30f, 0.25f, 1};
+// The analytic gamut maps black planes to neutral black for every source chroma.
+// Exercise the actual pixel and finish functions with the pre-gamut intensity at black.
+static void black_plane_is_neutral(const rpu *c29) {
+  const struct { double nits; enum dm_prim prim; double grid_nits, decoded_nits; } t[] = {
+    {600, DM_P3D65, 0, 0}, {2000, DM_P3D65, 0, 0}, {1000, DM_BT2020, 0, 0},
+    {100, DM_BT709, 0.005, 0.005}, {1000, DM_BT709, 0.005, 0.005},
+    {100, DM_BT709, 0.005, 0.0005}, {100, DM_BT709, 0.005, 0.0001},
+  };
+  const double probes[][3] = {{0.018, 0, 0}, {0, 0.018, 0}, {0, 0, 0.018}, {0.015, 0.008, 0}};
   for (unsigned k = 0; k < sizeof(t) / sizeof(*t); k++) {
     dv_dm_frame f = prep(c29, t[k].nits, t[k].prim);
-    f.weight = -2;   // pointwise
-    float *o = render(&f, in, 6, 1);
-    double dmax = 0;
-    for (int i = 0; i < DM_CM29_DARK_N; i++) dmax = fmax(dmax, f.c29.dark[i]);
-    for (int i = 0; i < 6; i++) {
-      double a[3] = {in[4*i], in[4*i+1], in[4*i+2]}, b[3] = {o[4*i], o[4*i+1], o[4*i+2]};
-      dm_cm29_pix pi, po; dm_cm29_pixel_pre(&f.c29, a, &pi); dm_cm29_pixel_pre(&f.c29, b, &po);
-      double ratio = po.C / pi.C;
-      bool black = pi.Ib <= 1e-9;   // D(0) = 0: chroma removed where the colour maps to PQ 0
-      bool ok = i < 4 ? (ratio <= 2 * dmax + 0.02 && (!black || ratio < 0.02)) : (ratio > 0.3 && ratio < 3);
-      if (!ok) { fprintf(stderr, "near black %g nits prim %d: colour %d chroma ratio %g (black %d)\n", t[k].nits, t[k].prim, i, ratio, black); exit(1); }
+    const double io = dm_pq_oetf(t[k].grid_nits), expected = dm_pq_oetf(t[k].decoded_nits);
+    double reference[3] = {0, 0, 0};
+    for (unsigned i = 0; i < sizeof(probes) / sizeof(*probes); i++) {
+      dm_cm29_pix p; double out[3];
+      dm_cm29_pixel_pre(&f.c29, probes[i], &p);
+      dm_cm29_finish(&f.c29, &p, p.Ib, io, out);
+      for (int c = 0; c < 3; c++) {
+        if (!isfinite(out[c]) || fabs(out[c] - expected) > 2e-6) {
+          fprintf(stderr, "black plane %g nits prim %d: probe %u channel %d = %.9g\n",
+                  t[k].nits, t[k].prim, i, c, out[c]); exit(1);
+        }
+      }
+      if (i == 0) memcpy(reference, out, sizeof(reference));
+      else for (int c = 0; c < 3; c++) if (fabs(out[c] - reference[c]) > 2e-6) {
+        fprintf(stderr, "black plane depends on source chroma: %g nits prim %d\n", t[k].nits, t[k].prim); exit(1);
+      }
     }
-    free(o);
+  }
+  // Ordinary midtones retain bounded color through the full renderer path.
+  const struct { double nits; enum dm_prim prim; } mid[] = {{600, DM_P3D65}, {1000, DM_BT2020}, {100, DM_BT709}};
+  const float in[4] = {0.50f, 0.30f, 0.25f, 1};
+  for (unsigned k = 0; k < sizeof(mid) / sizeof(*mid); k++) {
+    dv_dm_frame f = prep(c29, mid[k].nits, mid[k].prim); f.weight = -2;
+    float *out = render(&f, in, 1, 1);
+    double a[3] = {in[0], in[1], in[2]}, b[3] = {out[0], out[1], out[2]};
+    dm_cm29_pix pi, po; dm_cm29_pixel_pre(&f.c29, a, &pi); dm_cm29_pixel_pre(&f.c29, b, &po);
+    const double top = dm_pq_oetf(mid[k].nits);
+    if (!(po.C > 0 && isfinite(po.C)) || !isfinite(b[0]) || !isfinite(b[1]) || !isfinite(b[2]) ||
+        b[0] < 0 || b[1] < 0 || b[2] < 0 || b[0] > top || b[1] > top || b[2] > top) {
+      fprintf(stderr, "mid-tone color invalid %g nits prim %d: C %.9g RGB %.9g %.9g %.9g\n",
+              mid[k].nits, mid[k].prim, po.C, b[0], b[1], b[2]); exit(1);
+    }
+    free(out);
   }
 }
 
@@ -284,6 +305,17 @@ int main(int argc, char **argv) {
       dv_dm_frame x = prep(all[k], buckets[b], buckets[b] == 100 ? DM_BT709 : DM_P3D65);
       check_range(name, &x, buckets[b], 2);
     }
+  // CM v2.9 grey neutrality and monotonicity hold across all target primaries and peak classes.
+  {
+    static const unsigned peaks[] = {100, 600, 1000, 2000};
+    static const enum dm_prim prims[] = {DM_BT709, DM_P3D65, DM_BT2020};
+    for (unsigned p = 0; p < sizeof(peaks) / sizeof(*peaks); p++)
+      for (unsigned c = 0; c < sizeof(prims) / sizeof(*prims); c++) {
+        char name[64]; snprintf(name, sizeof(name), "cm29-neutral@%u-prim%d", peaks[p], prims[c]);
+        dv_dm_frame x = prep(&c29, peaks[p], prims[c]);
+        check_range(name, &x, peaks[p], 2);
+      }
+  }
 
   // 3. identical pixels, different L1: different output
   int w, h; float *lat = lattice(&w, &h);
@@ -379,18 +411,21 @@ int main(int argc, char **argv) {
     free(ramp);
   }
 
-  // 8b. CM v2.9 near-black colours stay neutral
-  near_black_chroma_is_neutral(&c29);
+  // 8b. Black planes stay neutral across chromatic source probes and target classes.
+  black_plane_is_neutral(&c29);
 
-  // 9. pinned golden values of the model (BT.2020/PQ out for a PQ 0.75 grey and a skin-like orange).
-  // They lock the closed form against silent drift; they are model outputs, not vendor measurements.
+  // 9. Pinned CM29 model outputs for float32 PQ probes [0.75,0.75,0.75] and
+  // [0.62,0.45,0.38]. Reproduced from dm_closed_form.h SHA-256
+  // 68719148b379a948e7db324289778fa22cfca5ba218a0efebb4b583ff13715f3 with L1
+  // [80,1528,3728]/4095, source 4000/.005, ms=-1, and the exact L2 codes below.
+  // CM4 pins above remain unchanged; all values here are model outputs, not vendor measurements.
   float probe[8] = {0.75f, 0.75f, 0.75f, 1, 0.62f, 0.45f, 0.38f, 1};
   const struct { const rpu *r; unsigned nits; enum dm_prim prim; double g[6]; } golden[] = {
     {&c4, 1000, DM_P3D65, {0.5987818, 0.5987818, 0.5987818, 0.4802569, 0.3451082, 0.2869328}},
     {&c4, 400, DM_P3D65, {0.6024639, 0.6024639, 0.6024639, 0.5226588, 0.3718402, 0.3081956}},
     {&c4, 100, DM_BT709, {0.5080784, 0.5080784, 0.5080784, 0.4660859, 0.3247151, 0.2794885}},
-    {&c29, 1000, DM_P3D65, {0.6817431, 0.6817437, 0.6817428, 0.6097828, 0.4371203, 0.3670094}},
-    {&c29, 100, DM_BT709, {0.4840483, 0.4840527, 0.4840463, 0.4678349, 0.3426540, 0.2857033}},
+    {&c29, 1000, DM_P3D65, {0.6817444, 0.6817445, 0.6817446, 0.6095730, 0.4369125, 0.3669640}}, // L2 2010/2180/2075/2050/2179
+    {&c29, 100, DM_BT709, {0.4840604, 0.4840600, 0.4840603, 0.4678732, 0.3429843, 0.2862816}}, // L2 2076/2030/2000/2020/2030
   };
   int bad = 0;
   for (unsigned k = 0; k < sizeof(golden) / sizeof(*golden); k++) {

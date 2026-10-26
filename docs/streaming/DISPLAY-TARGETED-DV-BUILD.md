@@ -3,7 +3,7 @@
 **Status:** A–D and F promoted to `main` through #1271 by Paul's decision of 2026-10-24. E (creative trims): closed-form Dolby display management merged through #1275; the served CM v4 L8 and CM v2.9 L2 trims (#1276, merged as 072d0f65 on 2026-10-25, not deployed) are accepted by pixel comparison against the reference on real titles, and playback reports `creative_trims_applied` per session; CM v2.9 near-black chroma follows the reference since #1278 (deca1e1e, not deployed); at the title's target black since #1281 (b9eb0466, not deployed) · **Updated:** 2026-10-25 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
-Evidence remains bound to its recorded source.
+Evidence remains bound to its recorded source. CM29 analytic gamut reconstruction and method v5 are built by Codex; final review and qualification are pending. The selected-frame and synthetic evidence is described below.
 
 ## Current qualification — source-bound evidence through F
 
@@ -333,21 +333,45 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   vertical Gaussian / derivative-of-Gaussian detail; finish and gamut clip).
   `display_target.h` calls it and prints one `display_target_frame` row per
   frame (`curve`, `trim_targets`, `detail_weight`). Method identity:
-  `dolby-closed-form-cm4-cm29-v4` (v1 served no trims; v2 had no CM v2.9
-  near-black chroma gain; v3 offset it by the target black); helper graph
+  `dolby-closed-form-cm4-cm29-v5` (CM4 unchanged; CM29 family v4). Earlier
+  versions served no trims (v1), added a fitted CM29 near-black gain (v3),
+  and applied it at absolute output intensity (v4). The helper graph remains
   `dv-native-master-or-closed-form-dm-v1`.
-- **Accuracy of the equations (private evidence, 2026-10-25).** CM v4
-  reproduces the reference on 30/30 random30 shots (median mean ΔE_ITP
-  0.000, max 0.055) and on real P8 frames with real L8 metadata (mean
-  ≤ 0.001 at 300–1600 nits, ≤ 0.007 at 100 nits). CM v2.9 passes 23/23
-  random30 shots (median 0.19, before the near-black gain); its gamut stage is approximate. Near black,
-  CM v2.9 caps the chroma scale's intensity ratio at 2 and applies a measured
-  gain D (absolute output intensity; it does not move with the target black), tabulated per stock target
-  in `dm_closed_form.h` (CM29_CLOSED_FORM.md, "Near-black chroma"). On real
-  frames with dark content this takes p99.9 ΔE_ITP from 3–28 to 0.7–8.5
-  (SDR and 600/1000-nit P3; BT.2020 rows are synthetic-only). The P3 gamut stage
-  itself is a minor share of the real-title error (0.06–0.13 mean at 1000
-  nits; under 0.03 % of pixels leave P3).
+- **CM4 accuracy (retained private evidence, 2026-10-25).** The unchanged
+  model reproduces 30/30 random30 shots (median mean ΔE_ITP 0.000, maximum
+  0.055) and real P8 frames with original L8 metadata (mean ≤0.001 at
+  300–1600 nits, ≤0.007 at 100 nits). This evidence retains its original source.
+- **CM29 analytic gamut reconstruction (Codex, 2026-10-25).** The former
+  intensity-only gain could not represent the sign, hue and chroma dependence
+  of interpolation near black. The model now uses standard IPT D65 in both
+  directions, colorfulness compensation
+  `S = clamp((Ib/I)*(2+I)/(2+Ib), 0.5, 2)` before the creative saturation trim,
+  and the eight analytic corners of a trilinear IPT gamut grid. The intervals
+  are target PQ peak divided by 64 for intensity and by 32 for each opponent
+  axis. A corner is computed from inverse IPT, PQ EOTF, the target matrix and
+  target cube, then encoded in the target transfer function. No measured
+  output tables or per-title corrections are used; the old gain tables are
+  removed. The colorfulness equation agrees with
+  [US20160005349A1 equations 11–14](https://patents.google.com/patent/US20160005349A1/en).
+- **Native black and encoding.** The HDR gamut cube has a zero-intensity
+  black plane; title black shapes its tone curve. The stock 100-nit BT.1886
+  cube has nominal black 0.005 nits, including its intensity origin and vertex
+  encoding. The resolved title minimum shapes the tone curve and the final
+  BT.1886 decoding independently. Confusing those two blacks causes a neutral
+  intensity error before any hue correction. The CPU reference and shader
+  share the prepared matrices and these parameters.
+- **Evidence and limits.** The frozen analytic candidate improves every
+  available selected-frame comparison across four title clips, including
+  Smile's 0.01–0.1-nit source band. Same-peak target renders refused by the
+  reference tool are explicit unavailable cells. Independent controls cover
+  two L1 sets, three HDR peaks, BT.2020, and SDR black changes, with original
+  title metadata preserved. Raw references, aggregate metrics, hashes and
+  reproduction sources stay in the private research ledger
+  `CM29_CLOSED_FORM.md`, branch `private/cm29-cause-20261025`.
+  Gamut-corner differences and isolated spatial maxima remain; these are
+  selected-frame pixel comparisons, not full-movie or physical-display
+  qualification. Final review, shader parity and merge qualification are
+  recorded with the landing PR. Paul deploys; this change is not deployed.
 - **Served trims are on.** `DV_TARGET_TRIMS_CM4` / `DV_TARGET_TRIMS_CM29`
   (helper) and `DISPLAY_TARGET_CREATIVE_TRIMS_CM4` / `_CM29` (Rust) are
   true. A frame whose mapping used a trim reports `CreativeTrimApplication`.

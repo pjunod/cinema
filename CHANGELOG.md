@@ -36,6 +36,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- Reconstruct CM v2.9 near-black color from analytic IPT gamut interpolation
+  and colorfulness compensation, replacing fitted target gain tables. Preserve
+  the stock SDR cube black separately from the resolved output black, and
+  advance targeted-render identity to v5 so cached older mappings are rebuilt.
+
 - Display-targeted HDR10-E and SDR now map each shot with closed-form Dolby
   display management instead of the ST 2094-10 Annex B.2 curve: CM v4 (L1+L3,
   L8 trims interpolated to the target, colour trims across gamuts) for CM v4.0
