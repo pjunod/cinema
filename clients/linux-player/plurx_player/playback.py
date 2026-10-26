@@ -63,6 +63,10 @@ class Playback:
         self.item_id = _track(handoff.get("item_id"))
         self.start_ms = max(0, _track(handoff.get("start_ms")) or 0)
         self.audio = _track(handoff.get("audio"))
+        # What the viewer asked for. self.audio becomes the effective track
+        # (the server's default when this is None); only an explicit pick is
+        # sent back to the server, so an untouched picker changes no plan.
+        self.requested_audio = self.audio
         self.subtitle = _track(handoff.get("subtitle"))
         # One playback_id for the whole run: a re-created session supersedes
         # its own predecessor and nobody else's (API.md section 9.1).
@@ -118,6 +122,36 @@ class Playback:
             raise PlaybackError(f"plurx planned a delivery this player does not know: {mode!r}")
         self.decision, self.delivery, self.mode = body, body["delivery"], mode
         self.method = body.get("method") if isinstance(body.get("method"), str) else None
+        self.apply_policy_defaults()
+
+    def apply_policy_defaults(self):
+        """A picker left on Default (null in the handoff) takes the server's choice.
+
+        The decision names it as the browser reads it: `selection` (present
+        when audio= or subtitle= was sent) carries the effective
+        audio_index/subtitle_index, otherwise the `default: true` track in
+        audio[]/subtitles[] (crates/plurxd/src/http/stream.rs). Only a text
+        default subtitle is taken: it becomes a sidecar. A bitmap default
+        would need a burn the decision did not plan, so it is left off.
+        """
+        selection = self.decision.get("selection") if isinstance(self.decision.get("selection"), dict) else None
+
+        def default_of(tracks):
+            for track in tracks if isinstance(tracks, list) else []:
+                if isinstance(track, dict) and track.get("default") is True:
+                    return _track(track.get("index"))
+            return None
+
+        if self.audio is None:
+            self.audio = _track(selection.get("audio_index")) if selection is not None \
+                else default_of(self.decision.get("audio"))
+        if self.subtitle is None:
+            chosen = _track(selection.get("subtitle_index")) if selection is not None \
+                else default_of(self.decision.get("subtitles"))
+            tracks = self.decision.get("subtitles") or []
+            track = next((t for t in tracks if isinstance(t, dict) and t.get("index") == chosen), None)
+            if chosen is not None and chosen >= 0 and track is not None and track.get("text"):
+                self.subtitle = chosen
 
     def plan_subtitle(self):
         if self.subtitle is None or self.subtitle < 0:
@@ -138,8 +172,8 @@ class Playback:
     def create_session(self, start_ms):
         body = {"playback_id": self.playback_id, "request_id": str(uuid.uuid4()), "caps": self.caps,
                 "start": round(max(0, start_ms) / 1000, 3), "presentation": "vod"}
-        if self.audio is not None:
-            body["audio"] = self.audio
+        if self.requested_audio is not None:
+            body["audio"] = self.requested_audio
         if self.mode == "remux":
             body.update(copy=True, aac=bool(self.delivery.get("aac")),
                         preserve_dolby_vision=bool(self.delivery.get("preserve_dolby_vision")))
@@ -382,7 +416,10 @@ class Playback:
                    f"mapper {facts['mapper']}, target {f'{nits} nits' if nits else 'unknown'}")
         if not self.mpv.closed:
             self.mpv.osd(message.split(": ", 1)[1], 4000)
-        body = {"level": "info", "event": "native_mapper", "message": message, "method": self.method,
+        # ClientLog distinguishes only "error" from everything else, which it
+        # logs at WARN (crates/plurxd/src/http/system.rs); "info" is not a
+        # level it has. "warn" says what the line will be logged as.
+        body = {"level": "warn", "event": "native_mapper", "message": message, "method": self.method,
                 "file_id": self.file_id, "session_id": (self.session or {}).get("session_id"),
                 "ua": self.caps.get("client", {}).get("ua"), "detail": json.dumps(facts, sort_keys=True)}
         try:

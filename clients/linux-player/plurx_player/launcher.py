@@ -54,6 +54,31 @@ class Terminated(BaseException):
         self.signum = signum
 
 
+class SignalGate:
+    """Defers SIGTERM/SIGINT/SIGHUP until the token is inside the guarded region.
+
+    A signal that interrupted the redeem call after the server had issued the
+    token, but before the try whose finally revokes it, would leave a live
+    token behind. Until arm(), the handler only records the signal; arm()
+    runs inside that try, right after the token is stored, and raises then.
+    """
+
+    def __init__(self):
+        self.armed = False
+        self.deferred = None
+
+    def handler(self, signum, _frame):
+        if self.armed:
+            raise Terminated(signum)
+        if self.deferred is None:
+            self.deferred = signum
+
+    def arm(self):
+        self.armed = True
+        if self.deferred is not None:
+            raise Terminated(self.deferred)
+
+
 def log(message):
     print(f"plurx-player: {message}", file=sys.stderr, flush=True)
 
@@ -90,13 +115,17 @@ def main(argv=None, deps=None):
         return EXIT_UNTRUSTED
     ca = args.ca or (store.entry(handoff.server) or {}).get("ca")
     http = Http(handoff.server, ca_file=ca, user_agent=f"plurx-player/{VERSION}")
+    gate = SignalGate()
     previous = {}
     if deps.install_signals and threading.current_thread() is threading.main_thread():
-        def on_signal(signum, _frame):
-            raise Terminated(signum)
-        previous = {sig: signal.signal(sig, on_signal) for sig in SIGNALS}
+        previous = {sig: signal.signal(sig, gate.handler) for sig in SIGNALS}
     try:
-        return _redeem_and_play(args, deps, handoff, http)
+        code = _redeem_and_play(args, deps, handoff, http, gate)
+        if gate.deferred is not None and not gate.armed:
+            # Stopped during a redeem that gave no token: nothing to revoke.
+            log(f"stopped by signal {gate.deferred}")
+            return 128 + gate.deferred
+        return code
     except Terminated as terminated:
         log(f"stopped by signal {terminated.signum}")
         return 128 + terminated.signum
@@ -105,7 +134,7 @@ def main(argv=None, deps=None):
             signal.signal(sig, handler)
 
 
-def _redeem_and_play(args, deps, handoff, http):
+def _redeem_and_play(args, deps, handoff, http, gate):
     try:
         status, redeemed = http.request("POST", "/api/v1/playback-handoffs/redeem",
                                         {"code": handoff.code, "device": DEVICE_NAME}, auth=False)
@@ -119,10 +148,13 @@ def _redeem_and_play(args, deps, handoff, http):
             or not redeemed["token"]:
         deps.error(f"plurx refused the handoff: {error_text(redeemed, f'HTTP {status}')}")
         return EXIT_REDEEM
-    http.token = redeemed.pop("token")
     runtime = mpv = playback = None
     failure = None
     try:
+        # Stored inside the region whose finally revokes it; a signal that
+        # arrived while redeeming is raised by arm(), after this line.
+        http.token = redeemed.pop("token")
+        gate.arm()
         _check_redeemed(redeemed, handoff.server)
         binary = resolve_binary(args.mpv)
         if not binary:
