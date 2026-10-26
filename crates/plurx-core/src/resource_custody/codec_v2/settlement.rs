@@ -185,6 +185,9 @@ pub(crate) enum ClosedFact {
         domain_id: Id,
         close_operation_id: Id,
     },
+    /// The original registered task's JoinHandle completed and every
+    /// inventoried owner closed under join_operation_id. This asserts nothing
+    /// about parser entry, output production or success.
     VodOutputTaskV1 {
         task: VodOutputTask,
         join_operation_id: Id,
@@ -485,10 +488,11 @@ pub(crate) fn validate_settlement(
                     MemberPlan::VodOutputTaskV1 { task, .. },
                     ClosedFact::VodOutputTaskV1 {
                         task: closed,
+                        join_operation_id,
                         owners,
-                        ..
                     },
                 ) if task == closed
+                    && !join_operation_id.uuid().is_nil()
                     && matches!(&envelope.observed,
                         Some(Observed::VodOutputTaskV1 { task: observed }) if observed == task) =>
                 {

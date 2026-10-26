@@ -1740,6 +1740,17 @@ impl SourceCell {
         self.finite_closed_fact_with(FiniteProcessClosedProof::RootOnly(closure))
     }
 
+    /// The SAME copy root's native closure, with no registered parser, closes
+    /// only the inventoried inherited copy after this cell's checked parent
+    /// close. Unobserved root-copy enrichment still must match its exact slot.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn copy_root_only_closed_fact(
+        &self,
+        closure: &crate::adaptive_resources::physical_graph::copy_vod::CopyRootOnlyClosure,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        self.finite_closed_fact_with(FiniteProcessClosedProof::CopyRootOnly(closure))
+    }
+
     fn finite_closed_fact_with(
         &self,
         proof: FiniteProcessClosedProof<'_>,
@@ -1767,6 +1778,14 @@ impl SourceCell {
                     closure.acquisition_id(),
                     closure.close_operation_id(),
                     true,
+                ),
+                #[cfg(target_os = "linux")]
+                FiniteProcessClosedProof::CopyRootOnly(closure) => (
+                    closure.generation(),
+                    closure.root_member(),
+                    closure.acquisition_id(),
+                    closure.close_operation_id(),
+                    false,
                 ),
             };
         if !self.parent_closed()
@@ -2069,6 +2088,8 @@ enum FiniteProcessClosedProof<'a> {
     RootOnly(&'a crate::adaptive_resources::physical_graph::finite_vod::FiniteVodRootOnlyClosure),
     #[cfg(target_os = "linux")]
     CopyJoined(&'a crate::adaptive_resources::physical_graph::copy_vod::CopyProcessClosure),
+    #[cfg(target_os = "linux")]
+    CopyRootOnly(&'a crate::adaptive_resources::physical_graph::copy_vod::CopyRootOnlyClosure),
 }
 
 pub(super) fn acknowledge(

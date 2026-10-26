@@ -435,10 +435,17 @@ impl NodeResourceRuntime {
             #[cfg(not(target_os = "linux"))]
             let recovered_producer = false;
             #[cfg(target_os = "linux")]
-            let closed_copy_producer = role
-                .copy_vod
-                .as_ref()
-                .is_some_and(|copy| copy.process_closure.is_some() && copy.terminal.is_some());
+            let closed_copy_producer = role.copy_vod.as_ref().is_some_and(|copy| {
+                let never_root = copy.never_root_closure.is_some();
+                let root_only = copy.root_only_closure.is_some();
+                let joined = copy.process_closure.is_some();
+                // Each branch requires its own original graph witness.
+                // A missing task/terminal alone is never nonentry proof.
+                usize::from(never_root) + usize::from(root_only) + usize::from(joined) == 1
+                    && copy.entered != never_root
+                    && copy.task.is_some() == joined
+                    && copy.terminal.is_some() == joined
+            });
             #[cfg(not(target_os = "linux"))]
             let closed_copy_producer = false;
             if role.refunded
