@@ -18,7 +18,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::transcode::{HlsSessionInfo, SessionKind};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 #[path = "playback_control/finite_memory.rs"]
 mod finite_memory;
 

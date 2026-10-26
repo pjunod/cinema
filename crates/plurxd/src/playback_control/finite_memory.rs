@@ -2,6 +2,11 @@
 //! attachment. These measurements describe owned Rust payloads, not process
 //! RSS or the allocator's private bookkeeping.
 
+#![cfg_attr(
+    all(test, not(target_os = "linux")),
+    allow(dead_code, reason = "portable private-token model fixtures exercise the shared pure compute/measure/adopt step; remaining finite production projections are composed only on Linux")
+)]
+
 use super::*;
 
 fn add(left: usize, right: usize) -> Option<usize> {
