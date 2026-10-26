@@ -130,3 +130,6 @@ Previous: [Live TV playback method](245-live-tv-playback-method.md).
 | [remote-diagnostics-qualification.md](remote-diagnostics-qualification.md) | Qualifies offline phone ZIP export, native TV local downloads and same-incident relaunch recovery. | built |
 
 Apple growing playlist attachment: [preparation and failover correction](914-growing-playlist-attachment.md) — **built; physical acceptance open**.
+
+- [Apple TV focus responsiveness](1130-apple-tv-focus-responsiveness.md) —
+  input-update isolation, regression evidence and remaining device acceptance.
