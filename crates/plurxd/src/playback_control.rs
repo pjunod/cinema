@@ -8900,7 +8900,7 @@ struct OwnedLocalControlRequest {
 #[cfg(target_os = "linux")]
 pub(crate) struct PreparationRequirement {
     pub(crate) needed: bool,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
     pub(crate) control_peak: usize,
 }
 

@@ -1152,7 +1152,7 @@ impl RollingControlActor {
                     .ok_or(ControlStateError::Unavailable)?,
             )
             .map_err(|_| ControlStateError::Unavailable)?;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "cluster-integration-tests"))]
         let control_peak = {
             use plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot;
             let layout = self
@@ -1182,7 +1182,7 @@ impl RollingControlActor {
         };
         Ok(PreparationRequirement {
             needed: plan.directive.is_some(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "cluster-integration-tests"))]
             control_peak,
         })
     }
