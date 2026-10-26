@@ -2020,6 +2020,7 @@ static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::c
 static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH_VAAPI: [tokio::sync::OnceCell<bool>; 2] =
     [const { tokio::sync::OnceCell::const_new() }; 2];
+static HEVC_MAIN10_VAAPI_DECODE: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
 static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -4165,6 +4166,73 @@ pub async fn has_hdr10_passthrough_vaapi(
             )
             .await
             .is_ok_and(|result| result.is_ok_and(|status| status.success()))
+        })
+        .await
+}
+
+/// Does the VA-API render device decode HEVC Main10 into GPU surfaces?
+///
+/// The Dolby Vision renderer decodes its layers there when it can, and that
+/// decides the CPU it is debited (`dv_segment::RendererDecode`). The startup
+/// decoder inventory cannot answer it: it decodes an 8-bit clip and reads a
+/// `Reinit context` line FFmpeg's HEVC decoder never prints. Here a Main10
+/// clip is decoded with `-hwaccel_output_format vaapi` into `hwdownload`,
+/// which accepts only hardware frames, so success means the GPU decoded it.
+/// Measured once per process; the completed DV window stays the authority.
+pub async fn has_hevc_main10_vaapi_decode() -> bool {
+    *HEVC_MAIN10_VAAPI_DECODE
+        .get_or_init(|| async {
+            let device = plurx_core::transcode::vaapi_device();
+            if !std::path::Path::new(&device).exists() {
+                return false;
+            }
+            let Ok(scratch) = tempfile::tempdir() else {
+                return false;
+            };
+            let clip = scratch.path().join("main10.mkv");
+            let run = |mut command: tokio::process::Command, purpose: &'static str| async move {
+                command.kill_on_drop(true);
+                tokio::time::timeout(
+                    Duration::from_secs(20),
+                    crate::process_control::status_job_owned(
+                        &mut command,
+                        crate::process_control::ChildWork::background(purpose),
+                    ),
+                )
+                .await
+                .is_ok_and(|result| result.is_ok_and(|status| status.success()))
+            };
+            let mut encode = tokio::process::Command::new(ffmpeg_bin());
+            encode
+                .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+                .arg("testsrc2=size=256x144:rate=24:duration=0.125")
+                .args(["-c:v", "libx265", "-x265-params", "log-level=error"])
+                .args(["-pix_fmt", "yuv420p10le", "-f", "matroska"])
+                .arg(&clip);
+            if !run(encode, "HEVC Main10 VA-API decode probe clip").await {
+                return false;
+            }
+            let mut decode = tokio::process::Command::new(ffmpeg_bin());
+            decode
+                .args(["-hide_banner", "-loglevel", "error", "-hwaccel", "vaapi"])
+                .args([
+                    "-hwaccel_device",
+                    &device,
+                    "-hwaccel_output_format",
+                    "vaapi",
+                    "-i",
+                ])
+                .arg(&clip)
+                .args([
+                    "-vf",
+                    "hwdownload,format=p010le",
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "null",
+                    "-",
+                ]);
+            run(decode, "HEVC Main10 VA-API decode probe").await
         })
         .await
 }

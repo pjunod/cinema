@@ -547,6 +547,25 @@ mod rate_control;
 pub use rate_control::*;
 // split: end rate-control
 
+/// Live FEL reconstruction graphs one worker runs at once. Measured on a
+/// Phoenix iGPU (VA-API decode, Vulkan compose, hevc_vaapi Main10): one 4K
+/// FEL compose + encode sustains 1.4-1.7x real time. Concurrent graphs are not
+/// measured, so a second play takes its ordinary route with the reason.
+pub(crate) const LIVE_RECONSTRUCTION_SLOTS: usize = 1;
+
+/// Node readings behind the Developer tab's FEL re-encode rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveReconstructionFacts {
+    pub(crate) device_present: bool,
+    pub(crate) main10_vaapi_decode: bool,
+    pub(crate) gpu_decode: bool,
+    pub(crate) renderer_threads: usize,
+    pub(crate) encoder_threads: usize,
+    pub(crate) software_budget: usize,
+    pub(crate) slots: usize,
+    pub(crate) slots_in_use: usize,
+}
+
 pub struct TranscodeManager {
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
     source_workers: source_actor::SourceWorkerRegistry,
@@ -610,6 +629,12 @@ pub struct TranscodeManager {
     processed_preparation_slot: Arc<tokio::sync::Semaphore>,
     #[cfg(target_os = "linux")]
     processed_instance_slots: Arc<tokio::sync::Semaphore>,
+    /// Live FEL reconstruction (BL+EL composed on the GPU, then re-encoded):
+    /// one graph per worker until concurrent reconstruction is measured. Its
+    /// permit lives in the graph's runtime recipe, so it is held exactly as
+    /// long as the graph that spends the GPU.
+    #[cfg(target_os = "linux")]
+    pub(crate) processed_reconstruction_slots: Arc<tokio::sync::Semaphore>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,

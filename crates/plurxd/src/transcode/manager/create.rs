@@ -1466,6 +1466,80 @@ impl TranscodeManager {
             .await
     }
 
+    /// The renderer's decode placement, which sizes its CPU debit. It decodes
+    /// on the GPU when it is handed the VA-API render device (whenever the
+    /// device exists) and that device proved an HEVC Main10 decode
+    /// (`ffmpeg::has_hevc_main10_vaapi_decode`). The completed window remains
+    /// the authority: one that opened its decoders in software under a GPU
+    /// admission is refused.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn processed_renderer_decode(
+        device_present: bool,
+        main10_vaapi_decode: bool,
+    ) -> crate::dv_segment::RendererDecode {
+        if device_present && main10_vaapi_decode {
+            crate::dv_segment::RendererDecode::Gpu
+        } else {
+            crate::dv_segment::RendererDecode::Software
+        }
+    }
+
+    /// What this node would spend on, and has free for, a live FEL
+    /// reconstruction, read from the same inputs the preparation uses.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn live_reconstruction_facts(&self) -> LiveReconstructionFacts {
+        let device_present = std::path::Path::new(&plurx_core::transcode::vaapi_device()).exists();
+        let main10_vaapi_decode = crate::ffmpeg::has_hevc_main10_vaapi_decode().await;
+        let decode = Self::processed_renderer_decode(device_present, main10_vaapi_decode);
+        let renderer_threads = crate::dv_segment::streaming_helper_cpu_threads(
+            plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
+            decode,
+        );
+        LiveReconstructionFacts {
+            device_present,
+            main10_vaapi_decode,
+            gpu_decode: decode == crate::dv_segment::RendererDecode::Gpu,
+            renderer_threads,
+            // The encoder's share with a soundtrack, as preparation debits it.
+            encoder_threads: 5,
+            software_budget: self.software_budget().await,
+            slots: LIVE_RECONSTRUCTION_SLOTS,
+            slots_in_use: LIVE_RECONSTRUCTION_SLOTS
+                .saturating_sub(self.processed_reconstruction_slots.available_permits()),
+        }
+    }
+
+    /// The worker's live FEL reconstruction slot for a graph that composes
+    /// the enhancement layer; `None` for base-layer processing. A busy slot
+    /// is the play's decline reason, and it falls back to its ordinary route.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn acquire_reconstruction_slot(
+        &self,
+        mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, String> {
+        if mode != plurx_core::transcode::dv_processing::DvProcessingMode::Fel {
+            return Ok(None);
+        }
+        Arc::clone(&self.processed_reconstruction_slots)
+            .try_acquire_owned()
+            .map(Some)
+            .map_err(|_| Self::reconstruction_slot_busy())
+    }
+
+    /// Why a second live FEL reconstruction on this worker was declined.
+    pub(crate) fn reconstruction_slot_busy() -> String {
+        format!(
+            "this worker already runs its {} live FEL reconstruction{}; \
+             more wait until concurrent reconstruction is measured",
+            LIVE_RECONSTRUCTION_SLOTS,
+            if LIVE_RECONSTRUCTION_SLOTS == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )
+    }
+
     /// Called only after ingress has acquired its durable create and checked
     /// predecessor admission. Catalog/restore paths never call this producer.
     pub(crate) async fn prepare_processed_hdr10(
@@ -2690,6 +2764,9 @@ impl TranscodeManager {
                     let mode = if file.dolby_vision.profile == Some(7) && file.dolby_vision.el_present != Some(false) {
                         plurx_core::transcode::dv_processing::DvProcessingMode::Fel
                     } else { plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu };
+                    // One live FEL reconstruction per worker. A second play falls
+                    // back to its ordinary route with this reason.
+                    let reconstruction_slot = self.acquire_reconstruction_slot(mode)?;
                     let preparation_budget = self.vod_settings(req).await?
                         .ok_or("DV processing requires the VOD preparation budget")?.block_budget;
                     let mut processed_options = retained.1.clone();
@@ -2705,6 +2782,13 @@ impl TranscodeManager {
                     if source_frame_probe.as_ref().is_some_and(|probe| probe.absolute_stream() != retained.0.decode().input_video_stream()) {
                         return Err("source frame metadata selected stream differs from the held decoder plan".into());
                     }
+                    // The renderer is handed the VA-API render device whenever it
+                    // exists; it decodes there when the device decodes HEVC Main10,
+                    // proved once per process. That decides the CPU debit.
+                    let renderer_decode = Self::processed_renderer_decode(
+                        std::path::Path::new(&plurx_core::transcode::vaapi_device()).exists(),
+                        crate::ffmpeg::has_hevc_main10_vaapi_decode().await,
+                    );
                     let source_mastering = crate::vodencode::dv_runtime::source_mastering_metadata(stream);
                     let source_mastering_minimum = crate::vodencode::dv_runtime::source_mastering_minimum(stream);
                     let display_target = req.candidate_context.as_ref().filter(|_| processed_trial).and_then(|context| context.display_target);
@@ -2742,7 +2826,7 @@ impl TranscodeManager {
                         display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),
                         display_target_note: req.candidate_context.as_ref().and_then(|context| context.display_target_note.clone()),
                         source_mastering, source_mastering_minimum,
-                        destination, mode, encoder: processed_encoder,
+                        destination, mode, decode: renderer_decode, reconstruction_slot, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
                         runtime_cache: self.runtime_cache.clone(),
                         shader_cache: Arc::new(tempfile::Builder::new().prefix("dv-shader-cache-")
@@ -2750,7 +2834,7 @@ impl TranscodeManager {
                         prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
                         report_revision: std::sync::atomic::AtomicU64::new(0),
                         published_receipt: std::sync::Mutex::new(None) };
-                    let helper_threads = crate::dv_segment::streaming_helper_cpu_threads(mode);
+                    let helper_threads = crate::dv_segment::streaming_helper_cpu_threads(mode, renderer_decode);
                     let processed_resources = TranscodeResourceEstimate { hardware_slot: true,
                         cpu_threads: helper_threads + if processed_plan.options().input_has_audio { 5 } else { 3 },
                         decoder_threads: Some(crate::dv_segment::STREAMING_DECODER_THREADS) };

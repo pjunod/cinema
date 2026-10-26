@@ -915,6 +915,9 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) renderer_deadline: Instant,
     pub(crate) window: Option<SegmentWindow>,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    /// Where the renderer was admitted to decode its layers. It decides the
+    /// renderer's CPU debit, so it is part of the frozen graph admission.
+    pub(crate) decode: RendererDecode,
     pub(crate) export_raster: Option<(u32, u32)>,
     /// Explicit producer policy only; this layer never reads client caps.
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
@@ -923,26 +926,51 @@ pub(crate) struct StreamingSegmentRequest {
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
 pub(crate) const STREAMING_DECODER_THREADS: usize = 4;
 
+/// Where the renderer decodes its source layers.
+///
+/// `segment_decode_render.c` (`open_layer`) gives each layer's decoder four
+/// frame workers only when it opened without a VA-API device; with one, each
+/// layer decodes with `thread_count = 1` and the GPU does the work. Debiting
+/// the software shape for a GPU decode reserved eight decoder threads nobody
+/// runs, and on a 12-thread worker it made every FEL graph (10 + 5 threads
+/// against a budget of 11) unadmittable.
+#[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RendererDecode {
+    /// The renderer is given the VA-API render device and the node measured
+    /// a VA-API HEVC decode. A window that nevertheless opened its decoders
+    /// in software is refused (`dv_runtime`), never served over budget.
+    Gpu,
+    Software,
+}
+
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
 pub(crate) fn streaming_helper_cpu_threads(
     mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    decode: RendererDecode,
 ) -> usize {
-    // Four frame-only decoder workers per native layer, one caller doing
-    // parsing/upload/packing, and one bounded software-Vulkan worker.
-    if mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu {
-        STREAMING_DECODER_THREADS + 2
+    let layers = if mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu {
+        1
     } else {
-        2 * STREAMING_DECODER_THREADS + 2
+        2
+    };
+    // Per layer: four frame-only software decoder workers, or one GPU decode
+    // context. Plus one caller doing parsing/upload/packing and one bounded
+    // software-Vulkan worker.
+    match decode {
+        RendererDecode::Software => layers * STREAMING_DECODER_THREADS + 2,
+        RendererDecode::Gpu => layers + 2,
     }
 }
 
 #[cfg(target_os = "linux")]
 fn check_streaming_budget(
     mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    decode: RendererDecode,
     args: &[String],
     cpu: usize,
 ) -> Result<(), String> {
-    let helper = streaming_helper_cpu_threads(mode);
+    let helper = streaming_helper_cpu_threads(mode, decode);
     let encoder = cpu
         .checked_sub(helper)
         .filter(|threads| *threads >= 3)
@@ -1004,7 +1032,12 @@ async fn run_streaming(
     let cpu = held
         .software
         .ok_or("concurrent helper and encoder lack their frozen CPU debit")?;
-    check_streaming_budget(stream.mode, &request.encoder_args, cpu.threads())?;
+    check_streaming_budget(
+        stream.mode,
+        stream.decode,
+        &request.encoder_args,
+        cpu.threads(),
+    )?;
     check_streaming_clock(&request.encoder_args, windowed)?;
     let reservation = request
         .producer
@@ -1286,6 +1319,8 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
             export_raster: None,
             display_target: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
+            // The probe passes no decode device: the renderer decodes in software.
+            decode: RendererDecode::Software,
             request,
             renderer_deadline: Instant::now() + Duration::from_secs(30),
             window: std::env::var("PLURX_DV_SEGMENT_WINDOW_START")
@@ -1419,8 +1454,10 @@ pub(crate) async fn physical_probe() {
     use plurx_core::domain::MediaFile;
     let streaming = std::env::var("PLURX_DV_SEGMENT_STREAMING").is_ok_and(|v| v == "1");
     let cpu_threads = if streaming {
-        streaming_helper_cpu_threads(plurx_core::transcode::dv_processing::DvProcessingMode::Fel)
-            + 3
+        streaming_helper_cpu_threads(
+            plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
+            RendererDecode::Software,
+        ) + 3
     } else {
         3
     };
@@ -2025,15 +2062,20 @@ mod tests {
                     .collect::<Vec<_>>(),
                 ["19"]
             );
-            for (mode, helper) in [(DvProcessingMode::BaseRpu, 6), (DvProcessingMode::Fel, 10)] {
-                assert_eq!(streaming_helper_cpu_threads(mode), helper);
+            for (mode, decode, helper) in [
+                (DvProcessingMode::BaseRpu, RendererDecode::Software, 6),
+                (DvProcessingMode::Fel, RendererDecode::Software, 10),
+                (DvProcessingMode::BaseRpu, RendererDecode::Gpu, 3),
+                (DvProcessingMode::Fel, RendererDecode::Gpu, 4),
+            ] {
+                assert_eq!(streaming_helper_cpu_threads(mode, decode), helper);
                 let total = helper + if audio { 5 } else { 3 };
                 assert!(
-                    check_streaming_budget(mode, &args, total).is_ok(),
+                    check_streaming_budget(mode, decode, &args, total).is_ok(),
                     "{args:?}"
                 );
                 assert!(
-                    check_streaming_budget(mode, &args, total - 1).is_err(),
+                    check_streaming_budget(mode, decode, &args, total - 1).is_err(),
                     "every scope must fit before producer reservation"
                 );
             }

@@ -1338,6 +1338,8 @@ async fn fixture_with_audio(
         preferences,
         destination,
         mode: DvProcessingMode::Fel,
+        decode: crate::dv_segment::RendererDecode::Software,
+        reconstruction_slot: None,
         encoder: Encoder::Software,
         vaapi_hdr_policy: None,
         runtime_cache: root.path().join("runtime"),

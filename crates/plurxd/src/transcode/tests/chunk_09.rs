@@ -2925,3 +2925,88 @@ fn compatibility_finite_budget_contains_native_audio_and_video_peak_and_changes_
         "worker request schemas refuse unknown policy fields before startup"
     );
 }
+
+/// M2 (Linux player plan §3.3): a 12-thread worker debited a GPU-decoded FEL
+/// graph as if its renderer ran eight software decoder threads, so the
+/// reconstructed Profile 8.1 (and FEL HDR10-E) was unadmittable there:
+/// "DV processing needs 15 CPU threads (10 renderer, 5 encoder) and this
+/// server's software encoder budget is 11".
+#[cfg(target_os = "linux")]
+#[test]
+fn a_gpu_decoded_fel_graph_fits_a_twelve_thread_worker() {
+    use crate::dv_segment::{streaming_helper_cpu_threads, RendererDecode};
+    use plurx_core::transcode::dv_processing::DvProcessingMode;
+    // The renderer decodes on the GPU only with the device and a proved
+    // VA-API HEVC Main10 decode; anything else keeps the software debit.
+    assert_eq!(
+        TranscodeManager::processed_renderer_decode(true, true),
+        RendererDecode::Gpu
+    );
+    for (device, proved) in [(false, true), (true, false), (false, false)] {
+        assert_eq!(
+            TranscodeManager::processed_renderer_decode(device, proved),
+            RendererDecode::Software
+        );
+    }
+    let budget = 12 - 1; // crate::admission::software_budget() on 12 threads
+    let audio_encoder = 5;
+    let fel = |decode| streaming_helper_cpu_threads(DvProcessingMode::Fel, decode) + audio_encoder;
+    assert!(fel(RendererDecode::Gpu) <= budget, "{}", fel(RendererDecode::Gpu));
+    assert!(fel(RendererDecode::Software) > budget, "software decode keeps its full debit");
+    // The preparation sizes the graph from the same decision.
+    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/transcode/manager/create.rs"));
+    assert!(source.contains(
+        "let helper_threads = crate::dv_segment::streaming_helper_cpu_threads(mode, renderer_decode);"
+    ));
+    assert!(source.contains("decode: renderer_decode, reconstruction_slot,"));
+    assert!(source.contains("crate::ffmpeg::has_hevc_main10_vaapi_decode().await,"));
+}
+
+/// One live FEL reconstruction per worker: the slot is held by the graph's
+/// runtime, a second FEL graph is declined with a reason the play reports,
+/// base-layer processing never takes it, and it frees with the graph.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn one_live_fel_reconstruction_per_worker_and_the_next_is_declined_with_its_reason() {
+    use plurx_core::transcode::dv_processing::DvProcessingMode;
+    let base = crate::test_tempdir().expect("runtime");
+    let store: Arc<dyn Store> = Arc::new(
+        plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"),
+    );
+    let manager = TranscodeManager::new(
+        store,
+        base.path().join("runtime"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let first = manager
+        .acquire_reconstruction_slot(DvProcessingMode::Fel)
+        .expect("free slot")
+        .expect("FEL holds the slot");
+    assert!(manager
+        .acquire_reconstruction_slot(DvProcessingMode::BaseRpu)
+        .expect("base-layer processing is not a reconstruction")
+        .is_none());
+    let refused = manager
+        .acquire_reconstruction_slot(DvProcessingMode::Fel)
+        .expect_err("second live reconstruction");
+    assert_eq!(refused, TranscodeManager::reconstruction_slot_busy());
+    assert!(refused.contains("live FEL reconstruction"), "{refused}");
+    let facts = manager.live_reconstruction_facts().await;
+    assert_eq!((facts.slots_in_use, facts.slots), (1, 1));
+    drop(first);
+    assert!(manager
+        .acquire_reconstruction_slot(DvProcessingMode::Fel)
+        .expect("freed with the graph")
+        .is_some());
+    // The slot is taken before the graph's CPU/GPU admission, and the runtime
+    // recipe (the graph's lifetime) holds it.
+    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/transcode/manager/create.rs"));
+    let slot = source
+        .find("let reconstruction_slot = self.acquire_reconstruction_slot(mode)?;")
+        .expect("slot acquisition");
+    let admission = source
+        .find("let bundle = crate::vodencode::admit_frozen_preparation(&self.admissions,")
+        .expect("graph admission");
+    assert!(slot < admission);
+}

@@ -3001,6 +3001,13 @@ async fn probe_system(
     for (codec, backend, decoder) in measured_decoders.measured_paths() {
         tracing::info!(%codec, backend = backend.name(), %decoder, "measured the decoder this ffmpeg selects");
     }
+    // The Dolby Vision renderer's CPU debit reads this; measure it now so no
+    // playback start waits on it.
+    let hevc_main10_vaapi_decode = crate::ffmpeg::has_hevc_main10_vaapi_decode().await;
+    tracing::info!(
+        hevc_main10_vaapi_decode,
+        "measured VA-API HEVC Main10 decode"
+    );
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
     let hwaccel_override = store

@@ -110,6 +110,12 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     manager.dovi_reshape = crate::ffmpeg::has_dovi_reshape().await;
     manager.decoders =
         plurx_core::transcode::detect_video_decoders(&crate::ffmpeg::ffmpeg_bin()).await;
+    // As at daemon start: the renderer's CPU debit follows the device's
+    // proved HEVC Main10 decode.
+    println!(
+        "{}",
+        serde_json::json!({"hevc_main10_vaapi_decode": crate::ffmpeg::has_hevc_main10_vaapi_decode().await})
+    );
     manager.dovi_passthrough = crate::ffmpeg::has_dovi_passthrough().await;
     manager.hdr10_passthrough = crate::ffmpeg::has_hdr10_passthrough().await;
     manager.hdr10_passthrough_vaapi =
@@ -179,7 +185,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     let (encoding, prepared_root) = if sdr {
         // Fresh durable admission, canonical catalog restoration and normal
         // one-shot lease/source validation precede genuine SDR rendering.
-        let root = admit_native_sdr_window_control(&manager, &store, request, &file).await;
+        let root = admit_native_sdr_window_control(&manager, &store, request.clone(), &file).await;
         (Arc::clone(&root.encoding), Some(root))
     } else {
         (
@@ -273,6 +279,53 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     if sdr {
         assert_native_sdr_window(&verified.bytes, raster, encoding.grid).await;
     }
+    // PLURX_DV_WINDOW_DUMP=<dir> keeps the served first window (and its source
+    // interval) for the offline composition proof and ffprobe checks.
+    if let Ok(dir) = std::env::var("PLURX_DV_WINDOW_DUMP") {
+        let dir = PathBuf::from(dir);
+        std::fs::write(dir.join("window-000.mp4"), &verified.bytes).expect("dump served window");
+        let first = &encoding
+            .grid
+            .plan(file.duration_ms.expect("duration"), 0)
+            .entries[0];
+        std::fs::write(
+            dir.join("window-000.json"),
+            serde_json::json!({"start_ticks":first.start_ticks,"duration_ticks":first.duration_ticks,
+                "numerator":encoding.grid.numerator,"denominator":encoding.grid.denominator,
+                "decoder":format!("{:?}", verified.observed.decoder),
+                "renderer_decode":format!("{:?}", runtime.decode),
+                "graph_cpu_threads":encoding.resources.cpu_threads})
+            .to_string(),
+        )
+        .expect("dump window interval");
+    }
+    if profile81 {
+        // One live reconstruction per worker: this graph holds the slot, and
+        // a second play is not given another graph (it keeps its ordinary
+        // converted copy, or an unprocessed recipe), never a second slot.
+        assert!(runtime.reconstruction_slot.is_some());
+        assert_eq!(manager.processed_reconstruction_slots.available_permits(), 0);
+        let second = manager
+            .prepare_vod_encoding(
+                &SessionRequest {
+                    request_id: Some("second-live-reconstruction".into()),
+                    playback_id: "second-live-reconstruction".into(),
+                    ..request.clone()
+                },
+                &file,
+            )
+            .await
+            .expect("second play keeps an ordinary route");
+        assert!(
+            second.as_ref().is_none_or(|second| !matches!(
+                second.dv_processing,
+                DvSelection::Selected(_)
+            )),
+            "a second live reconstruction must not be admitted on this worker"
+        );
+        drop(second);
+        assert_eq!(manager.processed_reconstruction_slots.available_permits(), 0);
+    }
     let luma = processed_window_luma(&verified.bytes, raster, false);
     println!(
         "{}",
@@ -292,6 +345,13 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     } else {
         &[1, 2, 360]
     };
+    // A short excerpt has no twelve-minute window; it checks the ones it has.
+    let entries: Vec<usize> = entries
+        .iter()
+        .copied()
+        .filter(|at| *at < segment_plan.entries.len())
+        .collect();
+    let entries = entries.as_slice();
     let mut target_digest = None;
     for &at in entries {
         let entry = &segment_plan.entries[at];
