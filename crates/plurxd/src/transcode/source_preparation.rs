@@ -280,6 +280,8 @@ impl SourceProbeHookOwner {
             .lock()
             .await
             .owner
+            .as_ref()
+            .expect("original Source planning before cleanup")
             .fixture_native_gate(mode == 2)
             .await
             .expect("same original P native gate");
@@ -478,13 +480,16 @@ struct ProbeState {
 // introduced; core retains its original opener, native tasks and transitions.
 #[cfg(target_os = "linux")]
 struct FixedSourceWork {
-    owner: plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner,
+    owner: Option<plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner>,
+    cleanup:
+        Option<plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeCleanup>,
     report:
         Option<plurx_core::adaptive_resources::runtime::planning_probe::FixedProbeMetadataLease>,
     native_closed: bool,
 }
 #[cfg(target_os = "linux")]
 struct FixedSourceState {
+    runtime: Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
     work: tokio::sync::Mutex<FixedSourceWork>,
     snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
     recipe_binding: String,
@@ -587,7 +592,7 @@ impl SourceProbeOperation {
                 let mut warned = false;
                 loop {
                     match self
-                        .finish_fixed_native(Instant::now() + Duration::from_secs(30))
+                        .retire_fixed_native(Instant::now() + Duration::from_secs(30))
                         .await
                     {
                         Ok(()) => {
@@ -687,6 +692,8 @@ impl SourceProbeOperation {
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| "Source original planning observation expired")?;
         work.owner
+            .as_mut()
+            .ok_or("Source original planning was sealed for cleanup")?
             .prepare_inputs(deadline)
             .await
             .map_err(|error| format!("preparing Source original planning inputs: {error}"))
@@ -716,6 +723,8 @@ impl SourceProbeOperation {
             .map_err(|_| "Source original planning observation expired")?;
         let report = work
             .owner
+            .as_mut()
+            .ok_or("Source original planning was sealed for cleanup")?
             .collect_and_refine(deadline)
             .await
             .map_err(|error| format!("collecting Source original planning report: {error}"))?;
@@ -723,6 +732,49 @@ impl SourceProbeOperation {
         // Cancelled/repeated callers share M; they cannot enter another P.
         work.report = Some(report.clone());
         Ok(report)
+    }
+    /// Failed-start retirement consumes the SAME original selector into its
+    /// existing cleanup path. Merely calling finish_native cannot join still
+    /// retained native handles after a collector waiter was cancelled.
+    #[cfg(target_os = "linux")]
+    async fn retire_fixed_native(&self, deadline: Instant) -> Result<(), String> {
+        let SourceProbeState::Fixed(state) = &self.state else {
+            return Err("Source original fixed planning owner is absent".into());
+        };
+        {
+            let mut work = tokio::time::timeout_at(deadline.into(), state.work.lock())
+                .await
+                .map_err(|_| "Source original planning cleanup deadline")?;
+            if work.native_closed {
+                return Ok(());
+            }
+            // An R/Encoding handoff is possible only after native_closed was
+            // set. Here startup failed: discard its private report alias, but
+            // retain the original application lease through Source SQL close.
+            drop(work.report.take());
+            if work.cleanup.is_none() {
+                let original = work
+                    .owner
+                    .take()
+                    .ok_or("Source original cleanup selector is absent")?;
+                work.cleanup = Some(original.into_cleanup());
+            }
+        }
+        // Existing maintenance joins ONLY already-entered original tasks.
+        // cleanup_requested blocks native entry for never-entered inputs;
+        // no new job, task, descriptor, P or native proof is reconstructed.
+        state.runtime.maintain_planning_cleanup(deadline).await;
+        let mut work = tokio::time::timeout_at(deadline.into(), state.work.lock())
+            .await
+            .map_err(|_| "Source original planning cleanup deadline")?;
+        work.cleanup
+            .as_mut()
+            .ok_or("Source original cleanup selector is absent")?
+            .seal_for_logical_close(deadline)
+            .await
+            .map_err(|error| format!("sealing Source original planning native cleanup: {error}"))?;
+        work.native_closed = true;
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     pub(crate) async fn finish_fixed_native(&self, deadline: Instant) -> Result<(), String> {
@@ -798,8 +850,10 @@ pub(crate) fn start_source_fixed_probe(
     Ok(SourceProbeOperation {
         assignment,
         state: SourceProbeState::Fixed(Arc::new(FixedSourceState {
+            runtime: Arc::clone(runtime),
             work: tokio::sync::Mutex::new(FixedSourceWork {
-                owner,
+                owner: Some(owner),
+                cleanup: None,
                 report: None,
                 native_closed: false,
             }),
@@ -1354,4 +1408,6 @@ mod dv_source_origin_tests {
 #[path = "source_preparation/fixed_tests.rs"]
 mod fixed_tests;
 #[cfg(all(test, target_os = "linux"))]
-pub(in crate::transcode) use fixed_tests::source_fixed_planning_fixture;
+pub(in crate::transcode) use fixed_tests::{
+    source_fixed_planning_fixture, source_native_cancelled_collector_cleanup_fixture,
+};

@@ -212,3 +212,133 @@ pub(in crate::transcode) async fn source_fixed_planning_fixture(
         ResourceVector::default()
     );
 }
+
+/// Dropping an actual native collector waiter must hand the SAME retained
+/// selector to original cleanup. A finish-only loop cannot join its pending
+/// original task and must fail this fixture's outer FAILURE watchdog.
+pub(in crate::transcode) async fn source_native_cancelled_collector_cleanup_fixture(
+    runtime: Arc<NodeResourceRuntime>,
+    manager: &crate::transcode::TranscodeManager,
+    prepared: &crate::http::hls::PreparedSourcePlayback,
+    assignment: &SourceDispatchAssignment,
+) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    runtime
+        .refresh_admission_capacity(deadline)
+        .await
+        .expect("actual admission observation");
+    let snapshot = Arc::new(
+        manager
+            .store
+            .playback_planning_snapshot(
+                prepared.file().id,
+                &crate::transcode::QUALITY_PLANNING_KEYS,
+            )
+            .await
+            .expect("actual Source snapshot")
+            .expect("Source snapshot"),
+    );
+    let bytes =
+        crate::transcode::adaptive_attempts::planning_snapshot_requested_heap_bytes(&snapshot)
+            .expect("snapshot capacities")
+            .checked_add(fixed_source_requested_bytes())
+            .expect("original carrier storage")
+            .checked_add(crate::transcode::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)
+            .expect("handoff allowance");
+    let request = crate::transcode::adaptive_attempts::fixed_planning_request(
+        manager,
+        &snapshot,
+        prepared.fingerprint(),
+        bytes,
+    )
+    .expect("original P request");
+    let operation =
+        start_source_fixed_probe(&runtime, request, snapshot, assignment.clone(), deadline)
+            .expect("original P registered");
+    operation
+        .prepare_fixed_inputs(deadline)
+        .await
+        .expect("actual original source opened");
+    let SourceProbeState::Fixed(state) = &operation.state else {
+        panic!("original fixed state")
+    };
+    let gate = state
+        .work
+        .lock()
+        .await
+        .owner
+        .as_ref()
+        .expect("same original owner")
+        .fixture_native_gate(false)
+        .await
+        .expect("gate only this original engine task");
+    let mut collecting = Box::pin(operation.fixed_report(deadline));
+    let started = tokio::time::timeout_at(deadline.into(), async {
+        tokio::select! {
+            started = gate.started() => started,
+            early = &mut collecting => panic!("original collector completed before its actual native gate: {}", early.is_ok()),
+        }
+    }).await.expect("FAILURE watchdog: original native custody not reached");
+    assert!(started.pid > 0 && !started.member_id.is_nil() && !started.close_operation_id.is_nil());
+    // This says STARTED/CUSTODY only. No PID observation proves continued
+    // execution, native absence, completion, or a closed root.
+    let held = runtime.accounting().expect("original P/M charge").used;
+    drop(collecting);
+    operation.cancel();
+    let mut closing = Box::pin(operation.settle());
+    std::future::poll_fn(|cx| {
+        assert!(
+            closing.as_mut().poll(cx).is_pending(),
+            "the original native task has not returned a close summary"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(
+        runtime.accounting().expect("no early partial refund").used,
+        held
+    );
+    gate.release();
+    let settled = tokio::time::timeout_at(deadline.into(), closing)
+        .await
+        .expect(
+        "FAILURE watchdog: original Source cleanup did not join cancelled collector's native tasks",
+    );
+    assert!(settled.matches(assignment));
+    drop(settled);
+    let counts = runtime
+        .planning_ownership_diagnostics()
+        .expect("complete original closure inventory");
+    assert_eq!(counts.native_roles_held, 0);
+    assert_eq!(
+        counts.metadata_owners, 1,
+        "original application lease keeps M until Source frame disposal"
+    );
+    assert_ne!(
+        runtime.accounting().expect("M still charged").used,
+        ResourceVector::default()
+    );
+    drop(operation);
+    drop(gate);
+    tokio::time::timeout_at(deadline.into(), async {
+        loop {
+            runtime.maintain_planning_cleanup(deadline).await;
+            if runtime
+                .planning_ownership_diagnostics()
+                .is_some_and(|counts| counts.metadata_owners == 0)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("FAILURE watchdog: same original M did not close after application drop");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("original P/M finally retired")
+            .used,
+        ResourceVector::default()
+    );
+}

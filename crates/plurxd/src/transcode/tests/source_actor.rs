@@ -152,20 +152,27 @@ async fn source_unknown_local_register_actual_closure_and_exact_ack_clear_pendin
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_original_p_open_inputs_cancelled_waiter_replays_same_m_and_cleanup() {
-    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(false))).await;
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(0))).await;
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_selected_software_actor_uses_original_p_and_retains_m_through_media_retirement() {
-    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(true))).await;
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(1))).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_original_p_native_collector_cancellation_joins_same_cleanup_before_source_release()
+{
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(2))).await;
 }
 
 async fn source_copy_preadmission_fixture(mode: u8) {
     source_copy_preadmission_fixture_with_fixed(mode, None).await;
 }
 
-async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Option<bool>) {
+async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Option<u8>) {
     use crate::http::hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget};
     use plurx_core::{
         config::Config,
@@ -593,7 +600,7 @@ async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Optio
         .expect("assignment")
         .expect("actual local assignment");
     #[cfg(target_os = "linux")]
-    if let Some(run_actor) = fixed_case {
+    if let Some(fixed_case) = fixed_case {
         let runtime = fixed_runtime.expect("actual started runtime");
         let dirs = crate::configured_dirs(&config.storage);
         let manager = Arc::new(
@@ -614,7 +621,7 @@ async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Optio
                 Some(Arc::clone(&runtime)),
             ),
         );
-        if run_actor {
+        if fixed_case == 1 {
             source_actual_actor_boxed(state, manager, prepared, assignment, 12, client.clone())
                 .await;
             tokio::time::timeout(Duration::from_secs(30), async {
@@ -631,13 +638,11 @@ async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Optio
             .await
             .expect("FAILURE watchdog: actual actor's original M aliases did not retire");
         } else {
-            super::super::source_preparation::source_fixed_planning_fixture(
-                Arc::clone(&runtime),
-                &manager,
-                &prepared,
-                &assignment,
-            )
-            .await;
+            match fixed_case {
+                0 => super::super::source_preparation::source_fixed_planning_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                2 => super::super::source_preparation::source_native_cancelled_collector_cleanup_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                _ => panic!("unknown fixed Source fixture case"),
+            }
             store
                 .seal_source_ingress_custody(&assignment)
                 .await
