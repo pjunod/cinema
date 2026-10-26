@@ -73,10 +73,6 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- Web playback title badges refresh when Dolby Vision processing evidence arrives
-  or clears; HDR10-E and the FEL, RPU and DYN pills reflect the current applied
-  operations, including per-shot metadata mapped into HDR10 by the server.
-
 - Display-targeted playback reads mastering metadata carried on decoded frames
   when stream metadata omits it. The bounded probe stays bound to the held source
   and selected stream; HDR primaries and unknown-title SDR black levels resolve
@@ -236,6 +232,10 @@ bump may break compatibility and a **patch** bump never does.
 
 - Non-Dolby-Vision clients that support HLS are offered a segmented HDR10-base copy when Developer → DV processing is enabled, so the HLS processing path can apply HDR10-E instead of silently bypassing it with a progressive remux. Setting-off and progressive-only delivery remain unchanged; actual processing and any decline are reported by the HLS session.
 - Continuous AVC fallback catalogs exclude rows outside H.264 High@5.0 at the source's measured cadence, including 2160p, instead of offering a family that fails at session creation. An unknown or nominal-only cadence offers no continuous family.
+
+- Web playback title badges refresh when Dolby Vision processing evidence arrives
+  or clears; HDR10-E and the FEL, RPU and DYN pills reflect the current applied
+  operations, including per-shot metadata mapped into HDR10 by the server.
 
 ### Added
 
