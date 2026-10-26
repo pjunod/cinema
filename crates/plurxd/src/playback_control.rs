@@ -2625,12 +2625,16 @@ impl LocalControlResult {
 #[derive(Clone)]
 pub(crate) struct TerminalResponseHandoff {
     pending: Arc<AtomicBool>,
+    _lifetime: ActorPayloadLifetime,
 }
 
 impl TerminalResponseHandoff {
-    pub(crate) fn new(pending: Arc<AtomicBool>) -> Self {
+    pub(crate) fn for_actor(pending: Arc<AtomicBool>, lifetime: ActorPayloadLifetime) -> Self {
         pending.store(true, Ordering::Release);
-        Self { pending }
+        Self {
+            pending,
+            _lifetime: lifetime,
+        }
     }
 
     pub(crate) fn complete(&self) {
@@ -2943,6 +2947,7 @@ pub(crate) struct AcceptedControlFence {
     identity: AcceptedControlIdentity,
     desired_lifetime: u64,
     live: Arc<AtomicBool>,
+    _lifetime: ActorPayloadLifetime,
 }
 
 impl AcceptedControlFence {
@@ -2955,7 +2960,7 @@ pub(crate) type ObservationAnswer<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Option<AcceptedControlFence>> + Send + 'a>>;
 
 #[derive(Clone, Debug)]
-pub(crate) struct StagedObservationFence(Arc<AtomicBool>);
+pub(crate) struct StagedObservationFence(Arc<AtomicBool>, ActorPayloadLifetime);
 impl StagedObservationFence {
     pub(crate) fn still_live(&self) -> bool {
         self.0.load(Ordering::Acquire)
@@ -4065,7 +4070,12 @@ impl ControlState {
     ) -> Option<StagedObservationFence> {
         (self.staged_observation_is_current(fence, incarnation, deadline)
             && self.observational_stage_live.load(Ordering::Acquire))
-        .then(|| StagedObservationFence(Arc::clone(&self.observational_stage_live)))
+        .then(|| {
+            StagedObservationFence(
+                Arc::clone(&self.observational_stage_live),
+                ActorPayloadLifetime::default(),
+            )
+        })
     }
     pub(crate) fn staged_observation_is_current(
         &self,
@@ -4100,6 +4110,7 @@ impl ControlState {
             identity,
             desired_lifetime: self.observational_desired_lifetime?,
             live: Arc::clone(&self.observational_live),
+            _lifetime: ActorPayloadLifetime::default(),
         };
         (self.last_sequence == fence.identity.sequence
             && self.prior_request_fingerprint.as_deref()
@@ -5160,6 +5171,8 @@ pub(crate) struct RollingLeaseSnapshot {
     /// remain observation-only; opted-in transcode and copy producers expose
     /// their exact decision, proposal, and completion evidence here.
     pub producer_control: RollingProducerOperationalSnapshot,
+    // Last: escaping snapshot clones retain the same original application.
+    _lifetime: ActorPayloadLifetime,
 }
 
 /// The only producer-failure reasons that may be retained by the M4 actor.
@@ -6584,17 +6597,45 @@ impl ProducerDecision {
     }
 }
 
+/// Only outward decision aliases retain the original actor owner. The actor's
+/// pending/last Arc<ProducerDecision> remains free of strong backlinks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RetainedProducerDecision {
+    value: Arc<ProducerDecision>,
+    _lifetime: ActorPayloadLifetime,
+}
+impl AsRef<ProducerDecision> for RetainedProducerDecision {
+    fn as_ref(&self) -> &ProducerDecision {
+        self.value.as_ref()
+    }
+}
+impl std::ops::Deref for RetainedProducerDecision {
+    type Target = Arc<ProducerDecision>;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+#[cfg(test)]
+impl From<Arc<ProducerDecision>> for RetainedProducerDecision {
+    fn from(value: Arc<ProducerDecision>) -> Self {
+        Self {
+            value,
+            _lifetime: ActorPayloadLifetime::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProducerDecisionPoll {
     Idle,
-    Decision(Arc<ProducerDecision>),
+    Decision(RetainedProducerDecision),
     ClassifyExit(RollingProducerExitProbe),
     Terminal(RollingTerminalCause),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RollingProducerExecutorPoll {
-    Decision(Arc<ProducerDecision>),
+    Decision(RetainedProducerDecision),
     ClassifyExit(RollingProducerExitProbe),
     Terminal(RollingTerminalCause),
     Unavailable,
@@ -7185,6 +7226,8 @@ struct RollingFirstMediaPublicationHandoffState {
     /// A timed-out request therefore cannot release admission while its
     /// unsettled handoff is still retained in the actor mailbox.
     _settlement_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    // Shared by the handoff and every waiter; never a command Sender.
+    lifetime: std::sync::OnceLock<ActorPayloadLifetime>,
 }
 
 pub(crate) struct RollingFirstMediaPublicationWaiter {
@@ -7200,6 +7243,7 @@ impl RollingFirstMediaPublicationHandoff {
                 notify: tokio::sync::Notify::new(),
                 prepublication_projection: None,
                 _settlement_permit: None,
+                lifetime: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -7214,6 +7258,7 @@ impl RollingFirstMediaPublicationHandoff {
                 notify: tokio::sync::Notify::new(),
                 prepublication_projection: Some(projection),
                 _settlement_permit: Some(settlement_permit),
+                lifetime: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -7313,6 +7358,7 @@ pub(crate) struct RollingMediaCommitHandoff {
     high_segment: Arc<AtomicI64>,
     fetched_end_ms: Arc<AtomicI64>,
     flow_sync: Arc<RollingFlowSync>,
+    _lifetime: ActorPayloadLifetime,
 }
 
 impl RollingMediaCommitHandoff {
@@ -8646,11 +8692,11 @@ pub(crate) struct RollingControlHandle {
 mod rolling_ingress;
 mod rolling_lifetime;
 use rolling_ingress::RollingProducerIngressBlocks;
-pub(crate) use rolling_lifetime::ActorPayloadAllocation;
 #[cfg(target_os = "linux")]
 pub(crate) use rolling_lifetime::RollingActorAccounting;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) use rolling_lifetime::RollingControlActorJoin;
+pub(crate) use rolling_lifetime::{ActorPayloadAllocation, ActorPayloadLifetime};
 
 struct OwnedLocalControlRequest {
     generation: String,
@@ -9673,6 +9719,8 @@ impl PrepublicationProducerControl {
 
 struct RollingControlActor {
     control: ControlState,
+    original_owner: Weak<rolling_lifetime::OriginalRollingActorTask>,
+    application_owner: Weak<rolling_lifetime::ActorApplicationOwner>,
     #[cfg(target_os = "linux")]
     reply_budget: Option<Arc<rolling_lifetime::ActorReplyBudget>>,
     #[cfg(target_os = "linux")]
@@ -9740,6 +9788,10 @@ struct RollingControlActor {
 }
 
 impl RollingControlActor {
+    fn payload_lifetime(&self) -> ActorPayloadLifetime {
+        ActorPayloadLifetime::from_weak(&self.original_owner, &self.application_owner)
+    }
+
     #[cfg(test)]
     fn new(now: Instant, initial_kind: &'static str, retired_fence: Arc<AtomicBool>) -> Self {
         let producer_transition = Arc::new(std::sync::Mutex::new(
@@ -9786,6 +9838,8 @@ impl RollingControlActor {
         } = runtime;
         Self {
             control: ControlState::default(),
+            original_owner: Weak::new(),
+            application_owner: Weak::new(),
             #[cfg(target_os = "linux")]
             reply_budget: None,
             #[cfg(target_os = "linux")]
@@ -9864,6 +9918,7 @@ impl RollingControlActor {
                     .unwrap_or(i64::MAX);
         }
         RollingLeaseSnapshot {
+            _lifetime: self.payload_lifetime(),
             mode: self.mode,
             idle_for,
             remaining: deadline.saturating_duration_since(now),
@@ -10767,6 +10822,7 @@ impl RollingControlActor {
     }
 
     fn poll_producer_decision_at(&self, after_sequence: u64) -> ProducerDecisionPoll {
+        let lifetime = self.payload_lifetime();
         // Lifecycle terminal state is a higher-priority observation than a
         // retained decision. Polling never consumes either value.
         if let Some(cause) = self.terminal {
@@ -10778,7 +10834,10 @@ impl RollingControlActor {
             .filter(|decision| decision.decision_sequence() > after_sequence)
             .cloned()
         {
-            return ProducerDecisionPoll::Decision(decision);
+            return ProducerDecisionPoll::Decision(RetainedProducerDecision {
+                value: decision,
+                _lifetime: lifetime,
+            });
         }
         self.prepublication
             .as_ref()
@@ -13221,6 +13280,7 @@ impl RollingControlActor {
                     deadline,
                     reply,
                 } => {
+                    let lifetime = self.payload_lifetime();
                     let answer = (!self.retired
                         && published_at < self.snapshot_at(published_at).deadline)
                         .then(|| {
@@ -13228,13 +13288,22 @@ impl RollingControlActor {
                                 .staged_observation_token(&fence, &incarnation, deadline)
                         })
                         .flatten();
+                    let answer = answer.map(|mut answer| {
+                        answer.1 = lifetime;
+                        answer
+                    });
                     let _ = reply.send(answer);
                 }
                 RollingControlCommand::AcceptedObservation { identity, reply } => {
+                    let lifetime = self.payload_lifetime();
                     let answer = (!self.retired
                         && published_at < self.snapshot_at(published_at).deadline)
                         .then(|| self.control.accepted_observation(identity))
                         .flatten();
+                    let answer = answer.map(|mut answer| {
+                        answer._lifetime = lifetime;
+                        answer
+                    });
                     let _ = reply.send(answer);
                 }
                 RollingControlCommand::ObservationIsCurrent { fence, reply } => {
@@ -13478,6 +13547,10 @@ impl RollingControlActor {
 }
 
 impl RollingControlHandle {
+    pub(crate) fn payload_lifetime(&self) -> ActorPayloadLifetime {
+        ActorPayloadLifetime::from_original(&self.original_actor)
+    }
+
     /// Publish one command through the same bounded sequence as producer
     /// facts. Capacity is reserved before either synchronous fence is taken;
     /// after the transition fence is acquired there is no await or fallible
@@ -13706,8 +13779,9 @@ impl RollingControlHandle {
                 hooks: Arc::clone(&hooks),
             },
         );
-        #[cfg(target_os = "linux")]
         let mut actor = actor;
+        let application = application.map(rolling_lifetime::ActorApplicationOwner::retain);
+        actor.application_owner = application.as_ref().map_or_else(Weak::new, Arc::downgrade);
         #[cfg(target_os = "linux")]
         let reply_budget = accounting.map(|accounting| {
             actor.control_allocation = Some(accounting.initial_state);
@@ -13718,7 +13792,9 @@ impl RollingControlHandle {
         let actor_task = tokio::spawn(rolling_lifetime::run_original_actor(
             Some(registered),
             Some(rolling_lifetime::OriginalRollingActorInput::new(
-                actor, receiver,
+                actor,
+                receiver,
+                application.clone(),
             )),
         ));
         hooks.actor_spawned(&actor_task);
@@ -13744,7 +13820,7 @@ impl RollingControlHandle {
             reply_budget,
         };
         // The original join handle is retained before the actor first polls.
-        let _ = start.send(());
+        let _ = start.send(Arc::downgrade(&handle.original_actor));
         (handle, executor_inbox, decision_notify)
     }
 
@@ -14120,6 +14196,9 @@ impl RollingControlHandle {
         handoff: Option<RollingFirstMediaPublicationHandoff>,
         deadline: Instant,
     ) -> Result<RollingResponseAuthorization, ResponsePublicationRejection> {
+        if let Some(handoff) = handoff.as_ref() {
+            let _ = handoff.state.lifetime.set(self.payload_lifetime());
+        }
         let response = self
             .request_command_before(
                 |reply| RollingControlCommand::AuthorizeResponsePublication {
@@ -15110,6 +15189,7 @@ impl RollingControlHandle {
         fetched_end_ms: Arc<AtomicI64>,
     ) -> RollingMediaCommitHandoff {
         RollingMediaCommitHandoff {
+            _lifetime: self.payload_lifetime(),
             producer_attempt,
             segment_index,
             segment_end_ms,

@@ -90,6 +90,57 @@ impl RollingActorAccounting {
     }
 }
 
+/// One private shared owner of the SAME move-only application lease. Neither
+/// this owner nor a payload carrier contains a command Sender or native token.
+pub(super) struct ActorApplicationOwner {
+    _application: ActorApplication,
+}
+impl ActorApplicationOwner {
+    pub(super) fn retain(application: ActorApplication) -> Arc<Self> {
+        Arc::new(Self {
+            _application: application,
+        })
+    }
+}
+
+/// Lifetime safety for byte/cardinality components that remain Unknown.
+/// The original selector is retained when present; the application owner also
+/// survives a lost selector while the original run frame is still draining.
+/// No serialization/deserialization or public constructor can mint authority.
+#[derive(Clone, Default)]
+pub(crate) struct ActorPayloadLifetime {
+    _original: Option<Arc<OriginalRollingActorTask>>,
+    _application: Option<Arc<ActorApplicationOwner>>,
+}
+impl ActorPayloadLifetime {
+    pub(super) fn from_original(original: &Arc<OriginalRollingActorTask>) -> Self {
+        Self {
+            _original: Some(Arc::clone(original)),
+            _application: original._application.clone(),
+        }
+    }
+    pub(super) fn from_weak(
+        original: &Weak<OriginalRollingActorTask>,
+        application: &Weak<ActorApplicationOwner>,
+    ) -> Self {
+        Self {
+            _original: original.upgrade(),
+            _application: application.upgrade(),
+        }
+    }
+}
+impl std::fmt::Debug for ActorPayloadLifetime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ActorPayloadLifetime")
+    }
+}
+impl PartialEq for ActorPayloadLifetime {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    } // Private accounting is not playback state.
+}
+impl Eq for ActorPayloadLifetime {}
+
 pub(super) struct OriginalRollingActorTask {
     #[cfg_attr(
         all(not(target_os = "linux"), not(test)),
@@ -118,7 +169,7 @@ pub(super) struct OriginalRollingActorTask {
     // Last: queued actor payloads and its completed JoinHandle allocation
     // remain within the original application's charged lifetime until the
     // original retirement selector itself is destroyed after join.
-    _application: Option<ActorApplication>,
+    _application: Option<Arc<ActorApplicationOwner>>,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -133,7 +184,7 @@ impl OriginalRollingActorTask {
 
     pub(super) fn registered_with_application(
         task: tokio::task::JoinHandle<()>,
-        application: Option<ActorApplication>,
+        application: Option<Arc<ActorApplicationOwner>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             task: tokio::sync::Mutex::new(Some(task)),
@@ -197,12 +248,15 @@ pub(super) struct OriginalRollingActorInput {
     actor: Option<RollingControlActor>,
     receiver: Option<tokio::sync::mpsc::Receiver<RollingControlEnvelope>>,
     exit: Option<RollingActorExitFence>,
+    // Last: input/actor/receiver destruction precedes application release.
+    _application: Option<Arc<ActorApplicationOwner>>,
 }
 
 impl OriginalRollingActorInput {
     pub(super) fn new(
         actor: RollingControlActor,
         receiver: tokio::sync::mpsc::Receiver<RollingControlEnvelope>,
+        application: Option<Arc<ActorApplicationOwner>>,
     ) -> Self {
         let exit = RollingActorExitFence {
             retired: Arc::clone(&actor.retired_fence),
@@ -215,6 +269,7 @@ impl OriginalRollingActorInput {
             actor: Some(actor),
             receiver: Some(receiver),
             exit: Some(exit),
+            _application: application,
         }
     }
 }
@@ -232,18 +287,22 @@ impl Drop for OriginalRollingActorInput {
 /// The exact future used by spawn. Constructing it with absent inputs below
 /// measures the same compiler layout without allocating an actor or channel.
 pub(super) async fn run_original_actor(
-    start: Option<tokio::sync::oneshot::Receiver<()>>,
+    start: Option<tokio::sync::oneshot::Receiver<Weak<OriginalRollingActorTask>>>,
     input: Option<OriginalRollingActorInput>,
 ) {
     let (Some(start), Some(mut input)) = (start, input) else {
         return;
     };
-    if start.await.is_ok() {
-        let actor = input.actor.take().expect("original registered actor");
+    if let Ok(original) = start.await {
+        let mut actor = input.actor.take().expect("original registered actor");
+        actor.original_owner = original;
         let receiver = input.receiver.take().expect("original registered receiver");
         let exit = input.exit.take().expect("original actor exit fence");
         actor.run(receiver, exit).await;
     }
+    // Explicitly keep the run frame's SAME lease owner across actor.run;
+    // losing all selectors cannot release it while receiver draining runs.
+    drop(input);
 }
 
 /// Only the task's fixed requested layout. Actor payloads, mailbox blocks,
@@ -251,8 +310,13 @@ pub(super) async fn run_original_actor(
 #[cfg(target_os = "linux")]
 pub(super) fn original_actor_frame_bytes() -> Option<usize> {
     std::mem::size_of_val(&run_original_actor(None, None))
-        .checked_add(std::mem::size_of::<OriginalRollingActorTask>())?
-        .checked_add(2 * std::mem::size_of::<usize>())
+        .checked_add(super::finite_memory::arc_requested_bytes::<
+            OriginalRollingActorTask,
+        >()?)?
+        // Exact new private Arc requested layout, charged before creation.
+        .checked_add(super::finite_memory::arc_requested_bytes::<
+            ActorApplicationOwner,
+        >()?)
 }
 
 #[cfg(test)]
@@ -265,7 +329,7 @@ mod tests {
         let actor =
             RollingControlActor::new(Instant::now(), "unpolled-actor-test", Arc::clone(&retired));
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
-        let input = OriginalRollingActorInput::new(actor, receiver);
+        let input = OriginalRollingActorInput::new(actor, receiver, None);
         drop(run_original_actor(None, Some(input)));
         assert!(retired.load(Ordering::Acquire));
         assert!(sender.is_closed());
@@ -308,5 +372,79 @@ mod tests {
             .join(Instant::now() + Duration::from_secs(2))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn snapshot_alias_retains_original_selector_without_retaining_sender() {
+        // Real actor/transport lifetime; no physical lease or native proof is
+        // minted by this portable fixture.
+        let control = RollingControlHandle::spawn("snapshot-owner-lifetime-fixture");
+        let weak = Arc::downgrade(&control.original_actor);
+        let mut original = control.original_actor_join();
+        let snapshot = control.snapshot().await.expect("live actor snapshot");
+        let alias = snapshot.clone();
+        drop(control);
+        original
+            .join(Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("snapshot retains no Sender and actor must finish");
+        drop(original);
+        assert!(
+            weak.upgrade().is_some(),
+            "original selector escaped its snapshot"
+        );
+        drop(snapshot);
+        assert!(
+            weak.upgrade().is_some(),
+            "deep alias lost its original owner"
+        );
+        drop(alias);
+        assert!(
+            weak.upgrade().is_none(),
+            "last payload retained an actor cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_alias_retains_original_selector_without_actor_cycle() {
+        // The actor stores plain decision Arcs. Only this outward alias owns
+        // a selector carrier; no native entry or physical receipt is involved.
+        let control = RollingControlHandle::spawn("decision-owner-lifetime-fixture");
+        let weak = Arc::downgrade(&control.original_actor);
+        let mut original = control.original_actor_join();
+        assert!(
+            control
+                .install_producer_decision_for_test(ProducerDecision::Fail {
+                    decision_sequence: 1,
+                    failed_attempt: 0,
+                    reason: ProducerDecisionReason::Unsupported,
+                    proposal: None,
+                    cleanup: ProducerFailureCleanup {
+                        kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                        cleanup_policy: CleanupPolicy::DiscardPrepublication,
+                    },
+                })
+                .await
+        );
+        let decision = control
+            .poll_producer_decision(0)
+            .await
+            .expect("live decision transport");
+        assert!(matches!(decision, ProducerDecisionPoll::Decision(_)));
+        let alias = decision.clone();
+        drop(control);
+        original
+            .join(Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("decision alias retains no Sender");
+        drop(original);
+        assert!(weak.upgrade().is_some());
+        drop(decision);
+        assert!(weak.upgrade().is_some());
+        drop(alias);
+        assert!(
+            weak.upgrade().is_none(),
+            "actor-retained decision formed a cycle"
+        );
     }
 }

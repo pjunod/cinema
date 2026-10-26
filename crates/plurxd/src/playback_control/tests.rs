@@ -13913,7 +13913,7 @@ fn incomplete_exit_evidence_fails_once_without_waiting_for_the_deadline() {
     ));
     assert_eq!(
         actor.poll_producer_decision_at(0),
-        ProducerDecisionPoll::Decision(retained)
+        ProducerDecisionPoll::Decision(retained.into())
     );
 }
 
@@ -14100,6 +14100,7 @@ async fn accepted_segment_eof_projects_frontier_and_flow_before_reply() {
         high_segment: Arc::clone(&high_segment),
         fetched_end_ms: Arc::clone(&fetched_end_ms),
         flow_sync: Arc::clone(&flow_sync),
+        _lifetime: ActorPayloadLifetime::default(),
     };
     let (reply, response) = tokio::sync::oneshot::channel();
     actor
@@ -15037,11 +15038,11 @@ fn producer_decision_slot_is_immutable_redeliverable_and_bounded() {
     ));
     assert_eq!(
         actor.poll_producer_decision_at(0),
-        ProducerDecisionPoll::Decision(Arc::new(decision.clone()))
+        ProducerDecisionPoll::Decision(Arc::new(decision.clone()).into())
     );
     assert_eq!(
         actor.poll_producer_decision_at(6),
-        ProducerDecisionPoll::Decision(Arc::new(decision))
+        ProducerDecisionPoll::Decision(Arc::new(decision).into())
     );
     assert_eq!(
         actor.poll_producer_decision_at(7),
@@ -15162,11 +15163,13 @@ async fn decision_poll_replays_without_a_fake_application_acknowledgement() {
     );
     assert_eq!(
         handle.poll_producer_decision(0).await,
-        Ok(ProducerDecisionPoll::Decision(Arc::new(decision.clone())))
+        Ok(ProducerDecisionPoll::Decision(
+            Arc::new(decision.clone()).into()
+        ))
     );
     assert_eq!(
         handle.poll_producer_decision(0).await,
-        Ok(ProducerDecisionPoll::Decision(Arc::new(decision)))
+        Ok(ProducerDecisionPoll::Decision(Arc::new(decision).into()))
     );
     assert_eq!(
         handle.poll_producer_decision(4).await,
@@ -15240,7 +15243,7 @@ async fn cancelled_decision_poll_does_not_consume_the_actor_slot() {
 
     assert_eq!(
         handle.poll_producer_decision(0).await,
-        Ok(ProducerDecisionPoll::Decision(Arc::new(decision)))
+        Ok(ProducerDecisionPoll::Decision(Arc::new(decision).into()))
     );
 }
 
@@ -15321,7 +15324,7 @@ async fn unexpected_executor_exit_is_visible_while_the_actor_remains_live() {
     );
     assert_eq!(
         handle.poll_producer_decision(0).await,
-        Ok(ProducerDecisionPoll::Decision(Arc::new(decision)))
+        Ok(ProducerDecisionPoll::Decision(Arc::new(decision).into()))
     );
     assert_eq!(handle.executor_observation_for_test().0, "lost");
     assert_eq!(

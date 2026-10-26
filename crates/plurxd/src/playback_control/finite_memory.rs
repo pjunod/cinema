@@ -649,6 +649,7 @@ impl RollingLeaseSnapshot {
             terminal: _,
             expiration_claimed: _,
             producer_control,
+            _lifetime: _,
         } = self;
         add(
             demand

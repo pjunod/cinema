@@ -32,9 +32,10 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
             if shared.is_some() {
                 return;
             }
-            let handoff = crate::playback_control::TerminalResponseHandoff::new(Arc::clone(
-                &self.session.terminal_response_pending,
-            ));
+            let handoff = crate::playback_control::TerminalResponseHandoff::for_actor(
+                Arc::clone(&self.session.terminal_response_pending),
+                self.session.control.payload_lifetime(),
+            );
             *shared = Some(operation.clone());
             handoff
         };
