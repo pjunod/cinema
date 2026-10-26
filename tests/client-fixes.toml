@@ -7649,3 +7649,22 @@ source = "clients/linux-player/packaging/apply-series.sh"
 source_anchor = "echo \"apply-series: $dir/series and the directory disagree\" >&2"
 test = "clients/linux-player/tests/test_packaging.py"
 test_anchor = "def test_verification_never_lets_a_failed_check_fall_through_to_pass(self):"
+
+# PR #1291: the private libplacebo shares no symbol names with the system one libavfilter loads.
+[[fixes]]
+id = "claude.linux-player-libplacebo-renamed-and-hidden"
+commits = ["35326ed6892e214e3bba31444d16057356490d96"]
+source = "clients/linux-player/packaging/build-private.sh"
+source_anchor = 'objcopy --redefine-syms="$out/libplacebo.rename" "$archive"'
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_libplacebo_is_linked_in_renamed_and_hidden(self):"
+
+# PR #1291: CM v2.9 evaluates its output lattice once per frame (real time on an Intel Arc iGPU).
+[[fixes]]
+id = "claude.dv-dm-cm29-lattice-once-per-frame"
+commits = []
+supplements = "claude.linux-player-libplacebo-renamed-and-hidden"
+source = "tools/dv_processing/dv_dm.h"
+source_anchor = "static const char dv_dm_body_lattice[]"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_cm29_evaluates_its_lattice_once_per_frame(self):"

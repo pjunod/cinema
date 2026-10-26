@@ -30,6 +30,7 @@ clients/apple/build/
 clients/linux-player/build/
 clients/linux-player/libplacebo/
 clients/linux-player/mpv/
+clients/linux-player/dm/
 
 # perf-report writes its output into the working directory, and the server
 # checkouts are reset to the remote — an untracked report is the one thing in

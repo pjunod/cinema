@@ -29,7 +29,7 @@ def device_caps(build):
                    "ua": f"plurx-player/{build} (Linux; mpv)"[:160]},
         "video": [
             {"codec": "hevc", "profiles": ["main", "main10"], "max_height": 2160,
-             "present": list(PRESENT), "dv_profiles": [5, 8]},
+             "present": list(PRESENT), "dv_profiles": [5, 7, 8]},
             {"codec": "h264", "profiles": [], "present": list(PRESENT)},
             {"codec": "av1", "profiles": ["main"], "present": list(PRESENT)},
         ],

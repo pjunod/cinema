@@ -10,17 +10,18 @@
 # for prefix /usr/lib/plurx-player and staged under
 # build/stage/usr/lib/plurx-player.
 #
-# mpv is linked with DT_RPATH $ORIGIN/../lib (--disable-new-dtags), not
-# DT_RUNPATH: the loader searches DT_RPATH before LD_LIBRARY_PATH, so even
-# /usr/lib/plurx-player/bin/mpv started by hand with LD_LIBRARY_PATH pointing
-# at another libplacebo loads the private one. The system mpv has no rpath,
-# and the private directory is not in ld.so.conf, so it never sees the
-# private libplacebo.
-#
-# mpv finds the staged libplacebo through -L in LDFLAGS rather than through
-# the .pc file, so meson adds no build-directory rpath: no build path is left
-# in mpv's dynamic string table, and the binaries do not depend on where the
-# build ran.
+# libplacebo is built as a static library, its global symbols renamed
+# pl_* -> plurx_pl_*, and linked into mpv with its symbols hidden
+# (-Wl,--exclude-libs,ALL). The system FFmpeg's libavfilter loads the system
+# libplacebo (another major version) into the same process, and libplacebo's
+# symbols are unversioned: a private libplacebo.so would take over every
+# pl_* call libavfilter makes, with the other version's ABI. Renamed and
+# hidden, the private copy is reachable only from mpv and the system one
+# only from libavfilter (the linker refuses to hide a symbol a linked
+# library references, so hiding alone cannot work), and there is no private
+# shared object for LD_LIBRARY_PATH or the loader to swap. mpv sees the new
+# names through the staged libplacebo/config.h, which every libplacebo
+# header includes.
 #
 # Options follow Ubuntu 26.10's own builds where they matter for this player:
 # libplacebo with Vulkan, OpenGL, glslang (not shaderc), lcms2, xxhash and the
@@ -58,25 +59,75 @@ for name in libplacebo mpv; do
   "$player/packaging/apply-series.sh" "$src/$name" "$player/packaging/patches/$name" "${pinned[$name]}" "$epoch"
 done
 
+# The mpv series compiles against plurx's closed-form display management
+# (dm/, from tools/dv_processing) and the pinned libdovi C API header:
+# Ubuntu's libdovi-dev ships an empty rpu_parser.h, so only its library is used.
+headers=$src/mpv/video/out/placebo/plurx
+mkdir -p "$headers"
+for file in dm/dm_closed_form.h dm/dv_dm.h packaging/libdovi/rpu_parser.h; do
+  [ -f "$player/$file" ] || fail "$player/$file is missing"
+  cp "$player/$file" "$headers/"
+done
+
+# Without LTO: objcopy renames symbols in object code, not in LTO bytecode
+# (Ubuntu's build flags turn LTO on).
+CFLAGS="${CFLAGS:-} -fno-lto" CXXFLAGS="${CXXFLAGS:-} -fno-lto" LDFLAGS="${LDFLAGS:-} -fno-lto" \
 meson setup "$out/libplacebo" "$src/libplacebo" \
   --prefix="$prefix" --libdir=lib --buildtype=plain --wrap-mode=nodownload \
   -Dvulkan=enabled -Dopengl=enabled -Dglslang=enabled -Dshaderc=disabled \
   -Dlcms=enabled -Dxxhash=enabled -Ddovi=enabled -Dlibdovi=disabled \
-  -Dd3d11=disabled -Ddemos=false -Dtests="$tests" -Dbench=false -Dfuzz=false
+  -Dd3d11=disabled -Ddemos=false -Dtests="$tests" -Dbench=false -Dfuzz=false \
+  -Ddefault_library=static
 ninja -C "$out/libplacebo" -j "$jobs"
 DESTDIR="$stage" meson install -C "$out/libplacebo" --no-rebuild --quiet
 
-# The staged .pc, with its prefix moved into the stage and without -L (see
-# above). The system libplacebo-dev is not installed in the build container,
-# and the check below fails the build if pkg-config found anything else.
+archive=$stage$prefix/lib/libplacebo.a
+config_h=$stage$prefix/include/libplacebo/config.h
+[ -f "$archive" ] && ! ls "$stage$prefix"/lib/libplacebo.so* 2> /dev/null \
+  || fail "libplacebo was not built as a static library only"
+nm -g --defined-only "$archive" | awk 'NF == 3 && $3 ~ /^pl_/ { print $3 }' | LC_ALL=C sort -u > "$out/libplacebo.symbols"
+[ -s "$out/libplacebo.symbols" ] || fail "libplacebo.a defines no pl_ symbol"
+macros=$(grep -rhE '^[[:space:]]*#[[:space:]]*define[[:space:]]+pl_' "$stage$prefix/include/libplacebo" \
+  | sed -E 's/^[[:space:]]*#[[:space:]]*define[[:space:]]+(pl_[A-Za-z0-9_]+).*/\1/' | LC_ALL=C sort -u)
+clash=$(LC_ALL=C comm -12 <(echo "$macros") "$out/libplacebo.symbols")
+[ -z "$clash" ] || fail "libplacebo headers define macros named like its symbols: $clash"
+awk '{ print $1, "plurx_" $1 }' "$out/libplacebo.symbols" > "$out/libplacebo.rename"
+objcopy --redefine-syms="$out/libplacebo.rename" "$archive"
+left=$(nm -g --defined-only "$archive" | awk 'NF == 3 && $3 ~ /^pl_/ { print $3 }' | head -n 3)
+[ -z "$left" ] || fail "libplacebo.a still defines pl_ symbols: $left"
+lto=$(nm "$archive" 2> /dev/null | grep -c __gnu_lto || true)
+[ "$lto" = 0 ] || fail "libplacebo.a carries LTO bytecode, which objcopy cannot rename"
+# First in config.h, before its own declarations (pl_version).
+{
+  echo "/* plurx-player: this private libplacebo's global symbols are renamed"
+  echo "   pl_* -> plurx_pl_* (packaging/build-private.sh). */"
+  echo "#ifndef PLURX_LIBPLACEBO_RENAMED"
+  echo "#define PLURX_LIBPLACEBO_RENAMED"
+  awk '{ print "#define", $1, "plurx_" $1 }' "$out/libplacebo.symbols"
+  echo "#endif"
+  echo
+  cat "$config_h"
+} > "$out/config.h"
+mv "$out/config.h" "$config_h"
+
+# The staged .pc, with its prefix moved into the stage and the archive named
+# by path instead of -L/-l (so meson adds no build-directory rpath). A
+# static-only meson build already lists glslang, SPIRV-Tools and the rest in
+# Libs and Requires (the build fails if that ever changes), but not the C++
+# runtime glslang needs, which is added. The system
+# libplacebo-dev is not installed in the build container, and the check
+# below fails the build if pkg-config found anything else.
 mkdir -p "$out/pkgconfig"
-sed -e "s|^prefix=.*|prefix=$stage$prefix|" -e 's|-L\${libdir} *||' \
-  "$stage$prefix/lib/pkgconfig/libplacebo.pc" > "$out/pkgconfig/libplacebo.pc"
+pc=$stage$prefix/lib/pkgconfig/libplacebo.pc
+! grep -q -E '^(Libs|Requires)\.private:' "$pc" || fail "libplacebo.pc has private dependencies a static link would miss"
+grep -q '^Libs: -L\${libdir} -lplacebo ' "$pc" || fail "libplacebo.pc Libs does not start with -L\${libdir} -lplacebo"
+sed -e "s|^prefix=.*|prefix=$stage$prefix|" -e 's|^Libs: -L\${libdir} -lplacebo |Libs: ${libdir}/libplacebo.a |' \
+  -e '/^Libs:/{/-lstdc++/!s/$/ -lstdc++/}' "$pc" > "$out/pkgconfig/libplacebo.pc"
 export PKG_CONFIG_PATH="$out/pkgconfig"
 [ "$(pkg-config --variable=libdir libplacebo)" = "$stage$prefix/lib" ] \
   || fail "pkg-config resolves libplacebo outside the stage"
 
-LDFLAGS="${LDFLAGS:-} -L$stage$prefix/lib -Wl,--disable-new-dtags -Wl,-rpath,\$ORIGIN/../lib" \
+LDFLAGS="${LDFLAGS:-} -Wl,--exclude-libs,ALL" \
 meson setup "$out/mpv" "$src/mpv" \
   --prefix="$prefix" --libdir=lib --buildtype=plain --wrap-mode=nodownload \
   -Dgpl=true -Dcplayer=true -Dlibmpv=false -Dbuild-date=false -Dtests=false -Dfuzzers=false \
@@ -97,20 +148,14 @@ ninja -C "$out/mpv" -j "$jobs"
 DESTDIR="$stage" meson install -C "$out/mpv" --no-rebuild --quiet
 
 mpv=$stage$prefix/bin/mpv
-soname=$(readelf -d "$stage$prefix/lib/libplacebo.so" | sed -n 's/.*(SONAME).*\[\(.*\)\]$/\1/p')
-lib=$stage$prefix/lib/$soname
 mpv_dynamic=$(readelf -d "$mpv")
-lib_dynamic=$(readelf -d "$lib")
-rpath=$(sed -n 's/.*(RPATH).*\[\(.*\)\]$/\1/p' <<< "$mpv_dynamic")
-[ "$rpath" = '$ORIGIN/../lib' ] || fail "mpv DT_RPATH is '$rpath', want \$ORIGIN/../lib"
-! grep -q '(RUNPATH)' <<< "$mpv_dynamic" || fail "mpv has a DT_RUNPATH, which LD_LIBRARY_PATH would beat"
-grep -q "(NEEDED).*\[$soname\]" <<< "$mpv_dynamic" || fail "mpv does not need $soname"
-! grep -q -E '\((RPATH|RUNPATH)\)' <<< "$lib_dynamic" || fail "the private libplacebo has an rpath"
-for binary in "$mpv" "$lib"; do
-  ! grep -a -q -F "$player" "$binary" || fail "$binary contains the build path $player"
-done
-resolved=$(LD_LIBRARY_PATH=/nonexistent ldd "$mpv" | awk -v so="$soname" '$1 == so {print $3}')
-[ "$(realpath "$resolved")" = "$(realpath "$lib")" ] || fail "staged mpv resolves $soname to $resolved"
+! grep -q '(NEEDED).*\[libplacebo' <<< "$mpv_dynamic" || fail "mpv needs a shared libplacebo"
+! grep -q -E '\((RPATH|RUNPATH)\)' <<< "$mpv_dynamic" || fail "mpv has an rpath"
+exported=$(nm -D --defined-only "$mpv" | awk '$3 ~ /^(plurx_)?pl_/' | head -n 3)
+[ -z "$exported" ] || fail "mpv exports libplacebo symbols: $exported"
+unrenamed=$(nm -D --undefined-only "$mpv" | awk '$2 ~ /^pl_/' | head -n 3)
+[ -z "$unrenamed" ] || fail "mpv would call the system libplacebo: $unrenamed"
+! grep -a -q -F "$player" "$mpv" || fail "$mpv contains the build path $player"
 
 builtusing=$(dpkg-query -W -f '${source:Package} ${source:Version}\n' glslang-dev spirv-tools-dev)
 {
@@ -124,8 +169,12 @@ builtusing=$(dpkg-query -W -f '${source:Package} ${source:Version}\n' glslang-de
     echo "  git describe: $(git -C "$src/$name" describe --tags)"
     git -C "$src/$name" log --reverse --format='  patch: %s' "v$ver-plurx..HEAD"
   done < "$lock"
+  echo "closed-form display management (compiled into mpv):"
+  for file in dm/dm_closed_form.h dm/dv_dm.h packaging/libdovi/rpu_parser.h; do
+    echo "  $(basename "$file") sha256 $(sha256sum < "$player/$file" | cut -d' ' -f1)"
+  done
   echo
-  echo "Installed under $prefix: bin/mpv (DT_RPATH $rpath) and lib/$soname."
+  echo "Installed under $prefix: bin/mpv, with libplacebo linked in, its symbols renamed plurx_pl_* and hidden."
   echo "libplacebo statically embeds glslang and SPIRV-Tools from the build environment:"
   echo "$builtusing" | sed 's/^/  /'
   echo "(licences in copyright.glslang and copyright.spirv-tools beside this file)."

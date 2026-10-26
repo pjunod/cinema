@@ -1,4 +1,4 @@
-.TH PLURX-PLAYER 1 2026-10-25 "plurx-player 0.1.1" "User Commands"
+.TH PLURX-PLAYER 1 2026-10-26 "plurx-player 0.3.0" "User Commands"
 .SH NAME
 plurx-player \- play a plurx title handed over by the plurx web app
 .SH SYNOPSIS
@@ -87,6 +87,15 @@ mpv's built-in key bindings and on-screen controller work without it.
 The options the player needs for correct output, including
 .BR \-\-vo=gpu\-next ,
 are on mpv's command line and take precedence over this directory.
+Dolby Vision options that belong here:
+.B dv\-brightness=absolute
+maps for the panel's real luminance instead of the default
+.BR relative ,
+which follows the desktop's HDR brightness setting;
+.B dv\-cm4\-trims=no
+and
+.B dv\-cm29\-trims=no
+turn off each family's creative trims.
 .PP
 Both paths follow
 .B XDG_CONFIG_HOME

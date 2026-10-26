@@ -21,10 +21,16 @@ apt-get install -y -q --no-install-recommends curl dpkg-dev git
 rm -rf /build
 mkdir -p /build
 cp -a /repo/clients/linux-player "$player"
-rm -rf "$player/upstream" "$player/build" "$player/libplacebo" "$player/mpv" \
+rm -rf "$player/upstream" "$player/build" "$player/libplacebo" "$player/mpv" "$player/dm" \
        "$player/debian/plurx-player" "$player/debian/.debhelper" "$player/debian/files"
 find "$player" -name __pycache__ -prune -exec rm -rf {} +
 chmod -R u+rwX,go+rX,go-w "$player"
+
+# plurx's closed-form display management, the same files the server's
+# processing helper compiles; they travel in the launcher orig tarball, so
+# the source package rebuilds without the plurx tree.
+mkdir -p "$player/dm"
+cp /repo/tools/dv_processing/dm_closed_form.h /repo/tools/dv_processing/dv_dm.h "$player/dm/"
 
 "$player/packaging/fetch-sources.sh" "$player"
 apt-get build-dep -y -q --no-install-recommends "$player"

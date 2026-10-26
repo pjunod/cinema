@@ -4,6 +4,7 @@ the package version expect it."""
 
 import configparser
 import glob
+import hashlib
 import os
 import re
 import shutil
@@ -84,7 +85,14 @@ class PrivateBuild(unittest.TestCase):
         for name, (version, sha256, url) in rows.items():
             self.assertRegex(sha256, r"^[0-9a-f]{64}$", name)
             self.assertTrue(url.startswith("https://"), url)
-            self.assertIn(version, url, name)
+            if "+git" in version:
+                # A commit pin: <release>+git<date>.<short commit>, and the URL
+                # names the full commit.
+                short = version.rsplit(".", 1)[1]
+                commit = re.search(r"/([0-9a-f]{40})\.tar\.gz$", url)
+                self.assertTrue(commit and commit.group(1).startswith(short), (name, version, url))
+            else:
+                self.assertIn(version, url, name)
 
     def test_the_build_environment_is_a_pinned_apt_snapshot(self):
         rows = [line.split() for line in read("packaging/upstream.lock").splitlines()
@@ -138,6 +146,109 @@ class PrivateBuild(unittest.TestCase):
         self.assertNotIn("Recommends: mpv", control)
         self.assertIn("Recommends: desktop-file-utils, mesa-vulkan-drivers | vulkan-icd", control)
         self.assertIn("Built-Using: ${plurx:Built-Using}", control)
+
+    def test_libplacebo_is_linked_in_renamed_and_hidden(self):
+        # The system FFmpeg's libavfilter loads the system libplacebo into
+        # mpv's process; libplacebo's symbols are unversioned, so the private
+        # copy must neither be a shared object nor share its symbol names.
+        build = read("packaging/build-private.sh")
+        self.assertIn("-Ddefault_library=static", build)
+        self.assertIn('CFLAGS="${CFLAGS:-} -fno-lto"', build)   # objcopy cannot rename LTO bytecode
+        self.assertIn('objcopy --redefine-syms="$out/libplacebo.rename" "$archive"', build)
+        self.assertIn("-Wl,--exclude-libs,ALL", build)
+        self.assertIn("nm -D --undefined-only", build)          # mpv imports no pl_* symbol
+        self.assertIn("mpv exports libplacebo symbols", build)
+        self.assertNotIn("-Wl,-rpath", build)
+        rules = read("debian/rules")
+        self.assertNotIn("libplacebo.so", rules)
+        self.assertNotIn("$(PRIVATE)/lib", rules)
+        verify = read("packaging/verify-in-container.sh")
+        self.assertIn("mpv would call the system libplacebo", verify)
+        self.assertIn("the package installs a private library directory", verify)
+
+
+# The libdovi C API header plurx's processing helper pins
+# (tools/dv_quality/backends/parsed-rpu/fetch_parser.py).
+LIBDOVI_HEADER_SHA256 = "77e130d174a285ec4d141a88245f12b068606174a745f39f7aca54a2c1439f82"
+
+DM_HEADERS = ("dm_closed_form.h", "dv_dm.h")
+
+
+def read_dm(header):
+    tools = os.path.join(ROOT, "..", "..", "tools", "dv_processing")
+    base = tools if os.path.isdir(tools) else os.path.join(ROOT, "dm")
+    with open(os.path.join(base, header), encoding="utf-8") as handle:
+        return handle.read()
+
+
+class ClosedFormMapping(unittest.TestCase):
+    """mpv compiles plurx's own display management, not a copy of it."""
+
+    def test_the_mpv_series_maps_dolby_vision_with_plurx_headers(self):
+        series = read("packaging/patches/mpv/series")
+        patch = "0003-vo_gpu_next-map-Dolby-Vision-with-plurx-s-closed-for.patch"
+        self.assertIn(patch, series)
+        text = read(f"packaging/patches/mpv/{patch}")
+        self.assertIn('#include "plurx/dv_dm.h"', text)
+        self.assertIn('#include "plurx/rpu_parser.h"', text)
+        self.assertIn("plurx mapper: %s", text)
+        # The equations are never carried in the patch itself.
+        self.assertNotIn("+++ b/video/out/placebo/plurx/", text)
+
+    def test_the_build_installs_the_headers_the_patch_includes(self):
+        build = read("packaging/build-private.sh")
+        for file in ("dm/dm_closed_form.h", "dm/dv_dm.h", "packaging/libdovi/rpu_parser.h"):
+            self.assertIn(file, build)
+        self.assertIn("video/out/placebo/plurx", build)
+        container = read("packaging/build-in-container.sh")
+        for header in DM_HEADERS:
+            self.assertIn(f"/repo/tools/dv_processing/{header}", container)
+            self.assertIn(header, read("packaging/fetch-sources.sh"))
+
+    def test_the_display_management_headers_exist(self):
+        # In the plurx tree they are tools/dv_processing's; in the unpacked
+        # source package, the dm/ copies build-in-container.sh made.
+        tools = os.path.join(ROOT, "..", "..", "tools", "dv_processing")
+        for header in DM_HEADERS:
+            self.assertTrue(os.path.isfile(os.path.join(tools, header)) or
+                            os.path.isfile(os.path.join(ROOT, "dm", header)), header)
+
+    def test_the_libdovi_header_is_the_pinned_one(self):
+        with open(os.path.join(ROOT, "packaging/libdovi/rpu_parser.h"), "rb") as handle:
+            self.assertEqual(hashlib.sha256(handle.read()).hexdigest(), LIBDOVI_HEADER_SHA256)
+        helper = os.path.join(ROOT, "..", "..", "tools/dv_quality/backends/parsed-rpu/fetch_parser.py")
+        if os.path.isfile(helper):
+            with open(helper, encoding="utf-8") as handle:
+                self.assertIn(LIBDOVI_HEADER_SHA256, handle.read())
+        self.assertIn("libdovi-dev", read("debian/control"))
+        # The header's struct layouts are proven against libdovi3 3.3.
+        self.assertIn("libdovi3 (<< 3.4~)", read("debian/control"))
+
+    def test_the_changelog_names_the_equations_it_ships(self):
+        # dm/ is copied from tools/dv_processing at build time, so a change to
+        # the equations must come with a new package version: the newest
+        # changelog entry records their hash.
+        tools = os.path.join(ROOT, "..", "..", "tools", "dv_processing")
+        base = tools if os.path.isdir(tools) else os.path.join(ROOT, "dm")
+        digest = hashlib.sha256()
+        for header in DM_HEADERS:
+            with open(os.path.join(base, header), "rb") as handle:
+                digest.update(handle.read())
+        newest = read("debian/changelog").split("\n -- ", 1)[0]
+        self.assertIn(f"dm {digest.hexdigest()[:12]}", newest)
+
+    def test_cm29_evaluates_its_lattice_once_per_frame(self):
+        # One 4K CM v2.9 frame cost 34 ms on an Intel Arc iGPU when the final
+        # pass evaluated eight lattice vertices per pixel inside a shader that
+        # also held CM v4.0; the frame's lattice is now a table, and each
+        # method's passes are their own shaders.
+        dm = read_dm("dv_dm.h")
+        self.assertIn("static const char dv_dm_body_lattice[]", dm)
+        self.assertIn("acc+=c29corner(lat,origin,step,base+b)", dm)
+        self.assertNotIn("acc+=c29vertex(", dm)
+        for body in ("point_cm4", "point_cm29", "final_cm4", "final_cm29"):
+            self.assertIn(f"static const char dv_dm_body_{body}[]", dm)
+        self.assertNotIn("u[18].x<10.0", dm)   # no runtime switch between methods
 
 
 GIT_AM_PATCH = """From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001

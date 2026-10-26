@@ -10,8 +10,12 @@
 //   1. pointwise mapping -> intensity differences D (what the tone curve removed)
 //   2. horizontal Gaussian / derivative-of-Gaussian of D
 //   3. vertical pass, detail stage, colour finish and target-gamut clip -> BT.2020/PQ RGB.
+// CM v2.9 also evaluates its 65x33x33 output lattice once per frame (dv_dm_body_lattice) for the
+// vertices pixels reach most, instead of eight vertex evaluations per pixel; the vertices are the
+// same float32 computation, so the result is the same.
 #ifndef PLURX_DV_DM_H
 #define PLURX_DV_DM_H
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <libplacebo/shaders/custom.h>
@@ -245,7 +249,13 @@ static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w
 }
 
 // ------------------------------------------------------------------ GLSL
+// The lattice's intensity axis: vertices 0..64 plus one past the top for a clipped Io.
+enum { DV_DM_LATTICE_X = 66 };
+// Chroma reach the table covers (IPT P/T); vertices beyond it are evaluated per pixel.
+#define DV_DM_LATTICE_CHROMA 0.6
+#define DV_DM_LATTICE_MAX_R 120
 static const char dv_dm_glsl_common[] =
+  "#define DV_DM_LATTICE_X 66.0\n"
   "const mat3 R2L_T = mat3(vec3(0.412109375,0.5239257812,0.06396484375), vec3(0.1667480469,0.7204589844,0.1127929688), vec3(0.02416992188,0.07543945312,0.900390625));\n"
   "const mat3 L2R_T = mat3(vec3(3.436606694,-2.506452119,0.06984542432), vec3(-0.7913295556,1.983600452,-0.1922708962), vec3(-0.02594989969,-0.09891371471,1.124863614));\n"
   "const mat3 L2I_T = mat3(vec3(0.5,0.5,0.0), vec3(1.613769531,-3.323486328,1.709716797), vec3(4.378173828,-4.245605469,-0.1325683594));\n"
@@ -313,7 +323,14 @@ static const char dv_dm_glsl_common[] =
   " vec3 lin=mrow(u[7],u[8],u[9],pq_eotf3(lmsp));\n"
   " vec3 lt=clamp(mrow(u[11],u[12],u[13],lin),vec3(u[1].z),vec3(u[1].w));\n"
   " return u[3].w>0.5 ? (pow(lt,vec3(1.0/2.4))-vec3(u[10].y))/u[10].z : pq_oetf3(lt); }\n"
-  "vec3 c29finish(vec3 p, float Ib, float Io){\n"
+  "// Lattice vertex idx (integer-valued; x 0..64, y/z centred on 0): the per-frame table when idx is\n"
+  "// inside it (u[18].z: its chroma offset R, u[18].w: its chroma size), otherwise evaluated here.\n"
+  "vec3 c29corner(sampler2D lat, vec3 origin, vec3 step, vec3 idx){\n"
+  " float R=u[18].z, nc=u[18].w;\n"
+  " if(idx.x>=0.0&&idx.x<DV_DM_LATTICE_X&&idx.y>=-R&&idx.y<nc-R&&idx.z>=-R&&idx.z<nc-R)\n"
+  "  return texelFetch(lat,ivec2(int(idx.x)+int(DV_DM_LATTICE_X)*int(idx.y+R),int(idx.z+R)),0).rgb;\n"
+  " return c29vertex(origin+idx*step); }\n"
+  "vec3 c29finish(sampler2D lat, vec3 p, float Ib, float Io){\n"
   " Ib=max(Ib,0.0); Io=max(Io,0.0); float Ii=max(p.x,1e-6);\n"
   " float sc=clamp((Ib/Ii)*(2.0+Ii)/(2.0+Ib),0.5,2.0)*(1.0+0.5*u[3].x);\n"
   " vec3 q=vec3(Io,p.y*sc,p.z*sc), origin=vec3(u[10].x,0.0,0.0);\n"
@@ -322,7 +339,7 @@ static const char dv_dm_glsl_common[] =
   " for(int bits=0;bits<8;bits++){\n"
   "  vec3 b=vec3(float(bits&1),float((bits>>1)&1),float((bits>>2)&1));\n"
   "  vec3 w=mix(vec3(1.0)-f,f,b);\n"
-  "  acc+=c29vertex(origin+(base+b)*step)*(w.x*w.y*w.z); }\n"
+  "  acc+=c29corner(lat,origin,step,base+b)*(w.x*w.y*w.z); }\n"
   " vec3 lt=u[3].w>0.5 ? pow(acc*u[19].y+vec3(u[19].x),vec3(2.4)) : pq_eotf3(acc);\n"
   " vec3 lin=mrow(u[14],u[15],u[16],lt);\n"
   " return max(pq_oetf3(clamp(lin,0.0,u[1].w)),vec3(u[3].z)); }\n"
@@ -330,33 +347,47 @@ static const char dv_dm_glsl_common[] =
   "const float GX[11]=float[11](0.008812229293,0.02714357714,0.0651140566,0.121649073,0.1769983568,0.2005654142,0.1769983568,0.121649073,0.0651140566,0.02714357714,0.008812229293);\n"
   "const float GY[5]=float[5](0.05448868455,0.244201342,0.4026199469,0.244201342,0.05448868455);\n";
 
-static const char dv_dm_body_point[] =   // pass 1: D (x: base/intensity, y: chroma-weighted for CM2.9)
+// Each method's passes are separate shaders: one shader holding both methods' code spills
+// registers on some GPUs (Intel Arc), which slows both.
+static const char dv_dm_body_point_cm4[] =   // pass 1: D (x: base/intensity)
   "vec3 rgb=texelFetch(master,ivec2(gl_FragCoord.xy),0).rgb;\n"
-  "if(u[18].x<10.0){ vec3 ic=ictcp(rgb); vec3 o=c4point(rgb); color=vec4(ic.x-o.x,0.0,0.0,1.0); }\n"
-  "else { vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); color=vec4(I-b.x,I-b.y,0.0,1.0); }\n";
+  "vec3 ic=ictcp(rgb); vec3 o=c4point(rgb); color=vec4(ic.x-o.x,0.0,0.0,1.0);\n";
+static const char dv_dm_body_point_cm29[] =  // pass 1: D (x: base/intensity, y: chroma-weighted)
+  "vec3 rgb=texelFetch(master,ivec2(gl_FragCoord.xy),0).rgb;\n"
+  "vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); color=vec4(I-b.x,I-b.y,0.0,1.0);\n";
+static const char dv_dm_body_lattice[] = // CM2.9 pass 0: the frame's output lattice
+  "ivec2 q=ivec2(gl_FragCoord.xy); int X=int(DV_DM_LATTICE_X), R=int(u[18].z);\n"
+  "vec3 idx=vec3(float(q.x%X),float(q.x/X-R),float(q.y-R));\n"
+  "vec3 origin=vec3(u[10].x,0.0,0.0), step=vec3(u[1].y/64.0,u[1].y/32.0,u[1].y/32.0);\n"
+  "color=vec4(c29vertex(origin+idx*step),1.0);\n";
 static const char dv_dm_body_h[] =       // pass 2: horizontal Gaussian and derivative
   "ivec2 q=ivec2(gl_FragCoord.xy); int w=textureSize(dpass,0).x; vec4 acc=vec4(0.0);\n"
   "for(int j=-5;j<=5;j++){ int x=clamp(q.x-j,0,w-1); vec2 d=texelFetch(dpass,ivec2(x,q.y),0).xy; float g=GX[j+5], dg=-float(j)/4.0*g;\n"
   " acc+=vec4(g*d.x,dg*d.x,g*d.y,dg*d.y); }\n"
   "color=acc;\n";
-static const char dv_dm_body_final[] =   // pass 3: vertical, detail, finish
+static const char dv_dm_body_final_cm4[] =   // pass 3: vertical, detail, finish
   "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
   "float B1=0.0,dx1=0.0,dy1=0.0,B2=0.0,dx2=0.0,dy2=0.0;\n"
   "if(wgt>-1.0){ int h=textureSize(hpass,0).y;\n"
   " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,0,h-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
   "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; B2+=g*t.z; dx2+=g*t.w; dy2+=dg*t.z; } }\n"
-  "if(u[18].x<10.0){\n"
   " vec3 ic=ictcp(rgb); vec3 o=c4point(rgb);\n"
   " if(wgt>-1.0){ float D=ic.x-o.x; float r=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); o.x=o.x+r*(D-B1); }\n"
   " vec3 res=c4finish(o); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
-  "} else {\n"
+  ;
+static const char dv_dm_body_final_cm29[] =  // pass 3: vertical, detail, finish
+  "ivec2 q=ivec2(gl_FragCoord.xy); vec3 rgb=texelFetch(master,q,0).rgb; float wgt=u[18].y;\n"
+  "float B1=0.0,dx1=0.0,dy1=0.0,B2=0.0,dx2=0.0,dy2=0.0;\n"
+  "if(wgt>-1.0){ int h=textureSize(hpass,0).y;\n"
+  " for(int j=-2;j<=2;j++){ int y=clamp(q.y-j,0,h-1); vec4 t=texelFetch(hpass,ivec2(q.x,y),0); float g=GY[j+2], dg=-float(j)*g;\n"
+  "  B1+=g*t.x; dx1+=g*t.y; dy1+=dg*t.x; B2+=g*t.z; dx2+=g*t.w; dy2+=dg*t.z; } }\n"
   " vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); float Ib=b.x, Io=b.y;\n"
   " if(wgt>-1.0){ float r1=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); Ib=Ib+r1*((I-b.x)-B1);\n"
   "  if(u[17].y>0.5){ float r2=clamp(1.0+wgt-4.0*(4.0*abs(dx2)+abs(dy2)),0.0,1.0); Io=Io+r2*((I-b.y)-B2); } else Io=Ib; }\n"
-  " vec3 res=c29finish(p,Ib,Io); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
-  "}\n";
+  " vec3 res=c29finish(lpass,p,Ib,Io); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
+  ;
 
-static struct { pl_dispatch dispatch; pl_tex dtex, htex, out; } dv_dm_gpu;
+static struct { pl_dispatch dispatch; pl_tex dtex, htex, ltex, out; } dv_dm_gpu;
 
 static inline pl_tex dv_dm_tex(pl_gpu gpu, pl_tex *t, int w, int h) {
   if (*t && ((*t)->params.w != w || (*t)->params.h != h)) pl_tex_destroy(gpu, t);
@@ -369,19 +400,22 @@ static inline pl_tex dv_dm_tex(pl_gpu gpu, pl_tex *t, int w, int h) {
   return *t;
 }
 static inline bool dv_dm_pass(pl_shader sh, const char *desc, const char *body, pl_tex in, const char *in_name,
-                              pl_tex in2, const char *in2_name, float (*u)[4], int w, int h) {
-  struct pl_shader_desc d[2] = {
+                              pl_tex in2, const char *in2_name, pl_tex in3, const char *in3_name,
+                              float (*u)[4], int w, int h) {
+  struct pl_shader_desc d[3] = {
     {.desc = {.name = in_name, .type = PL_DESC_SAMPLED_TEX},
      .binding = {.object = in, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}},
     {.desc = {.name = in2_name, .type = PL_DESC_SAMPLED_TEX},
      .binding = {.object = in2, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}},
+    {.desc = {.name = in3_name, .type = PL_DESC_SAMPLED_TEX},
+     .binding = {.object = in3, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}},
   };
   struct pl_var var = pl_var_vec4("u"); var.dim_a = DV_DM_U;
   struct pl_shader_var v = {.var = var, .data = u, .dynamic = true};
   return pl_shader_custom(sh, &(struct pl_custom_shader){
       .description = desc, .header = dv_dm_glsl_common, .body = body,
       .input = PL_SHADER_SIG_NONE, .output = PL_SHADER_SIG_COLOR,
-      .descriptors = d, .num_descriptors = in2 ? 2 : 1, .variables = &v, .num_variables = 1,
+      .descriptors = d, .num_descriptors = in3 ? 3 : in2 ? 2 : 1, .variables = &v, .num_variables = 1,
       .output_w = w, .output_h = h});
 }
 
@@ -391,24 +425,40 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
   if (!dv_dm_gpu.dispatch) dv_dm_gpu.dispatch = pl_dispatch_create(log, gpu);
   if (!dv_dm_gpu.dispatch || !dv_dm_tex(gpu, &dv_dm_gpu.dtex, w, h) || !dv_dm_tex(gpu, &dv_dm_gpu.htex, w, h) ||
       !dv_dm_tex(gpu, &dv_dm_gpu.out, w, h)) return NULL;
-  dv_dm_put(f->u[18], f->algo == 4 ? 4 : 29, f->weight, 0, 0);
   const char *desc = f->algo == 4 ? DV_DM_METHOD_CM4 : DV_DM_METHOD_CM29;
   pl_shader sh;
+  pl_tex lattice = NULL;   // CM v2.9 only
+  if (f->algo == 4) {
+    dv_dm_put(f->u[18], 4, f->weight, 0, 0);
+  } else {
+    // The same step the shader computes; R chroma steps each side of zero cover DV_DM_LATTICE_CHROMA.
+    float step = f->u[1][1] / 32.0f;
+    int r = step > 0 ? (int)ceil(DV_DM_LATTICE_CHROMA / step) : 0;
+    if (r > DV_DM_LATTICE_MAX_R) r = DV_DM_LATTICE_MAX_R;
+    int nc = 2 * r + 2;
+    dv_dm_put(f->u[18], 29, f->weight, r, nc);
+    if (!(lattice = dv_dm_tex(gpu, &dv_dm_gpu.ltex, DV_DM_LATTICE_X * nc, nc))) return NULL;
+    sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
+    if (!dv_dm_pass(sh, desc, dv_dm_body_lattice, source, "master", NULL, "unused", NULL, "unused2", f->u,
+                    DV_DM_LATTICE_X * nc, nc) ||
+        !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = lattice))) return NULL;
+  }
   if (f->weight > -1.0) {
     sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-    if (!dv_dm_pass(sh, desc, dv_dm_body_point, source, "master", NULL, "unused", f->u, w, h) ||
+    if (!dv_dm_pass(sh, desc, f->algo == 4 ? dv_dm_body_point_cm4 : dv_dm_body_point_cm29, source, "master", NULL, "unused", NULL, "unused2", f->u, w, h) ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.dtex))) return NULL;
     sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-    if (!dv_dm_pass(sh, desc, dv_dm_body_h, dv_dm_gpu.dtex, "dpass", NULL, "unused", f->u, w, h) ||
+    if (!dv_dm_pass(sh, desc, dv_dm_body_h, dv_dm_gpu.dtex, "dpass", NULL, "unused", NULL, "unused2", f->u, w, h) ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.htex))) return NULL;
   }
   sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-  if (!dv_dm_pass(sh, desc, dv_dm_body_final, source, "master", dv_dm_gpu.htex, "hpass", f->u, w, h) ||
+  if (!dv_dm_pass(sh, desc, f->algo == 4 ? dv_dm_body_final_cm4 : dv_dm_body_final_cm29, source, "master", dv_dm_gpu.htex, "hpass", lattice, "lpass", f->u, w, h) ||
       !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = dv_dm_gpu.out))) return NULL;
   return dv_dm_gpu.out;
 }
 static inline void dv_dm_destroy(pl_gpu gpu) {
-  pl_tex_destroy(gpu, &dv_dm_gpu.dtex); pl_tex_destroy(gpu, &dv_dm_gpu.htex); pl_tex_destroy(gpu, &dv_dm_gpu.out);
+  pl_tex_destroy(gpu, &dv_dm_gpu.dtex); pl_tex_destroy(gpu, &dv_dm_gpu.htex); pl_tex_destroy(gpu, &dv_dm_gpu.ltex);
+  pl_tex_destroy(gpu, &dv_dm_gpu.out);
   pl_dispatch_destroy(&dv_dm_gpu.dispatch);
 }
 #endif

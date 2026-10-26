@@ -1,3 +1,40 @@
+plurx-player (0.3.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Profile 7 FEL titles play with their full enhancement layer, composed
+    on the laptop's GPU before the closed-form mapping: plurx sends the
+    original stream (the caps claim Dolby Vision profile 7), so nothing is
+    re-encoded.
+  * Private libplacebo 7.387.0 and mpv master e59d90c84 (2026-10-26),
+    the first with FEL composition, plus a split of the enhancement layer
+    that works with Ubuntu's FFmpeg 8.1, and no zero MaxCLL/MaxFALL in the
+    Wayland image description.
+  * dv-brightness=relative|absolute (mpv.conf): follow the desktop's HDR
+    brightness setting (default), or map for the panel's real luminance.
+  * libplacebo is linked into mpv statically, its symbols renamed
+    plurx_pl_* and hidden, because the system FFmpeg's libavfilter loads
+    the system libplacebo
+    (another major version) into the same process and a private shared
+    libplacebo would take over its unversioned pl_* calls.
+  * Closed-form equations: tools/dv_processing dm 193c40343ebf (sha256 of
+    dm_closed_form.h then dv_dm.h, first 12 hex digits). CM v2.9 evaluates
+    its output lattice once per frame, and each method's passes are their
+    own shaders: a 4K CM v2.9 frame's mapping takes 19 ms instead of 34 ms
+    on an Intel Arc iGPU.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 18:00:00 +0000
+
+plurx-player (0.2.0+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
+
+  * mpv maps Dolby Vision profile 5 and 8 with plurx's closed-form CM v4.0
+    and CM v2.9 display management (tools/dv_processing/dv_dm.h, the
+    server's own code), for the compositor's preferred luminance and the
+    largest named gamut inside the panel's primaries, and logs one
+    "plurx mapper:" line per configuration.
+  * Build-Depends on libdovi-dev for the RPU parser; its C API header is
+    the pinned copy in packaging/libdovi.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 12:00:00 +0000
+
 plurx-player (0.1.1+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
 
   * Launcher (milestone M4): redeem, decide, play in mpv, heartbeat,

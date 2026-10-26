@@ -25,6 +25,9 @@ epoch=$(dpkg-parsechangelog -l "$player/debian/changelog" -S Timestamp)
 upstream=${version%-*}
 [ "$upstream" != "$version" ] || fail "debian/changelog version $version has no Debian revision"
 
+for header in dm_closed_form.h dv_dm.h; do
+  [ -f "$player/dm/$header" ] || fail "$player/dm/$header is missing (build-in-container.sh copies it from tools/dv_processing)"
+done
 rm -rf "$player/libplacebo" "$player/mpv"
 tar -C "$parent" --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
   --mode=u+rwX,go+rX,go-w --format=gnu \

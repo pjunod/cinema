@@ -1,9 +1,11 @@
 # Pinned upstream sources for the private libplacebo and mpv in plurx-player.
 #
-# These are the versions Ubuntu 26.10 ships (libplacebo 7.360.1-1,
-# mpv 0.41.0-2ubuntu5). The tarballs are byte-for-byte upstream's; their
-# unpacked contents are identical to Ubuntu's libplacebo_7.360.1.orig.tar.gz
-# and mpv_0.41.0.orig.tar.gz (checked when they were pinned).
+# libplacebo 7.387.0 and an mpv master commit (2026-10-26), newer than the
+# 7.360.1 and 0.41.0 Ubuntu 26.10 ships, because Dolby Vision Profile 7 FEL
+# composition (pl_frame.enhancement_layer, API 367; mpv's enhancement-layer
+# pairing and dovi_split) is in no mpv release yet. An mpv commit pin's
+# version is <last release>+git<date>.<short commit>, and its URL names the
+# full commit. The tarballs are upstream's archives, checked by sha256.
 #
 # Changing a version here changes the package version too: the upstream part
 # of debian/changelog's version must end in +lp<libplacebo>.mpv<mpv>, and
@@ -16,5 +18,5 @@
 apt-snapshot 20261025T000000Z
 #
 # name      version  sha256                                                            url
-libplacebo  7.360.1  14c0a99f4b01557ec9826ce6b1d52f6de21be274ba03fd5aab7307f18766dc39  https://code.videolan.org/videolan/libplacebo/-/archive/v7.360.1/libplacebo-v7.360.1.tar.gz
-mpv         0.41.0   ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209  https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz
+libplacebo  7.387.0  3bf5d72786682c194387c33d563872f6bfe202a9816f9dde6535a31a9b2e0d74  https://code.videolan.org/videolan/libplacebo/-/archive/v7.387.0/libplacebo-v7.387.0.tar.gz
+mpv         0.41.0+git20261026.e59d90c  68941962a5ad84165c3ebde877a7e2e1acb77c79bf5b06c33abe3d1b24cad34a  https://github.com/mpv-player/mpv/archive/e59d90c843339fe3c22f6e3d032216bb50a06725.tar.gz

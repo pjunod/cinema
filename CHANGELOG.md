@@ -10,6 +10,15 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- plurx Player (Linux) maps Dolby Vision profile 5 and 8 itself, with the
+  server's closed-form CM v4.0 and CM v2.9 display management compiled into
+  its private mpv, for the compositor's reported luminance and the largest
+  standard gamut inside the panel's primaries. Each playback logs which
+  mapper ran and for what target. Profile 7 FEL titles play from the
+  original stream with their full enhancement layer composed on the laptop's
+  GPU, so nothing is re-encoded. Package 0.3.0 (libplacebo 7.387.0, linked
+  into mpv master e59d90c84).
+
 - Server playback handoff for the Linux player: a signed-in client mints a
   one-time code (`POST /api/v1/playback-handoffs`, single use, 120 s) that
   another local app redeems for a token limited to one title's decision, HLS
@@ -41,6 +50,13 @@ bump may break compatibility and a **patch** bump never does.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
 
 ### Changed
+
+- The closed-form CM v2.9 display management (`tools/dv_processing/dv_dm.h`)
+  evaluates its output lattice once per frame instead of eight vertices per
+  pixel, and CM v4.0 and CM v2.9 compile as separate shaders. The output is
+  the same (the shader parity controls pass unchanged); a 4K CM v2.9 frame
+  takes about 19 ms instead of 34 ms on an Intel Arc iGPU, and the server's
+  display-targeted renders spend less GPU time.
 
 - Reconstruct CM v2.9 near-black color from analytic IPT gamut interpolation
   and colorfulness compensation, replacing fitted target gain tables. Preserve
