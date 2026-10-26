@@ -506,6 +506,7 @@ impl NodeResourceRuntime {
             let native = match joined {
                 Ok(Ok(native)) => native,
                 Ok(Err(failure)) => {
+                    tracing::warn!(reason = ?failure.error.fallback_reason(), "original planning probe failed; retaining native owners for cleanup");
                     task.probe_failure = Some(failure);
                     task.unknown = true;
                     self.retain_planning_uncertainty(binding)?;

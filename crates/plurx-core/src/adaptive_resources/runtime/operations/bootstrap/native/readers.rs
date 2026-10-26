@@ -283,6 +283,10 @@ impl ReaderCell {
     }
     /// A joined original open result with its original child returned. An
     /// identity mismatch is terminal native uncertainty, not a rejected open.
+    #[expect(
+        dead_code,
+        reason = "Partial/mismatched reader cleanup selection remains unconnected; the original ReaderCell retains its File and uncertain close. Only close_fact can certify closure."
+    )]
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn open_native_terminal(
         &self,
     ) -> bool {
@@ -291,6 +295,10 @@ impl ReaderCell {
             && self.lent_directory.is_none()
             && !self.failed_join
     }
+    #[expect(
+        dead_code,
+        reason = "Partial/mismatched reader cleanup selection remains unconnected; the original ReaderCell retains its File and uncertain close. Only close_fact can certify closure."
+    )]
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn open_mismatched_file_held(
         &self,
     ) -> bool {
@@ -302,11 +310,19 @@ impl ReaderCell {
     }
     /// True after the one original close job joined; only close_fact() is a
     /// positive closure observation. A failed close with no File is unknown.
+    #[expect(
+        dead_code,
+        reason = "Partial/mismatched reader cleanup selection remains unconnected; the original ReaderCell retains its File and uncertain close. Only close_fact can certify closure."
+    )]
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn close_native_terminal(
         &self,
     ) -> bool {
         self.close_fact.is_some() && self.pending.is_none() && !self.failed_join
     }
+    #[expect(
+        dead_code,
+        reason = "Partial/mismatched reader cleanup selection remains unconnected; the original ReaderCell retains its File and uncertain close. Only close_fact can certify closure."
+    )]
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn close_unknown(
         &self,
     ) -> bool {

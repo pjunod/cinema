@@ -650,69 +650,6 @@ impl NodeResourceRuntime {
     }
 }
 
-#[cfg(test)]
-mod engine_check_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn cancelled_engine_check_waiter_keeps_original_registered_job() {
-        let (entered, entered_rx) = tokio::sync::oneshot::channel();
-        let (release, release_rx) = tokio::sync::oneshot::channel();
-        let mut pending = Some(tokio::task::spawn_blocking(move || {
-            let _ = entered.send(());
-            let _ = release_rx.blocking_recv();
-            EngineCheckOutcome::Current
-        }));
-        entered_rx.await.expect("registered worker entered");
-        let mut drifted = false;
-        let mut unknown = false;
-        tokio::select! {
-            result = join_engine_check_pending(&mut pending, &mut drifted, &mut unknown) => {
-                panic!("blocked original job completed early: {result:?}");
-            }
-            _ = tokio::task::yield_now() => {}
-        }
-        assert!(
-            pending.is_some(),
-            "cancelled waiter retains original JoinHandle"
-        );
-        release.send(()).expect("release original job");
-        join_engine_check_pending(&mut pending, &mut drifted, &mut unknown)
-            .await
-            .expect("original job positively joined");
-        assert!(pending.is_none());
-        assert!(!drifted && !unknown);
-    }
-
-    #[tokio::test]
-    async fn engine_check_unknown_and_panic_remain_sticky_after_join() {
-        for panic_job in [false, true] {
-            let mut pending = Some(tokio::task::spawn_blocking(move || {
-                if panic_job {
-                    panic!("native check lost its close result");
-                }
-                EngineCheckOutcome::Unknown
-            }));
-            let mut drifted = false;
-            let mut unknown = false;
-            assert!(
-                join_engine_check_pending(&mut pending, &mut drifted, &mut unknown)
-                    .await
-                    .is_err()
-            );
-            assert!(pending.is_none());
-            assert!(unknown);
-            assert!(!drifted);
-            assert!(
-                join_engine_check_pending(&mut pending, &mut drifted, &mut unknown)
-                    .await
-                    .is_err(),
-                "a later settlement cannot erase uncertainty"
-            );
-        }
-    }
-}
-
 pub(super) fn acknowledge_task(
     role: &mut OwnedRole,
     member: Uuid,
@@ -914,5 +851,68 @@ impl NodeResourceRuntime {
         };
         finite.completion = Some(completion);
         Ok(completion)
+    }
+}
+
+#[cfg(test)]
+mod engine_check_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_engine_check_waiter_keeps_original_registered_job() {
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let mut pending = Some(tokio::task::spawn_blocking(move || {
+            let _ = entered.send(());
+            let _ = release_rx.blocking_recv();
+            EngineCheckOutcome::Current
+        }));
+        entered_rx.await.expect("registered worker entered");
+        let mut drifted = false;
+        let mut unknown = false;
+        tokio::select! {
+            result = join_engine_check_pending(&mut pending, &mut drifted, &mut unknown) => {
+                panic!("blocked original job completed early: {result:?}");
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+        assert!(
+            pending.is_some(),
+            "cancelled waiter retains original JoinHandle"
+        );
+        release.send(()).expect("release original job");
+        join_engine_check_pending(&mut pending, &mut drifted, &mut unknown)
+            .await
+            .expect("original job positively joined");
+        assert!(pending.is_none());
+        assert!(!drifted && !unknown);
+    }
+
+    #[tokio::test]
+    async fn engine_check_unknown_and_panic_remain_sticky_after_join() {
+        for panic_job in [false, true] {
+            let mut pending = Some(tokio::task::spawn_blocking(move || {
+                if panic_job {
+                    panic!("native check lost its close result");
+                }
+                EngineCheckOutcome::Unknown
+            }));
+            let mut drifted = false;
+            let mut unknown = false;
+            assert!(
+                join_engine_check_pending(&mut pending, &mut drifted, &mut unknown)
+                    .await
+                    .is_err()
+            );
+            assert!(pending.is_none());
+            assert!(unknown);
+            assert!(!drifted);
+            assert!(
+                join_engine_check_pending(&mut pending, &mut drifted, &mut unknown)
+                    .await
+                    .is_err(),
+                "a later settlement cannot erase uncertainty"
+            );
+        }
     }
 }

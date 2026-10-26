@@ -180,12 +180,6 @@ impl FixedEngineNativeClosure {
     pub(in crate::adaptive_resources) fn dependency_identity(&self) -> ProcessIdentity {
         self.dependency_root.identity()
     }
-    pub(in crate::adaptive_resources) fn version_close_operation_id(&self) -> Uuid {
-        self.version_root.close_operation_id()
-    }
-    pub(in crate::adaptive_resources) fn dependency_close_operation_id(&self) -> Uuid {
-        self.dependency_root.close_operation_id()
-    }
     pub(in crate::adaptive_resources) fn used_file_slots(&self) -> usize {
         self.files.len()
     }

@@ -6,6 +6,13 @@ use super::*;
 /// Nonclone/nonserde fact retained by core, bound to one sealed graph. It cannot
 /// authorize a refund or be reconstructed from caller-supplied audit fields.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Original Windows Job whole-process proof is retained for the unconnected legacy live adapter; fixed Linux adapters use their own bound closures."
+    )
+)]
 pub(in crate::adaptive_resources) struct LiveProcessClosure {
     binding: ReservationBinding,
     generation: Uuid,
@@ -13,12 +20,26 @@ pub(in crate::adaptive_resources) struct LiveProcessClosure {
 }
 
 impl LiveProcessClosure {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+        )
+    )]
     pub(in crate::adaptive_resources) fn matches(&self, graph: &SealedPhysicalGraph) -> bool {
         self.binding == graph.custody.binding
             && self.generation == graph.custody.identity.generation
             && graph.custody.sealed.load(Ordering::Acquire)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+        )
+    )]
     pub(in crate::adaptive_resources) fn roots(&self) -> &[GraphRoot] {
         &self.roots
     }
@@ -39,6 +60,13 @@ impl SealedPhysicalGraph {
     /// Query once, under the sealed graph's member lock, after real root waits.
     /// Existing supervised cleanup can retry WouldBlock/error; there is no
     /// timeout release, busy loop, new watcher or replacement empty Job here.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+        )
+    )]
     pub(in crate::adaptive_resources) async fn try_live_process_closure(
         &self,
     ) -> io::Result<LiveProcessClosure> {

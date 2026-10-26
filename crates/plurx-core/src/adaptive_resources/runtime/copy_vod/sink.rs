@@ -186,9 +186,6 @@ impl CopySink {
     ) -> Arc<tokio::sync::Mutex<()>> {
         Arc::clone(&self.publication_gate)
     }
-    pub(in crate::adaptive_resources::runtime) fn playlist_capacity(&self) -> usize {
-        self.playlist_capacity
-    }
 
     async fn publish(&self, output: OutputKey, bytes: Vec<u8>) -> io::Result<()> {
         if bytes.is_empty() || bytes.len() > self.max_payload_bytes {
@@ -288,10 +285,6 @@ impl CopySink {
 }
 
 impl PreparedCopySink {
-    pub(in crate::adaptive_resources::runtime) fn playlist_capacity(&self) -> usize {
-        self.playlist_capacity
-    }
-
     pub(in crate::adaptive_resources::runtime) fn bind(
         self,
         runtime: Arc<NodeResourceRuntime>,

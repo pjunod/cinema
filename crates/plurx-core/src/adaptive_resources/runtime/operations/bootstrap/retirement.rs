@@ -67,6 +67,10 @@ struct CleanupIo {
     launched: bool,
     joined: bool,
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "CleanupIo retains the exact original native cell and journal IDs inline in BootstrapMember; retained_bootstrap_node_bytes includes that layout, while boxing would introduce another allocation."
+)]
 enum CleanupPending {
     Begin { operation: v2::Id },
     Io(CleanupIo),

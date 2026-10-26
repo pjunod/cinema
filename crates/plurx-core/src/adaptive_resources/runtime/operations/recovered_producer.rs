@@ -177,7 +177,9 @@ impl NodeResourceRuntime {
                 .recovered_r_domains
                 .lock()
                 .map_err(|_| OperationError::State)?;
-            if !domains.contains_key(&role.durable_tag) {
+            if let std::collections::btree_map::Entry::Vacant(slot) =
+                domains.entry(role.durable_tag)
+            {
                 let imported = imports
                     .remove(&role.durable_tag)
                     .ok_or(OperationError::State)?;
@@ -195,7 +197,7 @@ impl NodeResourceRuntime {
                         return Err(OperationError::State);
                     }
                 };
-                domains.insert(role.durable_tag, domain);
+                slot.insert(domain);
             }
         }
         // Validate both capabilities under their sole locks before native

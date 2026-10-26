@@ -4,9 +4,23 @@
 use super::*;
 use crate::resource_custody::{ClosedMemberFact, MemberKind, RecoveryMethod};
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Legacy graph-pipe journal identity remains for fixture-covered whole-graph adapter; current production recipes use typed fixed task ownership."
+    )
+)]
 pub(super) const LOCATOR: &str = "discard-root-pipes-v1";
 
 impl NodeResourceRuntime {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+        )
+    )]
     pub(crate) async fn spawn_pipe_drain(
         &self,
         owner: &OwnedPreparation,
@@ -116,6 +130,13 @@ impl NodeResourceRuntime {
 
     /// Existing supervision seals the complete role first. This closes only an
     /// audited pipe task; it does NOT mint or submit a physical receipt/refund.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+        )
+    )]
     pub(crate) async fn close_pipe_drain(
         &self,
         owner: &OwnedPreparation,
@@ -157,6 +178,13 @@ impl NodeResourceRuntime {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+    )
+)]
 fn seal_and_hold(
     journal: &CustodyJournal,
     role: &mut OwnedRole,

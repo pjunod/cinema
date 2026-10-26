@@ -72,6 +72,7 @@ pub(super) struct Operations {
 
 /// Data describing missing roles, in reserve_families' family/role order. The
 /// runtime supplies the ACTUAL graph generation and daemon identity itself.
+#[cfg(test)]
 pub(crate) struct GraphPlan {
     pub attempt_id: Option<Uuid>,
     pub members: Vec<PlannedMember>,
@@ -162,6 +163,13 @@ struct PendingFiniteClose {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Effect {
     Arm(Uuid),
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy V2 scratch arm protocol remains fixture-covered; production acquires the configured root and child through V3 bootstrap, not this V2 audit-only entry."
+        )
+    )]
     Scratch(Uuid),
     Bootstrap(Uuid),
     #[cfg(unix)]
@@ -323,6 +331,7 @@ impl NodeResourceRuntime {
     }
     /// Only authoritative observations/settings composition may update this;
     /// the value remains Known/Unknown and does not rewrite explicit settings.
+    #[cfg(test)]
     pub(crate) fn update_capacity(
         &self,
         epoch: u64,
@@ -404,6 +413,7 @@ impl NodeResourceRuntime {
     /// Synchronous OWNERSHIP transfer before the first await. All missing roles
     /// reserve atomically; retained roles must already have live journal handles.
     /// No mutable physical graph or public acquisition authority escapes here.
+    #[cfg(test)]
     pub(crate) fn prepare_families(
         &self,
         families: &[FamilyDemand<'_>],
@@ -938,6 +948,10 @@ impl NodeResourceRuntime {
         Ok(())
     }
 
+    #[expect(
+        dead_code,
+        reason = "Same-command retry of an Unknown prepare is retained; no current production maintenance or fixture invokes this explicit reconciliation step yet."
+    )]
     pub(crate) async fn retry_preparation(
         &self,
         owner: &OwnedPreparation,
@@ -955,6 +969,7 @@ impl NodeResourceRuntime {
     /// The actual owned launcher is reached only AFTER arm commit. A named root
     /// can be invoked once; ambiguous/cancelled invocation is never replayed.
     /// LiveOnly roots remain unsupported for production restart qualification.
+    #[cfg(test)]
     pub(crate) async fn spawn_root(
         &self,
         owner: &OwnedPreparation,
@@ -1166,6 +1181,7 @@ impl NodeResourceRuntime {
         Ok(root)
     }
 
+    #[cfg(test)]
     pub(crate) async fn cancel_preparation(
         &self,
         owner: &OwnedPreparation,
@@ -1255,6 +1271,13 @@ impl NodeResourceRuntime {
 
     /// Physical proof is transferred into owned state/queue before any wait.
     /// This does not manufacture proof; actual positive backend is still owed.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+        )
+    )]
     pub(crate) fn settle_role(
         &self,
         owner: &OwnedPreparation,
@@ -1301,6 +1324,13 @@ impl NodeResourceRuntime {
 
     /// Correct data-only facts only after DEFINITE failure. The original proof
     /// returns from the journal owner; unknown commits cannot change payload/ID.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "The fixture-covered legacy correction returns the original rejected physical proof; no production V1 settlement caller is currently connected."
+        )
+    )]
     pub(crate) fn correct_settlement_facts(
         &self,
         owner: &OwnedPreparation,
@@ -1340,6 +1370,13 @@ impl NodeResourceRuntime {
         transition.operation.retry(&self.journal, deadline)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-role journal resumption has fixture callers; production fixed adapters resume their original typed operation directly."
+        )
+    )]
     pub(crate) async fn resume_role(
         &self,
         owner: &OwnedPreparation,
@@ -1445,6 +1482,13 @@ impl NodeResourceRuntime {
             .collect())
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Graceful adaptive admission drain is not yet connected to the daemon; current production drain consumes the runtime at shutdown."
+        )
+    )]
     pub(crate) fn begin_drain(&self) -> Result<(), OperationError> {
         let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
         let mut state = self

@@ -92,6 +92,7 @@ impl FiniteEngineSnapshot {
         Ok(snapshot)
     }
 
+    #[cfg(test)]
     pub(in crate::adaptive_resources::runtime) fn is_current(&self) -> bool {
         self.checked_current() == Some(true)
     }
@@ -437,6 +438,49 @@ fn validate_env(env: &[(OsString, OsString)]) -> io::Result<()> {
     Ok(())
 }
 
+fn os_len(value: &OsStr) -> io::Result<usize> {
+    let text = value.to_string_lossy();
+    if text.contains('\0') || text.len() > ITEM_LIMIT {
+        return Err(invalid("child environment value exceeds its bound"));
+    }
+    Ok(text.len())
+}
+
+fn validate_collection_limits(command: &SoftwareAvcCommand) -> io::Result<()> {
+    if command.args.len() > ITEM_LIMIT {
+        return Err(invalid("recipe has too many arguments"));
+    }
+    let mut args_bytes = 0usize;
+    for arg in &command.args {
+        if arg.len() > ITEM_LIMIT || arg.contains('\0') {
+            return Err(invalid("recipe argument exceeds its bound"));
+        }
+        args_bytes = args_bytes
+            .checked_add(arg.len())
+            .ok_or_else(|| invalid("recipe argument accounting overflow"))?;
+    }
+    if args_bytes > COLLECTION_LIMIT {
+        return Err(invalid("recipe arguments exceed their collection bound"));
+    }
+    let mut env_bytes = 0usize;
+    for (key, value) in &command.env {
+        let key_bytes = os_len(key)?;
+        let value_bytes = os_len(value)?;
+        env_bytes = env_bytes
+            .checked_add(key_bytes)
+            .and_then(|n| n.checked_add(value_bytes))
+            .ok_or_else(|| invalid("environment accounting overflow"))?;
+    }
+    if env_bytes > COLLECTION_LIMIT {
+        return Err(invalid("child environment exceeds its collection bound"));
+    }
+    Ok(())
+}
+
+fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
@@ -554,47 +598,4 @@ mod tests {
         )];
         assert!(validate_env(&nul_value).is_err());
     }
-}
-
-fn os_len(value: &OsStr) -> io::Result<usize> {
-    let text = value.to_string_lossy();
-    if text.contains('\0') || text.len() > ITEM_LIMIT {
-        return Err(invalid("child environment value exceeds its bound"));
-    }
-    Ok(text.len())
-}
-
-fn validate_collection_limits(command: &SoftwareAvcCommand) -> io::Result<()> {
-    if command.args.len() > ITEM_LIMIT {
-        return Err(invalid("recipe has too many arguments"));
-    }
-    let mut args_bytes = 0usize;
-    for arg in &command.args {
-        if arg.len() > ITEM_LIMIT || arg.contains('\0') {
-            return Err(invalid("recipe argument exceeds its bound"));
-        }
-        args_bytes = args_bytes
-            .checked_add(arg.len())
-            .ok_or_else(|| invalid("recipe argument accounting overflow"))?;
-    }
-    if args_bytes > COLLECTION_LIMIT {
-        return Err(invalid("recipe arguments exceed their collection bound"));
-    }
-    let mut env_bytes = 0usize;
-    for (key, value) in &command.env {
-        let key_bytes = os_len(key)?;
-        let value_bytes = os_len(value)?;
-        env_bytes = env_bytes
-            .checked_add(key_bytes)
-            .and_then(|n| n.checked_add(value_bytes))
-            .ok_or_else(|| invalid("environment accounting overflow"))?;
-    }
-    if env_bytes > COLLECTION_LIMIT {
-        return Err(invalid("child environment exceeds its collection bound"));
-    }
-    Ok(())
-}
-
-fn invalid(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message)
 }

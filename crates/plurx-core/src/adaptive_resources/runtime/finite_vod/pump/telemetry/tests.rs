@@ -187,7 +187,7 @@ fn live_mix_fixture() -> LiveMixFixture {
 
 #[test]
 fn actual_retained_mix_change_rekeys_and_rebases_window() {
-    let mut actual = live_mix_fixture();
+    let actual = live_mix_fixture();
     let basis = HistoryBasis {
         runtime_epoch: [1; 32],
         workload: [2; 32],

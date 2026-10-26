@@ -19,6 +19,13 @@ pub(in crate::adaptive_resources) struct GraphPipeDrain {
     root: usize,
 }
 impl GraphPipeDrain {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy discard-only pipe adapter is currently reached by graph/settlement fixtures; production finite and copy own their original parser pipes instead."
+        )
+    )]
     pub(in crate::adaptive_resources) fn object_identity(self) -> String {
         format!(
             "pipe-drain-v1:{}:{}:{}",
@@ -28,10 +35,24 @@ impl GraphPipeDrain {
 }
 
 pub(super) struct DrainRecord {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "This identity is used by the retained legacy drain adapter; no current production recipe constructs that adapter."
+        )
+    )]
     selection: GraphPipeDrain,
 }
 
 impl DrainRecord {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy discard-only pipe adapter is currently reached by graph/settlement fixtures; production finite and copy own their original parser pipes instead."
+        )
+    )]
     pub(super) fn matches_writer(&self, generation: Uuid, index: usize, roots: &[Root]) -> bool {
         self.selection.generation == generation
             && self.selection.index == index
@@ -40,11 +61,25 @@ impl DrainRecord {
                 .is_some_and(|root| root.pipes_claimed)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy discard-only pipe adapter is currently reached by graph/settlement fixtures; production finite and copy own their original parser pipes instead."
+        )
+    )]
     pub(super) fn owns_root(&self, index: usize) -> bool {
         self.selection.root == index
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "The retained legacy discard-only drain has no production recipe caller yet."
+    )
+)]
 async fn discard<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) {
     if let Some(mut pipe) = pipe {
         let mut bytes = [0u8; BUFFER_BYTES];
@@ -59,6 +94,13 @@ async fn discard<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) {
 }
 
 impl OwnedPhysicalGraph {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy discard-only pipe adapter is currently reached by graph/settlement fixtures; production finite and copy own their original parser pipes instead."
+        )
+    )]
     pub(in crate::adaptive_resources) async fn spawn_durable_pipe_drain(
         &mut self,
         root: GraphRoot,
@@ -135,6 +177,13 @@ impl OwnedPhysicalGraph {
 impl SealedPhysicalGraph {
     /// Idempotent positive closure of ONLY this audited task. An aborted-but-not-
     /// joined task is still owned; a cancelled waiter retains its JoinHandle.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy discard-only pipe adapter is currently reached by graph/settlement fixtures; production finite and copy own their original parser pipes instead."
+        )
+    )]
     pub(in crate::adaptive_resources) async fn close_pipe_drain(
         &self,
         task: GraphPipeDrain,

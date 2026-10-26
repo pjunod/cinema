@@ -23,6 +23,10 @@ pub struct CopyPipeCommand {
 }
 
 impl CopyPipeCommand {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Owned source and executable planning values must be checked against the complete audio and pacing recipe before admission; keep the flat stack inputs rather than an extra escaping argument allocation."
+    )]
     pub fn compile(
         source: MediaFile,
         video: CopyVideoOptions,

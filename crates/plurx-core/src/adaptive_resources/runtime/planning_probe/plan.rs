@@ -29,7 +29,6 @@ pub(in crate::adaptive_resources::runtime) struct PlannedProbe {
     pub(in crate::adaptive_resources::runtime) source_spec: Option<SourceOpenSpec>,
     pub(in crate::adaptive_resources::runtime) probe_plan: v2::FixedProbeDiscoverTaskV1,
     pub(in crate::adaptive_resources::runtime) engine_plan: v2::FixedPlanningEngineTaskV1,
-    pub(in crate::adaptive_resources::runtime) metadata_capacity: usize,
 }
 
 fn invalid() -> OperationError {
@@ -249,7 +248,7 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
         book_structural_bytes,
         application_bytes,
     ])?;
-    let metadata_capacity = usize::try_from(metadata_bytes).map_err(|_| invalid())?;
+    usize::try_from(metadata_bytes).map_err(|_| invalid())?;
     let metadata_member = id()?;
     let metadata = v2::FixedProbeMetadataV1 {
         version: 1,
@@ -405,6 +404,5 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
         source_spec: Some(source_spec),
         probe_plan,
         engine_plan,
-        metadata_capacity,
     })
 }

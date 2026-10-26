@@ -168,6 +168,10 @@ impl SoftwareAvcPumpPlan {
 }
 
 /// Bounded-channel metadata; never a terminal receipt or a resource refund.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Keep the bounded event payload inline; boxing InitIdentity adds an uncharged heap allocation. The separate Tokio block/channel and cloned-payload inventory remains an explicit open implementation item."
+)]
 pub enum SoftwareVodEvent {
     Initialized(InitIdentity),
     Materialized {

@@ -228,6 +228,10 @@ impl NodeResourceRuntime {
 
     /// Return the response selection before any native open. Cancellation after
     /// registration can only leave this same arm/cell in runtime custody.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The same original member/output, byte range and memory cap are validated before one native reader slot is allocated; splitting this admission would separate its ownership checks."
+    )]
     pub(in crate::adaptive_resources::runtime) async fn prepare_finite_reader(
         self: &Arc<Self>,
         owner: &OwnedPreparation,

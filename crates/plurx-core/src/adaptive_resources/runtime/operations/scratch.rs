@@ -10,6 +10,13 @@ pub(super) struct ScratchMember {
     // refuse new work while retaining all outer charges and native ownership.
     fold: Option<ScratchFold>,
     change: Option<(v2::Id, AssetChangeV2)>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy V2 scratch arm protocol remains fixture-covered; production acquires the configured root and child through V3 bootstrap, not this V2 audit-only entry."
+        )
+    )]
     directory_arm: Option<v2::Id>,
 }
 
@@ -17,6 +24,13 @@ impl NodeResourceRuntime {
     /// Bind a real admitted typed slot, then durably arm its one directory job.
     /// Borrowed cancellation retains the exact journal op/IDs in OwnedRole. No
     /// callback, fd, path-open or guessed native identity is accepted or returned.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy V2 scratch arm protocol remains fixture-covered; production acquires the configured root and child through V3 bootstrap, not this V2 audit-only entry."
+        )
+    )]
     pub(crate) async fn arm_scratch_directory(
         &self,
         owner: &OwnedPreparation,
@@ -121,6 +135,13 @@ impl NodeResourceRuntime {
 
 /// Queue acceptance and native entry are separate. This concrete command can
 /// be driven by the same retained supervisor after its original waiter goes.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Legacy V2 scratch arm protocol remains fixture-covered; production acquires the configured root and child through V3 bootstrap, not this V2 audit-only entry."
+    )
+)]
 fn queue_directory(
     journal: &CustodyJournal,
     role: &mut OwnedRole,

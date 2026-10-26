@@ -10,6 +10,13 @@ use crate::adaptive_resources::PhysicalCloseReceipt;
 impl SealedPhysicalGraph {
     /// Errors preserve custody and charges; existing supervision can retry native
     /// population observations. No replacement object, timeout or callback mint.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+        )
+    )]
     pub(in crate::adaptive_resources) async fn try_live_close_receipt(
         &self,
     ) -> io::Result<PhysicalCloseReceipt> {
@@ -56,6 +63,13 @@ impl SealedPhysicalGraph {
         })
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+        )
+    )]
     fn live_close_eligible(&self, members: &Members) -> io::Result<()> {
         if !self.custody.sealed.load(Ordering::Acquire)
             || !members.acquired
@@ -101,6 +115,13 @@ impl SealedPhysicalGraph {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+    )
+)]
 fn check_local_owners_closed(generation: Uuid, members: &Members) -> io::Result<()> {
     if members.source_files.iter().any(|source| !source.closed()) {
         return Err(io::Error::new(

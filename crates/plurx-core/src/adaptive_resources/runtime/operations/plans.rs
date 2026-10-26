@@ -34,6 +34,10 @@ pub(crate) enum TypedMemberPlan {
         slot: v2::MemberSlot,
         task: VodTaskPlan,
     },
+    #[expect(
+        dead_code,
+        reason = "The legacy known-probe process-local constructor is retained with its durable protocol; current production and fixtures construct cold FixedProbeDiscoverTask instead."
+    )]
     FixedProbeTask {
         slot: v2::MemberSlot,
         task: v2::FixedProbeTaskV1,
@@ -50,10 +54,24 @@ pub(crate) enum TypedMemberPlan {
         slot: v2::MemberSlot,
         metadata: v2::FixedProbeMetadataV1,
     },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy process-local manifest constructor has fixture callers only; current production builds cold planning and V3 scratch. Durable decoding/recovery protocol is unchanged."
+        )
+    )]
     ScratchV1 {
         slot: v2::MemberSlot,
         scratch: v2::ScratchAssets,
     },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy process-local manifest constructor has fixture callers only; current production builds cold planning and V3 scratch. Durable decoding/recovery protocol is unchanged."
+        )
+    )]
     ScratchV2 {
         slot: v2::MemberSlot,
         plan: v2::scratch::ScratchPlanV2,
@@ -121,9 +139,23 @@ pub(crate) enum SourceCopyOwner {
     LocalRoot {
         root_member_id: v2::Id,
     },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained-source copy acquisition has binder fixtures but is not yet routed by production source adapters; preserve the graph-bound binder and serialized protocol."
+        )
+    )]
     RetainedAssets {
         asset_id: v2::Id,
     },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained-source copy acquisition has binder fixtures but is not yet routed by production source adapters; preserve the graph-bound binder and serialized protocol."
+        )
+    )]
     RetainedRoleHolder {
         obligation_id: v2::Id,
         member_id: v2::Id,

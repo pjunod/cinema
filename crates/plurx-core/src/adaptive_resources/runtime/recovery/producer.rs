@@ -30,6 +30,10 @@ impl ImportedActiveR {
             && self.directories.lock().is_ok_and(|guard| guard.is_none())
             && self.claim.fold_consumed()
     }
+    #[allow(
+        clippy::result_large_err,
+        reason = "Refusal must return the entire original ImportedActiveR, including its claim, root-exit witness and directory owners; boxing adds an allocation not covered by the import ownership profile."
+    )]
     pub(in crate::adaptive_resources::runtime) fn into_closed_domain(
         self,
         authority: &RecoveredRAuthority,

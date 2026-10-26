@@ -205,46 +205,44 @@ async fn drain_diagnostics(mut reader: super::finite_pipes::FinitePipeReader) ->
     }
 }
 
-fn original_copy_task(
+async fn original_copy_task(
     pipes: Option<super::finite_pipes::FiniteRootPipes>,
     work: Option<CopyWork>,
     start: Option<tokio::sync::oneshot::Receiver<()>>,
     finished: Option<Arc<StdMutex<Option<CopyTaskSummary>>>>,
     completion: Option<Arc<tokio::sync::Notify>>,
-) -> impl Future<Output = ()> + Send {
-    async move {
-        let (Some(pipes), Some(mut work), Some(start), Some(finished), Some(completion)) =
-            (pipes, work, start, finished, completion)
-        else {
-            return;
-        };
-        if start.await.is_err() {
-            return;
-        }
-        let (result, diagnostics) = tokio::join!(
-            copy_segmenter::run_copy_pipe_prepared(
-                pipes.stdout,
-                &mut work.sink,
-                &work.diagnostic_id,
-                work.limits,
-                &work.source,
-                work.video,
-                work.parser,
-            ),
-            drain_diagnostics(pipes.stderr),
-        );
-        let summary = match result {
-            Outcome::Completed(counts) if diagnostics.is_ok() => CopyTaskSummary {
-                completed: true,
-                segments: counts.segments,
-            },
-            _ => CopyTaskSummary::default(),
-        };
-        let terminal_lock = finished.lock();
-        if let Ok(mut slot) = terminal_lock {
-            *slot = Some(summary);
-            completion.notify_waiters();
-        }
+) {
+    let (Some(pipes), Some(mut work), Some(start), Some(finished), Some(completion)) =
+        (pipes, work, start, finished, completion)
+    else {
+        return;
+    };
+    if start.await.is_err() {
+        return;
+    }
+    let (result, diagnostics) = tokio::join!(
+        copy_segmenter::run_copy_pipe_prepared(
+            pipes.stdout,
+            &mut work.sink,
+            &work.diagnostic_id,
+            work.limits,
+            &work.source,
+            work.video,
+            work.parser,
+        ),
+        drain_diagnostics(pipes.stderr),
+    );
+    let summary = match result {
+        Outcome::Completed(counts) if diagnostics.is_ok() => CopyTaskSummary {
+            completed: true,
+            segments: counts.segments,
+        },
+        _ => CopyTaskSummary::default(),
+    };
+    let terminal_lock = finished.lock();
+    if let Ok(mut slot) = terminal_lock {
+        *slot = Some(summary);
+        completion.notify_waiters();
     }
 }
 
@@ -277,6 +275,10 @@ impl OwnedPhysicalGraph {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Original root/task/acquisition IDs, durable arm, parser work and fixed image are validated and transferred atomically; retain the explicit original owners instead of an additional staged owner."
+    )]
     pub(in crate::adaptive_resources) async fn spawn_durable_copy_vod(
         &mut self,
         root: GraphRoot,

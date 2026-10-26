@@ -7,6 +7,14 @@
 //! under one short lock. No lock crosses I/O or await. Post-spawn Drop retains
 //! accounting; only the actual cleanup owner may present a non-wire receipt.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        reason = "Fixture assertions intentionally fail tests; production adaptive resource code is checked separately with strict Clippy."
+    )
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -114,36 +122,6 @@ impl ResourceVector {
             tuner_slots: self.tuner_slots.max(other.tuner_slots),
             scratch_bytes: self.scratch_bytes.max(other.scratch_bytes),
         }
-    }
-
-    fn exceeded(self, cap: Self) -> Option<ResourceDimension> {
-        [
-            (
-                self.cpu_ns_per_second,
-                cap.cpu_ns_per_second,
-                ResourceDimension::Cpu,
-            ),
-            (
-                self.peak_memory_bytes,
-                cap.peak_memory_bytes,
-                ResourceDimension::Memory,
-            ),
-            (self.handles, cap.handles, ResourceDimension::Handles),
-            (self.processes, cap.processes, ResourceDimension::Processes),
-            (
-                self.hardware_slots,
-                cap.hardware_slots,
-                ResourceDimension::Hardware,
-            ),
-            (self.tuner_slots, cap.tuner_slots, ResourceDimension::Tuner),
-            (
-                self.scratch_bytes,
-                cap.scratch_bytes,
-                ResourceDimension::Scratch,
-            ),
-        ]
-        .into_iter()
-        .find_map(|(used, limit, dimension)| (used > limit).then_some(dimension))
     }
 }
 

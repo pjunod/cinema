@@ -29,12 +29,6 @@ impl ImportedRetainedS {
     pub(super) fn claim(&self) -> &RetainedSImportClaim {
         &self.claim
     }
-    pub(crate) fn obligation_id(&self) -> Uuid {
-        self.claim.obligation_id()
-    }
-    pub(crate) fn file_count(&self) -> usize {
-        self.claim.full().files.len()
-    }
 }
 
 /// Nonserde authority retained by the journal's original queued adoption. The
@@ -61,9 +55,6 @@ impl NativeRetainedSImportProof {
     }
     pub(crate) fn previous_owner_id(&self) -> Uuid {
         self.owner.claim.old_owner_id()
-    }
-    pub(crate) fn old_owner_id(&self) -> Uuid {
-        self.previous_owner_id()
     }
     pub(crate) fn current_owner_id(&self) -> Uuid {
         self.current_owner_id

@@ -394,7 +394,7 @@ pub struct FiniteOutput {
     encoded_process_marker: bool,
     // Last: response selectors hold the same application lifetime as owner
     // and control aliases, including when a ReadyFile outlives its rendition.
-    app_guard: Arc<super::finite_lifetime::FiniteAppGuard>,
+    _app_guard: Arc<super::finite_lifetime::FiniteAppGuard>,
 }
 
 /// Original finite close selection. The runtime book keeps the native proof,
@@ -802,7 +802,7 @@ impl NodeResourceRuntime {
                     member,
                     directory_path: Arc::new(directory_path),
                     encoded_process_marker,
-                    app_guard,
+                    _app_guard: app_guard,
                 }
             },
         ))
@@ -892,7 +892,7 @@ impl SoftwareVodOwner {
             member: self.scratch_member,
             directory_path: self.directory_path.clone(),
             encoded_process_marker: self.encoded_process_marker,
-            app_guard: Arc::clone(&self.app_guard),
+            _app_guard: Arc::clone(&self.app_guard),
         }
     }
     /// Resolve prepare BEFORE queueing either source native open or output
@@ -954,7 +954,7 @@ impl SoftwareVodOwner {
             member: self.scratch_member,
             directory_path: self.directory_path.clone(),
             encoded_process_marker: self.encoded_process_marker,
-            app_guard: Arc::clone(&self.app_guard),
+            _app_guard: Arc::clone(&self.app_guard),
         })
     }
     /// Request stop through the original registration without waiting for a
@@ -1018,7 +1018,7 @@ impl SoftwareVodOwner {
             member,
             directory_path: self.directory_path.clone(),
             encoded_process_marker: self.encoded_process_marker,
-            app_guard: Arc::clone(&self.app_guard),
+            _app_guard: Arc::clone(&self.app_guard),
         })
     }
 
@@ -1576,7 +1576,7 @@ impl NodeResourceRuntime {
                     member: scratch_member.uuid(),
                     directory_path: directory_for_output,
                     encoded_process_marker: request.encoded_process_marker,
-                    app_guard: guard_for_output,
+                    _app_guard: guard_for_output,
                 };
                 let (pump, events) =
                     pump::SoftwarePump::from_encoded_output(output, request.producer);

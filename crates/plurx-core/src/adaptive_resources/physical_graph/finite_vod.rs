@@ -15,14 +15,7 @@ pub(in crate::adaptive_resources) struct GraphFiniteVodTask {
     index: usize,
     root: usize,
 }
-impl GraphFiniteVodTask {
-    pub(in crate::adaptive_resources) fn object_identity(self) -> String {
-        format!(
-            "software-avc-vod-task-v1:{}:{}:{}",
-            self.generation, self.member, self.root
-        )
-    }
-}
+impl GraphFiniteVodTask {}
 /// A private, move-only record of the *held* source adapter's verified ELF
 /// result. Only the fixed runtime adapter may create it, and the graph consumes
 /// it for the exact root/task pair after the original launch has been retained.
@@ -290,6 +283,10 @@ impl JoinedFiniteVod {
 }
 
 impl OwnedPhysicalGraph {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Original root/task/acquisition IDs, durable arm, pump and fixed image are one checked ownership transfer; flat arguments preserve original owners on every refused launch."
+    )]
     pub(in crate::adaptive_resources) async fn spawn_durable_finite_vod(
         &mut self,
         root: GraphRoot,

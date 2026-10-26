@@ -266,6 +266,10 @@ impl CleanupCell {
     ) -> Option<CleanupFact> {
         self.result.as_ref().and_then(|r| r.fact.clone())
     }
+    #[expect(
+        dead_code,
+        reason = "Partial-close diagnostic consumption is not connected; the retained result still owns unattempted Files and cannot issue an aggregate receipt."
+    )]
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn partial_close_facts(
         &self,
     ) -> Option<(&[v2::Id], Option<v2::Id>)> {

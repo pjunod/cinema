@@ -99,6 +99,10 @@ pub struct DirectSourceRequest {
 /// Existing authorization remains with the daemon's sharing assignment or
 /// authenticated local MediaFile lookup. This nonserde value only records the
 /// provenance of the selected, scanner-bound path before the admitted open.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "This in-place pre-admission provenance value is consumed into the source plan before reservation; boxing Sharing adds a heap owner outside the current request projections."
+)]
 pub enum DirectSourceBinding {
     Sharing(SourceDispatchAssignment),
     Local {
@@ -954,12 +958,13 @@ impl DirectSourceOwner {
         let buffer = FiniteResponseBuffer::allocate(slot, self.inner.chunk_bytes)?;
         let (file, expected_s1) = {
             let state = self.inner.state.lock().map_err(|_| invalid())?;
+            let length = state.length.ok_or_else(invalid)?;
             if state.closing
                 || state.lease.is_none()
-                || offset >= state.length.ok_or_else(invalid)?
+                || offset >= length
                 || offset
                     .checked_add(len as u64)
-                    .is_none_or(|end| end > state.length.unwrap())
+                    .is_none_or(|end| end > length)
             {
                 return Err(invalid());
             }

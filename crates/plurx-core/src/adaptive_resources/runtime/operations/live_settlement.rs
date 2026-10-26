@@ -6,6 +6,13 @@ use crate::resource_custody::{ClosedMemberFact, MemberKind, RecoveryMethod};
 impl NodeResourceRuntime {
     /// Queue, but do not yet refund, one exact live settlement. Resume the owned
     /// journal transition with `resume_role`; retries must never mint new proof.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+        )
+    )]
     pub(crate) async fn queue_live_settlement(
         &self,
         owner: &OwnedPreparation,
@@ -66,6 +73,13 @@ impl NodeResourceRuntime {
 /// Prebuild data before the graph disposes its native roots. Every named slot
 /// must have its actual once-only acquisition selection; never invent a fact
 /// for an uninvoked member or mislabel unsupported resources as local handles.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Legacy whole-graph Windows Job closure has fixture callers only; production finite/copy/planning settle through dedicated typed adapters."
+    )
+)]
 fn live_member_facts(role: &OwnedRole) -> Result<Vec<ClosedMemberFact>, OperationError> {
     if role.transition.is_some()
         // Typed retained assets require their complete private native inventory
