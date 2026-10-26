@@ -7591,3 +7591,19 @@ source = "crates/plurxd/src/web/player/decode-tiers.js"
 source_anchor = "function watchDisplayDynamicRange(){"
 test = "tests/web/hdr-display-change.test.js"
 test_anchor = "test(\"a display that turns HDR after boot is claimed for the next session\""
+
+[[fixes]]
+id = "claude.linux-player-signal-during-redeem-revokes"
+commits = ["cb621c7dfd5053461c95ab93e04c333940a9cb74"]
+source = "clients/linux-player/plurx_player/launcher.py"
+source_anchor = "class SignalGate:"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_sigterm_while_redeeming_still_revokes_the_issued_token(self):"
+
+[[fixes]]
+id = "claude.linux-player-default-picker-policy-tracks"
+commits = ["752ac01107eee2c9cabcc09b8702e7f9377e6f50"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def apply_policy_defaults(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_default_audio_is_selected_for_direct_play(self):"

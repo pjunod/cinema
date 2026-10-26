@@ -1204,6 +1204,26 @@ impl TranscodeManager {
         self.admit_source_work(1).await
     }
 
+    /// A claimed, cancellable operation keeps its FIFO place behind the
+    /// current heavy worker instead of losing every try-acquire race. CPU
+    /// capacity is reserved only after this same shared gate is acquired;
+    /// foreground work still wins the normal admission checks.
+    pub(crate) async fn admit_fragment_queued(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<FragmentAdmission> {
+        let heavy = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return None,
+            permit = Arc::clone(&self.background_heavy).acquire_owned() => permit.ok()?,
+        };
+        if cancel.is_cancelled() {
+            return None;
+        }
+        self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
+            .await
+    }
+
     async fn admit_source_work(&self, threads: usize) -> Option<FragmentAdmission> {
         if !self.pretranscode_worker_idle() {
             return None;
@@ -1211,6 +1231,17 @@ impl TranscodeManager {
         let heavy = Arc::clone(&self.background_heavy)
             .try_acquire_owned()
             .ok()?;
+        self.admit_source_work_with_heavy(threads, heavy).await
+    }
+
+    async fn admit_source_work_with_heavy(
+        &self,
+        threads: usize,
+        heavy: tokio::sync::OwnedSemaphorePermit,
+    ) -> Option<FragmentAdmission> {
+        if !self.pretranscode_worker_idle() {
+            return None;
+        }
         self.admissions
             .try_admit_bundle(
                 self.max_hw_sessions().await,

@@ -241,13 +241,13 @@
       },
       {
         "anchor": "pub(super) const REPLICATED_STORE_TIMEOUT: &str = \"replicated store operation timed out\";",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc",
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "M2 Hiqlite replicated timeout classification"
       },
       {
         "anchor": "                        super::background_jobs::RETENTION_SCHEMA",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc",
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585"
       },
@@ -409,37 +409,37 @@
       },
       {
         "anchor": "async fn with_fenced_conn<T, F>",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "proposal \u00a74.1 SQLite fenced transaction"
       },
       {
         "anchor": "            let execution_time_ms = std::time::SystemTime::now()",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1973"
       },
       {
         "anchor": "                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1984"
       },
       {
         "anchor": "                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1996"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:2008"
       },
       {
         "anchor": "    super::background_jobs::RETENTION_SCHEMA,",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255"
       },
@@ -451,7 +451,7 @@
       },
       {
         "anchor": "#[path = \"store_contract/formal_publication.rs\"]\nmod formal_publication;",
-        "sha256": "abb90a74cb26703d089f8707fc051912724bf5d6dddf3531abaf3559e05dafaf",
+        "sha256": "f86f8ccced5a214258e4ed3b04b9b4a80aee81e962fe1a0caa9b8cd7dbac9c06",
         "source": "crates/plurx-core/tests/store_contract.rs",
         "table": "M2 conformance parent module registration"
       },

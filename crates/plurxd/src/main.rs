@@ -3409,6 +3409,10 @@ fn spawn_background_loops(
         state.clone(),
         background_shutdown.clone(),
     ));
+    tokio::spawn(http::playback_handoffs::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(subtitle_transcription::run(
         state.clone(),
         background_shutdown.clone(),
