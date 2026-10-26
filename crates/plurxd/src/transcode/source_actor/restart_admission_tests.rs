@@ -127,9 +127,9 @@ pub(super) async fn after_factory(
         manager
             .resource_runtime
             .as_ref()
-            .unwrap()
+            .expect("same selected Source runtime after waiter cancellation")
             .accounting()
-            .unwrap()
+            .expect("same original P/M accounting after waiter cancellation")
             .used,
         charge
     );
