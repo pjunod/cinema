@@ -590,3 +590,141 @@ async fn entered_terminal_cannot_match_dropped_unsent_disposition() {
         charge
     );
 }
+
+#[tokio::test]
+async fn real_exited_root_signal_error_does_not_replace_or_permanently_hold_original_join() {
+    use crate::adaptive_resources::runtime::finite_vod::SoftwareAvcExecutable;
+    use sha2::{Digest, Sha256};
+    let root = tempfile::tempdir().expect("fixture root");
+    let (runtime, mut request) =
+        NodeResourceRuntime::fixture_actual_copy_request(root.path(), false).await;
+    let source = root.path().join("exited_invalid.c");
+    let binary = root.path().join("exited_invalid");
+    std::fs::write(
+        &source,
+        br#"#include <unistd.h>
+int main(void) {
+    const unsigned char invalid[] = {0,0,0,4,'b','a','d','!'};
+    return write(1, invalid, sizeof invalid) == sizeof invalid ? 0 : 1;
+}
+"#,
+    )
+    .expect("actual exited-child source");
+    let compiler = std::env::var_os("PLURX_TEST_CC").unwrap_or_else(|| "/usr/bin/cc".into());
+    let built = std::process::Command::new(compiler)
+        .args(["-O0", "-o"])
+        .arg(&binary)
+        .arg(&source)
+        .output()
+        .expect("actual C compiler required");
+    assert!(
+        built.status.success(),
+        "native fixture compilation failed: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let binary = std::fs::canonicalize(binary).expect("actual ELF");
+    let identity = crate::source_identity::SourceIdentity::from_metadata(
+        &std::fs::metadata(&binary).expect("actual ELF metadata"),
+    );
+    let digest = hex::encode(Sha256::digest(
+        std::fs::read(&binary).expect("actual ELF bytes"),
+    ));
+    request.command = CopyPipeCommand::compile(
+        request.command.source().clone(),
+        request.command.video(),
+        SoftwareAvcExecutable::new(binary, identity, &digest).expect("actual ELF binding"),
+        root.path().to_owned(),
+        None,
+        false,
+        crate::transcode::Pacing::unpaced(),
+        None,
+    )
+    .expect("same fixed recipe");
+    let mut owner = bounded(runtime.prepare_copy_vod(request, deadline()))
+        .await
+        .expect("original R");
+    let preparation = NodeResourceRuntime::fixture_copy_original_preparation(&owner);
+    cancel_at(&runtime, &mut owner, CopyStartFixtureStage::TaskObserved).await;
+    let sender = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        role.graph
+            .as_ref()
+            .expect("original graph")
+            .take_copy_start(
+                role.copy_vod
+                    .as_ref()
+                    .expect("copy")
+                    .task
+                    .expect("original task"),
+            )
+            .await
+            .expect("SAME start sender taken before seal")
+    };
+    let (graph, task, child) = seal_registered(&preparation).await;
+    // The actual root exits while the SAME original parser still awaits its
+    // original receiver. This wait, not a signal result, records its exit.
+    assert!(bounded(graph.wait_root(child))
+        .await
+        .expect("actual original wait")
+        .success());
+    let signal_error = child
+        .registered_control()
+        .expect("original retained pidfd control")
+        .start_kill()
+        .expect_err("original reaped pidfd must report a real signal error");
+    assert_eq!(signal_error.raw_os_error(), Some(libc::ESRCH));
+    assert!(!graph.fixture_copy_task_finished(task).await);
+    let charge = runtime
+        .accounting()
+        .expect("signal failure cannot refund")
+        .used;
+    sender
+        .send(())
+        .expect("deliver SAME original latch, never create replacement parser");
+    let terminal = bounded(async {
+        loop {
+            match graph.join_copy_vod(task).await {
+                Ok(terminal) => break terminal,
+                Err(_) => {
+                    assert!(matches!(
+                        graph.copy_task_hold_reason(task).await,
+                        Some(
+                            CopyTaskHoldReason::FailureKillFailed
+                                | CopyTaskHoldReason::FailureKillUnavailable
+                        )
+                    ));
+                    assert!(
+                        graph.copy_hold_reason().await.is_none(),
+                        "signal failure must stay retryable"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(matches!(terminal, CopyTaskTerminal::Entered(summary) if !summary.completed));
+    assert!(graph.copy_task_hold_reason(task).await.is_none());
+    assert_eq!(
+        graph.fixture_copy_disposition(task).await,
+        Some(CopyStartDisposition::TakenBeforeSeal)
+    );
+    assert_eq!(graph.fixture_copy_pipe_close_calls(task).await, [1, 1]);
+    let closed = graph
+        .try_copy_process_closure(task)
+        .await
+        .expect("actual wait+same join+checked pipes");
+    assert_eq!(closed.terminal(), terminal);
+    assert_eq!(closed.task(), task);
+    assert_eq!(closed.root(), child);
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("physical closure alone is not settlement")
+            .used,
+        charge
+    );
+    // Deliberately direct native fixture: runtime start_released is false,
+    // so its independent identity cross-check must not authorize a refund.
+}
