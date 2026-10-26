@@ -24,11 +24,11 @@ async fn prepared_config(
         "/never-entered/ffprobe".into(),
         "/never-entered/ffmpeg".into(),
     );
-    let mut planned = plan::prepare(&runtime, &request, deadline()).unwrap();
-    let preparation = planned.preparation.clone();
-    runtime
-        .register_planning_tasks(&preparation, &mut planned, request)
-        .unwrap();
+    let original = plan::prepare(&runtime, request, deadline()).unwrap();
+    let preparation = plan::original_preparation_for_test(&original);
+    // Low-level settlement fixtures retain the original preparation directly;
+    // dropping its actual public owner requests cleanup but cannot refund.
+    drop(original);
     assert_eq!(
         preparation.state.lock().await.roles[1]
             .typed_members
@@ -466,3 +466,6 @@ async fn never_entered_book_conflict_holds_ledger_and_journal_without_refund() {
         .drain()
         .unwrap();
 }
+
+mod native_custody;
+pub(super) mod construction;

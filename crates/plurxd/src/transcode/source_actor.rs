@@ -1238,6 +1238,68 @@ impl TranscodeManager {
         deadline: Instant,
         work: &mut Option<super::source_preparation::SourceProbeOperation>,
     ) -> Result<Arc<crate::vodencode::Encoding>, SourceWorkerError> {
+        #[cfg(target_os = "linux")]
+        if let Some(operation) = work
+            .as_ref()
+            .filter(|operation| operation.uses_fixed_planning())
+        {
+            // A changed setting cannot convert an already selected original
+            // P into a second admission or the legacy native path on replay.
+            let snapshot = Arc::clone(
+                operation
+                    .fixed_snapshot()
+                    .map_err(|_| SourceWorkerError::Unavailable)?,
+            );
+            return self
+                .prepare_source_fixed_encoded_recipe(owner, prepared, &snapshot, deadline, work, 0)
+                .await;
+        }
+        #[cfg(target_os = "linux")]
+        if prepared.request().subtitle_burn.is_none()
+            && prepared.request().continuous_media.is_none()
+            && prepared.request().dv_processing_destination.is_none()
+            && !prepared.request().hdr10
+            && !prepared.native_subtitles().0
+            && self.pipeline == Pipeline::Cpu
+            && plurx_core::playback::hdr_route(prepared.file()).is_none()
+        {
+            let snapshot = Arc::new(
+                self.store
+                    .playback_planning_snapshot(prepared.file().id, &super::QUALITY_PLANNING_KEYS)
+                    .await
+                    .map_err(|_| SourceWorkerError::Unavailable)?
+                    .ok_or(SourceWorkerError::Unavailable)?,
+            );
+            if self.encoder_for_preference(
+                snapshot
+                    .settings
+                    .get(keys::HWACCEL)
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            ) == Encoder::Software
+            {
+                // Measure this actual unpolled coordinator layout. Dropping
+                // this observation enters no work; the next future has the
+                // identical type and borrows the same registered operation.
+                let pending = self.prepare_source_fixed_encoded_recipe(
+                    owner, prepared, &snapshot, deadline, work, 0,
+                );
+                let frame_bytes = std::mem::size_of_val(&pending);
+                drop(pending);
+                // Selection commits to admitted P. A refusal/Unknown is never
+                // retried through the legacy source opener or native probe.
+                return self
+                    .prepare_source_fixed_encoded_recipe(
+                        owner,
+                        prepared,
+                        &snapshot,
+                        deadline,
+                        work,
+                        frame_bytes,
+                    )
+                    .await;
+            }
+        }
         let permit = self.admit_source_copy(deadline).await.inspect_err(|error| { tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.probe_admission", error_class = ?error, "Source encoded preparation refused"); })?;
         let source =
             crate::fragment_index_cluster::open_source_playback_fence(prepared.file(), None)
@@ -1301,6 +1363,142 @@ impl TranscodeManager {
                 tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.encoder_plan", error_class, "Source encoded preparation refused");
                 SourceWorkerError::Unavailable
             })
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn prepare_source_fixed_encoded_recipe(
+        &self,
+        owner: &Arc<SourceViewerInner>,
+        prepared: &crate::http::hls::PreparedSourcePlayback,
+        snapshot: &Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+        deadline: Instant,
+        work: &mut Option<super::source_preparation::SourceProbeOperation>,
+        coordinator_frame_bytes: usize,
+    ) -> Result<Arc<crate::vodencode::Encoding>, SourceWorkerError> {
+        let refused = |error: String| {
+            tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.fixed_planning", %error, "Source admitted software planning refused");
+            SourceWorkerError::Unavailable
+        };
+        let runtime = self
+            .resource_runtime
+            .as_ref()
+            .ok_or_else(|| refused("Source planning runtime is unavailable".into()))?;
+        if snapshot.file.id != prepared.file().id
+            || snapshot.file.path != prepared.file().path
+            || snapshot.file.size != prepared.file().size
+            || snapshot.file.mtime != prepared.file().mtime
+        {
+            return Err(refused("Source planning scanner binding changed".into()));
+        }
+        if work.is_none() {
+            let proof = owner.gate.current_preparation(&owner.assignment).await?;
+            if !prepared.matches_assignment(proof.assignment()) {
+                return Err(SourceWorkerError::Conflict);
+            }
+            runtime
+                .refresh_admission_capacity(deadline)
+                .await
+                .map_err(|error| {
+                    refused(format!("observing Source planning capacity: {error:?}"))
+                })?;
+            let requested = (|| -> Option<usize> {
+                super::adaptive_attempts::planning_snapshot_requested_heap_bytes(snapshot)?
+                    .checked_add(std::mem::size_of::<
+                        plurx_core::store::PlaybackPlanningSnapshot,
+                    >())?
+                    .checked_add(2 * std::mem::size_of::<usize>())?
+                    .checked_add(prepared.request().selected_finite_requested_heap_bytes()?)?
+                    .checked_add(super::source_preparation::fixed_source_requested_bytes())?
+                    .checked_add(coordinator_frame_bytes)?
+                    .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)
+            })()
+            .ok_or_else(|| refused("Source planning requested capacity overflow".into()))?;
+            let request = super::adaptive_attempts::fixed_planning_request(
+                self,
+                snapshot,
+                prepared.fingerprint(),
+                requested,
+            )
+            .map_err(refused)?;
+            #[cfg(test)]
+            self.source_workers
+                .probe_hooks
+                .deny_fixed_cpu_if_armed(runtime)
+                .map_err(refused)?;
+            // Synchronous P/M registration precedes the first native await.
+            // The operation slot survives a cancelled waiter and supplies its
+            // SAME original owner to replay and final Source cleanup.
+            match super::source_preparation::start_source_fixed_probe(
+                runtime,
+                request,
+                Arc::clone(snapshot),
+                proof.assignment().clone(),
+                deadline,
+            ) {
+                Ok(operation) => *work = Some(operation),
+                Err(failure) => {
+                    let (error, held) = failure.into_parts();
+                    // Only exact pre-reservation refusal leaves no P selector.
+                    // Generic constructor uncertainty stays in this SAME
+                    // existing operation slot and cannot settle Source SQL.
+                    *work = held;
+                    #[cfg(test)]
+                    self.source_workers.probe_hooks.record_fixed_refusal(&error);
+                    return Err(refused(error));
+                }
+            }
+        }
+        let operation = work.as_ref().expect("registered Source planning operation");
+        if !operation.fixed_matches(&owner.assignment, prepared.fingerprint()) {
+            return Err(SourceWorkerError::Conflict);
+        }
+
+        #[cfg(test)]
+        self.source_workers
+            .probe_hooks
+            .install_fixed_native(operation)
+            .await;
+        #[cfg(test)]
+        self.source_workers.probe_hooks.before_fixed_inputs().await;
+
+        drop(owner.gate.current_preparation(&owner.assignment).await?);
+        operation
+            .prepare_fixed_inputs(deadline)
+            .await
+            .map_err(refused)?;
+        #[cfg(test)]
+        self.source_workers.probe_hooks.before_fixed_collect().await;
+        drop(owner.gate.current_preparation(&owner.assignment).await?);
+        let report = operation.fixed_report(deadline).await.map_err(refused)?;
+        // Pure refinement consumes only immutable facts from this SAME M.
+        // It neither exports the SourceCell File nor repeats native discovery.
+        let refinement = self.resolve_adaptive_encoding_from_probe(
+            prepared.request(),
+            prepared.file(),
+            operation.fixed_snapshot().map_err(refused)?,
+            report,
+        );
+        let refinement_frame = std::mem::size_of_val(&refinement);
+        let encoding = refinement.await.map_err(refused)?;
+        let requested = encoding
+            .requested_heap_bytes()
+            .and_then(|bytes| bytes.checked_add(refinement_frame))
+            .ok_or_else(|| refused("Source refined recipe capacity is unknown".into()))?;
+        if requested > super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES {
+            return Err(refused(
+                "Source refined recipe exceeds its explicit P-to-R allowance".into(),
+            ));
+        }
+        drop(owner.gate.current_preparation(&owner.assignment).await?);
+        // Only the original native receipts refund P. M/application aliases
+        // remain retained by this operation and every resulting Encoding.
+        operation
+            .finish_fixed_native(deadline)
+            .await
+            .map_err(refused)?;
+        #[cfg(test)]
+        self.source_workers.probe_hooks.after_evidence().await;
+        Ok(encoding)
     }
 
     async fn run_source_owner(
