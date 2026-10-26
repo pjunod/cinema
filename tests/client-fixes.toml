@@ -7242,6 +7242,16 @@ source_anchor = 'XCTAssertEqual(controlExchanges.firstResponse(withReadiness: "r
 test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
 test_anchor = "testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard"
 
+# The duplicate helper blocked both full Swift unit-test targets; compile and
+# queued callback execution receipts are separate from these source anchors.
+[[fixes]]
+id = "https.apple-subtitle-callback-helper-defined-once"
+commits = ["ae0348cdc171d3448a7dbcd15dd7ad1e34931ef2"]
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = "func takeAll() -> [@MainActor @Sendable () -> Void] {"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testQueuedSubtitleFailureIsDeliveredOnlyToItsCurrentIntent"
+
 [[fixes]]
 id = "https.apple-subtitle-failure-fixture-holds-complete-readiness-batch"
 commits = []
