@@ -701,6 +701,13 @@ mod qualification {
                         .expect("typed operation read"),
                 )
                 .await;
+                assert!(
+                    operation["failed_ranges"]
+                        .as_array()
+                        .expect("typed range failures")
+                        .is_empty(),
+                    "actual progressive range failed before readback: {operation:?}"
+                );
                 let Some(asset) = operation["asset_id"].as_str() else {
                     continue;
                 };

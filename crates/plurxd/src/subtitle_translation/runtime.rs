@@ -854,6 +854,49 @@ struct Window {
     audio_start_samples: i64,
 }
 
+/// The pinned whisper.cpp revision's include/whisper.h declares
+/// WHISPER_CHUNK_SIZE=30 (306c88f4d1286aec1bf96e544632897886af5501;
+/// scripts/subtitle-engine-manifest.json). A context window can need a second
+/// acoustic encoder block even though its owned core is only thirty seconds.
+/// Preserve the existing wall budget per block and cap the input at the
+/// registered profile's core plus contexts, never at a caller-supplied limit.
+#[cfg(unix)]
+fn inference_budget(window: Window) -> Result<Duration, StoreError> {
+    const ACOUSTIC_BLOCK_MS: i64 = 30_000;
+    const SECONDS_PER_BLOCK: u64 = 120;
+    let invalid = || failure("output_invalid");
+    let span = window
+        .end_ms
+        .checked_sub(window.begin_ms)
+        .filter(|span| *span > 0)
+        .ok_or_else(invalid)?;
+    let selected = super::profile::selected_profile();
+    let maximum = i64::from(selected.core_ms)
+        .checked_add(i64::from(selected.left_context_ms))
+        .and_then(|span| span.checked_add(i64::from(selected.right_context_ms)))
+        .ok_or_else(invalid)?;
+    if window.begin_ms < 0
+        || span > maximum
+        || window.core_begin_ms < window.begin_ms
+        || window.core_end_ms > window.end_ms
+        || window
+            .core_end_ms
+            .checked_sub(window.core_begin_ms)
+            .is_none_or(|core| core <= 0 || core > i64::from(selected.core_ms))
+    {
+        return Err(invalid());
+    }
+    let blocks = span
+        .checked_add(ACOUSTIC_BLOCK_MS - 1)
+        .ok_or_else(invalid)?
+        / ACOUSTIC_BLOCK_MS;
+    let seconds = u64::try_from(blocks)
+        .map_err(|_| invalid())?
+        .checked_mul(SECONDS_PER_BLOCK)
+        .ok_or_else(invalid)?;
+    Ok(Duration::from_secs(seconds))
+}
+
 #[cfg(unix)]
 struct DecodedPcm {
     file: std::fs::File,
@@ -1028,7 +1071,7 @@ async fn infer_window(
             &mut whisper,
             &[(&decoded.file, 3), (&model.handle, 5), (&engine.handle, 7)],
         );
-        child_output(&mut whisper, Duration::from_secs(120), 256 * 1024, true).await?;
+        child_output(&mut whisper, inference_budget(window)?, 256 * 1024, true).await?;
         if !invocation.unchanged() {
             return Err(failure("packaged_engine_changed"));
         }
@@ -1370,6 +1413,47 @@ pub(crate) async fn self_test_translation(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn inference_budget_counts_pinned_acoustic_blocks_within_registered_window_bounds() {
+        let window = |span: i64| Window {
+            purpose: Purpose::Range,
+            core_begin_ms: 0,
+            core_end_ms: span.min(30_000),
+            begin_ms: 0,
+            end_ms: span,
+            audio_index: 2,
+            audio_start_samples: 0,
+        };
+        for (span, seconds) in [
+            (12_960, 120),
+            (30_000, 120),
+            (30_001, 240),
+            (35_000, 240),
+            (40_000, 240),
+        ] {
+            assert_eq!(
+                inference_budget(window(span)).expect("qualified span"),
+                Duration::from_secs(seconds)
+            );
+        }
+        let mut self_test = window(12_960);
+        self_test.purpose = Purpose::TranslationSelfTest;
+        assert_eq!(
+            inference_budget(self_test).expect("self-test budget"),
+            Duration::from_secs(120)
+        );
+        for span in [0, -1, 40_001, i64::MAX] {
+            assert!(inference_budget(window(span)).is_err());
+        }
+        let mut overflowing = window(1);
+        overflowing.begin_ms = i64::MIN;
+        overflowing.end_ms = i64::MAX;
+        assert!(inference_budget(overflowing).is_err());
+        let mut invalid_core = window(30_000);
+        invalid_core.core_end_ms = 30_001;
+        assert!(inference_budget(invalid_core).is_err());
+    }
 
     fn frame(filter: u8, pts: i64, samples: i64) -> String {
         format!(
