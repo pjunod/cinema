@@ -6412,7 +6412,7 @@ commits = ["8d6008c903bf644c223c7abcbd7c766d64e736fa"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "val processed = candidates.filter { it.processed_hdr10 && it.hasValidIdentity &&"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
-test_anchor = "processedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+test_anchor = "processedDvPreferenceRequiresQualifiedProductionAndCodecForBothGrades"
 
 [[fixes]]
 id = "apple.processed-hdr10-qualified-auto"

@@ -9,8 +9,9 @@ implementing them. No live deployment is implied by this build.
 
 ## Completion integration — 2026-10-25
 
-The completion candidate incorporates main `671546d67` (subtitle setup and
-fair background admission), retaining the earlier `9bcfa9ca1` integration.
+The completion candidate incorporates main `e02fb1283` (DV float32 PQ precision),
+retaining `671546d67` (subtitle setup and fair background admission) and the
+earlier `9bcfa9ca1` integration.
 Current main's formal
 smokes, desktop compilation, native dependency setup and full qualification
 commands remain intact. The dedicated bounded unit runner is retained with
@@ -35,8 +36,8 @@ new schema authority reads, four separately bound SQLite annotation queries
 and an ambiguous test-module path. The repaired strict census passes 58 cases;
 its scan roots, rejection rules and unannotated-read ceiling are unchanged.
 First and intermediate failed runs remain diagnostic evidence. Linux-only
-planning consumers now use the shared parser directly. The exact final tree
-still requires a fresh Linux check and denied-warning Clippy run.
+planning consumers now use the shared parser directly. Source `477eef81b` passed exact-source Linux check and denied-warning Clippy,
+including the affected contract and cluster integration features.
 
 The new main merge is conflict-free and preserves the subtitle response
 purpose, setup UI and FIFO/cancellable model-admission repair. Current-source
@@ -57,8 +58,18 @@ Upstream's physical-admission review, operation-progress pin and explanatory
 source-anchor update are retained alongside the HTTPS source review. Only
 operation-progress's governed construct/mapping inputs changed; durable-jobs
 and worker-refinement governed bytes remain unchanged. Earlier scoped proof
-is retained only for identical inputs. The exact new-base source still needs
-its compiler checks, affected operation-progress smoke and fresh CI binding.
+is retained only for identical inputs. Source `477eef81b` passed the affected
+operation-progress smoke and corrective-history audit. The subsequent conflict-free
+`e02fb1283` merge changes no governed formal inputs or HTTPS source. Its five
+float32 precision regressions pass; the embedded header requires fresh exact-source
+Linux compilation and denied-warning Clippy before pushing. Fresh CI binding
+remains required.
+
+The prior full run exposed two Android test failures. The processed-DV selector
+regression now accepts the documented SDR grade while preserving rejection of
+invalid grades and unsustainable or unsupported candidates. The library dialog
+regression waits for the asynchronously projected row before retaining its display
+assertion. Production Android behavior is unchanged; focused runtime proof is pending.
 
 Authenticated full qualification, the Main promotion gate and physical
 acceptance are still pending. Nothing has been deployed or enabled live.
