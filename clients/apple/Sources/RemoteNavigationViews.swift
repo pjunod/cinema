@@ -207,7 +207,32 @@ private struct RemoteScrollRealization: ViewModifier {
     }
 }
 
+/// Observe input bookkeeping at this modifier boundary. SwiftUI evaluates
+/// onChange after a transition settles, rather than reentering a coordinator
+/// mutation from @Published's willSet notification.
+private struct RemoteFocusChangeModifier: ViewModifier {
+    @ObservedObject var activity: RemoteNavigationActivity
+    let changed: () -> Void
+    func body(content: Content) -> some View {
+        content.onChange(of: activity.focusRevision) { _, _ in changed() }
+    }
+}
+
+private struct RemotePhysicalInputChangeModifier: ViewModifier {
+    @ObservedObject var activity: RemoteNavigationActivity
+    let changed: (UInt64) -> Void
+    func body(content: Content) -> some View {
+        content.onChange(of: activity.physicalInputRevision) { _, value in changed(value) }
+    }
+}
+
 extension View {
+    func onRemoteFocusChange(_ navigation: RemoteNavigationCoordinator, perform changed: @escaping () -> Void) -> some View {
+        modifier(RemoteFocusChangeModifier(activity: navigation.activity, changed: changed))
+    }
+    func onRemotePhysicalInput(_ navigation: RemoteNavigationCoordinator, perform changed: @escaping (UInt64) -> Void) -> some View {
+        modifier(RemotePhysicalInputChangeModifier(activity: navigation.activity, changed: changed))
+    }
     func remoteScrollRealization() -> some View { modifier(RemoteScrollRealization()) }
     func remoteScope(_ scope: String) -> some View {
         environment(\.remoteNavigationScope, scope).modifier(RemoteScopeLifecycle(scope: scope))

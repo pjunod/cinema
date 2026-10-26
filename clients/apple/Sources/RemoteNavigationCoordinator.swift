@@ -2,6 +2,14 @@ import Combine
 import Foundation
 import CoreGraphics
 
+/// Frequent native input observations have a separate publisher so moving
+/// focus does not invalidate the shell and every registered control.
+@MainActor
+final class RemoteNavigationActivity: ObservableObject {
+    @Published fileprivate(set) var focusRevision: UInt64 = 1
+    @Published fileprivate(set) var physicalInputRevision: UInt64 = 1
+}
+
 /// UI authorization is separate from B06's authenticated receiver admission.
 /// Every callback here is a specifically registered browsing action.
 @MainActor
@@ -31,11 +39,15 @@ final class RemoteNavigationCoordinator: ObservableObject {
         var admission: () -> Outcome? = { nil }
         let activate: () -> Void
     }
-    @Published private(set) var requestedFocus: String?
+    private(set) var requestedFocus: String? {
+        didSet { refreshViewerNavigationFocusRequest() }
+    }
+    @Published private(set) var viewerNavigationFocusRequested = false
+    let activity = RemoteNavigationActivity()
     @Published private(set) var focusRequestRevision: UInt64 = 1
     @Published private(set) var contextRevision: UInt64 = 1
-    @Published private(set) var focusRevision: UInt64 = 1
-    @Published private(set) var physicalInputRevision: UInt64 = 1
+    var focusRevision: UInt64 { activity.focusRevision }
+    var physicalInputRevision: UInt64 { activity.physicalInputRevision }
     private var physicalModalReturn: (scope: String, revision: UInt64)?
     @Published var selectedTab: HomeTab = .home
     @Published var paths: [HomeTab: [Route]] = [:]
@@ -197,13 +209,18 @@ final class RemoteNavigationCoordinator: ObservableObject {
         exhausted || activeScope == "restricted" || (!blockers.isEmpty && modal?.scope != Self.viewerNavigationScope) || presentationBlocked()
     }
     var context: Context { Context(epoch: epoch, contextRevision: contextRevision, focusRevision: focusRevision) }
+    private func refreshViewerNavigationFocusRequest() {
+        let requested = activeScope == rootScope && requestedFocus == Self.viewerNavigationOpener
+        if viewerNavigationFocusRequested != requested { viewerNavigationFocusRequested = requested }
+    }
     private func advanceContext() {
+        refreshViewerNavigationFocusRequest()
         guard contextRevision < 9_007_199_254_740_991 else { exhausted = true; return }
         contextRevision += 1
     }
     private func advanceFocus() {
         guard focusRevision < 9_007_199_254_740_991 else { exhausted = true; return }
-        focusRevision += 1
+        activity.focusRevision += 1
     }
     func synchronizeRoute() {
         let currentPath = paths[selectedTab] ?? []
@@ -297,7 +314,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
     }
     func physicalInput() {
         guard physicalInputRevision < 9_007_199_254_740_991 else { exhausted = true; return }
-        physicalInputRevision += 1
+        activity.physicalInputRevision += 1
         physicalIntent = UUID()
         modalEntryPending = false
         modalReturn = nil

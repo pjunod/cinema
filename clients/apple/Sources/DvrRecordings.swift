@@ -742,7 +742,7 @@ struct DvrRecordingsPanel: View {
         #if os(tvOS)
         .remoteRestricted()
         .remotePhysicalDirections()
-        .onChange(of: navigation.physicalInputRevision) { _, value in
+        .onRemotePhysicalInput(navigation) { value in
             if value != restorationRevision { restoreTarget = nil }
         }
         .remoteChoicePresentation(isPresented: Binding(get: { nativePanel != nil }, set: { if !$0 { nativePanel = nil } }), scope: "dvr:modal", onDismiss: restoreNativeFocus) {
@@ -1429,7 +1429,7 @@ struct DvrRecordingDetailView: View {
         #if os(tvOS)
         .remoteRestricted()
         .remotePhysicalDirections()
-        .onChange(of: navigation.physicalInputRevision) { _, value in
+        .onRemotePhysicalInput(navigation) { value in
             if value != restorationRevision { restoreTarget = nil }
         }
         .remoteChoicePresentation(isPresented: Binding(get: { confirmStop != nil }, set: { if !$0 { confirmStop = nil } }), scope: "dvr:detail-confirmation", onDismiss: {

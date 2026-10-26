@@ -152,17 +152,38 @@ function playerEffectiveProcessing(p){
   return effectiveHdrProcessing(p.effectiveProcessing,p.controlReporter?.bootstrap?.generation,
     stream?.dynamic_range||p.deliveredRange);
 }
-// What the player may show now. A processed-HDR10 delivery's FEL/RPU claim is
+// What the player may show now. A processed delivery's FEL/RPU/DYN claim is
 // only true while the report proving it is current: a seek, fallback or
 // replacement clears the report, and with it every pill and the details row.
 function playerEnhancement(p){
   const enhancement=p&&p.enhancement;
   if(!enhancement) return null;
-  if(enhancement.requires_effective_processing&&!playerEffectiveProcessing(p)) return null;
-  return enhancement;
+  if(!enhancement.requires_effective_processing) return enhancement;
+  const report=playerEffectiveProcessing(p);
+  if(!report) return null;
+  // Session creation can precede the first processed window. For these
+  // routes the current execution report supersedes that provisional snapshot;
+  // carried Dolby Vision routes keep the server-authored enhancement above.
+  const operations=report.applied_operations;
+  const rpuNames={PolynomialReshape:'polynomial reshaping',MmrReshape:'MMR reshaping',RpuColorConversion:'RPU color conversion'};
+  const rpu=operations.filter(op=>typeof op==='string'&&Object.hasOwn(rpuNames,op)).map(op=>rpuNames[op]);
+  const target=operations.find(op=>op?.DisplayTargetMapping)?.DisplayTargetMapping.nits;
+  const trims=operations.includes('CreativeTrimApplication')?"with the colourist's creative trims"
+    :report.creative_trims_partial===true?"with the colourist's creative trims on some shots":"L1 only; creative trims are not applied";
+  const current=[
+    {badge:'FEL',active:report.fel_contributed,text:report.fel_contributed
+      ?`FEL: full enhancement layer reconstructed into the ${report.sdr_processed?'SDR ':''}picture`
+      :'FEL: no enhancement-layer detail in this window'},
+    {badge:'RPU',active:rpu.length>0,text:rpu.length?`RPU: ${rpu.join(', ')} applied by the server`:'RPU: no reshaping or colour conversion applied in this window'},
+    {badge:'DYN',active:!!target,text:target?`DYN: per-shot Dolby display mapping for a ${target}-nit display by the server (${trims})`
+      :'DYN: no per-shot Dolby display mapping applied in this window'}
+  ];
+  const details=current.filter(d=>d.badge!=='FEL'||d.active||enhancement.details.some(old=>old.badge==='FEL'))
+    .concat(enhancement.details.filter(d=>!['FEL','RPU','DYN'].includes(d.badge)));
+  return {...enhancement,active:current.filter(d=>d.active).map(d=>d.badge),details};
 }
 // The Playback info row: the active badges, then one neutral line per
-// enhancement — active or not — exactly as the server wrote it.
+// enhancement — active or not — from the server or current execution report.
 function playerEnhancementRow(p){
   const enhancement=playerEnhancement(p);
   if(!enhancement) return null;
