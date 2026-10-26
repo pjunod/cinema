@@ -143,6 +143,7 @@ bump may break compatibility and a **patch** bump never does.
   explains failures and capacity waits, and recovers model choices after a
   failed status load without losing unsaved settings. Model tests keep a FIFO
   place for background capacity so repeated library work cannot skip them.
+- Transcoding settings show the selected encoder in parentheses beside Auto.
 
 - All playback caches share one disk budget with reader-safe global eviction,
   pre-write capacity reservations and a filesystem free-space reserve, preventing
