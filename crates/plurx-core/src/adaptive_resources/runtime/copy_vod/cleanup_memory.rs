@@ -205,3 +205,49 @@ pub(in crate::adaptive_resources::runtime) fn requested_bytes(
         validator_keys,
     ])
 }
+
+#[cfg(all(test, feature = "fixtures"))]
+mod tests {
+    use super::*;
+    use crate::adaptive_resources::{Metric, ResourceVector};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn enlarged_close_metadata_is_charged_before_any_copy_reservation_or_native_entry() {
+        let root = tempfile::tempdir().expect("actual runtime root");
+        let (runtime, mut request) =
+            NodeResourceRuntime::fixture_actual_copy_request(root.path(), false).await;
+        let original = runtime
+            .copy_vod_known_memory_bytes(&request)
+            .expect("pure original requested profile");
+        // Valid immutable metadata, independent of media/parser payload. It
+        // must be counted in the retained plans AND overlapping close DTOs.
+        request.recipe_source_binding.push_str(&"m".repeat(1024));
+        assert!(request.recipe_source_binding.len() <= 4096);
+        let enlarged = runtime
+            .copy_vod_known_memory_bytes(&request)
+            .expect("same pure profile with larger original association");
+        assert!(
+            enlarged > original + 1024,
+            "a shared byte count must include simultaneous owned association copies"
+        );
+        let Metric::Known(mut resources) = request.demand.resources else {
+            panic!("actual known fixture demand");
+        };
+        resources.peak_memory_bytes = original;
+        request.demand.resources = Metric::Known(resources);
+        let result = runtime
+            .prepare_copy_vod(request, Instant::now() + Duration::from_secs(60))
+            .await;
+        let error = match result {
+            Ok(_) => panic!("old profile may not admit larger close metadata"),
+            Err(error) => error,
+        };
+        assert!(error.definitely_before_reservation());
+        assert_eq!(
+            runtime.accounting().expect("original ledger").used,
+            ResourceVector::default(),
+            "no R or native acquisition from insufficient pre-R profile"
+        );
+    }
+}
