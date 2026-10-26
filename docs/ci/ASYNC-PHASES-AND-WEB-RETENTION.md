@@ -1,6 +1,7 @@
 # Async qualification phases and whole web cohort retention
 
-Status: implemented, independent source review and affected execution pending.
+**Status:** open — implementation reviewed; qualification pending.
+
 The phase recovery follows run 5964's Rust job deadline; its incomplete product
 exploration is not a proof result. This document defines the new transport and
 execution boundaries, not a claim that qualification has completed.
