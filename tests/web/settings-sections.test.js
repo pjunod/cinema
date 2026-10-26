@@ -272,14 +272,19 @@ test("English translation setup graduates to Playback and preserves legacy links
     assert.equal(r.settingsTab(),"playback");
   }
   const panels=developerPanels(),settings={},readiness={features:[]};
-  assert.doesNotMatch(panels.developerPanel(settings,readiness),/Configure English translation/);
+  assert.doesNotMatch(panels.developerPanel(settings,readiness),/Configure English translation|Set up subtitle text translation/);
   const html=panels.playbackPanel(settings,readiness);
-  assert.match(html,/Configure English translation/);
+  assert.match(html,/Set up speech captions/);
+  assert.match(html,/Set up subtitle text translation/);
   assert.match(html,/id="subtitle-translation-form"/);
-  assert.match(html,/one audio stream/);
+  assert.match(html,/selected audio track and the current playback timeline/);
+  assert.match(html,/Shared viewers can read committed AI captions/);
+  assert.match(html,/Original captions and Off remain available/);
+  assert.doesNotMatch(html,/Leaves Developer when|pill warn">experimental/);
   const card=shippedSource("subtitleTranslationCard");
-  assert.match(card,/Experimental accuracy/);
-  assert.doesNotMatch(card,/devGraduation|Qualification pending|Leaves Developer when/);
+  assert.match(card,/Accuracy needs checking/);
+  assert.match(card,/Generate captions from speech, translate speech to English, or translate an existing text subtitle/);
+  assert.doesNotMatch(card,/devGraduation|Leaves Developer when/);
   assert.match(shippedSource("translationOpen"),/#\/settings\/playback\/enable-subtitle-translation/);
 });
 
@@ -936,6 +941,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=true/);
   assert.match(graduatedPlayback, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/);
   assert.match(graduatedPlayback, /FOOT:savePreparedQuality/);
+  const subtitleCaptionsCard=/CARD\[CARDHEAD:AI captions[\s\S]*?(?=CARD\[CARDHEAD:|<details class="setdetails"|$)/.exec(graduatedPlayback);
+  assert.ok(subtitleCaptionsCard,"Playback keeps the unfinished subtitle operations together in their card");
+  assert.match(shippedSource("subtitleTranslationCard"),/Accuracy needs checking/,"the authored card keeps its accuracy qualification warning");
   assert.doesNotMatch(graduatedPlayback, /Leaves Developer when|pill warn">experimental/);
   // Absent from the settings document is on: the store's switch defaults on.
   // It sits in Maintenance beside the store it controls.

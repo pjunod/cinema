@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-19, plurx has 386 routes declared by the ordinary listener's
+As of 2026-10-26, plurx has 397 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -37,7 +37,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 386 routes across the registered routers.
+plurx has 397 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2358,8 +2358,8 @@ existing import grant; it does not start work on the Source.
 | GET | `/api/v1/subtitle-text-translation/jobs/{id}` | bearer | Observe a translation job. |
 | POST | `/api/v1/subtitle-text-translation/jobs/{id}/retry` | admin bearer | Retry a failed job. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/captions` | import grant | Cursor page of committed captions for shared playback. |
-| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/manifest?position_ms={ms}` | import grant | Playback-window coverage and segment descriptors. |
-| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/segments/{segment}?lease={uuid}` | import grant | Bounded caption segment under the manifest read lease. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/manifest` | import grant | Playback-window coverage and segment descriptors; requires `position_ms`. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/segments/{segment}` | import grant | Bounded caption segment; requires the manifest `lease` query value. |
 
 Shared caption reads are grant-bound and revalidate the Source asset authority.
 Expired snapshots require refreshing the caption page and manifest; the reads

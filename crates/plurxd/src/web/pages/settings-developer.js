@@ -709,8 +709,7 @@ function subtitleTranslationCard(){
     <p>Download and test the speech model on a worker, then choose Generate or translate speech in the player. A separate text model translates existing text subtitles. Each setup shows download progress, worker readiness and an explicit retry.</p>
     <p class="hint">Web, iPhone and Apple TV use the selected audio track and the current playback timeline. Shared viewers can read committed AI captions; a Source administrator requests missing coverage. Partial captions may lag or be wrong. Original captions and Off remain available.</p>
     <button type="button" class="sm" onclick="openTranslationSettings()">Set up speech captions</button><div id="subtitle-translation-form"></div>
-    <button type="button" class="sm" onclick="openTextTranslationSettings()">Set up subtitle text translation</button><div id="text-subtitle-translation-settings"></div>
-    ${devGraduation("model installation, language accuracy and playback qualification complete on the target clients.","the permanent model settings move to their normal settings section.")}`,{id:"enable-subtitle-translation"});
+    <button type="button" class="sm" onclick="openTextTranslationSettings()">Set up subtitle text translation</button><div id="text-subtitle-translation-settings"></div>`,{id:"enable-subtitle-translation"});
 }
 
 function displayTargetHdr10Card(settings,readiness){

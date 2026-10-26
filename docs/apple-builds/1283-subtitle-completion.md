@@ -1,5 +1,7 @@
 # Add text subtitle translation and shared caption reads
 
+**Status:** open · final qualification
+
 Build: 277
 Issue: #1283
 

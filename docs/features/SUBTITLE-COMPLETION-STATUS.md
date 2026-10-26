@@ -1,6 +1,8 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Date:** 2026-10-25 · **Status:** final qualification · **Updated:** 2026-10-26 · **Owner:** Codex /root · **Branch:** `effort/subtitle-completion`
+**Status:** open · final qualification
+
+**Date:** 2026-10-25 · **Updated:** 2026-10-26 · **Owner:** Codex /root · **Branch:** `effort/subtitle-completion`
 
 Companion to the [subtitle generation plan](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md)
 and [progressive translation plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).
