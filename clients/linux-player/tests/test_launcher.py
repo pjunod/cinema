@@ -15,6 +15,7 @@ from unittest import mock
 
 import support
 from support import CODE, FILE_ID, ITEM_ID, TOKEN, LauncherCase, transcode_decision
+from plurx_player import launcher as launcher_module
 from plurx_player import playback as playback_module
 from plurx_player.trust import TrustStore, zenity_confirm
 
@@ -334,6 +335,86 @@ class Delivery(LauncherCase):
                       self.mpv.commands())
 
 
+class PolicyDefaults(LauncherCase):
+    """A picker left on Default (null in the handoff) takes the decision's own choice."""
+
+    def direct(self, **extra):
+        self.server.decision = transcode_decision(method="direct_play", delivery={
+            "mode": "direct", "url": f"/api/v1/files/{FILE_ID}/direct"}, **extra)
+
+    def test_default_audio_is_selected_for_direct_play(self):
+        self.server.redeem_body.update(audio=None, subtitle=None)
+        self.direct(audio=[{"index": 0, "default": False}, {"index": 1, "default": True}])
+        self.close_at(4)
+        self.run_launcher()
+        self.assertIn(["set_property", "aid", 2], self.mpv.commands())
+        self.assertNotIn("audio", self.server.calls("POST", f"/api/v1/files/{FILE_ID}/decision")[0]["query"])
+
+    def test_default_text_subtitle_loads_as_a_sidecar(self):
+        self.server.redeem_body.update(audio=None, subtitle=None)
+        self.server.decision = transcode_decision(subtitles=[
+            {"index": 2, "text": True, "default": True}, {"index": 3, "text": False}])
+        self.close_at(4)
+        self.run_launcher()
+        commands = self.mpv.commands()
+        self.assertIn(["sub-add", f"{self.server.origin}/api/v1/files/{FILE_ID}/subs/2", "select", "plurx"], commands)
+        create = self.server.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions")[0]["body"]
+        self.assertNotIn("audio", create, "an untouched audio picker is not sent back")
+        self.assertNotIn("subtitle_burn", create)
+
+    def test_selection_echo_names_the_policy_subtitle_when_audio_was_picked(self):
+        self.server.redeem_body.update(audio=1, subtitle=None)
+        self.server.decision = transcode_decision(
+            subtitles=[{"index": 2, "text": True, "default": False}],
+            selection={"audio_index": 1, "subtitle_index": 2, "subtitle_requires_burn_in": False,
+                       "subtitle_burn_in_blocked_by_hdr": False})
+        self.close_at(4)
+        self.run_launcher()
+        self.assertIn(["sub-add", f"{self.server.origin}/api/v1/files/{FILE_ID}/subs/2", "select", "plurx"],
+                      self.mpv.commands())
+
+    def test_a_bitmap_default_and_an_explicit_off_load_nothing(self):
+        for subtitle, tracks in ((None, [{"index": 3, "text": False, "default": True}]),
+                                 (-1, [{"index": 2, "text": True, "default": True}])):
+            with self.subTest(subtitle=subtitle):
+                self.server.redeemed, self.server.revoked = False, False
+                self.server.redeem_body.update(audio=None, subtitle=subtitle)
+                self.server.decision = transcode_decision(subtitles=tracks)
+                self.mpv.reset()
+                before = len(self.server.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions"))
+                self.clock.at(self.clock.now + 4, self.mpv.close)
+                self.run_launcher()
+                self.assertFalse([c for c in self.mpv.commands() if c[0] == "sub-add"])
+                create = self.server.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions")[before]["body"]
+                self.assertNotIn("subtitle_burn", create)
+
+
+class SignalDuringRedeem(LauncherCase):
+    def test_sigterm_while_redeeming_still_revokes_the_issued_token(self):
+        # The server issues the token and the signal lands before the answer
+        # is read: without the gate, Terminated would be raised inside the
+        # redeem call and the live token would never be revoked.
+        route = self.server.route
+
+        def signalling(method, path, headers, body):
+            answer = route(method, path, headers, body)
+            if path.endswith("/redeem"):
+                os.kill(os.getpid(), signal.SIGTERM)
+            return answer
+
+        self.server.route = signalling
+        deps = launcher_module.Deps(confirm=self.refuse, error=self.errors.append, clock=self.clock,
+                                    sleep=self.clock.sleep, config_dir=self.config,
+                                    runtime_dir=self.runtime, install_signals=True)
+        previous = signal.getsignal(signal.SIGTERM)
+        code = launcher_module.main([self.server.url(), "--mpv", self.wrapper], deps)
+        self.assertIs(signal.getsignal(signal.SIGTERM), previous, "handlers are restored")
+        self.assertEqual(code, 128 + signal.SIGTERM)
+        self.assertTrue(self.server.redeemed)
+        self.assertTrue(self.server.revoked, "the token issued during the signal is revoked")
+        self.assertFalse(self.server.calls("POST", f"/api/v1/files/{FILE_ID}/decision"))
+
+
 class Mapper(LauncherCase):
     def test_one_client_log_line_per_playback_with_profile_mapper_and_target(self):
         self.server.origins = [60_000, 559_000]
@@ -351,6 +432,7 @@ class Mapper(LauncherCase):
         self.assertEqual(line["message"],
                          "plurx Player (Linux): DV profile 8, mapper closed-form CM v4.0, target 616 nits")
         self.assertEqual(json.loads(line["detail"])["target_nits"], 616)
+        self.assertEqual(line["level"], "warn", "ClientLog has only error and WARN; info would be logged as WARN")
         self.assertEqual(line["file_id"], FILE_ID)
         self.assertIn(["show-text", "DV profile 8, mapper closed-form CM v4.0, target 616 nits", 4000],
                       self.mpv.commands())
