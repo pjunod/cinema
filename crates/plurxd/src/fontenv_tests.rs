@@ -141,7 +141,10 @@ fn fixture() -> Fixture {
         .iter()
         .map(|(file, _)| {
             let copy = fonts.join(file.file_name().expect("font name"));
-            std::fs::copy(file, &copy).expect("install font");
+            // Install readable logical bytes, including compressed host fonts,
+            // without inheriting filesystem-specific copy metadata.
+            let bytes = std::fs::read(file).expect("read installed font bytes");
+            std::fs::write(&copy, bytes).expect("install font bytes");
             copy
         })
         .collect();
