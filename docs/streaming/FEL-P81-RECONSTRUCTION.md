@@ -2,7 +2,8 @@
 
 **Status:** built on branch `claude/lp-fel-p81` (milestone M2 of
 [the Linux player plan](../clients/LINUX-PLAYER-PLAN.md) §3.3) · not
-deployed · physical Dolby Vision display acceptance open · **Written:**
+deployed · served-picture quality acceptance not met (§3, §6) · physical
+Dolby Vision display acceptance open · **Written:**
 2026-10-25
 
 Companion to [DV_PROCESSING_TOOLS.md](DV_PROCESSING_TOOLS.md) (the helpers)
@@ -82,35 +83,73 @@ Reference: the helper's own FEL master render (`fel`, 16-bit R'G'B').
 EL dropped: the window converted with `dovi_tool -m 2` (libdovi `To81`, as
 `dvconvert.rs`), its base layer checked bit-identical to the source's, then
 rendered by the same helper in `base-rpu` mode — what a Dolby Vision display
-reconstructs from the plain conversion. PSNR over every pixel on PQ
-R'G'B'; ΔE_ITP (BT.2124, `tools/dv_quality/metrics.py`) on a 16-pixel
-lattice, 1 555 200 samples.
+reconstructs from the plain conversion. PSNR over every pixel on PQ R'G'B',
+frames paired by index; ΔE_ITP (BT.2124, `tools/dv_quality/metrics.py`) on a
+16-pixel lattice. Each cell is whole frame / active picture (inside the
+letterbox: Title A rows 274–1884, Title B rows 40–2118).
 
 | Against the FEL reference | Title A PSNR · ΔE mean · ΔE p99 | Title B PSNR · ΔE mean · ΔE p99 |
 |---|---|---|
-| Composed, pre-encode 4:2:0 export | 53.16 dB · 1.01 · 6.19 | 57.27 dB · 0.92 · 2.87 |
-| EL dropped, same 4:2:0 export | 42.45 dB · 4.68 · 10.58 | 36.15 dB · 3.32 · 10.58 |
-| Served window (composed + `hevc_vaapi`, ~18.4 Mb/s) | 47.29 dB · 2.86 · 12.16 | 34.66 dB · 3.95 · 11.36 |
-| EL dropped, 4:4:4, unencoded | 43.15 dB · 3.94 · 10.27 | 36.04 dB · 3.53 · 10.27 |
+| Composed, pre-encode 4:2:0 export | 53.16 · 1.01 · 6.19 / 51.94 · 1.22 · 6.98 | 57.27 · 0.92 · 2.87 / 57.14 · 0.93 · 2.92 |
+| EL dropped, same 4:2:0 export | 42.45 · 4.68 · 10.58 / 48.48 · 2.69 · 7.65 | 47.00 · 3.32 · 10.58 / 48.60 · 3.05 · 7.05 |
+| EL dropped, 4:4:4, unencoded (what the fallback shows) | 43.15 · 3.94 · 10.27 / 52.48 · 1.81 · 5.98 | 46.07 · 3.53 · 10.27 / 47.22 · 3.27 · 7.34 |
+| Served, current recipe (20 Mb/s rung, VBR, compression level 19) | 46.77 · 3.03 · 13.82 / 45.51 · 3.90 · 14.79 | 45.37 · 4.00 · 12.89 / 45.21 · 4.12 · 13.00 |
+| Served, VBR 50 Mb/s, `-qmax 16`, compression level 0 | 48.46 · 2.50 · 10.40 / 47.21 · 3.20 · 11.12 | 49.16 · 2.67 · 8.12 / 49.01 · 2.74 · 8.18 |
+| Served, VBR 60 Mb/s, `-qmax 14`, compression level 0 | 48.77 · 2.40 · 9.92 / 47.52 · 3.06 · 10.65 | 49.47 · 2.61 · 7.43 / 49.32 · 2.68 · 7.49 |
 
-**How to read it.** The first two rows differ only in whether the EL was
-composed — same frames, same export, same Y'CbCr step — so they prove
-composition: the served base layer is built from the composed picture, and
-that picture is 10.7 dB (A) and 21.1 dB (B) closer to the FEL master. The
-last two rows add the delivery encode. Title A's served window is still
-closer than the plain conversion's untouched base layer; Title B's is not.
-Per-frame Y-PSNR of B's served window against its own pre-encode picture is
-about 48 dB on every third frame and 29–34 dB on the rest: `hevc_vaapi`
-(RADV, compression level 19) quantizes its B-frames far harder than its
-anchors, and B's grain is the EL's detail. That is the open "quality at
-delivery bitrates" requirement, not a composition fault.
+The served rows encode the window's pre-encode composed picture with the
+production argument list for this route (`vod_completed_reconstructed_pipe_args`
+plus the radeonsi policy), varying only the rate-control arguments. The
+current-recipe reproduction scores what the daemon's own dumped window
+scored. Throughput is unaffected: compose + encode over five consecutive
+2 s windows runs at 35.2 fps (1.47×) with the current recipe and 35.4–36.2
+fps (1.48–1.51×) at 60 Mb/s.
 
-Both titles are letterboxed and the bars are in every number. The EL-dropped
-p99 is the same in both titles because it is the bars: the composed picture
-puts them at 0.00001 nits, the EL-dropped one at 0.004–0.005 nits, a
-constant ΔE_ITP of 10.27 (4:4:4) or 10.58 (4:2:0). The picture area is
-where the PSNR and mean differences come from (Title A centre pixel: ΔE 1.98;
-Title B: 3.57).
+**How to read it.** Rows one and two differ only in whether the EL was
+composed, so they prove composition, in the active picture too (A: ΔE 1.22
+vs 2.69; B: 0.93 vs 3.05). Whether the *served* picture beats the
+fallback is a different question: the fallback serves the disc's own base
+layer untouched (~80 Mb/s), the reconstruction re-encodes the whole picture.
+
+- **Title B** (large EL contribution: the fallback is 47.22 dB from the
+  reference inside the picture): the current recipe loses (45.21 dB, ΔE
+  4.12). At 60 Mb/s with `-qmax 14` it wins PSNR (+2.1 dB) and ΔE mean
+  (−18%) inside the picture, with p99 at parity (7.49 vs 7.34).
+- **Title A** (small EL contribution: the fallback is 52.48 dB, ΔE 1.81
+  inside the picture): no hevc_vaapi setting tried beats it inside the
+  picture, up to 106 Mb/s with `-qmax 6` (48.89 dB, ΔE 2.50, p99 9.15).
+  Its whole-frame lead comes from the letterbox, where the composed picture
+  puts the bars at 0.00001 nits and the fallback at 0.004–0.005 nits (a
+  constant ΔE 10.27 per bar pixel, which is also why the fallback's p99 is
+  the same on both titles).
+
+**What limits the encoder** (measured, `trace_headers` slice QPs and per-frame
+Y-PSNR against the pre-encode picture):
+
+1. **There are no B-frames.** This route already sets `-bf 0`. The earlier
+   "29–34 dB on two frames in three" was the measurement: FFmpeg's `psnr`
+   pairs frames by timestamp, and a 23.976/24 fps window in a millisecond
+   time base was paired with the previous reference frame two times in
+   three. The proof now restamps both inputs to their frame index
+   (fixed 2026-10-26); the earlier PSNR column in this document was wrong,
+   the ΔE columns were always index-paired.
+2. **Each window's IDR is its worst frame.** Every window is a fresh encoder,
+   so VBR starts the IDR at QP 24 while the P frames settle at 18 or below;
+   the IDR scores 48.5 dB at every bitrate from 18 to 60 Mb/s. In CQP mode
+   radeonsi encodes the IDR at QP 26 whatever `-qp` says (`-i_qfactor` /
+   `-i_qoffset` change nothing). `-qmax` is the one argument that reaches
+   it (IDR 53–55 dB at `-qmax 14–16`).
+3. **The 20 Mb/s rung.** `ladder::bitrate_for_height(2160)` is the transcode
+   rung; this route replaces a full-rate copy. Bitrate moves ΔE mean
+   steadily (B active: 4.12 at 20, 2.74 at 50+qmax, 2.68 at 60+qmax).
+4. **VBAQ** (compression level bit 4, on in the radeonsi policy) costs p99 at
+   the 18 Mb/s rate (13.4 vs 11.7 on B), and nothing measurable at 50 Mb/s
+   with `-qmax`; the radeonsi policy for ordinary HDR10 encodes is not shown
+   wrong by this.
+5. **The ceiling.** P frames reach 57.8 dB against the pre-encode picture at
+   CQP 4, so a picture whose EL changes it by less than that (Title A) cannot
+   be served closer to the FEL master than the untouched base layer at any
+   practical rate.
 
 ## 4. Truthfulness and attribution
 
@@ -144,11 +183,14 @@ python3 -I tools/dv_processing/controls/fel_composition_proof.py proof clip.mkv 
 
 ## 6. Open
 
-- **Delivery-bitrate quality.** Title B's served window loses to the plain
-  conversion after the encode (§3). The `hevc_vaapi` B-frame quality on
-  RADV, and the processed rendition's bitrate when it replaces a full-rate
-  converted copy, need their own measurement before this is the better
-  picture on grainy titles. The Developer row says so.
+- **Served quality (M2 acceptance not met).** The current recipe serves a
+  picture further from the FEL master than the fallback on both titles. A
+  60 Mb/s `-qmax 14` recipe for this route wins on Title B and cannot win
+  inside Title A's picture at any rate tried (§3). Choosing the rate (and
+  whether to reconstruct a title whose EL changes the picture less than the
+  encode loses) is an owner decision; no recipe change is committed. A
+  `-qmax` floor can push a hard scene past `-maxrate`, which the advertised
+  peak would then understate, so a recipe with it needs a VBV check.
 - **Concurrency.** One slot until two concurrent graphs are measured.
 - **A device whose VA-API driver fails HEVC Main10** decodes in software
   and is debited for it; one whose probe passes but whose renderer still
