@@ -594,8 +594,8 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
-    // A handoff token's marker travels with its `tokens` row: imported
-    // without it, the row would authenticate as a native account bearer.
+    // Playback handoff codes and the tokens they redeemed into; a handoff
+    // token lives only in its own table, never in `tokens`.
     TablePlan {
         name: "playback_handoffs",
         columns: &[
@@ -626,6 +626,8 @@ const TABLES: &[TablePlan] = &[
             "user_id",
             "file_id",
             "source_token_hash",
+            "device",
+            "created_at",
             "expires_at",
         ],
         order_by: "token_hash",

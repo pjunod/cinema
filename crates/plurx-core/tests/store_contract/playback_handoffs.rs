@@ -152,6 +152,16 @@ async fn playback_handoff_redeems_once_into_a_file_scoped_audience() {
             "{backend}"
         );
         assert_eq!(audiences(&store, &minter).await, [TokenAudience::Native]);
+        // It is not a row in `tokens` at all, so no native lookup — this
+        // binary's or an older one's — can find it.
+        assert!(
+            !store.delete_token(&token).await.expect("tokens lookup"),
+            "{backend}: a handoff token must not be a tokens row"
+        );
+        assert_eq!(
+            audiences(&store, &token).await,
+            [TokenAudience::PlaybackHandoff]
+        );
         let scope = store
             .playback_handoff_token_scope(&token, now)
             .await
@@ -245,6 +255,36 @@ async fn playback_handoff_redeems_once_into_a_file_scoped_audience() {
             assert!(audiences(&store, dead).await.is_empty());
         }
         assert!(!lists_device(&store, uid).await);
+
+        // Revocation from the sessions list (by digest prefix) and by the
+        // player itself.
+        assert!(store
+            .create_playback_handoff(handoff("h5", uid, file, &minter3, now))
+            .await
+            .expect("mint"));
+        let listed = digest("t5");
+        assert!(matches!(
+            store
+                .redeem_playback_handoff(&redemption("h5", &listed, now, expires))
+                .await
+                .expect("redeem"),
+            PlaybackHandoffRedeemOutcome::Redeemed(_)
+        ));
+        assert!(lists_device(&store, uid).await, "{backend}");
+        assert!(store
+            .revoke_playback_handoff_token_by_prefix(uid, &listed[..8])
+            .await
+            .expect("revoke by prefix"));
+        assert!(audiences(&store, &listed).await.is_empty(), "{backend}");
+        assert!(!store
+            .revoke_playback_handoff_token(&listed)
+            .await
+            .expect("already revoked"));
+        assert!(!store
+            .revoke_playback_handoff_token_by_prefix(uid, &minter3[..8])
+            .await
+            .expect("a login token prefix is not a handoff token"));
+        assert_eq!(audiences(&store, &minter3).await, [TokenAudience::Native]);
     })
     .await;
 }

@@ -1,9 +1,10 @@
-//! Standalone playback handoffs share the native token table; see
-//! `store/playback_handoffs.rs` for the audience rules.
+//! Standalone playback handoffs; see `store/playback_handoffs.rs` for why a
+//! handoff token never shares the native `tokens` table.
 use async_trait::async_trait;
 use rusqlite::{params, OptionalExtension};
 
 use super::SqliteStore;
+use crate::domain::User;
 use crate::error::StoreError;
 use crate::store::playback_handoffs as ph;
 use crate::store::{
@@ -84,20 +85,14 @@ impl PlaybackHandoffStore for SqliteStore {
         let r = redemption.clone();
         let device = bounded_device_label(r.device.clone());
         self.with_conn(move |conn| {
-            // One fixed batch: each later statement is conditional on the
-            // claim this batch made, and the guard rolls everything back if a
-            // token row would be left without its audience marker.
+            // The claim and the token it mints commit together; the token
+            // insert is conditional on the claim this batch made.
             let tx = conn.unchecked_transaction()?;
             tx.execute(ph::CLAIM_SQL, params![r.now, r.code_hash])?;
             tx.execute(
                 ph::MINT_TOKEN_SQL,
-                params![r.token_hash, device, r.now, r.code_hash],
+                params![r.token_hash, device, r.now, r.token_expires_at, r.code_hash],
             )?;
-            tx.execute(
-                ph::MARK_TOKEN_SQL,
-                params![r.token_hash, r.token_expires_at, r.code_hash, r.now],
-            )?;
-            tx.execute(ph::MARKER_GUARD_SQL, params![r.token_hash])?;
             tx.commit()?;
             let row = conn
                 .query_row(
@@ -132,18 +127,58 @@ impl PlaybackHandoffStore for SqliteStore {
         .await
     }
 
+    async fn revoke_playback_handoff_token(&self, token_hash: &str) -> Result<bool, StoreError> {
+        let token_hash = token_hash.to_owned();
+        self.with_conn(move |conn| Ok(conn.execute(ph::REVOKE_SQL, params![token_hash])? > 0))
+            .await
+    }
+
+    async fn revoke_playback_handoff_token_by_prefix(
+        &self,
+        user_id: i64,
+        prefix: &str,
+    ) -> Result<bool, StoreError> {
+        let prefix = prefix.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(ph::REVOKE_PREFIX_SQL, params![user_id, prefix])? > 0)
+        })
+        .await
+    }
+
     async fn prune_playback_handoffs(
         &self,
         now: i64,
         codes_before: i64,
     ) -> Result<u64, StoreError> {
         self.with_conn(move |conn| {
-            // Each statement is safe on its own: a token row goes before its
-            // marker, and a marker goes only once its token row is gone.
             let tokens = conn.execute(ph::PRUNE_TOKENS_SQL, params![now])?;
-            let markers = conn.execute(ph::PRUNE_MARKERS_SQL, [])?;
             let codes = conn.execute(ph::PRUNE_CODES_SQL, params![codes_before])?;
-            Ok((tokens + markers + codes) as u64)
+            Ok((tokens + codes) as u64)
+        })
+        .await
+    }
+}
+
+impl SqliteStore {
+    /// `TokenAudience::PlaybackHandoff`: the user of a live handoff token.
+    /// Read from its own table, never from `tokens`.
+    pub(super) async fn authenticate_playback_handoff(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<User>, StoreError> {
+        let token_hash = token_hash.to_owned();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.with_read(move |conn| {
+            Ok(conn
+                .query_row(
+                    ph::AUTHENTICATE_SQL,
+                    params![token_hash, now],
+                    super::user_from_row,
+                )
+                .optional()?)
         })
         .await
     }

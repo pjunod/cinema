@@ -6423,6 +6423,15 @@ impl UserStore for HiqliteAuthStore {
         token_hash: &str,
         audience: super::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
+        // A handoff token is never a row in `tokens`; its own table answers.
+        if audience == super::TokenAudience::PlaybackHandoff {
+            return Ok(
+                match self.authenticate_playback_handoff(token_hash).await? {
+                    Some(user) => TokenAuthentication::Authenticated(user),
+                    None => TokenAuthentication::Unknown,
+                },
+            );
+        }
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
         // against the committed policy rather than a node-local cache.
@@ -6436,21 +6445,8 @@ impl UserStore for HiqliteAuthStore {
                           (SELECT value FROM settings WHERE key = $3) AS expiry_since \
                  FROM users u JOIN tokens t ON t.user_id = u.id \
                  WHERE t.token_hash = $4 \
-                   AND CASE $5 \
-                     WHEN 'native' THEN NOT EXISTS ( \
-                         SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash) \
-                       AND NOT EXISTS ( \
-                         SELECT 1 FROM playback_handoffs_tokens h WHERE h.token_hash = t.token_hash) \
-                     WHEN 'jellyfin' THEN EXISTS ( \
-                         SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash) \
-                     WHEN 'playback_handoff' THEN EXISTS ( \
-                         SELECT 1 FROM playback_handoffs_tokens h \
-                         WHERE h.token_hash = t.token_hash AND h.user_id = t.user_id \
-                           AND h.expires_at > $6 \
-                           AND EXISTS (SELECT 1 FROM tokens s \
-                                       WHERE s.token_hash = h.source_token_hash \
-                                         AND s.user_id = h.user_id)) \
-                     ELSE 0 END";
+                   AND ($5 = 'native') = NOT EXISTS ( \
+                     SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)";
         validate_sql(sql)?;
         trace_statement("authenticate_token", sql);
         let mut rows = self
@@ -6462,8 +6458,7 @@ impl UserStore for HiqliteAuthStore {
                     keys::AUTH_TOKEN_IDLE_DAYS,
                     keys::AUTH_TOKEN_EXPIRY_SINCE,
                     token_hash,
-                    audience.as_str(),
-                    self.now()?
+                    audience.as_str()
                 ),
             )
             .await?;
@@ -6526,12 +6521,15 @@ impl UserStore for HiqliteAuthStore {
         // the user predicate, so it is `$1`.
         let sql = "SELECT substr(token_hash, 1, 8) AS token_hash_prefix, \
                           substr(device, 1, $1) AS device, created_at, last_seen_at \
-                   FROM tokens WHERE user_id = $2 \
-                     AND NOT EXISTS (SELECT 1 FROM playback_handoffs_tokens h \
-                       WHERE h.token_hash = tokens.token_hash \
-                         AND (h.expires_at <= $3 OR NOT EXISTS ( \
-                           SELECT 1 FROM tokens s WHERE s.token_hash = h.source_token_hash \
-                             AND s.user_id = h.user_id))) \
+                   FROM (SELECT token_hash, device, created_at, last_seen_at \
+                         FROM tokens WHERE user_id = $2 \
+                         UNION ALL \
+                         SELECT h.token_hash, h.device, h.created_at, h.created_at \
+                         FROM playback_handoffs_tokens h \
+                         WHERE h.user_id = $2 AND h.expires_at > $3 \
+                           AND EXISTS (SELECT 1 FROM tokens s \
+                                       WHERE s.token_hash = h.source_token_hash \
+                                         AND s.user_id = h.user_id)) \
                    ORDER BY created_at, token_hash LIMIT $4";
         validate_sql(sql)?;
         Ok(self

@@ -1,11 +1,14 @@
 //! Playback handoff — one title handed from a signed-in client to another
 //! local app (the Linux player) through a one-time code, never a bearer in a
 //! URL. The code redeems into a token of its own audience
-//! ([`super::TokenAudience::PlaybackHandoff`]): a row in `tokens`, so it shows
-//! in the account's sessions list and every revocation path removes it, plus
-//! a marker row that keeps it off every native route and scopes it to one
-//! file. An independently recognized extension schema, installed the same way
-//! on SQLite (one migration step) and hiqlite (an idempotent install from the
+//! ([`super::TokenAudience::PlaybackHandoff`]) that lives only in
+//! `playback_handoffs_tokens`, never in `tokens`. Every native lookup reads
+//! `tokens`, so no native route can accept a handoff token — including one
+//! served by a binary older than this table during a rolling upgrade, which
+//! finds nothing and answers 401. The account's sessions list unions the
+//! table in, so the token still shows there with its device label. An
+//! independently recognized extension schema, installed the same way on
+//! SQLite (one migration step) and hiqlite (an idempotent install from the
 //! current-schema arm).
 use async_trait::async_trait;
 use std::sync::LazyLock;
@@ -17,8 +20,7 @@ pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE nam
 pub(crate) const MARKER_SQL: &str =
     "SELECT count(*) AS count FROM playback_handoffs_schema WHERE singleton=1 AND version=1";
 /// The tables this extension references.
-const DEPENDENCIES: &str =
-    "CREATE TABLE users(id INTEGER PRIMARY KEY); CREATE TABLE tokens(token_hash TEXT PRIMARY KEY);";
+const DEPENDENCIES: &str = "CREATE TABLE users(id INTEGER PRIMARY KEY);";
 
 /// How long a minted code may wait to be redeemed.
 pub const PLAYBACK_HANDOFF_CODE_TTL_SECS: i64 = 120;
@@ -50,63 +52,61 @@ pub(crate) const CLAIM_SQL: &str = "UPDATE playback_handoffs SET redeemed_at = $
      WHERE code_hash = $2 AND redeemed_at IS NULL AND expires_at > $1 \
      AND EXISTS (SELECT 1 FROM tokens s WHERE s.token_hash = playback_handoffs.source_token_hash \
                  AND s.user_id = playback_handoffs.user_id)";
-/// Step 2: the token row, only for the claim this redemption made (claimed
-/// at `now` and not yet carrying a marker). Parameters: token hash, device,
-/// now, code hash.
-pub(crate) const MINT_TOKEN_SQL: &str = "INSERT INTO tokens \
-     (token_hash, user_id, device, created_at, last_seen_at) \
-     SELECT $1, h.user_id, $2, $3, $3 FROM playback_handoffs h \
-     WHERE h.code_hash = $4 AND h.redeemed_at = $3 \
+/// Step 2, in the same transaction: the token, only for the claim this
+/// redemption made (claimed at `now` and not yet carrying a token).
+/// Parameters: token hash, device, now, token expiry, code hash.
+pub(crate) const MINT_TOKEN_SQL: &str = "INSERT INTO playback_handoffs_tokens \
+     (token_hash, handoff_id, user_id, file_id, source_token_hash, device, created_at, expires_at) \
+     SELECT $1, h.id, h.user_id, h.file_id, h.source_token_hash, $2, $3, $4 \
+     FROM playback_handoffs h \
+     WHERE h.code_hash = $5 AND h.redeemed_at = $3 \
      AND NOT EXISTS (SELECT 1 FROM playback_handoffs_tokens m WHERE m.handoff_id = h.id)";
-/// Step 3: the audience marker for exactly that token. Parameters: token
-/// hash, token expiry, code hash, now.
-pub(crate) const MARK_TOKEN_SQL: &str = "INSERT INTO playback_handoffs_tokens \
-     (token_hash, handoff_id, user_id, file_id, source_token_hash, expires_at) \
-     SELECT $1, h.id, h.user_id, h.file_id, h.source_token_hash, $2 FROM playback_handoffs h \
-     WHERE h.code_hash = $3 AND h.redeemed_at = $4 \
-     AND NOT EXISTS (SELECT 1 FROM playback_handoffs_tokens m WHERE m.handoff_id = h.id) \
-     AND EXISTS (SELECT 1 FROM tokens t WHERE t.token_hash = $1 AND t.user_id = h.user_id)";
-/// Step 4: abort the whole redemption if it would leave a token row without
-/// its marker — that row would authenticate as a native account bearer. The
-/// forbidden row (singleton 2, NULL version) fails its CHECK and NOT NULL.
-/// Parameter: token hash.
-pub(crate) const MARKER_GUARD_SQL: &str = "INSERT INTO playback_handoffs_schema \
-     (singleton, version) SELECT 2, NULL \
-     WHERE EXISTS (SELECT 1 FROM tokens t WHERE t.token_hash = $1) \
-     AND NOT EXISTS (SELECT 1 FROM playback_handoffs_tokens m WHERE m.token_hash = $1)";
 /// After the redemption: what the code is now, and whether this token is the
 /// one it redeemed into. Parameters: token hash, code hash.
 pub(crate) const OUTCOME_SQL: &str = "SELECT h.id AS id, h.user_id AS user_id, \
      h.file_id AS file_id, h.start_ms AS start_ms, h.audio AS audio, h.subtitle AS subtitle, \
      h.origin AS origin, h.created_at AS created_at, h.expires_at AS expires_at, \
      h.redeemed_at AS redeemed_at, \
-     EXISTS (SELECT 1 FROM playback_handoffs_tokens m JOIN tokens t ON t.token_hash = m.token_hash \
+     EXISTS (SELECT 1 FROM playback_handoffs_tokens m \
              WHERE m.handoff_id = h.id AND m.token_hash = $1) AS redeemed_here \
      FROM playback_handoffs h WHERE h.code_hash = $2";
 
-/// The scope of a live handoff token: unexpired, its token row present and
-/// its minting token still present. Parameters: token hash, now.
+/// Authentication of the `PlaybackHandoff` audience: the user of a live
+/// handoff token — unexpired, and its minting token still present.
+/// Parameters: token hash, now.
+pub(crate) const AUTHENTICATE_SQL: &str = "SELECT u.id AS id, u.username AS username, \
+     u.password_hash AS password_hash, u.is_admin AS is_admin, u.created_at AS created_at \
+     FROM playback_handoffs_tokens m JOIN users u ON u.id = m.user_id \
+     WHERE m.token_hash = $1 AND m.expires_at > $2 \
+     AND EXISTS (SELECT 1 FROM tokens s WHERE s.token_hash = m.source_token_hash \
+                 AND s.user_id = m.user_id)";
+/// The scope of a live handoff token. Parameters: token hash, now.
 pub(crate) const TOKEN_SCOPE_SQL: &str = "SELECT m.handoff_id AS handoff_id, \
      m.user_id AS user_id, m.file_id AS file_id, m.expires_at AS expires_at \
      FROM playback_handoffs_tokens m \
-     JOIN tokens t ON t.token_hash = m.token_hash AND t.user_id = m.user_id \
      WHERE m.token_hash = $1 AND m.expires_at > $2 \
      AND EXISTS (SELECT 1 FROM tokens s WHERE s.token_hash = m.source_token_hash \
                  AND s.user_id = m.user_id)";
 
-/// Pruning, step 1: delete the token rows of handoff tokens that are expired
-/// or whose minting token is gone (their markers go by cascade). Parameter:
-/// now.
-pub(crate) const PRUNE_TOKENS_SQL: &str = "DELETE FROM tokens WHERE token_hash IN \
-     (SELECT m.token_hash FROM playback_handoffs_tokens m WHERE m.expires_at <= $1 \
-      OR NOT EXISTS (SELECT 1 FROM tokens s WHERE s.token_hash = m.source_token_hash \
-                     AND s.user_id = m.user_id))";
-/// Step 2: markers whose token row is already gone. Removing one can never
-/// promote a token, because there is no token row left to promote.
-pub(crate) const PRUNE_MARKERS_SQL: &str = "DELETE FROM playback_handoffs_tokens \
-     WHERE NOT EXISTS (SELECT 1 FROM tokens t \
-                       WHERE t.token_hash = playback_handoffs_tokens.token_hash)";
-/// Step 3: codes past their expiry by the caller's margin with no live token.
+/// The player revokes its own token. Parameter: token hash.
+pub(crate) const REVOKE_SQL: &str = "DELETE FROM playback_handoffs_tokens WHERE token_hash = $1";
+/// Revocation from the sessions list: exactly one handoff token of this user
+/// carries the prefix, and no login token does (that one is revoked by the
+/// ordinary path). Parameters: user id, prefix.
+pub(crate) const REVOKE_PREFIX_SQL: &str = "DELETE FROM playback_handoffs_tokens \
+     WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2 \
+     AND (SELECT COUNT(*) FROM playback_handoffs_tokens \
+          WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2) = 1 \
+     AND NOT EXISTS (SELECT 1 FROM tokens WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2)";
+
+/// Pruning, step 1: handoff tokens that are expired or whose minting token is
+/// gone. Parameter: now.
+pub(crate) const PRUNE_TOKENS_SQL: &str = "DELETE FROM playback_handoffs_tokens \
+     WHERE expires_at <= $1 \
+     OR NOT EXISTS (SELECT 1 FROM tokens s \
+                    WHERE s.token_hash = playback_handoffs_tokens.source_token_hash \
+                    AND s.user_id = playback_handoffs_tokens.user_id)";
+/// Step 2: codes past their expiry by the caller's margin with no live token.
 /// Parameter: the cutoff.
 pub(crate) const PRUNE_CODES_SQL: &str = "DELETE FROM playback_handoffs \
      WHERE expires_at < $1 AND NOT EXISTS (SELECT 1 FROM playback_handoffs_tokens m \
@@ -201,6 +201,15 @@ pub trait PlaybackHandoffStore: Send + Sync {
         token_hash: &str,
         now: i64,
     ) -> Result<Option<PlaybackHandoffTokenScope>, StoreError>;
+    /// Revoke one handoff token by its digest.
+    async fn revoke_playback_handoff_token(&self, token_hash: &str) -> Result<bool, StoreError>;
+    /// Revoke the one handoff token of `user_id` whose digest starts with
+    /// `prefix`, when no login token shares the prefix.
+    async fn revoke_playback_handoff_token_by_prefix(
+        &self,
+        user_id: i64,
+        prefix: &str,
+    ) -> Result<bool, StoreError>;
     /// Delete dead handoff tokens and codes expired before `codes_before`.
     async fn prune_playback_handoffs(&self, now: i64, codes_before: i64)
         -> Result<u64, StoreError>;
@@ -318,21 +327,85 @@ mod tests {
         }
     }
 
-    /// The marker guard aborts exactly when a token row lacks its marker.
+    /// The lookup every native route used before this extension existed —
+    /// and that a binary older than it still runs — finds no handoff token:
+    /// handoff tokens are not rows in `tokens`.
     #[test]
-    fn handoff_marker_guard_refuses_an_unmarked_token() {
-        let conn = fixture();
-        conn.execute_batch(SCHEMA).expect("install");
-        let guard = |hash: &str| conn.execute(MARKER_GUARD_SQL, rusqlite::params![hash]);
-        assert_eq!(guard("absent").expect("no token, no abort"), 0);
-        conn.execute("INSERT INTO tokens(token_hash) VALUES ('bare')", [])
-            .expect("unmarked token");
-        assert!(guard("bare").is_err(), "an unmarked token aborts");
-        conn.execute(
-            "INSERT INTO playback_handoffs_tokens VALUES ('bare','h',1,1,'src',1)",
-            [],
+    fn handoff_tokens_are_invisible_to_the_pre_handoff_native_lookup() {
+        let conn = rusqlite::Connection::open_in_memory().expect("fixture");
+        conn.execute_batch(
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, \
+             is_admin INTEGER, created_at INTEGER); \
+             CREATE TABLE tokens(token_hash TEXT PRIMARY KEY, user_id INTEGER, device TEXT, \
+             created_at INTEGER, last_seen_at INTEGER); \
+             CREATE TABLE jellyfin_login_tokens(token_hash TEXT PRIMARY KEY); \
+             INSERT INTO users VALUES (1, 'paul', 'hash', 1, 0); \
+             INSERT INTO tokens VALUES ('minter', 1, 'web', 0, 0);",
         )
-        .expect("marker");
-        assert_eq!(guard("bare").expect("marked token passes"), 0);
+        .expect("fixture tables");
+        conn.execute_batch(SCHEMA).expect("install");
+        let p = rusqlite::params![
+            "h",
+            "code",
+            1,
+            7,
+            "minter",
+            None::<i64>,
+            None::<i64>,
+            -1,
+            None::<String>,
+            10,
+            1000
+        ];
+        assert_eq!(conn.execute(INSERT_SQL, p).expect("mint"), 1);
+        assert_eq!(
+            conn.execute(CLAIM_SQL, rusqlite::params![100, "code"])
+                .expect("claim"),
+            1
+        );
+        assert_eq!(
+            conn.execute(
+                MINT_TOKEN_SQL,
+                rusqlite::params!["player", "plurx Player (Linux)", 100, 100 + 21_600, "code"],
+            )
+            .expect("mint token"),
+            1
+        );
+        // The native predicate as it stood before this change, verbatim in
+        // substance: a token row with no Jellyfin marker is a native bearer.
+        const OLD_NATIVE: &str = "SELECT u.id FROM users u JOIN tokens t ON t.user_id = u.id \
+             WHERE t.token_hash = ?1 AND ('native' = 'native') = NOT EXISTS ( \
+             SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)";
+        let native = |hash: &str| -> Option<i64> {
+            use rusqlite::OptionalExtension;
+            conn.query_row(OLD_NATIVE, [hash], |row| row.get(0))
+                .optional()
+                .expect("old native lookup")
+        };
+        assert_eq!(
+            native("minter"),
+            Some(1),
+            "the fixture's native lookup works"
+        );
+        assert_eq!(
+            native("player"),
+            None,
+            "a handoff token is never a native bearer"
+        );
+        let rows: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM tokens WHERE token_hash = 'player'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("plain tokens lookup");
+        assert_eq!(rows, 0);
+        // It authenticates under its own audience only.
+        let user: i64 = conn
+            .query_row(AUTHENTICATE_SQL, rusqlite::params!["player", 200], |row| {
+                row.get(0)
+            })
+            .expect("handoff audience");
+        assert_eq!(user, 1);
     }
 }

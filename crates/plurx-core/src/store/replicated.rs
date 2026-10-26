@@ -267,10 +267,9 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
     },
-    // Handoff redemption: a fixed batch of claim, token, marker and guard,
-    // each later statement conditional on this batch's claim; the guard rolls
-    // the batch back rather than leave a token without its audience marker.
-    // The replicated twin sends the same four statements as one transaction.
+    // Handoff redemption: the claim and the token it mints, the insert
+    // conditional on this batch's claim. The replicated twin sends the same
+    // two statements as one transaction.
     SqliteTransactionSite {
         module: "playback_handoffs.rs",
         method: "redeem_playback_handoff",
@@ -1420,7 +1419,7 @@ mod tests {
         // guarded transaction, each measured in sqlite/sharing.rs.
         // Cinema adds one paired receiver/grant revoke and four guarded
         // invitation admission/cleanup boundaries, registered above.
-        // Playback handoff redemption adds one fixed claim/mint/mark batch.
+        // Playback handoff redemption adds one fixed claim/mint batch.
         assert_eq!(methods.len(), 115);
     }
 
