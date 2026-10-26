@@ -107,10 +107,11 @@ With no known child there is no handle on which to invent a kill/wait receipt.
 JoinHandle and pipe/work ownership are registered (S3).
 
 Copy start sets its entry flag, then awaits source observations before starting
-the task (`runtime/operations/copy_vod.rs::start_copy_vod`); task arming adds another await
-before registration (`start_copy_task`). Thus this differs from S1. Current runtime
-join requires a task and committed task observation (`join_copy_producer`), and the copy
-process witness requires a joined parser. No copy root-only witness exists.
+the task (`runtime/operations/copy_vod.rs::start_copy_vod`); task arming adds
+another await before registration (`start_copy_task`). Thus this differs from
+S1. Current runtime join requires a task and committed task observation
+(`join_copy_producer`), and the copy process witness requires a joined parser.
+No copy root-only witness exists.
 
 **Required cleanup:** seal new entry; request kill of the retained root/job;
 wait that root; check-close its unclaimed stdout/stderr cells; dispose its
@@ -162,8 +163,11 @@ The required cancellation order for a state with a known live child is
 checked pipe close → remaining source/prefix closure**. No reader-drop-based
 termination assumption is allowed. Decide how to connect this ordering to the
 existing helpers rather than claiming it is already implemented: current
-`join_copy_vod(abort=true)` requests kill, joins/checks parser pipes, then waits
-the root (`runtime/operations/copy_vod.rs::join_copy_producer`).
+`join_copy_producer(abort=true)` requests root kill, calls the physical
+`join_copy_vod(task, false)` to join/check parser pipes, then waits the root
+(`runtime/operations/copy_vod.rs::join_copy_producer`). The physical helper's
+`abort=true` branch aborts the parser task; it neither kills the root nor
+supplies the natural nonentry join required by S3.
 
 Use the retained cleanup selector's deadline for every awaited step. Timeout,
 kill/wait error, uncertain job/pipe close or unresolved journal acknowledgment

@@ -409,9 +409,11 @@ async fn selected_copy_named_arm_starts_same_root_replays_release_and_fully_join
         .wait_producer_result(deadline())
         .await
         .expect("actual original parser terminal, not latch-delivery inference");
-    let producer = owner
-        .stop_producer(false)
+    // Failure-only watchdog around the SAME borrowed native wait. Elapsed
+    // fails the fixture; it cannot establish a join, closure, or refund.
+    let producer = tokio::time::timeout_at(deadline().into(), owner.stop_producer(false))
         .await
+        .expect("original producer join exceeded fixture deadline; no closure proved")
         .expect("join original copy producer");
     assert_eq!(producer.segments, parser.segments);
     assert!(!producer.completed || parser.completed);
@@ -432,6 +434,7 @@ async fn selected_copy_named_arm_starts_same_root_replays_release_and_fully_join
         .await
         .expect("same copy-specific full native and scratch retirement");
     drop(owner);
+    assert_eq!(ticket.fixture_application_released(), Some(false));
     assert!(
         ticket
             .finish_retirement(Instant::now() + Duration::from_millis(1))
@@ -447,6 +450,7 @@ async fn selected_copy_named_arm_starts_same_root_replays_release_and_fully_join
         charged
     );
     drop(output);
+    assert_eq!(ticket.fixture_application_released(), Some(false));
     assert!(
         ticket
             .finish_retirement(Instant::now() + Duration::from_millis(1))
@@ -462,6 +466,7 @@ async fn selected_copy_named_arm_starts_same_root_replays_release_and_fully_join
         charged
     );
     drop(application);
+    assert_eq!(ticket.fixture_application_released(), Some(true));
     ticket
         .finish_retirement(deadline())
         .await

@@ -177,6 +177,14 @@ pub struct CopyCloseTicket {
     app_state: Option<Arc<super::super::finite_lifetime::FiniteAppState>>,
 }
 impl CopyCloseTicket {
+    /// Observes this ticket's same application fence; never native/settlement proof.
+    #[cfg(test)]
+    pub(in crate::adaptive_resources::runtime) fn fixture_application_released(
+        &self,
+    ) -> Option<bool> {
+        self.app_state.as_ref().map(|state| state.released())
+    }
+
     pub async fn finish_retirement(&mut self, deadline: Instant) -> Result<(), FiniteVodError> {
         if self.preparation.is_none() {
             return Ok(());
