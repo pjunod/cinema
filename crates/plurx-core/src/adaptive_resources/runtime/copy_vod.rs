@@ -8,6 +8,7 @@ use crate::copy_segmenter::Limits;
 use crate::fmp4::FragmentReaderBounds;
 use std::time::Duration;
 
+pub(in crate::adaptive_resources::runtime) mod cleanup_memory;
 mod command;
 mod owner;
 mod sink;

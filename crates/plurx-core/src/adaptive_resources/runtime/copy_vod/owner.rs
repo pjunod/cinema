@@ -50,6 +50,7 @@ fn invalid_before_reservation() -> FiniteVodError {
 }
 
 fn known_copy_memory(
+    runtime: &NodeResourceRuntime,
     request: &CopyVodRequest,
     selected_directory_capacity: usize,
     binary_path_capacity: usize,
@@ -91,6 +92,13 @@ fn known_copy_memory(
         .and_then(|n| n.checked_add(std::mem::size_of::<CopyWork>()))
         .and_then(|n| n.checked_add(NodeResourceRuntime::copy_launch_structural_bytes()))
         .and_then(|n| n.checked_add(request.rendition_id.capacity()))
+        .and_then(|n| {
+            n.checked_add(super::cleanup_memory::requested_bytes(
+                runtime,
+                request,
+                selected_directory_capacity,
+            )?)
+        })
         .and_then(|n| n.checked_add(copy_task_structural_bytes()?))
         .ok_or_else(invalid)?;
     let owner = std::mem::size_of::<CopyVodOwner>()
@@ -842,7 +850,7 @@ impl NodeResourceRuntime {
             .ok_or_else(invalid)?;
         let (_, directory) = finite_directory_path(root, &request.rendition_id)?;
         let binary_path = request.command.executable().path().to_owned();
-        known_copy_memory(request, directory.capacity(), binary_path.capacity())
+        known_copy_memory(self, request, directory.capacity(), binary_path.capacity())
             .map(|(_, total)| total)
     }
 
@@ -912,6 +920,7 @@ impl NodeResourceRuntime {
         let binary_path_for_source = request.command.executable().path().to_owned();
         let binary_path_projected = binary_path_for_source.capacity();
         let (minimum_task_memory, minimum_total_memory) = known_copy_memory(
+            self,
             &request,
             selected_directory_path.capacity(),
             binary_path_projected,
