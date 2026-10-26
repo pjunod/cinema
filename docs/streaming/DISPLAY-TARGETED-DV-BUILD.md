@@ -3,7 +3,7 @@
 **Status:** A–D and F promoted to `main` through #1271 by Paul's decision of 2026-10-24. E (creative trims): closed-form Dolby display management merged through #1275; the served CM v4 L8 and CM v2.9 L2 trims (#1276, merged as 072d0f65 on 2026-10-25, not deployed) are accepted by pixel comparison against the reference on real titles, and playback reports `creative_trims_applied` per session; CM v2.9 near-black chroma follows the reference since #1278 (deca1e1e, not deployed); at the title's target black since #1281 (b9eb0466, not deployed) · **Updated:** 2026-10-25 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
-Evidence remains bound to its recorded source. CM29 analytic gamut reconstruction and method v5 are built by Codex; final review and qualification are pending. The selected-frame and synthetic evidence is described below.
+Evidence remains bound to its recorded source. CM29 analytic gamut reconstruction and method v5 are built by Codex; adversarial review approved and native parity passed. [PR #1289](http://forge.lan:3000/noirr/plurx/pulls/1289) records final qualification and landing. The selected-frame and synthetic evidence is described below.
 
 ## Current qualification — source-bound evidence through F
 
