@@ -9,8 +9,9 @@ implementing them. No live deployment is implied by this build.
 
 ## Completion integration — 2026-10-26
 
-The completion candidate includes main `087e836d3` (current HDR10-E and applied
-enhancement pills), `01a1709bf` (native Apple focus isolation) and `8edca502b`
+The completion candidate includes main `7c155f3df` (Auto names the selected
+encoder), retaining `087e836d3` (HDR10-E and applied enhancement pills),
+`01a1709bf` (native Apple focus isolation) and `8edca502b`
 (CM29 method v5). The client-fix catalog merge preserves both upstream focus
 records and the reviewed HTTPS qualification repairs. No qualification gate,
 resource allowance or physical-closure requirement is waived.
