@@ -19,7 +19,7 @@
 #include "dm_closed_form.h"
 
 #define DV_DM_METHOD_CM4 "dolby-cm4-closed-form-v1"
-#define DV_DM_METHOD_CM29 "dolby-cm29-closed-form-v3"
+#define DV_DM_METHOD_CM29 "dolby-cm29-closed-form-v4"
 
 enum { DV_DM_U = 24 };   // vec4 uniforms
 typedef struct {
@@ -90,14 +90,14 @@ static inline void dv_dm_pack_cm4(dv_dm_frame *f, const dm_cm4_state *s) {
 static inline void dv_dm_pack_cm29(dv_dm_frame *f, const dm_cm29_state *s) {
   f->algo = 29;
   dv_dm_put(f->u[0], s->a, s->b, s->c, s->n);
-  // u[1].z: the cube clip's floor (0 for PQ targets, the display black for BT.709; dm_cm29_finish)
-  dv_dm_put(f->u[1], s->Tm, s->TM, s->tg.prim == DM_BT709 ? s->tg.min_nits : 0.0, s->tg.peak_nits);
+  // u[1].z: stock gamut cube black; resolved output black is packed separately.
+  dv_dm_put(f->u[1], s->Tm, s->TM, s->cube_min, s->tg.peak_nits);
   dv_dm_put(f->u[2], s->tr.lift, s->tr.gain, s->tr.gamma, s->tr.cw);
-  dv_dm_put(f->u[3], s->tr.sg, f->weight, s->tg.floor_pq, s->tg.prim != DM_BT2020);
-  // near-black chroma gain: 23 node values in u[4..9] (row-major); the shader's
-  // DKI[] repeats DM_CM29_DARK_IO
-  _Static_assert(DM_CM29_DARK_N == 23 && 4 + (DM_CM29_DARK_N + 3) / 4 <= 10, "near-black table must fit u[4..9]");
-  for (int i = 0; i < DM_CM29_DARK_N; i++) f->u[4 + i / 4][i % 4] = (float)s->dark[i];
+  dv_dm_put(f->u[3], s->tr.sg, f->weight, s->tg.floor_pq, s->tg.prim == DM_BT709);
+  dv_dm_rows(f->u + 4, s->rgb2lms);
+  dv_dm_rows(f->u + 7, s->lms2rgb);
+  dv_dm_put(f->u[10], s->grid_origin, s->native_black, s->native_span, 0);
+  dv_dm_put(f->u[19], s->decode_black, s->decode_span, 0, 0);
   dv_dm_rows(f->u + 11, s->to_t);
   dv_dm_rows(f->u + 14, s->from_t);
   bool sop_on = s->tr.lift != 0 || s->tr.gain != 0 || s->tr.gamma != 0;
@@ -250,13 +250,17 @@ static const char dv_dm_glsl_common[] =
   "const mat3 L2R_T = mat3(vec3(3.436606694,-2.506452119,0.06984542432), vec3(-0.7913295556,1.983600452,-0.1922708962), vec3(-0.02594989969,-0.09891371471,1.124863614));\n"
   "const mat3 L2I_T = mat3(vec3(0.5,0.5,0.0), vec3(1.613769531,-3.323486328,1.709716797), vec3(4.378173828,-4.245605469,-0.1325683594));\n"
   "const mat3 I2L_T = mat3(vec3(1.0,0.008609037038,0.111029625), vec3(1.0,-0.008609037038,-0.111029625), vec3(1.0,0.5600313357,-0.320627175));\n"
-  "const mat3 H2L_T = mat3(vec3(0.4407708416,0.5352938173,0.0239208517), vec3(0.156878576,0.7484430916,0.094624714), vec3(0.0,0.0257822432,0.974408624));\n"
-  "const mat3 HL2R_T = mat3(vec3(3.045750856,-2.183078002,0.1372280312), vec3(-0.6405521273,1.799714833,-0.1590451327), vec3(0.01694860895,-0.04761932969,1.03047173));\n"
   "const mat3 IPT_T = mat3(vec3(0.4,0.4,0.2), vec3(4.455,-4.851,0.396), vec3(0.8056,0.3572,-1.1628));\n"
   "const mat3 IPTI_T = mat3(vec3(1.0,0.09756893051,0.2052264332), vec3(1.0,-0.1138764855,0.1332171584), vec3(1.0,0.03261510992,-0.6768871831));\n"
-  "float pq_eotf(float e){ e=clamp(e,0.0,1.0); float p=pow(e,1.0/78.84375); return 10000.0*pow(max(p-0.8359375,0.0)/(18.8515625-18.6875*p),1.0/0.1593017578125); }\n"
-  "float pq_eotf_ext(float e){ e=max(e,0.0); float p=pow(e,1.0/78.84375); return 10000.0*pow(max(p-0.8359375,0.0)/max(18.8515625-18.6875*p,1e-12),1.0/0.1593017578125); }\n"
-  "float pq_oetf(float y){ y=clamp(y/10000.0,0.0,1.0); float p=pow(y,0.1593017578125); return pow((0.8359375+18.8515625*p)/(1.0+18.6875*p),78.84375); }\n"
+  // ST 2084 in float32: avoid subtracting c1 from pow(e,1/m2), and avoid
+  // raising a rounded ratio near 1 to m2. These are the same PQ equations as
+  // the double reference, with compensated log1p/expm1 (GLSL has neither).
+  // c1-1 = -(c2-c3) = -0.1640625; c2-c3*c1 = 3.22998046875 exactly.
+  "float pq_log1p(float x){ float u=1.0+x,d=u-1.0; return d==0.0 ? x : log(u)*x/d; }\n"
+  "float pq_expm1(float x){ float u=exp(x),l=log(u); return u==1.0 || l==0.0 ? x : (u-1.0)*x/l; }\n"
+  "float pq_eotf_ext(float e){ e=max(e,0.0); float x=log(max(e/7.309559025783966e-7,1.0))/78.84375; float d=0.8359375*pq_expm1(x); return 10000.0*pow(d/max(3.22998046875-18.6875*d,1e-12),1.0/0.1593017578125); }\n"
+  "float pq_eotf(float e){ return pq_eotf_ext(clamp(e,0.0,1.0)); }\n"
+  "float pq_oetf(float y){ y=clamp(y/10000.0,0.0,1.0); float t=pow(y,0.1593017578125); return exp(78.84375*pq_log1p(-0.1640625*(1.0-t)/(1.0+18.6875*t))); }\n"
   "vec3 pq_eotf3(vec3 e){ return vec3(pq_eotf(e.x),pq_eotf(e.y),pq_eotf(e.z)); }\n"
   "vec3 pq_oetf3(vec3 y){ return vec3(pq_oetf(y.x),pq_oetf(y.y),pq_oetf(y.z)); }\n"
   "vec3 mrow(vec4 r0, vec4 r1, vec4 r2, vec3 v){ return vec3(dot(r0.xyz,v),dot(r1.xyz,v),dot(r2.xyz,v)); }\n"
@@ -300,23 +304,28 @@ static const char dv_dm_glsl_common[] =
   "float c29curve(float x){ float xn=pow(max(x,0.0),u[0].w); float v=pow(max((u[0].x+u[0].y*xn)/(1.0+u[0].z*xn),0.0),1.0/3.0); return clamp(v,u[1].x,u[1].y); }\n"
   "float c29sop(float y){ if(u[17].x<0.5) return y; float L=u[2].x,g=u[2].y,G=u[2].z;\n"
   " return clamp(pow(max((1.0+g/2.0)*((1.0-L/2.0)*y+L/2.0),0.0),2.0/(2.0+G)),u[1].x,u[1].y); }\n"
-  "vec3 ipt(vec3 rgb){ vec3 lms=max(pq_eotf3(rgb)*H2L_T,vec3(0.0)); return pq_oetf3(lms)*IPT_T; }\n"
+  "vec3 ipt(vec3 rgb){ vec3 lms=max(mrow(u[4],u[5],u[6],pq_eotf3(rgb)),vec3(0.0)); return pq_oetf3(lms)*IPT_T; }\n"
   "vec2 c29point(vec3 p, out float I){ I=p.x; float C=length(p.yz); float Ib=c29sop(c29curve(I));\n"
   " float Io=u[17].y>0.5 ? c29sop(c29curve(I+0.5*u[2].w*C)) : Ib; return vec2(Ib,Io); }\n"
-  "const float DKI[23]=float[23](0.000,0.002,0.004,0.006,0.008,0.010,0.012,0.014,0.016,0.018,0.020,0.022,\n"
-  " 0.024,0.026,0.028,0.030,0.035,0.040,0.050,0.060,0.080,0.100,0.150);\n"
-  "float c29dk(int i){ return u[4+i/4][i%4]; }\n"
-  "float c29dark(float Ib){ float x=Ib; if(x<=0.0) return c29dk(0);\n"
-  " for(int k=1;k<23;k++){ if(x<DKI[k]){ float t=(x-DKI[k-1])/(DKI[k]-DKI[k-1]); return mix(c29dk(k-1),c29dk(k),t); } }\n"
-  " return 1.0; }\n"
+  "vec3 c29vertex(vec3 q){\n"
+  " if(q.x<=u[10].x) return vec3(0.0);\n"
+  " vec3 lmsp=clamp(q*IPTI_T,0.0,1.0);\n"
+  " vec3 lin=mrow(u[7],u[8],u[9],pq_eotf3(lmsp));\n"
+  " vec3 lt=clamp(mrow(u[11],u[12],u[13],lin),vec3(u[1].z),vec3(u[1].w));\n"
+  " return u[3].w>0.5 ? (pow(lt,vec3(1.0/2.4))-vec3(u[10].y))/u[10].z : pq_oetf3(lt); }\n"
   "vec3 c29finish(vec3 p, float Ib, float Io){\n"
-  " Ib=max(Ib,0.0); Io=max(Io,0.0); float I=p.x; float Ie=max(max(I,0.5*Ib),1e-6);\n"
-  " float sc=pow(Ib/Ie,0.9385)*exp(-0.3246*(Ib-Ie))*(1.0+0.5*u[3].x)*c29dark(Ib);\n"
-  " vec3 o=vec3(Io,p.y*sc,p.z*sc); vec3 lmsp=clamp(o*IPTI_T,0.0,1.0); vec3 lin=pq_eotf3(lmsp)*HL2R_T;\n"
-  " float tmin=u[1].z,tpk=u[1].w; vec3 res;\n"
-  " if(u[3].w>0.5){ vec3 lt=clamp(mrow(u[11],u[12],u[13],lin),vec3(tmin),vec3(tpk)); lin=mrow(u[14],u[15],u[16],lt); res=pq_oetf3(clamp(lin,0.0,tpk)); }\n"
-  " else res=pq_oetf3(clamp(lin,tmin,tpk));\n"
-  " return max(res,vec3(u[3].z)); }\n"
+  " Ib=max(Ib,0.0); Io=max(Io,0.0); float Ii=max(p.x,1e-6);\n"
+  " float sc=clamp((Ib/Ii)*(2.0+Ii)/(2.0+Ib),0.5,2.0)*(1.0+0.5*u[3].x);\n"
+  " vec3 q=vec3(Io,p.y*sc,p.z*sc), origin=vec3(u[10].x,0.0,0.0);\n"
+  " vec3 step=vec3(u[1].y/64.0,u[1].y/32.0,u[1].y/32.0);\n"
+  " vec3 pos=(q-origin)/step, base=floor(pos), f=pos-base, acc=vec3(0.0);\n"
+  " for(int bits=0;bits<8;bits++){\n"
+  "  vec3 b=vec3(float(bits&1),float((bits>>1)&1),float((bits>>2)&1));\n"
+  "  vec3 w=mix(vec3(1.0)-f,f,b);\n"
+  "  acc+=c29vertex(origin+(base+b)*step)*(w.x*w.y*w.z); }\n"
+  " vec3 lt=u[3].w>0.5 ? pow(acc*u[19].y+vec3(u[19].x),vec3(2.4)) : pq_eotf3(acc);\n"
+  " vec3 lin=mrow(u[14],u[15],u[16],lt);\n"
+  " return max(pq_oetf3(clamp(lin,0.0,u[1].w)),vec3(u[3].z)); }\n"
   // ---------------------------------------------------------- spatial kernels
   "const float GX[11]=float[11](0.008812229293,0.02714357714,0.0651140566,0.121649073,0.1769983568,0.2005654142,0.1769983568,0.121649073,0.0651140566,0.02714357714,0.008812229293);\n"
   "const float GY[5]=float[5](0.05448868455,0.244201342,0.4026199469,0.244201342,0.05448868455);\n";
