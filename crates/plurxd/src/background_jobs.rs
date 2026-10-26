@@ -24,7 +24,7 @@ pub(crate) mod subtitle_fixture;
 
 #[cfg(test)]
 #[path = "background_job_faults.rs"]
-mod faults;
+pub(crate) mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
 use metrics::Event;
@@ -961,9 +961,12 @@ impl JobFence {
         let Some(token) = state.token.clone() else {
             return Ok(false);
         };
-        publisher
+        let completed = publisher
             .complete_library_work(token, request_id, result, unix_ms()?)
-            .await
+            .await;
+        #[cfg(test)]
+        let completed = faults::after_commit(faults::COMPLETE, completed);
+        completed
     }
 
     pub(crate) async fn bind_transcode_recipe(
@@ -1518,6 +1521,51 @@ impl JobFence {
                 }
                 request.now_ms = unix_ms()?;
                 self.0.store.publish_embedding_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn publish_dv_title(
+        &self,
+        output: plurx_core::store::dv_title_jobs::TitleOutput,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = plurx_core::store::dv_title_jobs::PublishTitleJob {
+            token,
+            output,
+            now_ms: unix_ms()?,
+        };
+        let result = match self.0.store.publish_dv_title_job(request.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_dv_title_job(request).await?
             }
         };
         let published = matches!(

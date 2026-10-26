@@ -13,7 +13,7 @@ mod background_jobs;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
-mod chapter_thumbs;
+pub(crate) mod chapter_thumbs;
 mod cluster;
 pub(crate) mod cluster_operations;
 pub mod comingsoon;

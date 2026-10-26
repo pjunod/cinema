@@ -420,6 +420,7 @@ function retirePlaybackPredecessor(p,release=releaseSession){
 // Attachment ownership is not command ownership: a native seek or Pause can
 // change the current command while this same decoder is still loading.
 function beginPlaybackMediaAttachment(p){
+  if(typeof stopFrameDropRecorder==="function")stopFrameDropRecorder(p,"replaced");
   if(typeof translationRetire==="function")translationRetire("attachment changed");
   clearEffectiveProcessing(p);
   // A Shared direct session is read by exactly one attachment; any new one on
@@ -605,6 +606,7 @@ function stopPlayerTimers(){
   if(!PLAYER) return;
   if(PLAYER.preparedRetiring)
     retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
+  if(typeof stopFrameDropRecorder==="function")stopFrameDropRecorder(PLAYER);
   stopPlaybackControl(PLAYER);
   clearPendingSeekTimer();
   clearInterval(PLAYER.timer); PLAYER.timer=null;
@@ -627,6 +629,7 @@ function stopPlayerTimers(){
 // full open.
 function armPlaybackSampling(v,p){
   if(!v||!p||p.playPermissionDenied) return;
+  if(typeof startFrameDropRecorder==="function")startFrameDropRecorder(v,p);
   clearInterval(p.progressTimer);
   p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
   clearInterval(p.autoTimer);

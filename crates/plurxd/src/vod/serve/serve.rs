@@ -1380,6 +1380,8 @@ impl VodServe {
         SegmentReady {
             observed_media_duration_ms: None,
             file: ready_file::ReadyFile::Finite { output, file, len },
+            // Finite readers remain pinned by the original R/S output owner.
+            cache_pin: None,
             len,
             etag: format!("{etag_stem}-{len}"),
             delivery: Arc::clone(delivery),

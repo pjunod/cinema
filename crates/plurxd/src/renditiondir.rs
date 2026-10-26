@@ -267,6 +267,9 @@ impl RenditionDir {
                 "finite output requires whole retained-asset eviction",
             ));
         }
+        if crate::playback_cache::is_pinned(&self.segment_path(index)) {
+            return Ok(false);
+        }
         let Some(state) = manifest.state(index) else {
             return Ok(false);
         };

@@ -526,6 +526,63 @@ fn a_content_encoding_report_is_not_a_source_change_for_the_same_reporter() {
     }
 }
 
+/// Fenced title publication adds application metadata to the stored probe.
+/// Source identity compares the underlying media; title eligibility and its
+/// publication fences remain independently enforced by their owners.
+#[test]
+fn a_dv_title_report_is_not_a_source_change_for_either_reporter_direction() {
+    use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, SCHEMA};
+
+    let title = DvTitleStats {
+        schema: SCHEMA,
+        complete: true,
+        decoded_frames: 17_983,
+        valid_l1_frames: 17_983,
+        missing_l1_frames: 0,
+        invalid_l1_frames: 0,
+        max_l1_pq: Some(3441),
+        mastering_luminance: TitleConstant::Unknown,
+        mastering_primaries: TitleConstant::Unknown,
+    };
+    let held = current_reporter_probe();
+    for different_reporter in [false, true] {
+        let mut stored = held.clone();
+        stored[plurx_core::scan::dv_title::PROBE_FIELD] =
+            serde_json::to_value(title).expect("title report");
+        if different_reporter {
+            plurx_core::scan::probe::stamp_reporter(&mut stored, "ffprobe version 5.1.9");
+        }
+        // Normalization is symmetric: neither operand's application metadata
+        // can make unchanged media appear replaced.
+        for (left, right) in [(&stored, &held), (&held, &stored)] {
+            let comparison = super::compare_probe_documents(&left.to_string(), &right.to_string())
+                .expect("compare title enrichment");
+            assert!(comparison.same, "{:?}", comparison.differences);
+            assert_eq!(comparison.admitted_on_reporter_drift, different_reporter);
+        }
+
+        stored["streams"][0]["width"] = serde_json::json!(1920);
+        let changed = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+            .expect("compare changed media beside title enrichment");
+        assert!(!changed.same);
+        assert!(changed.rendered_differences().contains("/streams/0/width"));
+    }
+
+    // Only the exact application-owned key is excluded. The same reporter's
+    // strict comparison still refuses an unrelated, unknown root field.
+    let mut unknown = held.clone();
+    unknown[plurx_core::scan::dv_title::PROBE_FIELD] =
+        serde_json::to_value(title).expect("title report");
+    unknown["unexpected_probe_field"] = serde_json::json!(true);
+    let comparison = super::compare_probe_documents(&unknown.to_string(), &held.to_string())
+        .expect("compare unrelated root field");
+    assert!(!comparison.same);
+    assert!(!comparison.admitted_on_reporter_drift);
+    assert!(comparison
+        .rendered_differences()
+        .contains("/<unknown-field> missing"));
+}
+
 /// The production failure this exists to stop: three refusals on `media1`
 /// inside four minutes, on a file nothing had touched, because the scan
 /// and the held-descriptor probe came from different FFprobe builds. 5,061

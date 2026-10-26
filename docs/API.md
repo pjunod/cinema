@@ -548,7 +548,16 @@ native Mac processing and negotiated HEVC output for new plans. Saving either
 choice is accepted on every platform regardless of advisory readiness;
 existing sessions retain their captured plan. `macos_video_processing` is the
 read-only runtime report, including `hevc_output_enabled` and per-graph
-observations. The Developer readiness item `macos_hevc_output` reports
+observations.
+The independent `dolby_vision_display_target` boolean defaults
+false and saves regardless of readiness. Its Developer item reports helper and
+HDR10-E preference, active processed-root peak reports, title-scan eligibility
+counts and per-bucket live media versus retained-cache bytes. Display caps accept
+optional integer `display.max_nits` and optional `display.peak_source` (`platform`
+or `viewer`); no display minimum is collected. Unknown/out-of-range peaks keep
+the master grade. See [the targeting contract](streaming/DISPLAY-TARGETED-DV-BUILD.md#server-phase-1).
+
+The Developer readiness item `macos_hevc_output` reports
 `hevc_effective_encoder`, `hevc_sdr`, `hevc_hdr10` and
 `hevc_delivery_qualification` requirements. Missing
 observations mean unobserved, not supported; a pending probe means unknown.
@@ -792,7 +801,11 @@ A poisoned limiter mutex fails *open*, because a lock bug must not silence
 diagnostics.
 
 `event` is one of `playback_failed`, `stream_rejected`, `hls_fatal`, `stall`,
-`stall_end`, `stall_recovery`. `stall_end` closes a `stall` that was reported
+`stall_end`, `stall_recovery`, or `frame_drop`. A `frame_drop` report may carry
+the bounded, typed version 1 `frame_drop` object retained in playback-event
+`extra.frame_drop`; see the [recorder contract](clients/FRAME-DROP-RECORDER.md)
+for numeric columns, retention, admin retrieval and attribution limits.
+`stall_end` closes a `stall` that was reported
 while it was still going (the web's persistent wait): its `ms` is the time
 after that report, and it adds to `plurx_stalled_seconds_total` without
 counting a second stall. `decode_hw` is an optional hardware observation for
@@ -2378,6 +2391,10 @@ not qualified by this route.
 
 Existing model Install/Test routes also accept strict version 2 translation
 requests with request UUID, intent expiry, purpose, profile ID and named workers.
+Their version 2 responses identify `purpose: "translation"`, `model_id` and
+`profile_id` alongside per-worker `operations`, so setup can follow accepted jobs.
+Model job phases include `waiting_for_capacity` while a claimed test holds a
+FIFO place for the shared heavy-background slot; this consumes no CPU admission.
 Translation qualification does not imply that the ordinary generation self-test
 ran. Work mutations require current administrator authority and an unexpired
 first-use intent; retained exact receipts replay without starting fresh work.

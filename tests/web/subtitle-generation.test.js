@@ -30,12 +30,12 @@ test("managed setup preserves enable despite unavailable readiness and escapes w
   const h=harness();const html=h.ctx.subtitleTranscriptionForm(config,{models:[model],workers:[{node_id:"node",label:"<worker>",eligible:false,observed_at_ms:0,expires_at_ms:0,engine:{status:"available"},models:[{model_id:"base",status:"verified",verified_at_ms:1}]}]});
   assert.match(html,/id="st-enabled" type="checkbox" checked/);assert.match(html,/>Save<\/button>/);assert.match(html,/&lt;worker&gt;/);assert.match(html,/observation is stale; readiness is unknown/);assert.doesNotMatch(html,/Save<\/button>.*disabled/);assert.doesNotMatch(html,/>verified · engine/);
 });
-test("cancelled cached model stays unverified with explicit Install and Test available",()=>{
+test("cancelled cached model stays unverified with Download and test available",()=>{
   const h=harness();const now=Date.now();const worker={node_id:"worker",label:"Named worker",eligible:true,observed_at_ms:now,expires_at_ms:now+60000,engine:{status:"available"},models:[{model_id:"base",status:"unverified_cache",verified_at_ms:null}]};
   const html=h.ctx.subtitleModelEvidence({models:[model],workers:[worker]},"base");
-  assert.match(html,/Download cached · install to finish setup/);assert.doesNotMatch(html,/ · verified · engine|tested /);
+  assert.match(html,/Download cached · download and test to finish setup/);assert.doesNotMatch(html,/ · verified · engine|tested /);
   assert.match(html,/name="st-worker" value="worker" checked/);
-  assert.match(html,/<button class="sm" onclick="subtitleModelOperation\('install',this\)">Install selected model<\/button>/);
+  assert.match(html,/<button class="sm" onclick="subtitleModelOperation\('install',this\)">Download and test<\/button>/);
   assert.match(html,/<button class="sm" onclick="subtitleModelOperation\('verify',this\)">Test selected model<\/button>/);
   assert.equal(h.ctx.subtitleModelStatus("PRIVATE /worker/path"),"unknown");
 });
@@ -111,7 +111,7 @@ test("transient progress failure exposes exact Activity link and recovers throug
 });
 test("partial model operation refusals survive progress and transient status errors",async()=>{
   const h=harness(),panel=h.settings(),setup=panel._subtitleSetup,worker=element("accepted-node");worker.checked=true;h.workers.push(worker);setup.catalog.workers=[{node_id:"accepted-node",label:"Available worker"},{node_id:"refused-node",label:"Refused worker"}];let fail=false;
-  h.ctx.respond=path=>{if(path.endsWith("/install"))return {operations:[{node_id:"accepted-node",job_id:"install-one",outcome:"accepted"},{node_id:"refused-node",outcome:"queue_full"}]};if(path.includes("/jobs/")){if(fail)throw Error("Temporary status failure");return {job_id:"install-one",node_id:"accepted-node",state:"running",phase:"verifying"};}return {models:[model],workers:[]};};await h.ctx.subtitleModelOperation("install",element());await settle();const status=h.nodes["st-operation-status"];assert.match(status.innerHTML,/Refused worker: queue full/);assert.match(status.innerHTML,/verifying/);fail=true;await h.ctx.pollSubtitleModelOperations(setup,["install-one"]);assert.match(status.innerHTML,/queue full/);assert.match(status.innerHTML,/Retry status/);assert.match(status.innerHTML,/activity\/jobs\/install-one/);fail=false;h.ctx.retrySubtitleModelOperations();await settle();assert.match(status.innerHTML,/queue full/);assert.match(status.innerHTML,/verifying/);
+  h.ctx.respond=path=>{if(path.endsWith("/install"))return {operations:[{node_id:"accepted-node",job_id:"install-one",outcome:"accepted"},{node_id:"refused-node",outcome:"queue_full"}]};if(path.includes("/jobs/")){if(fail)throw Error("Temporary status failure");return {job_id:"install-one",node_id:"accepted-node",state:"running",phase:"verifying"};}return {models:[model],workers:[]};};await h.ctx.subtitleModelOperation("install",element());await settle();const status=h.nodes["st-operation-status"];assert.match(status.innerHTML,/Refused worker: queue full/);assert.match(status.innerHTML,/Verifying model/);fail=true;await h.ctx.pollSubtitleModelOperations(setup,["install-one"]);assert.match(status.innerHTML,/queue full/);assert.match(status.innerHTML,/Retry status/);assert.match(status.innerHTML,/activity\/jobs\/install-one/);fail=false;h.ctx.retrySubtitleModelOperations();await settle();assert.match(status.innerHTML,/queue full/);assert.match(status.innerHTML,/Verifying model/);
 });
 test("older Activity history entries cannot resurrect another account's inspector after Back",async()=>{
   const h=harness();let inspected=[];Object.assign(h.ctx,{layoutChrome(){},setPagePhase(){},ACTIVITY_SNAPSHOT:null,DVR_PAGE:{},renderActivityBody:async()=>{},setPageTimer(){},setActivityTab:tab=>h.ctx.ACTIVITY_VIEW.tab=tab,showDurableJob:id=>inspected.push(id)});h.ctx.normalizeActivityJobRoute("#/activity/jobs/account-one-job");const older={...h.ctx.history.state};h.ctx.resetActivityWork();h.ctx.AUTH_GENERATION++;h.ctx.TOKEN="account-two";h.ctx.ME={id:2,username:"admin-two",created_at:2,is_admin:true};h.ctx.history.state=older;await h.ctx.viewActivity(1);assert.equal(inspected.length,0);assert.equal(h.ctx.ACTIVITY_VIEW.tab,"status");h.ctx.normalizeActivityJobRoute("#/activity/jobs/account-two-job");await h.ctx.viewActivity(1);assert.deepEqual(inspected,["account-two-job"]);h.ctx.ACTIVITY_VIEW={tab:"status"};await h.ctx.viewActivity(1);assert.deepEqual(inspected,["account-two-job","account-two-job"]);
@@ -126,9 +126,24 @@ test("model failure reasons distinguish network storage integrity and engine rep
   assert.doesNotMatch(h.ctx.subtitleReason("worker_source_unavailable"),/model|download|playback capacity|source changed/i);
   assert.doesNotMatch(h.ctx.subtitleReason("no_speech_detected"),/model|corrupt|verification/i);
   const html=h.ctx.subtitleModelOperationsHtml({catalog:{workers:[{node_id:"ready",label:"Ready worker"},{node_id:"space",label:"Storage worker"}]},operationRows:[{node_id:"ready",outcome:"accepted",job_id:"install-one",job:{state:"running",phase:"verifying"}},{node_id:"space",outcome:"insufficient_disk"}]});
-  assert.match(html,/Ready worker: verifying/);assert.match(html,/Storage worker: storage unavailable.*could not safely reserve model storage/);assert.match(html,/activity\/jobs\/install-one/);
+  assert.match(html,/Ready worker: Verifying model/);assert.match(html,/Storage worker: storage unavailable.*could not safely reserve model storage/);assert.match(html,/activity\/jobs\/install-one/);
   const unknown=h.ctx.subtitleReason("PRIVATE /srv/process/stdout");assert.doesNotMatch(unknown,/PRIVATE|\/srv\/process/);
   const refused=h.ctx.subtitleModelOperationsHtml({catalog:{workers:[]},operationRows:[{node_id:"worker",outcome:"PRIVATE /srv/process/stdout"}]});assert.match(refused,/not accepted/);assert.doesNotMatch(refused,/PRIVATE|\/srv\/process/);
+});
+test("model operation statuses use friendly phases and broad preparation failures",()=>{
+  const h=harness(),setup={catalog:{workers:[{node_id:"worker",label:"Worker"}]},operationRows:[]};
+  for(const [phase,label]of [["queued","Queued"],["waiting_for_capacity","Waiting for server capacity"],["downloading","Downloading model"],["verifying","Verifying model"],["decoding","Decoding test audio"],["transcribing","Running speech test"],["validating","Validating"],["publishing","Publishing"]]){
+    setup.operationRows=[{node_id:"worker",outcome:"accepted",job:{state:"running",phase}}];assert.match(h.ctx.subtitleModelOperationsHtml(setup),new RegExp(`Worker: ${label}`));
+  }
+  for(const [state,label]of [["succeeded","Ready"],["failed","Failed"],["cancelled","Cancelled"]]){
+    setup.operationRows=[{node_id:"worker",outcome:"accepted",job:{state}}];assert.match(h.ctx.subtitleModelOperationsHtml(setup),new RegExp(`Worker: ${label}`));
+  }
+  setup.operationRows=[{node_id:"worker",outcome:"accepted",job:{state:"running"}}];assert.match(h.ctx.subtitleModelOperationsHtml(setup),/Worker: Running/);
+  setup.operationRows=[{node_id:"worker",outcome:"accepted",job:{state:"cancelling"}}];assert.match(h.ctx.subtitleModelOperationsHtml(setup),/Worker: Cancelling/);
+  setup.operationRows=[{node_id:"worker",outcome:"accepted",job:{state:"private_internal_state"}}];const unavailable=h.ctx.subtitleModelOperationsHtml(setup);assert.match(unavailable,/Worker: Status unavailable/);assert.doesNotMatch(unavailable,/private_internal_state/);
+  setup.operationRows=[{node_id:"worker",outcome:"accepted",job:{state:"failed",reason:"output_invalid"}}];
+  const html=h.ctx.subtitleModelOperationsHtml(setup);assert.match(html,/The model test could not prepare or validate captions.*Check server storage and logs, then retry Test/);assert.doesNotMatch(html,/generated captions failed validation/);
+  assert.equal(h.ctx.subtitleReason("no_speech_detected"),"The selected audio is silent. Choose another audio track.");
 });
 test("watch generation mount survives mirrored ledger refresh and retires on file or account changes",()=>{
   const h=harness();Object.assign(h.ctx.file,{available:true,video_codec:"h264"});h.ctx.watchCurrentFile=()=>h.ctx.file;

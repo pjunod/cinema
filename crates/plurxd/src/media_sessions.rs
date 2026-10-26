@@ -1508,6 +1508,7 @@ pub(crate) fn selected_finite_device_caps_heap_bytes(
             hdr: _,
             dolby_vision: _,
             max_nits: _,
+            peak_source: _,
             presentation_target: _,
         } = display;
     }
@@ -1613,6 +1614,8 @@ fn selected_finite_candidate_context_heap_bytes(
         prepared_processing,
         ordinary_request,
         retained_output,
+        display_target,
+        display_target_note,
         canonical_caps,
         selected_candidate,
         planning_binding,
@@ -1628,6 +1631,8 @@ fn selected_finite_candidate_context_heap_bytes(
         || prepared_processing.is_some()
         || ordinary_request.is_some()
         || retained_output.is_some()
+        || display_target.is_some()
+        || display_target_note.is_some()
     {
         return None;
     }
@@ -1642,7 +1647,7 @@ fn selected_finite_candidate_context_heap_bytes(
         id: _,
         recipe_digest: _,
         route: _,
-        processed_hdr10: _,
+        processed_dv: _,
         normalized_geometry: _,
         width: _,
         height: _,

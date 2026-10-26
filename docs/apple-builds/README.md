@@ -77,6 +77,10 @@ sequence to prove they no longer collide.
 
 ## Notes moved from the docs index
 
+iPhone Live TV guide: [Restore the station-logo time grid](1273-iphone-guide-grid.md).
+
+Apple TV timeline Select: [Commit the previewed seek position](1264-tvos-timeline-select.md).
+
 These lines used to sit in `docs/README.md`; they point at fragments in this folder.
 
 Apple build 160: [Native Live TV and shelf layouts](320-native-layout-followup.md).
@@ -117,6 +121,8 @@ Previous: [Live TV playback method](245-live-tv-playback-method.md).
 
 | Note | Answers | |
 |---|---|---|
+| [Display target session source contract follow-up](1216-display-target-session-contract.md) | What model-boundary contract coverage accompanies the display-target session work? | built |
+| [SDR display target contract follow-up](1216-sdr-display-target-contract.md) | What typed SDR processing contracts follow the display-target session work? | built |
 | [Ratings, watchlist and favorites](1205-ratings-watchlist-favorites.md) | What do the ratings and list controls add to iOS and tvOS? | built |
 | [Server label names the machine](1204-server-hostname-label.md) | What does Settings call the server you are signed in to? | built |
 | [Remote diagnostics Apple wire](remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |

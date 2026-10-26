@@ -81,7 +81,7 @@ fn fixture() -> (
         recipe_digest,
         route: CandidateRoute::Encode,
         planned_codec: Some("h264".into()),
-        processed_hdr10: false,
+        processed_dv: false,
         normalized_geometry: true,
         width: 640,
         height: 360,

@@ -23,6 +23,10 @@ use queue_fixture::QueueFixture;
 mod adaptive_resource_attempts;
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/dv_title_jobs.rs"]
+mod dv_title_jobs;
+#[path = "store_contract/formal_publication.rs"]
+mod formal_publication;
 #[path = "store_contract/invitations.rs"]
 mod invitations;
 #[path = "store_contract/jellyfin_catalog.rs"]

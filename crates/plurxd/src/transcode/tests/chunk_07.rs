@@ -516,6 +516,84 @@ use crate::queue_fixture::QueueFixture;
         assert!(manager.admit_fragment().await.is_some());
     }
 
+    #[tokio::test]
+    async fn queued_background_admission_keeps_its_turn_without_bypassing_foreground() {
+        use std::{future::Future, task::Poll};
+        use tokio_util::sync::CancellationToken;
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let (manager, _work, _cache) = cached_manager(&store);
+        let first = manager
+            .admit_fragment()
+            .await
+            .expect("existing background work");
+        let cancel = CancellationToken::new();
+        let mut queued = Box::pin(manager.admit_fragment_queued(&cancel));
+        std::future::poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(first);
+        // A newly arriving scanner cannot beat the already queued operation,
+        // even before that operation is polled again by its worker.
+        assert!(manager.admit_fragment().await.is_none());
+        let next = queued.await.expect("FIFO successor");
+        assert!(manager.fragment_worker_idle(&next));
+        assert!(manager.admit_fragment().await.is_none());
+        drop(next);
+        assert_eq!(manager.admissions.software_in_use(), 0);
+
+        let held = manager
+            .admit_fragment()
+            .await
+            .expect("another background job");
+        let mut queued = Box::pin(manager.admit_fragment_queued(&cancel));
+        std::future::poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let viewer = manager.admissions.wait_for_slot();
+        drop(held);
+        assert!(
+            queued.await.is_none(),
+            "the queued background turn cannot take a viewer's capacity"
+        );
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(!manager.background_worker_in_use());
+        drop(viewer);
+        assert!(manager.admit_fragment().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_background_admission_removes_its_queued_turn() {
+        use std::{future::Future, task::Poll};
+        use tokio_util::sync::CancellationToken;
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let (manager, _work, _cache) = cached_manager(&store);
+        let held = manager
+            .admit_fragment()
+            .await
+            .expect("existing background work");
+        let cancel = CancellationToken::new();
+        let mut queued = Box::pin(manager.admit_fragment_queued(&cancel));
+        std::future::poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        cancel.cancel();
+        assert!(queued.await.is_none());
+        drop(held);
+        let next = manager
+            .admit_fragment()
+            .await
+            .expect("cancelled waiter left no gate reservation");
+        assert!(manager.fragment_worker_idle(&next));
+    }
+
     async fn recipe_hash_for_options(
         mgr: &TranscodeManager,
         file: &plurx_core::domain::MediaFile,
@@ -1819,7 +1897,7 @@ use crate::queue_fixture::QueueFixture;
             .expect("file");
         let digest = [7; 32];
         let candidate = plurx_core::playback::candidate::QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: plurx_core::playback::candidate::CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: plurx_core::playback::candidate::CandidateRoute::Encode,
@@ -1896,7 +1974,7 @@ use crate::queue_fixture::QueueFixture;
         let (mgr, _work, _cache) = cached_manager(&store);
         let digest = [9; 32];
         let candidate = plurx_core::playback::candidate::QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: plurx_core::playback::candidate::CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: plurx_core::playback::candidate::CandidateRoute::Encode,
@@ -1954,7 +2032,7 @@ use crate::queue_fixture::QueueFixture;
         assert!(matches!(snapshot.capacity.installation, CapacityInstallation::Ready { .. }));
         let binding = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
         let candidate = plurx_core::playback::candidate::QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x41; 32]),
             recipe_digest: [0x41; 32],
             route: plurx_core::playback::candidate::CandidateRoute::Encode,

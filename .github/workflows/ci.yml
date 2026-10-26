@@ -232,8 +232,8 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # The same history/contract sweep runs in the effort and main fast lanes.
-    # Use their ten-minute budget rather than timing out a qualified release.
+    # Allows the 5-minute worker witness smoke, other package smokes, toolchain
+    # provisioning and preflight validation to finish with headroom.
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -260,6 +260,49 @@ jobs:
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+      - name: Check formal protocol source mapping
+        id: formal-inputs
+        env:
+          PLURX_FORMAL_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          mkdir -p target/verification/durable-jobs target/verification/operation-progress target/verification/worker-refinement
+          if [ -n "$PLURX_FORMAL_BASE" ]; then
+            python3 scripts/check-formal check-mapping --package durable-jobs --affected-base "$PLURX_FORMAL_BASE" > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package operation-progress --affected-base "$PLURX_FORMAL_BASE" > target/verification/operation-progress/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package worker-refinement --affected-base "$PLURX_FORMAL_BASE" > target/verification/worker-refinement/ci-inputs.json
+          else
+            python3 scripts/check-formal check-mapping --package durable-jobs > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package operation-progress > target/verification/operation-progress/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package worker-refinement > target/verification/worker-refinement/ci-inputs.json
+          fi
+          python3 -c 'import json, os; from pathlib import Path; base=Path("target/verification"); durable=json.loads((base/"durable-jobs/ci-inputs.json").read_text()); progress=json.loads((base/"operation-progress/ci-inputs.json").read_text()); worker=json.loads((base/"worker-refinement/ci-inputs.json").read_text()); assert all(type(item["affected"]) is bool for item in (durable, progress, worker)); out=open(os.environ["GITHUB_OUTPUT"], "a"); print("affected_durable=" + str(durable["affected"]).lower(), file=out); print("affected_progress=" + str(progress["affected"]).lower(), file=out); print("affected_worker_refinement=" + str(worker["affected"]).lower(), file=out); print("affected=" + str(durable["affected"] or progress["affected"] or worker["affected"]).lower(), file=out)'
+      - name: Provision the pinned formal toolchain
+        if: steps.formal-inputs.outputs.affected == 'true'
+        run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+      - name: Complete the bounded formal smoke configuration
+        id: formal-smoke
+        if: steps.formal-inputs.outputs.affected_durable == 'true'
+        run: python3 scripts/check-formal smoke --package durable-jobs --cache-dir target/formal-toolchain
+      - name: Complete operation-progress formal smoke configurations
+        id: formal-progress-smoke
+        if: steps.formal-inputs.outputs.affected_progress == 'true'
+        run: python3 scripts/check-formal smoke --package operation-progress --cache-dir target/formal-toolchain
+      - name: Complete worker-refinement formal smoke configurations
+        id: formal-worker-refinement-smoke
+        if: steps.formal-inputs.outputs.affected_worker_refinement == 'true'
+        run: python3 scripts/check-formal smoke --package worker-refinement --cache-dir target/formal-toolchain
+      - name: Preserve formal model receipts and counterexamples
+        if: always() && steps.formal-inputs.outcome != 'skipped'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: formal-model-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/verification/durable-jobs/
+            target/verification/operation-progress/
+            target/verification/worker-refinement/
+          if-no-files-found: error
+          retention-days: 90
       - name: Provision checksummed public K08 oracle sources
         run: |
           set -eu
@@ -1463,7 +1506,7 @@ jobs:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
     if: (needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
@@ -1481,8 +1524,9 @@ jobs:
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
-          grep -Fxq "Xcode 27.0" <<< "$xcode_version"
-          grep -Fxq "Build version 27A266a" <<< "$xcode_version"
+          printf '%s\n' "$xcode_version"
+          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
+          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
           xcrun --find swift
       - name: Build and test native macOS server tray
         if: needs.scope.outputs.desktop_macos == 'true'
@@ -1503,7 +1547,7 @@ jobs:
       - name: Verify the pinned mobile Apple toolchain
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
-          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.0"
+          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.1"
           test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"
           test "$(xcodegen --version)" = "Version: 2.46.0"
           simulator_runtimes="$(xcrun simctl list runtimes)"
@@ -1519,10 +1563,10 @@ jobs:
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: clients/apple/build/DerivedData
-          key: apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
+          key: apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
           restore-keys: |
-            apple-dd-${{ hashFiles('clients/apple/project.yml') }}-
-            apple-dd-
+            apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-
+            apple-dd-xcode-27A9275-ios27.1-tvos27.0-
       - name: Create isolated iPhone, iPad, and Apple TV simulators
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |

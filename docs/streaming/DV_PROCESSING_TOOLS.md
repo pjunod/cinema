@@ -92,7 +92,7 @@ build.
 ## Streaming interface
 
 ```text
-segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START END MAX_PREROLL]]
+segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START END MAX_PREROLL]] [--held-source-origin N/D]
 ```
 
 `SOURCE` is a held descriptor for the original timestamped movie when `START`,
@@ -151,6 +151,127 @@ inconsistent extent refuses. These observations establish source membership;
 the serving layer must separately verify its output frame grid and packaging.
 NUT preserves source PTS here but does not serialize explicit packet durations;
 `timing.tsv` remains the separate duration record.
+
+### Real P7 curves share the validated public mapper
+
+The [shared metadata validator](../../tools/dv_processing/dv_metadata.h) admits
+actual decoder-attached `AVDOVIMetadata` for both base/RPU and paired FEL.
+The same BL frame must carry a fresh raw RPU; production independently binds
+that original NAL hash, PTS and duration to the coded AU. Decoder metadata alone
+never supplies a missing current RPU. Existing raw-parser refusals for reused
+RPUs, normalization, filtering, partitions, representation and active area stay
+in force. The same validation runs on preroll and emitted pictures, regardless
+of hardware import or host copies.
+
+Each component has 2–9 strictly ordered ten-bit pivots, at most 8 pieces,
+polynomial orders 1–2 or MMR orders 1–3. Fixed coefficients have 23 fractional
+bits and the public API's binary32 projection; exact preservation of every
+fixed-point LSB is not claimed. Bounded section offsets, extension arrays,
+coefficient ranges, rational matrices/offsets and finite projected transforms
+are checked before `pl_map_dovi_metadata`. Signalled pivot clamps and source
+matrices are preserved. FEL also requires decoded NLQ/colors to agree exactly
+with its fresh parsed raw metadata.
+
+Rust independently validates each original raw RPU with `DvFelMetadata`, reusing
+base curve validation plus the fresh P7/FEL and unchanged nonbinding NLQ guards.
+The daemon checks rendered polynomial/MMR counts against that parse; completed
+HDR10 graphs describe conditional methods and per-frame receipts list only
+methods actually signalled. Synthetic scalar predicates and P8.1 authoring stay
+narrow; no helper JSON claim supplies missing source authority.
+
+The pinned [public mapper](https://github.com/haasn/libplacebo/blob/0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/include/libplacebo/utils/libav_internal.h)
+and [public shader](https://github.com/haasn/libplacebo/blob/0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/shaders/colorspace.c)
+normalize and reshape BL, add the paired EL's LINEAR_DZ residual, then apply
+color transforms. NLQ offset uses code/1023, slope uses 1023*S/2^23 and threshold
+uses (T−S/2)/2^23, with exact neutral code contributing zero. The existing
+[`vdr_in_max` admission](../../tools/dv_processing/nlq_clipping.h) must still
+prove clipping cannot bind for any ten-bit EL code, including its rounding
+reserve. The measured 512/2048/0/1048576 parameter family satisfies that same
+contract; no source-specific override is introduced.
+
+Direct synthetic texture controls without decoder frames retain their original
+manual identity projection. The [metadata-only fixture](../../tools/dv_processing/controls/p7_mapping_fixture.h)
+and [CPU contracts](../../tools/dv_processing/test_decoded_metadata.c) cover the
+observed 8-piece polynomial/third-order MMR shape, coefficient projection, scalar
+samples, clamp endpoints, NLQ and malformed metadata. They are authored, unrun
+pending completed-delta review. Public-source mapping and synthetic arithmetic
+do not establish real-title visual accuracy or independent decoded A/V sync.
+
+### Three clocks share one observed common origin
+
+The [display-target build ledger](DISPLAY-TARGETED-DV-BUILD.md) records the
+2026-10-22 positive-origin correction and its pending qualification. The
+[core contract](../../crates/plurx-core/src/transcode/dv_processing.rs),
+[held-probe reader](../../crates/plurxd/src/transcode/source_preparation.rs)
+and [runtime](../../crates/plurxd/src/dv_runtime.rs) keep three clocks:
+
+| Clock | Contract |
+|---|---|
+| Original source | Coded, decoded BL/EL/RPU, NUT and receipt picture keys retain original PTS and durations. |
+| Film global | Compare `source PTS - O` to the zero-based frame grid within one original source tick. |
+| Generation output | Existing AAC preroll and generation-local encoder timing remain in force. |
+
+`O` is the exact selected video's `start_pts × time_base`, validated against
+an observed held FORMAT origin. Producer-default zero is distinct from observed
+zero. Missing, negative, overflowing or differing origins explicitly refuse the
+bounded route; the selected-video clock never replaces the soundtrack clock.
+The same held source fence owns the probe and every window, and source drift
+continues to invalidate publication. The observation digest binds the common
+origin, its held FORMAT/selected-video probe provenance, selected stream,
+epoch and absolute window bounds along with original coded-picture keys and
+hashes.
+
+For film boundary `b`, the requested absolute endpoint is
+`O + max(0, b - source_tick)`. Seek uses that absolute endpoint in the selected
+stream's time base, preserving all three-second/frame/byte/preroll limits.
+Production windows append `--held-source-origin N/D` after any existing
+mode/export/title arguments. The argument comes only from the typed held common
+origin already checked in Rust. The helper requires an exact nonnegative value
+representable in its actual selected stream's tick clock, and requires the
+absolute window to begin at or after that origin. Its completion reports
+`observed_held_format_and_selected_video_probe`; Rust requires that exact
+provenance and rational equality with the frozen origin, including when zero.
+A missing or contradictory held probe still refuses before helper execution.
+
+Partial demux timing is not source-epoch authority. Diagnostic308 observed both
+FORMAT and selected-stream start times missing after bounded discovery; four
+reordered packet reads later changed the stream start to0.208 seconds, while
+the held probe's common origin remained0.125 seconds. Early versus deferred
+discard produced identical results. Reading until nonmissing, taking the first
+packet/minimum sample, increasing budgets or defaulting to zero cannot replace
+the held observation. Original packet/frame PTS and DTS are never rewritten.
+
+The declared-duration EOF endpoint is `frozen_origin_ticks + AVStream.duration`,
+with checked addition and the existing one-tick comparison. A Matroska
+`DURATION` tag remains an absolute endpoint. Neither path uses a mutable partial
+`AVStream.start_time`. The old CLI without the held-origin option exists only
+for private controls with actually observed zero; missing or nonzero legacy
+origins refuse. Its `observed_stream_start_time` provenance cannot satisfy a
+production receipt.
+
+For an observed common origin of 1/8 second at 24000/1001 fps, film window 0
+maps the original first 48 source keys to output frames 0–47. Window 1 starts
+at source 2.126 seconds and window 360 at 720.844 seconds, each including the
+existing 1 ms membership allowance. The soundtrack retains `-itsoffset
+-0.125000`, so audio starting 10 ms after the video keeps that relationship.
+Argument regressions establish clock handling; the physical harness checks
+encoded cadence/geometry and final AAC codec/rate/channels, and does not
+independently measure decoded audio/video synchronization.
+
+The authored regressions are
+`common_source_origin_preserves_absolute_keys_across_film_windows`,
+`common_source_origin_bounds_are_absolute_exact_and_seek_stable`,
+`dv_origin_requires_matching_observed_held_format_and_selected_video` and
+`renderer_receipt_requires_exact_observed_held_common_origin`. Execution and
+native acceptance are recorded separately in the build ledger. The held CLI
+and strict provenance regressions are
+`held_origin_window_arguments_bind_the_exact_epoch_before_absolute_bounds` and
+`renderer_receipt_requires_exact_observed_held_common_origin`. The CPU-only
+[`test_held_source_origin.py`](../../tools/dv_processing/controls/test_held_source_origin.py)
+control includes the actual helper and checks frozen origins against missing
+and changing demux starts, exact tick representation, bounds, overflow, legacy
+refusal and declared-duration EOF arithmetic. These new controls are authored;
+execution awaits independent review and native qualification.
 
 The encoder must preserve the input time base (`-enc_time_base -1` in the
 exercised FFmpeg path), source PTS and color interpretation. RGB is full-range

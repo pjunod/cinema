@@ -202,7 +202,7 @@ pub(super) fn restore_selected_candidate(
         || !selected.identity_matches()
         || selected.route != plurx_core::playback::candidate::CandidateRoute::Encode
         || selected.grade != OutputGrade::Sdr
-        || selected.processed_hdr10
+        || selected.processed_dv
         || !selected.decoder_compatible
         || selected
             .planned_codec

@@ -363,6 +363,7 @@ function playbackWaitSurfaceLive(){
 // The half-second sampling tick: resample the wait sentence, then run the
 // presenter step that paints it.
 function playbackSamplingTick(v,p){
+  if(typeof sampleFrameDropRecorder==="function")sampleFrameDropRecorder(v,p);
   renderPlaybackSurface.waitDetail=playbackWaitLiveDetail(v,p);
   playbackProgressTick(v,p);
   updatePlaybackQualityChrome(v,p);

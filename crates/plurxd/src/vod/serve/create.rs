@@ -2395,7 +2395,7 @@ impl ReservedSourceVodRendition {
                     .encoding
                     .as_ref()
                     .map_or(plurx_core::transcode::OutputGrade::Sdr, |encoding| {
-                        encoding.options.pipeline.output_grade()
+                        encoding.delivered_output_grade()
                     }),
                 vod: true,
                 retained_output: None,

@@ -800,6 +800,7 @@ pub struct AppState {
     /// Optional shared-cache mount, admitted only while its all-voter canary
     /// proof remains current.
     pub(crate) shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
+    pub(crate) playback_cache: Arc<crate::playback_cache::PlaybackCacheBudget>,
     /// Where extracted subtitles are kept, keyed by file identity and source
     /// fingerprint — see `http::stream::subtitles_vtt`.
     pub subs_dir: PathBuf,
@@ -1135,6 +1136,18 @@ impl AppState {
             runtime_cache,
             renditions,
         } = dirs;
+        // Every regenerable playback namespace shares physical capacity and
+        // outstanding write grants. Durable state and artwork are excluded.
+        let playback_cache = crate::playback_cache::PlaybackCacheBudget::new(
+            Arc::clone(&store),
+            vec![
+                cache_dir.clone(),
+                subs_dir.clone(),
+                runtime_cache.clone(),
+                renditions.clone(),
+                transcode_dir.clone(),
+            ],
+        );
         // The finite-media orphan sweep reserves this child. Only the Live TV
         // registry can distinguish active tuner scratch from restart debris.
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
@@ -1236,6 +1249,25 @@ impl AppState {
             .with_serving_authority(serving.authority())
             .with_shared_cache(Arc::clone(&shared_cache)),
         );
+        transcode.register_playback_cache(&playback_cache);
+        crate::subtitle_translation::runtime::register_playback_cache(
+            &playback_cache,
+            &runtime_cache,
+        );
+        crate::fragment_index_cluster::register_playback_cache(
+            &playback_cache,
+            &runtime_cache,
+            Arc::clone(&store),
+            node_id.clone(),
+        );
+        crate::http::chapter_thumbs::register_playback_cache(&playback_cache, &runtime_cache);
+        crate::subtitle_source::register_playback_cache(
+            &playback_cache,
+            &runtime_cache,
+            &subs_dir,
+            Arc::clone(&store),
+            &node_id,
+        );
         // PLURX_TRAKT_BASE overrides the API base for tests/mocks.
         let trakt_base = std::env::var("PLURX_TRAKT_BASE")
             .ok()
@@ -1309,6 +1341,7 @@ impl AppState {
             cache_dir,
             runtime_cache_dir: runtime_cache,
             shared_cache,
+            playback_cache,
             subs_dir,
             jobs,
             backup,
@@ -3476,6 +3509,21 @@ impl JobManager {
     #[cfg(test)]
     pub(crate) fn test_new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Arc<Self> {
         Arc::new(Self::new(store, artwork_dir))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_new_for_node(
+        store: Arc<dyn Store>,
+        artwork_dir: PathBuf,
+        node_id: impl Into<String>,
+    ) -> Arc<Self> {
+        Arc::new(Self::new_with_scan_prune_percent(
+            store,
+            artwork_dir,
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            node_id.into(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ))
     }
 
     fn new_with_scan_prune_percent(
@@ -11340,6 +11388,26 @@ impl JobManager {
             .await;
             return false;
         }
+        let Some(index_path) =
+            crate::fragment_index_cluster::cache_path(&worker.cache_root, &artifact.cache_key)
+        else {
+            self.fail_fragment_index_job(fence, job, "invalid_cache_key", false, clock_ms())
+                .await;
+            return false;
+        };
+        let _index_publication_pin = match crate::playback_cache::pin(&index_path) {
+            Ok(pin) => pin,
+            Err(_) => {
+                self.yield_fragment_index_job(
+                    fence,
+                    job,
+                    "cache_maintenance",
+                    clock_ms().saturating_add(retry_ms),
+                )
+                .await;
+                return false;
+            }
+        };
         if let Err(error) =
             crate::fragment_index_cluster::install_local_blob(&worker.cache_root, &artifact, &blob)
                 .await
@@ -11639,6 +11707,17 @@ impl JobManager {
             // cache reconciliation stays on the cleanup schedule: doing its
             // database inventory and filesystem walk here would make an empty
             // queue tax every media-serving node once per scheduler tick.
+            let global_remaining = match crate::playback_cache::lookup(root) {
+                Some(budget) => match budget.available_bytes(root).await {
+                    Ok(bytes) => i64::try_from(bytes).unwrap_or(i64::MAX),
+                    Err(error) => {
+                        tracing::warn!(%error, "playback cache capacity unavailable before queue claim");
+                        *reasons.entry("cache_usage_unavailable").or_default() += 1;
+                        break;
+                    }
+                },
+                None => i64::MAX,
+            };
             let remaining_budget = if lanes.speculative {
                 let used_bytes = match self.store.cache_bytes(node).await {
                     Ok(bytes) => bytes.max(0),
@@ -11648,7 +11727,9 @@ impl JobManager {
                         break;
                     }
                 };
-                cache_ceiling.saturating_sub(used_bytes)
+                cache_ceiling
+                    .saturating_sub(used_bytes)
+                    .min(global_remaining)
             } else {
                 0
             };
@@ -11659,8 +11740,8 @@ impl JobManager {
                     "speculative worker stopped at cache budget"
                 );
                 *reasons.entry("cache_budget_full").or_default() += 1;
-                // The output lanes publish into the retained registry, which
-                // this budget does not bound; they continue on their own.
+                // Output preparation also draws from global_remaining below;
+                // no lane can advertise the same bytes independently.
                 lanes.speculative = false;
                 if lanes.is_empty() {
                     break;
@@ -11668,7 +11749,8 @@ impl JobManager {
             }
             let output_remaining =
                 i64::try_from(transcode.retained_output_remaining(output_budget))
-                    .unwrap_or(i64::MAX);
+                    .unwrap_or(i64::MAX)
+                    .min(global_remaining);
             let capabilities = transcode.pretranscode_capabilities();
             // Requirements carry the estimated complete artifact plus 64 MiB
             // generation headroom. Each lane advertises only the lesser of

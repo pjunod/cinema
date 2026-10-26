@@ -504,7 +504,7 @@ pub(crate) async fn model_operation(
         .remove(&request.profile_id);
     state.subtitle_models.translation.wake.notify_one();
     Ok(axum::Json(
-        json!({"version":2,"model_id":id,"profile_id":request.profile_id,"operations":operations,"intent_expires_at_ms":request.intent_expires_at_ms,"server_now_ms":now}),
+        json!({"version":2,"purpose":"translation","model_id":id,"profile_id":request.profile_id,"operations":operations,"intent_expires_at_ms":request.intent_expires_at_ms,"server_now_ms":now}),
     ))
 }
 

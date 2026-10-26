@@ -8336,6 +8336,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "chapter_thumbnails",
             "dolby_vision_convert",
             "dolby_vision_hdr_processing",
+            "dolby_vision_display_target",
             "dolby_vision_fel_reencode",
             "source_probe_comparison",
             "output_preparation",
@@ -20415,4 +20416,50 @@ async fn desktop_drain_accounts_internal_proxy_and_post_relay_bodies() {
     drop(read);
     drop(relay);
     assert!(fence.commit_desktop_shutdown(token, 0).await);
+}
+
+#[tokio::test]
+async fn display_target_setting_defaults_off_and_saves_despite_unmet_advice() {
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let (_, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+    assert_eq!(initial["dolby_vision_display_target"], false);
+    for enabled in [true, false] {
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"dolby_vision_display_target": enabled}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["dolby_vision_display_target"], enabled);
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::DV_DISPLAY_TARGET)
+                .await
+                .expect("stored"),
+            Some(if enabled { "1" } else { "0" }.into())
+        );
+        let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+        let item = readiness["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .find(|item| item["id"] == "dolby_vision_display_target")
+            .expect("target item");
+        assert_eq!(item["enabled"], enabled);
+        assert!(item["requirements"]
+            .as_array()
+            .expect("requirements")
+            .iter()
+            .any(|row| row["status"] != "met"));
+        assert_eq!(
+            saved["dolby_vision_hdr_processing"], false,
+            "targeting never silently enables HDR10-E"
+        );
+    }
 }

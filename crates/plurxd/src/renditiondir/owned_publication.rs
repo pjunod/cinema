@@ -71,12 +71,24 @@ impl PendingWrites {
     }
 }
 
+#[cfg(test)]
 fn start_publication(
     owner: std::sync::Arc<PendingWrites>,
     directory: PathBuf,
     name: &str,
     bytes: Vec<u8>,
 ) -> io::Result<(PendingWrite, std::sync::mpsc::Sender<()>)> {
+    start_reserved_publication(owner, directory, name, bytes, None)
+}
+
+fn start_reserved_publication(
+    owner: std::sync::Arc<PendingWrites>,
+    directory: PathBuf,
+    name: &str,
+    bytes: Vec<u8>,
+    reservation: Option<crate::playback_cache::CacheReservation>,
+) -> io::Result<(PendingWrite, std::sync::mpsc::Sender<()>)> {
+    let publication_bytes = bytes.len() as u64;
     #[cfg(unix)]
     let native = {
         owner.check_native_result()?;
@@ -105,26 +117,37 @@ fn start_publication(
                 "publication registration did not authorize native entry",
             )
         })?;
-        #[cfg(unix)]
-        {
-            #[cfg(test)]
+        // The existing global cache grant follows the actual blocking write,
+        // including cancellation of its async waiter. It is disk-budget state,
+        // not a finite native close receipt.
+        let result = {
+            #[cfg(unix)]
             {
-                _owner.run_native(&native)
+                #[cfg(test)]
+                {
+                    _owner.run_native(&native)
+                }
+                #[cfg(not(test))]
+                {
+                    native
+                        .lock()
+                        .map_err(|_| io::Error::other("native publication inventory unknown"))?
+                        .run()
+                }
             }
-            #[cfg(not(test))]
+            #[cfg(not(unix))]
             {
-                native
-                    .lock()
-                    .map_err(|_| io::Error::other("native publication inventory unknown"))?
-                    .run()
+                // Legacy platform path; not no-follow or finite custody evidence.
+                std::fs::write(&tmp, bytes)?;
+                std::fs::rename(&tmp, destination)
+            }
+        };
+        if result.is_ok() {
+            if let Some(reservation) = reservation {
+                reservation.commit(publication_bytes);
             }
         }
-        #[cfg(not(unix))]
-        {
-            // Legacy platform path; not no-follow or finite custody evidence.
-            std::fs::write(&tmp, bytes)?;
-            std::fs::rename(&tmp, destination)
-        }
+        result
     });
     Ok((PendingWrite { task }, release))
 }
@@ -135,13 +158,21 @@ impl RenditionDir {
         if let Some(finite) = &self.writes.finite {
             return finite.publish(name, bytes).await;
         }
+        // Segment callers already reserve before their manifest lock. Init
+        // publication takes its existing global-cache grant before our lock.
+        let reservation = if name == INIT_NAME {
+            crate::playback_cache::reserve(self.path(), bytes.len() as u64).await?
+        } else {
+            None
+        };
         let mut pending = self.writes.pending.lock().await;
         join_pending_write(&mut pending).await?;
-        let (write, release) = start_publication(
+        let (write, release) = start_reserved_publication(
             std::sync::Arc::clone(&self.writes),
             self.dir.clone(),
             name,
             bytes,
+            reservation,
         )?;
         // The actual native closure is waiting on entry. No await or physical
         // filesystem call occurs before retaining its original JoinHandle.

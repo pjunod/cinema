@@ -1231,6 +1231,7 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
         // the source bytes changed. Keep all FFprobe-owned fields comparable.
         document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
         document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
+        document.remove(plurx_core::scan::dv_title::PROBE_FIELD);
     }
     if let Some(format) = value
         .get_mut("format")

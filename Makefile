@@ -1354,6 +1354,7 @@ validate-help: ## Explain the validation workflow and UI golden commands
 .PHONY: validation-lint
 validation-lint: ## Verify every governed file maps to a valid functionality point
 	@scripts/validate lint
+	@scripts/knowledge lint --scope pilot --body-env
 
 .PHONY: validate-plan
 validate-plan: ## Explain which points and checks the staged diff selects
@@ -1548,6 +1549,7 @@ web-check: web-unit-check ## Test playback policy, embedded JS, and every shippe
 # runs exactly this, so a web pull request executes the same tests web-check
 # does apart from the two real-browser scripts.
 web-unit-check: ## Run every Node web and playback test (no browser)
+	@node --test tests/playback/frame-drop-recorder.test.js
 	@node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
@@ -1590,6 +1592,9 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/subtitle-generation.test.js tests/web/subtitle-translation.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
+	@node --test tests/web/hdr-display-peak.test.js
+	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
+	@node --test tests/web/hdr-display-change.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js

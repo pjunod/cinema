@@ -28,6 +28,7 @@ audit_paths = [
   "scripts/**",
   "tests/**",
   "validation/**",
+  "verification/**",
   "vendor/**",
 ]
 audit_exclude = []
@@ -41,6 +42,15 @@ profiles = ["commit", "ci", "full", "nightly"]
 requires = ["python3"]
 missing = "fail"
 timeout_seconds = 60
+
+[[checks]]
+id = "knowledge-contract"
+title = "Engineering knowledge schema and references"
+command = "scripts/knowledge lint --scope pilot"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["python3", "git"]
+missing = "fail"
+timeout_seconds = 30
 
 [[checks]]
 id = "history-regressions"
@@ -560,6 +570,8 @@ paths = [
   "crates/plurx-core/src/store/sqlite/annotations.rs",
   "crates/plurx-core/src/store/library_annotations.sql",
   "crates/plurx-core/src/store/library_annotations_schema.rs",
+  "crates/plurx-core/src/store/dv_title_jobs{,_schema}.rs",
+  "crates/plurx-core/src/store/dv_title_jobs.sql",
   "crates/plurx-core/src/store/sqlite/telemetry.rs",
   "crates/plurx-core/src/store/sqlite/fragindex.rs",
   "crates/plurx-core/src/store/sqlite/fragment_index_cluster.rs",
@@ -577,7 +589,10 @@ paths = [
   "crates/plurx-core/src/store/timeline_annotations.rs",
   "crates/plurx-core/src/store/renditionplan.rs",
   "crates/plurx-core/tests/store_contract.rs",
+  "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
+  "crates/plurx-core/tests/store_contract/dv_title_probe_provenance.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/store_contract/formal_publication.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/fixtures/startup_observer.rs",
   "crates/plurx-core/tests/support/fragment_prune_budget.rs",
@@ -597,6 +612,8 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_import/tests.rs",
   "crates/plurx-core/src/store/sqlite/tests.rs",
   "crates/plurx-core/src/cluster/migration.rs",
+  "crates/plurx-core/src/store/dv_title_jobs{,_schema}.rs",
+  "crates/plurx-core/src/store/dv_title_jobs.sql",
   "crates/plurx-core/src/cluster/migration/**",
   "crates/plurx-core/src/store/schema_lineage.rs",
   "crates/plurx-core/tests/schema_lineage_upgrade.rs",
@@ -677,6 +694,9 @@ paths = [
   "crates/plurx-core/tests/store_contract/jellyfin_play.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/hiqlite_library_channels.rs",
+  "crates/plurx-core/src/store/dv_title_jobs{,_schema}.rs",
+  "crates/plurx-core/src/store/dv_title_jobs.sql",
+  "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_media.rs",
   "crates/plurx-core/src/store/hiqlite_publication.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
@@ -829,7 +849,9 @@ paths = [
   "crates/plurxd/src/cache_preparation.rs",
   "crates/plurxd/src/background_jobs.rs",
   "crates/plurxd/src/library_work.rs",
+  "crates/plurx-worker-control/**",
   "crates/plurxd/src/source_probe.rs",
+  "crates/plurxd/src/source_probe/**",
   "crates/plurxd/src/subtitle_transcription.rs",
   "crates/plurxd/src/artifact_integrity.rs",
   "crates/plurxd/src/subtitle_work.rs",
@@ -903,6 +925,7 @@ id = "server.api"
 title = "Native server API and runtime"
 contract = "The single server binary exposes stable native endpoints, coordinates background work safely, carries authenticated cluster media control without widening household credentials, and publishes a permanent Dolby Vision replacement only after exact media verification and a final source-identity fence."
 paths = [
+  "crates/plurxd/src/http/system/frame_drop.rs",
   "crates/plurxd/src/dv_disk/tests.rs",
   "crates/plurxd/src/http/system/tests.rs",
   "crates/plurxd/src/http/test_agents.rs",
@@ -1091,6 +1114,8 @@ paths = [
   "crates/plurx-core/tests/fixtures/hevc-progressive-configuration.json",
   "crates/plurx-core/tests/fixtures/dv-runtime/**",
   "crates/plurxd/src/dv_runtime.rs",
+  "crates/plurx-core/examples/dv_target_policy.rs",
+  "crates/plurx-core/examples/dv_target_fixtures.rs",
   "crates/plurxd/src/dv_report_lifetime.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
@@ -1099,7 +1124,7 @@ paths = [
   "vendor/dolby_vision/**",
   "vendor/gemm-common/**",
   "vendor/bitvec_helpers/**",
-  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dv_segment,dvpipe,ffmpeg,fontenv,fontenv_tests,fragindex,fragment_index_cluster,hevc_census,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,rolling_output,rolling_provenance,scratch_ledger,scratch_put,seam_hooks,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dv_segment,dvpipe,ffmpeg,fontenv,fontenv_tests,fragindex,fragment_index_cluster,hevc_census,meter,pgs_overlay,pipeprobe,playback_cache,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,rolling_output,rolling_provenance,scratch_ledger,scratch_put,seam_hooks,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/playback_control/**",
   "crates/plurxd/src/prodrun/**",
   "crates/plurxd/src/renditiondir/**",
@@ -1137,6 +1162,7 @@ paths = [
   "docs/evidence/ffmpeg-hls-write-boundary-*.md",
   "docs/streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md",
   "scripts/dv-evidence",
+  "scripts/generate-hdr-peak-pattern",
   "scripts/generate-macos-video-fixtures",
   "scripts/generate-macos-video-extensions",
   "scripts/generate-macos-p5-fixtures",
@@ -1496,6 +1522,22 @@ paths = [
   "scripts/ffmpeg-support-matrix.json",
   "crates/plurxd/src/ffmpeg_support.rs",
   "scripts/install-linux-source-runtime",
+  "scripts/bootstrap-formal-toolchain",
+  "scripts/check-formal",
+  "verification/durable-jobs/**",
+  "verification/operation-progress/**",
+  "verification/worker-refinement/**",
+  "verification/worker-control/**",
+  "scripts/check-worker-control",
+  "validation/worker_control_resume.py",
+  "tests/operations/test_worker_control_runner.py",
+  "tests/fixtures/worker-control/**",
+  "tests/operations/test_worker_control_ci.py",
+  "tests/operations/test_formal_runner.py",
+  "tests/operations/test_formal_ci.py",
+  "tests/operations/test_formal_toolchain.py",
+  "tests/operations/test_operation_progress_runner.py",
+  "tests/operations/test_worker_refinement_runner.py",
   "scripts/install-compose-tray",
   "scripts/linux-tray-release",
   "scripts/package-macos",
@@ -1799,3 +1841,19 @@ paths = [
 ]
 checks = ["rust-gate", "rust-gate-ci", "finite-software-vod-lifecycle", "finite-software-vod-restart"]
 depends_on = ["playback.pipeline"]
+
+[[points]]
+id = "knowledge.engineering"
+title = "Scoped engineering intent and evidence graph"
+contract = "Code and proposed changes trace to source-backed intent, scoped obligations and independently labeled execution evidence; unknown coverage and origin never become qualification."
+paths = [
+  "validation/knowledge/**",
+  "scripts/knowledge",
+  ".agents/skills/engineering-knowledge/**",
+  "tests/validation/test_knowledge_*.py",
+  "tests/operations/test_knowledge_pilot.py",
+  "docs/features/ENGINEERING-KNOWLEDGE-GRAPH-*.md",
+  "docs/ci/ENGINEERING-KNOWLEDGE.md",
+]
+checks = ["knowledge-contract", "catalog-contract", "operations-contract"]
+depends_on = ["validation.framework"]

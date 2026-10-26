@@ -447,7 +447,9 @@ test('processed HDR10 Auto preference requires production proof, decoder and lin
   width:1280,height:720,target_height:720,planned_codec:'hevc',processed_hdr10:true,peak_bps:3000000};
  const pick=row=>policy.selectQualityCandidate({candidates:[original,row],allowTrial:true});
  assert.equal(pick(processed).id,processed.id);
- for(const refused of [{sustainable:false},{decoder_compatible:false},{planned_codec:'h264'},{grade:'sdr'}])
+ assert.equal(pick({...processed,grade:'sdr'}).id,processed.id);
+ assert.equal(pick({...processed,grade:'sdr'}).grade,'sdr');
+ for(const refused of [{sustainable:false},{decoder_compatible:false},{planned_codec:'h264'},{grade:'unknown'}])
   assert.equal(pick({...processed,...refused}).id,original.id);
  assert.equal(policy.selectQualityCandidate({candidates:[original,processed],linkLimitBps:2000000}).id,original.id);
  assert.equal(policy.selectQualityCandidate({candidates:[original,{...processed,processed_hdr10:false}]}).id,original.id);

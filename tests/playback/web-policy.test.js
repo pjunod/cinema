@@ -489,7 +489,8 @@ const CAPS_DOCUMENT_PRELUDE = [
   `function capsDocument(){return ${JSON.stringify(USABLE_CAPS_DOCUMENT)};}`,
   "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
   "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
-      shippedSource("currentCapsDocument"),
+  shippedSource("hdrDisplayPeakCaps"),
+  shippedSource("currentCapsDocument"),
   shippedSource("capsDocumentIsUsable"),
 ].join("\n");
 function buildOpenSession(overrides) {
@@ -520,6 +521,7 @@ function buildOpenSession(overrides) {
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;} function qualityForce(){return 'auto';}",
       "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
+      shippedSource("hdrDisplayPeakCaps"),
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -629,6 +631,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
+      shippedSource("hdrDisplayPeakCaps"),
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("askDecision"),
@@ -676,6 +679,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
+      shippedSource("hdrDisplayPeakCaps"),
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),

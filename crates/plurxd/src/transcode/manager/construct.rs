@@ -423,6 +423,22 @@ impl TranscodeManager {
         self
     }
 
+    pub(crate) fn register_playback_cache(
+        self: &Arc<Self>,
+        budget: &Arc<crate::playback_cache::PlaybackCacheBudget>,
+    ) {
+        if let Some(cache) = self.cache.as_ref() {
+            crate::cachekeep::register_playback_cache(
+                budget,
+                Arc::clone(&self.store),
+                cache.dir.clone(),
+                cache.node_id.clone(),
+                self.cache_readers.clone(),
+            );
+        }
+        self.vod.register_playback_cache(budget);
+    }
+
     pub fn cache_readers(&self) -> &crate::cachekeep::ActiveCacheReaders {
         &self.cache_readers
     }
@@ -1195,19 +1211,58 @@ impl TranscodeManager {
     }
 
     pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {
+        self.admit_source_work(self.software_budget().await.max(1))
+            .await
+    }
+
+    /// The title scanner has one software decoder thread and never uses a GPU.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn admit_dv_title(&self) -> Option<FragmentAdmission> {
+        self.admit_source_work(1).await
+    }
+
+    /// A claimed, cancellable operation keeps its FIFO place behind the
+    /// current heavy worker instead of losing every try-acquire race. CPU
+    /// capacity is reserved only after this same shared gate is acquired;
+    /// foreground work still wins the normal admission checks.
+    pub(crate) async fn admit_fragment_queued(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<FragmentAdmission> {
+        let heavy = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return None,
+            permit = Arc::clone(&self.background_heavy).acquire_owned() => permit.ok()?,
+        };
+        if cancel.is_cancelled() {
+            return None;
+        }
+        self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
+            .await
+    }
+
+    async fn admit_source_work(&self, threads: usize) -> Option<FragmentAdmission> {
         if !self.pretranscode_worker_idle() {
             return None;
         }
         let heavy = Arc::clone(&self.background_heavy)
             .try_acquire_owned()
             .ok()?;
-        // Copy indexing can still run CPU transforms. Reserve the available
-        // software budget conservatively until a per-pipeline estimate exists.
-        let threads = self.software_budget().await.max(1);
+        self.admit_source_work_with_heavy(threads, heavy).await
+    }
+
+    async fn admit_source_work_with_heavy(
+        &self,
+        threads: usize,
+        heavy: tokio::sync::OwnedSemaphorePermit,
+    ) -> Option<FragmentAdmission> {
+        if !self.pretranscode_worker_idle() {
+            return None;
+        }
         self.admissions
             .try_admit_bundle(
                 self.max_hw_sessions().await,
-                threads,
+                self.software_budget().await,
                 &TranscodeResourceEstimate {
                     hardware_slot: false,
                     cpu_threads: threads,

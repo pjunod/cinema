@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "source_commit": "6fb7996f2b44c98ed0c33a2eb0695a42c023d766",
+      "digests": {
+        "scripts/check-worker-control": "9d7ed23e2c12f9df052e5366ec7db8499e4a25fd0b0a2d837dd137b902f74443",
+        ".github/workflows/main-fast-lane.yml": "5c4b065278cb3763c31fde6765fed1aa38b2c5315cc4df0337bc89e73f503c95",
+        "verification/worker-control/toolchain.json": "c0e7b3c9e70ebafa2f34ce45b75f7154685798a475a5d8f2f7806080b14e7935"
+      },
+      "review_basis": {
+        "original_review": "t_e69efaca/run19 reviewed 58a10429c; A1-A5 amendments were implemented thereafter. This does not claim an explicit Fable review of the 6fb7996 hash.",
+        "delta_review": "t_ef8b9487/run20 reviewed f0f35e274; source-pinned parser attestation approved, with F1 requiring explicit historical invocation attestation."
+      },
+      "coordinator_attestation": "The coordinator reviewed compatibility of the exact 6fb7996 invocation tuple: unchanged prover command, scoped pinned tools, clean source staging, and actual nine-target execution. Changes since 58a10429c implement requested assertions, parser fixtures, and pins without changing the solver command or weakening safety/unwinding checks."
+    }
+  ]
+}

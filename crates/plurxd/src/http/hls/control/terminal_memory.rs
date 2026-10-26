@@ -72,7 +72,7 @@ fn quality_candidate(v: &plurx_core::playback::candidate::QualityCandidate) -> u
         recipe_digest: _,
         route: _,
         planned_codec: _,
-        processed_hdr10: _,
+        processed_dv: _,
         normalized_geometry: _,
         width: _,
         height: _,

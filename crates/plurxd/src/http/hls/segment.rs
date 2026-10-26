@@ -1030,6 +1030,7 @@ async fn vod_segment_response_before(
     // only its opaque stream crosses into the body pump.
     let delivery = std::sync::Arc::clone(&ready.delivery);
     let retained_lease = ready.retained_lease;
+    let cache_pin = ready.cache_pin;
     let observed_media_duration_ms = ready.observed_media_duration_ms;
     let body_deadline = tokio::time::Instant::from_std(body_deadline_std);
     let (sender, receiver) = tokio::sync::mpsc::channel(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
@@ -1084,6 +1085,7 @@ async fn vod_segment_response_before(
         },
         move || {
             let _retained_lease = retained_lease;
+            let _cache_pin = cache_pin;
             let (manager, session, authorization, complete_object, permit) = completion;
             settle_streamed_response_completion(
                 manager,
