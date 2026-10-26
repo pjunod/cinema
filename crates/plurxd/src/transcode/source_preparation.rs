@@ -490,7 +490,7 @@ struct FixedSourceState {
     recipe_binding: String,
     // All original application payloads above drop before this last fence.
     // It signals lifetime only; the original core supervisor settles M.
-    _application: plurx_core::adaptive_resources::runtime::finite_lifetime::FiniteApplicationLease,
+    _application: plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease,
 }
 /// A failed constructor may already have reserved P/M without returning its
 /// selector. Missing owner is uncertainty, never never-acquired evidence.

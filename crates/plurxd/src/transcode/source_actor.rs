@@ -1407,7 +1407,7 @@ impl TranscodeManager {
                         plurx_core::store::PlaybackPlanningSnapshot,
                     >())?
                     .checked_add(2 * std::mem::size_of::<usize>())?
-                    .checked_add(prepared.request().requested_heap_bytes()?)?
+                    .checked_add(prepared.request().selected_finite_requested_heap_bytes()?)?
                     .checked_add(super::source_preparation::fixed_source_requested_bytes())?
                     .checked_add(coordinator_frame_bytes)?
                     .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)
