@@ -226,6 +226,33 @@ pub(super) struct SourceWorkerRegistry {
     probe_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
     native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
 }
+/// Original factory admission for Source P/R and producer work only. Earlier
+/// HTTP planning/availability IO is outside this custody boundary. An armed
+/// owner lost without its exact terminal settlement leaves persistent restart
+/// uncertainty; waiter loss and Rust Drop never supply native-close evidence.
+pub(super) struct SourceRestartAdmission {
+    admission: Option<crate::serving_fence::RestartAdmission>,
+}
+impl SourceRestartAdmission {
+    fn new(admission: crate::serving_fence::RestartAdmission) -> Self {
+        Self {
+            admission: Some(admission),
+        }
+    }
+    fn known_settled(mut self) {
+        drop(self.admission.take());
+    }
+}
+impl Drop for SourceRestartAdmission {
+    fn drop(&mut self) {
+        if let Some(admission) = &self.admission {
+            admission.retain_native_cleanup_uncertainty(
+                plurx_core::process::bounded::OriginalWorkUncertainty::CollectorDropped,
+            );
+        }
+    }
+}
+
 struct SourceViewerInner {
     control_target_duration_ms: i64,
     control_hooks: control::SourceControlHookOwner,
@@ -270,6 +297,7 @@ enum SourcePhysicalSettlement {
     ),
 }
 struct SourceViewerState {
+    restart_admission: Option<SourceRestartAdmission>,
     native: Option<Arc<super::source_subtitles::SourceNativeTracks>>,
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
     retirement_requested: bool,
@@ -1015,6 +1043,13 @@ impl TranscodeManager {
                 SourceWorkerError::Unavailable,
             ));
         }
+        // Replay borrows the original owner and its original restart admission.
+        if let Some(actor) = self.lookup_source_worker(&assignment) {
+            return Ok(actor);
+        }
+        let restart_admission = state.serving.try_restart_admission().await.ok_or_else(|| {
+            SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unavailable)
+        })?;
         let registry_boot_id = state.sharing.accepted_drivers.boot_id();
         let mut registry = self.source_workers.entries.lock().expect("Source workers");
         if let Some(owner) = registry
@@ -1050,6 +1085,7 @@ impl TranscodeManager {
             retirement_deadline: Default::default(),
             direct: None,
             state: std::sync::Mutex::new(SourceViewerState {
+                restart_admission: Some(SourceRestartAdmission::new(restart_admission)),
                 start: None,
                 retirement_requested: false,
                 retirement_mode: crate::sharing_connection_custody::DriverCloseMode::Drain,
@@ -1907,6 +1943,20 @@ impl TranscodeManager {
                 reason = ?fault,
                 "Source owner left its settlement unresolved; the session lease sweep reclaims its row"
             );
+        }
+        // Linux direct custody moves into the SAME retained typed ticket after
+        // the original worker joins. HLS and the legacy direct worker disarm
+        // only after their exact physical and final Source settlement succeeds.
+        if settlement.is_ok() && (owner.direct.is_none() || !cfg!(target_os = "linux")) {
+            if let Some(admission) = owner
+                .state
+                .lock()
+                .expect("Source worker state")
+                .restart_admission
+                .take()
+            {
+                admission.known_settled();
+            }
         }
         // The owner is finished either way. Its registry slot is not capacity
         // the stopped owner can still use.

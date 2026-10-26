@@ -35,6 +35,7 @@ pub(super) enum SourceDirectRecord {
         worker: tokio::task::JoinHandle<DirectSourceRetirementTicket>,
     },
     Settling {
+        restart_admission: Option<SourceRestartAdmission>,
         ticket: SharedTicket,
         worker: tokio::task::JoinHandle<
             Result<(), plurx_core::adaptive_resources::runtime::direct_source::DirectSourceError>,
@@ -475,19 +476,46 @@ impl TranscodeManager {
                     ticket,
                 } => {
                     drop(slot.take());
+                    // Move the SAME factory admission before the rich owner
+                    // leaves the registry. No await or new admission occurs.
+                    let restart_admission = registry
+                        .iter()
+                        .find(|owner| Arc::as_ptr(owner) as usize == owner_address)
+                        .and_then(|owner| {
+                            owner
+                                .state
+                                .lock()
+                                .expect("Source worker state")
+                                .restart_admission
+                                .take()
+                        });
                     registry.retain(|owner| Arc::as_ptr(owner) as usize != owner_address);
                     let ticket = Arc::new(tokio::sync::Mutex::new(ticket));
                     let worker =
                         tokio::spawn(Self::finish_source_direct_ticket(Arc::clone(&ticket)));
-                    *slot = Some(SourceDirectRecord::Settling { ticket, worker });
+                    *slot = Some(SourceDirectRecord::Settling {
+                        restart_admission,
+                        ticket,
+                        worker,
+                    });
                 }
                 Transition::RetrySettle => {
-                    if let Some(SourceDirectRecord::Settling { ticket, worker }) = slot {
+                    if let Some(SourceDirectRecord::Settling { ticket, worker, .. }) = slot {
                         *worker =
                             tokio::spawn(Self::finish_source_direct_ticket(Arc::clone(ticket)));
                     }
                 }
                 Transition::Remove => {
+                    // This is the positive join of the SAME ticket finalizer,
+                    // after original native closure, Source SQL and R release.
+                    if let Some(SourceDirectRecord::Settling {
+                        restart_admission, ..
+                    }) = slot
+                    {
+                        if let Some(admission) = restart_admission.take() {
+                            admission.known_settled();
+                        }
+                    }
                     *slot = None;
                 }
                 Transition::Failed { owner_address } => {
@@ -556,7 +584,8 @@ impl TranscodeManager {
             .checked_add(size_of::<
                 BudgetedSourceWorker<Pin<Box<dyn Future<Output = ()> + Send>>>,
             >())?
-            .checked_add(size_of::<Arc<SourceViewerInner>>())?;
+            .checked_add(size_of::<Arc<SourceViewerInner>>())?
+            .checked_add(size_of::<SourceDirectRecord>())?;
         u64::try_from(bytes).ok()
     }
 
@@ -616,6 +645,9 @@ impl TranscodeManager {
         {
             return Ok(SourceViewerActor(Arc::clone(owner)));
         }
+        let restart_admission = state.serving.try_restart_admission().await.ok_or_else(|| {
+            SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unavailable)
+        })?;
         #[cfg(target_os = "linux")]
         let (runtime, epoch, application_owner_bytes, media_file_id, path_len) = {
             let runtime = state.resource_runtime.as_ref().ok_or_else(|| {
@@ -680,7 +712,7 @@ impl TranscodeManager {
             SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Capacity)
         })?;
         #[cfg(target_os = "linux")]
-        let (admitted, application_lease) = {
+        let (admitted, application_lease, restart_admission) = {
             const CHUNK: usize = 64 * 1024;
             const CHUNKS: usize = 64;
             let memory = DirectSourceRequest::minimum_memory_bytes(
@@ -694,38 +726,54 @@ impl TranscodeManager {
             .ok_or_else(|| {
                 SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Capacity)
             })?;
-            runtime
-                .prepare_direct_source(
-                    DirectSourceRequest {
-                        binding: DirectSourceBinding::Sharing(assignment.clone()),
-                        path: prepared.source_file().path.clone(),
-                        media_file_id,
-                        scanner_size: prepared.source_file().size,
-                        scanner_mtime: prepared.source_file().mtime,
-                        demand: WorkloadDemand {
-                            resources: Metric::Known(ResourceVector {
-                                cpu_ns_per_second: 0,
-                                peak_memory_bytes: memory,
-                                handles: 1,
-                                processes: 0,
-                                hardware_slots: 0,
-                                tuner_slots: 0,
-                                scratch_bytes: 0,
-                            }),
-                            limit_epoch: epoch,
-                            trial: false,
-                        },
-                        max_bodies: 64,
-                        chunk_bytes: CHUNK,
-                        outstanding_chunks: CHUNKS,
-                        application_owner_bytes,
+            // The opaque constructor can fail after R. From this boundary
+            // generic failure retains uncertainty instead of claiming no R.
+            let restart_admission = SourceRestartAdmission::new(restart_admission);
+            let result = runtime.prepare_direct_source(
+                DirectSourceRequest {
+                    binding: DirectSourceBinding::Sharing(assignment.clone()),
+                    path: prepared.source_file().path.clone(),
+                    media_file_id,
+                    scanner_size: prepared.source_file().size,
+                    scanner_mtime: prepared.source_file().mtime,
+                    demand: WorkloadDemand {
+                        resources: Metric::Known(ResourceVector {
+                            cpu_ns_per_second: 0,
+                            peak_memory_bytes: memory,
+                            handles: 1,
+                            processes: 0,
+                            hardware_slots: 0,
+                            tuner_slots: 0,
+                            scratch_bytes: 0,
+                        }),
+                        limit_epoch: epoch,
+                        trial: false,
                     },
-                    deadline,
-                )
-                .map_err(|_| {
-                    SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unavailable)
-                })?
+                    max_bodies: 64,
+                    chunk_bytes: CHUNK,
+                    outstanding_chunks: CHUNKS,
+                    application_owner_bytes,
+                },
+                deadline,
+            );
+            let (admitted, application_lease) = match result {
+                Ok(admitted) => admitted,
+                Err(error) => {
+                    // Only the exact typed pre-reservation tag authorizes this
+                    // release. Generic constructor errors may already own R.
+                    if error.definitely_before_reservation() {
+                        restart_admission.known_settled();
+                    }
+                    return Err(SourceWorkerNoAdmission::refused(
+                        &assignment,
+                        SourceWorkerError::Unavailable,
+                    ));
+                }
+            };
+            (admitted, application_lease, restart_admission)
         };
+        #[cfg(not(target_os = "linux"))]
+        let restart_admission = SourceRestartAdmission::new(restart_admission);
         let direct_file = prepared.into_direct_file();
         #[cfg(target_os = "linux")]
         let mut direct_file = direct_file;
@@ -748,6 +796,7 @@ impl TranscodeManager {
             retirement_deadline: Default::default(),
             direct: Some(Arc::new(direct_file)),
             state: std::sync::Mutex::new(SourceViewerState {
+                restart_admission: Some(restart_admission),
                 start: None,
                 retirement_requested: false,
                 retirement_mode: crate::sharing_connection_custody::DriverCloseMode::Drain,

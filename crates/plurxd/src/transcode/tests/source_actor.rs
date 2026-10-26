@@ -1,4 +1,8 @@
 #[cfg(target_os = "linux")]
+#[path = "../source_actor/restart_admission_tests.rs"]
+mod restart_admission_tests;
+
+#[cfg(target_os = "linux")]
 #[path = "source_fixed_native.rs"]
 mod fixed_native;
 
@@ -173,6 +177,14 @@ async fn source_copy_preadmission_fixture(mode: u8) {
 }
 
 async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Option<u8>) {
+    source_copy_preadmission_fixture_with_restart(mode, fixed_case, None).await;
+}
+
+async fn source_copy_preadmission_fixture_with_restart(
+    mode: u8,
+    fixed_case: Option<u8>,
+    restart_case: Option<u8>,
+) {
     use crate::http::hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget};
     use plurx_core::{
         config::Config,
@@ -1301,7 +1313,13 @@ async fn source_actual_actor(
         ),
         _ => None,
     };
-    let actor = Box::pin(manager.start_source_worker(
+    #[cfg(target_os = "linux")]
+    let restart_fence = if restart_case == Some(0) {
+        Some(restart_admission_tests::before_factory(&state).await)
+    } else {
+        None
+    };
+    let admitted = Box::pin(manager.start_source_worker(
         Arc::clone(&state),
         assignment.clone(),
         *activation,
@@ -1309,8 +1327,21 @@ async fn source_actual_actor(
         prepared,
         Instant::now() + Duration::from_secs(15),
     ))
-    .await
-    .expect("owned Source task");
+    .await;
+    #[cfg(target_os = "linux")]
+    if let Some(fence) = restart_fence {
+        restart_admission_tests::refused_factory(
+            &state,
+            &manager,
+            &assignment,
+            admitted,
+            ingress_fixture,
+            fence,
+        )
+        .await;
+        return;
+    }
+    let actor = admitted.expect("owned Source task");
     if mode == 54 {
         actor
             .wait_ready(Instant::now() + Duration::from_secs(15))
@@ -1372,6 +1403,23 @@ async fn source_actual_actor(
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
     assert!(Arc::ptr_eq(&actor.0, &joined.0));
+    #[cfg(target_os = "linux")]
+    if let Some(case) = restart_case {
+        drop(joined);
+        restart_admission_tests::after_factory(
+            &state,
+            &manager,
+            &actor,
+            &assignment,
+            mode,
+            case,
+            ingress_monitor,
+        )
+        .await;
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = restart_case;
     #[cfg(target_os = "linux")]
     if matches!(mode, 13 | 15) {
         drop(joined);

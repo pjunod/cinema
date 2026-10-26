@@ -881,6 +881,8 @@ pub(crate) fn fixed_source_requested_bytes() -> usize {
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<SourceProbeOperation>()
         + std::mem::size_of::<SourceFixedStartFailure>()
+        // Inline factory custody retained independently of the P/M selector.
+        + std::mem::size_of::<Option<super::source_actor::SourceRestartAdmission>>()
 }
 
 #[allow(clippy::too_many_arguments)]
