@@ -745,6 +745,10 @@ impl SourceProbeOperation {
 
 /// Synchronous installation before any P/native await. The application lease
 /// is the original M partition, not a second admission or a native receipt.
+#[expect(
+    clippy::result_large_err,
+    reason = "Retain the original Source assignment and move-only P selector inline on construction failure; boxing would allocate when application admission failed. The admitted coordinator frame includes this inline storage, and uncertainty keeps the original charge held."
+)]
 #[cfg(target_os = "linux")]
 pub(crate) fn start_source_fixed_probe(
     runtime: &Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
