@@ -210,13 +210,9 @@ impl RenditionDir {
     ///
     /// Refused for an index the plan does not contain, rather than writing a
     /// segment no playlist will ever name.
-    #[cfg_attr(
-        all(target_os = "linux", not(test)),
-        expect(
-            dead_code,
-            reason = "Linux production uses registered materialize_owned; preserve the legacy portable convenience entry and its fixture callers."
-        )
-    )]
+    // Production moves its already owned output through materialize_owned on
+    // every platform. This borrowed-byte convenience only constructs fixtures.
+    #[cfg(test)]
     pub async fn materialize(
         &self,
         manifest: &mut Manifest,
