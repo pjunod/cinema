@@ -60,6 +60,7 @@ fn probe_launch_path(
 
 const MAX_PROBE_STDOUT_BYTES: usize = 256 * 1024;
 const MAX_PROBE_STDERR_BYTES: usize = 16 * 1024;
+const MAX_SOURCE_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROBE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_VERSION_BYTES: usize = 64 * 1024;
 #[cfg_attr(
@@ -118,7 +119,7 @@ pub(crate) fn fixed_probe_native_profile() -> FixedProbeNativeProfile {
         pipe_readers: 3,
         max_image_bytes: MAX_PROBE_EXECUTABLE_BYTES,
         max_version_stdout_bytes: MAX_VERSION_BYTES as u64,
-        max_document_stdout_bytes: (16 * 1024 * 1024) as u64,
+        max_document_stdout_bytes: MAX_SOURCE_DOCUMENT_BYTES as u64,
         max_document_stderr_bytes: MAX_PROBE_STDERR_BYTES as u64,
         retained_custody_bytes: custody,
     }
@@ -1423,6 +1424,8 @@ pub(crate) struct AdmittedProbeImage {
     )
 )]
 pub(crate) struct FixedProbeRootClosed {
+    #[cfg(target_os = "linux")]
+    stdout_projection: FixedProbeRootOutput,
     identity: crate::process::observation::ProcessIdentity,
     inherited_source: bool,
     close_operation_id: uuid::Uuid,
@@ -1433,6 +1436,14 @@ pub(crate) struct FixedProbeRootClosed {
     stdout_closed: ProbePipeClosed,
     stderr_closed: Option<ProbePipeClosed>,
     pidfd_closed: ProbePidfdClosed,
+}
+
+/// Private projection captured by the original producer, not a wire limit or
+/// a different task's larger output allowance.
+#[cfg(target_os = "linux")]
+enum FixedProbeRootOutput {
+    Version,
+    SourceDocument,
 }
 
 #[cfg(target_os = "linux")]
@@ -1522,7 +1533,14 @@ impl FixedProbeRootClosed {
                 ProbeSessionClosed::KilledOriginalGroupAndObservedAbsent
                     | ProbeSessionClosed::OriginalGroupAlreadyAbsent
             )
-            && self.drained_stdout_bytes <= MAX_PROBE_STDOUT_BYTES.max(MAX_VERSION_BYTES)
+            && match self.stdout_projection {
+                FixedProbeRootOutput::Version => {
+                    !self.inherited_source && self.drained_stdout_bytes <= MAX_VERSION_BYTES
+                }
+                FixedProbeRootOutput::SourceDocument => {
+                    self.inherited_source && self.drained_stdout_bytes <= MAX_SOURCE_DOCUMENT_BYTES
+                }
+            }
             && self.drained_stderr_bytes <= MAX_PROBE_STDERR_BYTES
             && self.stdout_closed.bound_root_close_operation_id == self.close_operation_id
             && (!self.inherited_source || self.stderr_closed.is_some())
@@ -5114,6 +5132,7 @@ async fn probe_version_with_deadline_on_recording(
             let session_closed = session_closed.ok_or(DecodeFactError::CacheInvariant)?;
             *record.lock().map_err(|_| DecodeFactError::CacheInvariant)? =
                 Some(FixedProbeRootClosed {
+                    stdout_projection: FixedProbeRootOutput::Version,
                     identity,
                     inherited_source: false,
                     close_operation_id,
@@ -5287,7 +5306,7 @@ impl ProbeProjection {
         match self {
             Self::Decoder => MAX_PROBE_STDOUT_BYTES,
             // Same bound as the held-source comparison this replaces.
-            Self::SourceDocument => 16 * 1024 * 1024,
+            Self::SourceDocument => MAX_SOURCE_DOCUMENT_BYTES,
             #[cfg(any(target_os = "linux", test))]
             Self::SourceFrames(_) => 256 * 1024,
         }
@@ -6971,6 +6990,10 @@ async fn collect(
             })?;
             let session_closed = session_closed.ok_or(DecodeFactError::CacheInvariant)?;
             collected.original_root = Some(FixedProbeRootClosed {
+                stdout_projection: match projection {
+                    ProbeProjection::SourceDocument => FixedProbeRootOutput::SourceDocument,
+                    _ => return Err(DecodeFactError::CacheInvariant),
+                },
                 identity,
                 inherited_source: true,
                 close_operation_id,

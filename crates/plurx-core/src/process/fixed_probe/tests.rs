@@ -768,6 +768,18 @@ void probe_main(unsigned long *stack) {
     unsigned long delay[2] = { 60, 0 };
     syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
 #endif
+#elif PROBE_MODE == 13
+    if (argc > 1 && same(argv[1], "-version")) {
+        write_text(1, "ffprobe version admitted-large-document\n");
+        finish(0);
+    }
+    /* Valid JSON whitespace belongs to the actual document pipe drain even
+       though canonical document serialization removes it afterward. */
+    for (long block = 0; block < 8192; ++block) {
+        write_text(1, "                                ");
+    }
+    write_text(1, facts);
+    finish(0);
 #elif PROBE_MODE == 10 || PROBE_MODE == 11 || PROBE_MODE == 12
     if (argc > 1 && same(argv[1], "-version")) {
         write_text(1, "ffprobe version admitted-static\n");
@@ -3449,4 +3461,31 @@ esac
         changed_probe.document(None).await,
         Err(DecodeFactError::ProbeChanged)
     ));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn admitted_large_document_close_uses_its_original_projection_bound() {
+    let completion = match admitted_static_probe_fixture(13, false).await {
+        Ok(completion) => completion,
+        Err(failure) => panic!(
+            "actual large document lost original native closure: {}",
+            failure.error
+        ),
+    };
+    let (version, document) = completion.roots();
+    assert!(version.original_native_close_verified());
+    assert!(matches!(
+        version.stdout_projection,
+        FixedProbeRootOutput::Version
+    ));
+    assert!(version.drained_stdout_bytes <= MAX_VERSION_BYTES);
+    assert!(matches!(
+        document.stdout_projection,
+        FixedProbeRootOutput::SourceDocument
+    ));
+    assert!(document.drained_stdout_bytes > MAX_PROBE_STDOUT_BYTES);
+    assert!(document.drained_stdout_bytes <= MAX_SOURCE_DOCUMENT_BYTES);
+    assert!(document.original_native_close_verified());
+    assert!(completion.output.is_ok());
 }
