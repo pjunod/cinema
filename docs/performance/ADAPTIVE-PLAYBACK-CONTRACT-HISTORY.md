@@ -1,4 +1,4 @@
-# Adaptive playback contract history — M0 proposals and manager direction
+# Adaptive playback contract history — decisions and original proposals
 
 **Status:** done · historical contract proposals and manager direction, not current implementation or acceptance evidence.
 **Written:** 2026-10-22.
