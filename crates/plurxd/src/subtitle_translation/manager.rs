@@ -704,7 +704,7 @@ pub(crate) async fn worker_pass(
                 continue;
             }
             match state.transcode.admit_fragment().await {
-                Some(a) if state.transcode.fragment_worker_idle(&a) => Some(a),
+                Some(a) if state.transcode.fragment_worker_idle(&a) => Some(std::sync::Arc::new(a)),
                 _ => continue,
             }
         };
@@ -747,10 +747,11 @@ pub(crate) async fn worker_pass(
                 &source,
                 &fence,
                 &cancel,
-                admission.as_ref(),
+                admission.as_deref(),
                 expected_model_identity.as_deref(),
             ),
         );
+        let operation = crate::subtitle_models::admitted_work::scope(admission.as_ref(), operation);
         tokio::pin!(operation);
         let result = loop {
             tokio::select! {

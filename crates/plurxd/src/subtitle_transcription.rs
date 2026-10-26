@@ -152,75 +152,86 @@ struct Model {
     languages: Vec<String>,
 }
 async fn open_model(path: &str) -> Result<Model, StoreError> {
+    // UI fingerprint timeouts must stop the same existing hash worker at its
+    // next bounded chunk, without introducing admission for discovery.
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    open_model_cancellable(path, &cancel).await
+}
+async fn open_model_cancellable(
+    path: &str,
+    cancel: &CancellationToken,
+) -> Result<Model, StoreError> {
     let path = PathBuf::from(path);
-    let handle = tokio::task::spawn_blocking(move || {
-        plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+    let cancel = cancel.clone();
+    crate::subtitle_models::admitted_work::spawn_blocking(move || {
+        use std::io::Read;
+        let handle = plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+            .map_err(|_| StoreError::Task("transcription model unavailable".into()))?;
+        let meta = handle
+            .metadata()
+            .map_err(|_| StoreError::Task("model metadata unavailable".into()))?;
+        if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_MODEL_BYTES {
+            return Err(StoreError::Task("transcription model exceeds bound".into()));
+        }
+        let identity = plurx_core::fs_secure::std_file_identity(&handle)
+            .map_err(|_| StoreError::Task("model identity unavailable".into()))?;
+        let mut reader = handle
+            .try_clone()
+            .map_err(|error| StoreError::Task(error.to_string()))?;
+        let mut hash = Sha256::new();
+        let mut buffer = vec![0_u8; 256 * 1024];
+        let mut bytes = 0_u64;
+        let mut english_only = false;
+        let mut languages = vec![];
+        loop {
+            if cancel.is_cancelled() {
+                return Err(StoreError::Task("model hashing cancelled".into()));
+            }
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|error| StoreError::Task(error.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            if bytes == 0 && read >= 8 {
+                // Standard whisper.cpp GGML header: English-only models have
+                // 51864 vocabulary entries; multilingual models add language tokens.
+                if u32::from_le_bytes(buffer[..4].try_into().expect("header width")) == 0x67676d6c {
+                    let vocabulary =
+                        u32::from_le_bytes(buffer[4..8].try_into().expect("header width"));
+                    english_only = vocabulary == 51864;
+                    languages = languages_for_vocabulary(vocabulary);
+                }
+            }
+            bytes += read as u64;
+            if bytes > MAX_MODEL_BYTES {
+                return Err(StoreError::Task("model changed or exceeds bound".into()));
+            }
+            hash.update(&buffer[..read]);
+        }
+        if bytes != meta.len()
+            || plurx_core::fs_secure::std_file_identity(&handle)
+                .ok()
+                .as_ref()
+                != Some(&identity)
+        {
+            return Err(StoreError::Task("model changed while hashing".into()));
+        }
+        use std::io::{Seek, SeekFrom};
+        (&handle)
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| StoreError::Task(error.to_string()))?;
+        Ok(Model {
+            handle,
+            identity,
+            digest: hex::encode(hash.finalize()),
+            english_only,
+            languages,
+        })
     })
     .await
     .map_err(|_| StoreError::Task("model open task failed".into()))?
-    .map_err(|_| StoreError::Task("transcription model unavailable".into()))?;
-    let meta = handle
-        .metadata()
-        .map_err(|_| StoreError::Task("model metadata unavailable".into()))?;
-    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_MODEL_BYTES {
-        return Err(StoreError::Task("transcription model exceeds bound".into()));
-    }
-    let identity = plurx_core::fs_secure::std_file_identity(&handle)
-        .map_err(|_| StoreError::Task("model identity unavailable".into()))?;
-    let mut reader = tokio::fs::File::from_std(
-        handle
-            .try_clone()
-            .map_err(|error| StoreError::Task(error.to_string()))?,
-    );
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0_u8; 256 * 1024];
-    let mut bytes = 0_u64;
-    let mut english_only = false;
-    let mut languages = vec![];
-    loop {
-        plurx_core::process::bounded::check_cancellation()
-            .map_err(|_| StoreError::Task("model hashing cancelled".into()))?;
-        let read = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|error| StoreError::Task(error.to_string()))?;
-        if read == 0 {
-            break;
-        }
-        if bytes == 0 && read >= 8 {
-            // Standard whisper.cpp GGML header: English-only models have
-            // 51864 vocabulary entries; multilingual models add language tokens.
-            if u32::from_le_bytes(buffer[..4].try_into().expect("header width")) == 0x67676d6c {
-                let vocabulary = u32::from_le_bytes(buffer[4..8].try_into().expect("header width"));
-                english_only = vocabulary == 51864;
-                languages = languages_for_vocabulary(vocabulary);
-            }
-        }
-        bytes += read as u64;
-        if bytes > MAX_MODEL_BYTES {
-            return Err(StoreError::Task("model changed or exceeds bound".into()));
-        }
-        hash.update(&buffer[..read]);
-    }
-    if bytes != meta.len()
-        || plurx_core::fs_secure::std_file_identity(&handle)
-            .ok()
-            .as_ref()
-            != Some(&identity)
-    {
-        return Err(StoreError::Task("model changed while hashing".into()));
-    }
-    use std::io::{Seek, SeekFrom};
-    (&handle)
-        .seek(SeekFrom::Start(0))
-        .map_err(|error| StoreError::Task(error.to_string()))?;
-    Ok(Model {
-        handle,
-        identity,
-        digest: hex::encode(hash.finalize()),
-        english_only,
-        languages,
-    })
 }
 fn pipeline_digest(config: &Settings, command: &Path, model: &Model, audio_index: i64) -> String {
     hex::encode(Sha256::digest(format!(
@@ -751,9 +762,11 @@ async fn decoded_pcm(path: &Path, cancel: &CancellationToken) -> Result<(bool, u
     let cancel = cancel.clone();
     // Await the owned read loop even on cancellation. It observes the token
     // between bounded chunks and cannot continue detached after scratch retires.
-    tokio::task::spawn_blocking(move || pcm_has_signal(&mut file, &cancel))
-        .await
-        .map_err(|_| "decode_failed")?
+    crate::subtitle_models::admitted_work::spawn_blocking(move || {
+        pcm_has_signal(&mut file, &cancel)
+    })
+    .await
+    .map_err(|_| "decode_failed")?
 }
 impl EngineInvocation {
     pub(crate) fn unchanged(&self) -> bool {
@@ -796,7 +809,7 @@ pub(crate) async fn engine_invocation(
         let expected_identity = engine.identity;
         let expected_digest = engine.binary_sha256.clone();
         let cancel = cancel.clone();
-        let (staged, identity) = tokio::task::spawn_blocking(move || {
+        let (staged, identity) = crate::subtitle_models::admitted_work::spawn_blocking(move || {
             use std::io::{Read, Seek, SeekFrom, Write};
             let metadata = directory_metadata(&directory)?;
             if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
@@ -1292,7 +1305,7 @@ async fn pipeline_output(
 /// Unknown formats cannot advertise a language merely because a file exists.
 pub(crate) async fn model_languages(path: &str) -> Vec<String> {
     let path = PathBuf::from(path);
-    tokio::task::spawn_blocking(move || {
+    crate::subtitle_models::admitted_work::spawn_blocking(move || {
         use std::io::Read;
         let Ok(mut file) = plurx_core::fs_secure::open_read_nofollow_blocking(&path) else {
             return vec![];
@@ -1734,9 +1747,11 @@ async fn pass(
     let Some(admission) = state.transcode.admit_fragment().await else {
         return Ok(());
     };
+    let admission = Arc::new(admission);
+    crate::subtitle_models::admitted_work::scope(Some(&admission), async {
     // Physical capacity remains held through model reads, children and scratch cleanup.
     let path = PathBuf::from(&config.model_path);
-    let observed = tokio::task::spawn_blocking(move || {
+    let observed = crate::subtitle_models::admitted_work::spawn_blocking(move || {
         let handle = plurx_core::fs_secure::open_read_nofollow_blocking(&path).ok()?;
         plurx_core::fs_secure::std_file_identity(&handle).ok()
     })
@@ -1751,7 +1766,7 @@ async fn pass(
         let cancel = shutdown.child_token();
         let operation = plurx_core::process::bounded::cancellable(
             cancel.clone(),
-            open_model(&config.model_path),
+            open_model_cancellable(&config.model_path, &cancel),
         );
         tokio::pin!(operation);
         let model = tokio::select! {
@@ -1952,6 +1967,7 @@ async fn pass(
         return Ok(());
     }
     Ok(())
+    }).await
 }
 /// A saved disable/mode change stops future claims. An accepted attempt keeps
 /// its captured recipe; only Stop, shutdown or foreground demand interrupts it.

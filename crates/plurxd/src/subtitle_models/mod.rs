@@ -1,4 +1,5 @@
 //! Managed local subtitle artifacts over the common durable job ownership.
+pub(crate) mod admitted_work;
 pub(crate) mod api;
 pub(crate) mod artifacts;
 pub(crate) mod config;
@@ -1362,7 +1363,7 @@ pub(crate) async fn worker_pass(
         let admission = if generation {
             match state.transcode.admit_fragment().await {
                 Some(admission) if state.transcode.fragment_worker_idle(&admission) => {
-                    Some(admission)
+                    Some(std::sync::Arc::new(admission))
                 }
                 _ => {
                     state
@@ -1451,10 +1452,11 @@ pub(crate) async fn worker_pass(
                     Some(admission) => admission,
                     None => admit_model_test(state, &fence, &cancel).await?,
                 };
-                if !state.transcode.fragment_worker_idle(&admission) {
-                    return Err(StoreError::Task("waiting_for_playback_capacity".into()));
-                }
-                if !fence
+                admitted_work::scope(Some(&admission), async {
+                    if !state.transcode.fragment_worker_idle(&admission) {
+                        return Err(StoreError::Task("waiting_for_playback_capacity".into()));
+                    }
+                    if !fence
                     .observe_subtitle(
                         plurx_core::store::background_jobs_transcription::SubtitlePhase::Verifying,
                     )
@@ -1462,41 +1464,43 @@ pub(crate) async fn worker_pass(
                 {
                     return Err(StoreError::Task("subtitle_operation_fenced".into()));
                 }
-                crate::subtitle_transcription::self_test_managed(
-                    state, &engine, &model, &fence, &admission, &cancel,
-                )
-                .await?;
-                if cancel.is_cancelled() {
-                    return Err(StoreError::Task("worker_interrupted".into()));
-                }
-                let named = artifacts::model_identity(&state.subtitle_models.root, spec)
-                    .await
-                    .map_err(StoreError::Task)?;
-                if named != model.identity {
-                    return Err(StoreError::Task(
-                        if automatic_model_identity.is_some() {
-                            "automatic_verification_obsolete"
-                        } else {
-                            "artifact_changed"
-                        }
-                        .into(),
-                    ));
-                }
-                let receipt =
-                    plurx_core::store::background_jobs_transcription::SubtitleModelReceipt {
-                        node_id: String::new(),
-                        boot_id: String::new(),
-                        model_id: spec.id.clone(),
-                        model_sha256: spec.sha256.clone(),
-                        adapter_contract: engine.adapter_contract.clone(),
-                        engine_sha256: engine.binary_sha256.clone(),
-                        model_file_identity: artifacts::identity_key(model.identity),
-                        engine_file_identity: artifacts::identity_key(engine.identity),
-                        job_id: String::new(),
-                        fence: 0,
-                        verified_at_ms: 0,
-                    };
-                fence.publish_subtitle_model(payload.clone(), receipt).await
+                    crate::subtitle_transcription::self_test_managed(
+                        state, &engine, &model, &fence, &admission, &cancel,
+                    )
+                    .await?;
+                    if cancel.is_cancelled() {
+                        return Err(StoreError::Task("worker_interrupted".into()));
+                    }
+                    let named = artifacts::model_identity(&state.subtitle_models.root, spec)
+                        .await
+                        .map_err(StoreError::Task)?;
+                    if named != model.identity {
+                        return Err(StoreError::Task(
+                            if automatic_model_identity.is_some() {
+                                "automatic_verification_obsolete"
+                            } else {
+                                "artifact_changed"
+                            }
+                            .into(),
+                        ));
+                    }
+                    let receipt =
+                        plurx_core::store::background_jobs_transcription::SubtitleModelReceipt {
+                            node_id: String::new(),
+                            boot_id: String::new(),
+                            model_id: spec.id.clone(),
+                            model_sha256: spec.sha256.clone(),
+                            adapter_contract: engine.adapter_contract.clone(),
+                            engine_sha256: engine.binary_sha256.clone(),
+                            model_file_identity: artifacts::identity_key(model.identity),
+                            engine_file_identity: artifacts::identity_key(engine.identity),
+                            job_id: String::new(),
+                            fence: 0,
+                            verified_at_ms: 0,
+                        };
+                    fence.publish_subtitle_model(payload.clone(), receipt).await
+                })
+                .await
             } else if let JobPayload::SubtitleTranscribeManaged {
                 file_id,
                 source_size,
@@ -1560,6 +1564,7 @@ pub(crate) async fn worker_pass(
                 Ok(false)
             }
         };
+        let operation = admitted_work::scope(admission.as_ref(), operation);
         let operation = plurx_core::process::bounded::cancellable(cancel.clone(), operation);
         tokio::pin!(operation);
         let result = loop {
@@ -1650,7 +1655,7 @@ async fn admit_model_test(
     state: &AppState,
     fence: &crate::background_jobs::JobFence,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<crate::transcode::FragmentAdmission, StoreError> {
+) -> Result<std::sync::Arc<crate::transcode::FragmentAdmission>, StoreError> {
     use plurx_core::store::background_jobs_transcription::SubtitlePhase;
     if !fence
         .observe_subtitle(SubtitlePhase::WaitingForCapacity)
@@ -1669,19 +1674,22 @@ async fn admit_model_test(
     if !fence.observe_subtitle(SubtitlePhase::Verifying).await? {
         return Err(StoreError::Task("subtitle_operation_fenced".into()));
     }
-    Ok(admission)
+    Ok(std::sync::Arc::new(admission))
 }
 
 async fn hash_admitted_model(
     state: &AppState,
     spec: &CatalogModel,
     cancel: &tokio_util::sync::CancellationToken,
-    admission: &crate::transcode::FragmentAdmission,
+    admission: &std::sync::Arc<crate::transcode::FragmentAdmission>,
 ) -> Result<artifacts::ManagedModel, StoreError> {
     if !state.transcode.fragment_worker_idle(admission) {
         return Err(StoreError::Task("waiting_for_playback_capacity".into()));
     }
-    let operation = artifacts::open_model_cancellable(&state.subtitle_models.root, spec, cancel);
+    let operation = admitted_work::scope(
+        Some(admission),
+        artifacts::open_model_cancellable(&state.subtitle_models.root, spec, cancel),
+    );
     tokio::pin!(operation);
     loop {
         tokio::select! {
@@ -2225,6 +2233,7 @@ mod tests {
             .admit_fragment()
             .await
             .expect("idle admission");
+        let admission = std::sync::Arc::new(admission);
         let demand = state.transcode.test_mark_live_waiting();
         let cancel = tokio_util::sync::CancellationToken::new();
         // No model store exists: any metadata/content access would fail with a

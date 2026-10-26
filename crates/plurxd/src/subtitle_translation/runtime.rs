@@ -572,9 +572,11 @@ pub(crate) async fn verify_source(
         let hash_cancel = cancel.clone();
         // Never race/drop this JoinHandle on Stop. The owned loop checks the
         // manager-derived token between bounded chunks; always await its exit.
-        let sha256 = tokio::task::spawn_blocking(move || hash_source(held, identity, &hash_cancel))
-            .await
-            .map_err(|_| failure("worker_source_unavailable"))??;
+        let sha256 = crate::subtitle_models::admitted_work::spawn_blocking(move || {
+            hash_source(held, identity, &hash_cancel)
+        })
+        .await
+        .map_err(|_| failure("worker_source_unavailable"))??;
         let verified = VerifiedSource {
             fence: source,
             identity,
@@ -921,7 +923,7 @@ async fn decode_window(
         anchor_sample: clock.anchor_sample,
         samples: clock.samples,
     };
-    let has_signal = tokio::task::spawn_blocking(move || {
+    let has_signal = crate::subtitle_models::admitted_work::spawn_blocking(move || {
         inspect_pcm(
             &mut held,
             &scan_clock,
@@ -1215,7 +1217,7 @@ pub(crate) async fn self_test_translation(
         let write_cancel = cancel.clone();
         // The compiled rights-cleared source is staged once in this exclusive
         // 0700 attempt. Close the writer and hand the decoder a read-only FD.
-        let source = tokio::task::spawn_blocking(move || {
+        let source = crate::subtitle_models::admitted_work::spawn_blocking(move || {
             use std::{io::Write, os::unix::fs::OpenOptionsExt};
             interrupted(&write_cancel)?;
             let mut output = std::fs::OpenOptions::new()

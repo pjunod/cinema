@@ -92,7 +92,7 @@ async fn admit(
     state: &AppState,
     fence: &JobFence,
     cancel: &CancellationToken,
-) -> Result<FragmentAdmission, StoreError> {
+) -> Result<std::sync::Arc<FragmentAdmission>, StoreError> {
     interrupted(cancel)?;
     phase(fence, SubtitlePhase::WaitingForCapacity, cancel).await?;
     let admitted = state
@@ -103,20 +103,23 @@ async fn admit(
         .ok_or_else(|| failure("waiting_for_playback_capacity"))?;
     interrupted(cancel)?;
     phase(fence, SubtitlePhase::Verifying, cancel).await?;
-    Ok(admitted)
+    Ok(std::sync::Arc::new(admitted))
 }
 
 async fn hash_admitted(
     state: &AppState,
     cancel: &CancellationToken,
-    admission: &FragmentAdmission,
+    admission: &std::sync::Arc<FragmentAdmission>,
 ) -> Result<ManagedModel, StoreError> {
     interrupted(cancel)?;
     if !state.transcode.fragment_worker_idle(admission) {
         return Err(failure("waiting_for_playback_capacity"));
     }
     let spec = profile::model_spec();
-    let hash = artifacts::open_model_cancellable(&state.subtitle_models.root, &spec, cancel);
+    let hash = crate::subtitle_models::admitted_work::scope(
+        Some(admission),
+        artifacts::open_model_cancellable(&state.subtitle_models.root, &spec, cancel),
+    );
     tokio::pin!(hash);
     tokio::select! {
         result = &mut hash => result.map_err(StoreError::Task),
@@ -167,58 +170,63 @@ pub(crate) async fn execute(
         }
         _ => return Err(failure("translation_unverified")),
     };
-    interrupted(&cancel)?;
-    if !state.transcode.fragment_worker_idle(&admission) {
-        return Err(failure("waiting_for_playback_capacity"));
-    }
-    crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;
-    phase(fence, SubtitlePhase::Verifying, &cancel).await?;
-    runtime::self_test_translation(state, engine, &model, &selected, fence, &admission, &cancel)
+    crate::subtitle_models::admitted_work::scope(Some(&admission), async {
+        interrupted(&cancel)?;
+        if !state.transcode.fragment_worker_idle(&admission) {
+            return Err(failure("waiting_for_playback_capacity"));
+        }
+        crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;
+        phase(fence, SubtitlePhase::Verifying, &cancel).await?;
+        runtime::self_test_translation(
+            state, engine, &model, &selected, fence, &admission, &cancel,
+        )
         .await?;
-    interrupted(&cancel)?;
-    crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;
-    let named_model = artifacts::model_identity(&state.subtitle_models.root, &spec)
-        .await
-        .map_err(StoreError::Task)?;
-    if named_model != model.identity || model.sha256 != spec.sha256 {
-        return Err(failure("artifact_digest_mismatch"));
-    }
-    // Re-inspect the current trusted package, including its companions. A held
-    // executable from a replaced bundle cannot qualify the new named package.
-    // Await the bounded engine verifier rather than timing out/detaching it.
-    let named_engine = artifacts::inspect_engine()
-        .await
-        .map_err(StoreError::Task)?;
-    if named_engine.identity != engine.identity
-        || named_engine.binary_sha256 != engine.binary_sha256
-        || named_engine.adapter_contract != engine.adapter_contract
-        || named_engine.platform != engine.platform
-    {
-        return Err(failure("packaged_engine_changed"));
-    }
-    crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;
-    interrupted(&cancel)?;
-    phase(fence, SubtitlePhase::Validating, &cancel).await?;
-    Ok(Qualification {
-        receipt: SubtitleModelReceipt {
-            // JobFence binds node/boot/job/fence/time atomically at publication.
-            node_id: String::new(),
-            boot_id: String::new(),
-            model_id: spec.id,
-            model_sha256: spec.sha256,
-            adapter_contract: engine.adapter_contract.clone(),
-            engine_sha256: engine.binary_sha256.clone(),
-            model_file_identity: artifacts::identity_key(model.identity),
-            engine_file_identity: artifacts::identity_key(engine.identity),
-            job_id: String::new(),
-            fence: 0,
-            verified_at_ms: 0,
-        },
-        translation: TranslationQualification {
-            profile: selected,
-            self_test_sha256: profile::SELF_TEST_SHA256.into(),
-        },
+        interrupted(&cancel)?;
+        crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;
+        let named_model = artifacts::model_identity(&state.subtitle_models.root, &spec)
+            .await
+            .map_err(StoreError::Task)?;
+        if named_model != model.identity || model.sha256 != spec.sha256 {
+            return Err(failure("artifact_digest_mismatch"));
+        }
+        // Re-inspect the current trusted package, including its companions. A held
+        // executable from a replaced bundle cannot qualify the new named package.
+        // Await the bounded engine verifier rather than timing out/detaching it.
+        let named_engine = artifacts::inspect_engine()
+            .await
+            .map_err(StoreError::Task)?;
+        if named_engine.identity != engine.identity
+            || named_engine.binary_sha256 != engine.binary_sha256
+            || named_engine.adapter_contract != engine.adapter_contract
+            || named_engine.platform != engine.platform
+        {
+            return Err(failure("packaged_engine_changed"));
+        }
+        crate::subtitle_transcription::managed_artifacts_unchanged(engine, &model)?;
+        interrupted(&cancel)?;
+        phase(fence, SubtitlePhase::Validating, &cancel).await?;
+        Ok(Qualification {
+            receipt: SubtitleModelReceipt {
+                // JobFence binds node/boot/job/fence/time atomically at publication.
+                node_id: String::new(),
+                boot_id: String::new(),
+                model_id: spec.id,
+                model_sha256: spec.sha256,
+                adapter_contract: engine.adapter_contract.clone(),
+                engine_sha256: engine.binary_sha256.clone(),
+                model_file_identity: artifacts::identity_key(model.identity),
+                engine_file_identity: artifacts::identity_key(engine.identity),
+                job_id: String::new(),
+                fence: 0,
+                verified_at_ms: 0,
+            },
+            translation: TranslationQualification {
+                profile: selected,
+                self_test_sha256: profile::SELF_TEST_SHA256.into(),
+            },
+        })
     })
+    .await
 }
 
 #[cfg(test)]

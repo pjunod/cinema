@@ -207,8 +207,21 @@ mod local {
         Ok(before)
     }
 
+    // Exercise the existing actual read/hash path and its original chunk hook;
+    // this test seam creates no closure proof or production allocation.
+    #[cfg(test)]
+    pub(in crate::subtitle_models) fn hash_held_lifetime_fixture(
+        file: &mut File,
+        expected: &str,
+        size: u64,
+        cancel: &CancellationToken,
+        after_chunk: impl FnMut(),
+    ) -> Result<FileIdentity, String> {
+        hash_held_observed(file, expected, size, cancel, after_chunk)
+    }
+
     pub(super) async fn inspect_engine_at(path: PathBuf) -> Result<Engine, String> {
-        tokio::task::spawn_blocking(move || {
+        crate::subtitle_models::admitted_work::spawn_blocking(move || {
             if !path.is_absolute() {
                 return Err("packaged_engine_path_not_absolute".into());
             }
@@ -420,7 +433,7 @@ mod local {
         let expected = spec.sha256.clone();
         let size = spec.download_bytes;
         let cancel = cancel.clone();
-        let (handle, identity) = tokio::task::spawn_blocking(move || {
+        let (handle, identity) = crate::subtitle_models::admitted_work::spawn_blocking(move || {
             check_model_owner(&handle)?;
             let identity = hash_held_cancellable(&mut handle, &expected, size, &cancel)?;
             Ok::<_, String>((handle, identity))
@@ -601,7 +614,7 @@ mod local {
     }
 
     async fn temporary(directory: SecureDirectory, size: u64) -> Result<Temporary, String> {
-        tokio::task::spawn_blocking(move || {
+        crate::subtitle_models::admitted_work::spawn_blocking(move || {
             let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
             // SAFETY: valid held directory and output storage for statvfs.
             if unsafe { libc::fstatvfs(directory.raw_fd(), stats.as_mut_ptr()) } != 0 {
@@ -739,7 +752,7 @@ mod local {
         let sha = spec.sha256.clone();
         let bytes = spec.download_bytes;
         let hash_cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::subtitle_models::admitted_work::spawn_blocking(move || {
             hash_held_cancellable(&mut verify, &sha, bytes, &hash_cancel)?;
             verify.sync_all().map_err(|_| "model_sync_failed")?;
             use std::os::unix::fs::PermissionsExt;
@@ -860,7 +873,7 @@ mod local {
         let expected = spec.sha256.clone();
         let size = spec.download_bytes;
         let hash_cancel = cancel.clone();
-        let checked = tokio::task::spawn_blocking(move || {
+        let checked = crate::subtitle_models::admitted_work::spawn_blocking(move || {
             let result = check_model_owner(&held)
                 .and_then(|_| hash_held_cancellable(&mut held, &expected, size, &hash_cancel));
             (held, result)
@@ -1547,6 +1560,8 @@ mod local {
 #[cfg(unix)]
 pub(crate) use local::{inspect_engine, install_model, model_identity, open_model_cancellable};
 
+#[cfg(all(unix, test))]
+pub(super) use local::hash_held_lifetime_fixture;
 #[cfg(all(unix, test))]
 pub(crate) use local::open_model;
 
