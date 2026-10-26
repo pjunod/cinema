@@ -1794,10 +1794,10 @@ assert.equal(context.ACT_TIMER, null);
             apple_target.index("test-without-building"),
         )
         self.assertEqual(apple_target.count('-derivedDataPath "$(APPLE_DERIVED_DATA)"'), 5)
-        # The DerivedData cache in ci.yml must point at the same directory the
-        # Makefile builds into, or it silently caches nothing.
+        # DerivedData is reused by build/test destinations within this job only;
+        # whole build state must not transfer between checkout roots.
         self.assertIn("APPLE_DERIVED_DATA := build/DerivedData", makefile)
-        self.assertIn("path: clients/apple/build/DerivedData", workflow)
+        self.assertNotIn("path: clients/apple/build/DerivedData", workflow)
 
     def test_validation_workflows_do_not_compile_or_gate_windows(self):
         from validation.qualification import REQUIRED_JOBS
