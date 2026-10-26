@@ -440,6 +440,28 @@ fn a_recorded_hevc_census_is_not_a_change_in_the_source() {
     );
 }
 
+/// A title's FEL qualification verdict is stored beside its Dolby Vision
+/// facts in the probe document. Without this exemption storing a verdict
+/// made every later encoded session of the title refuse as
+/// `vod_source_rescan_required` ("/plurx_dv_fel_v1 missing").
+#[test]
+fn a_fel_qualification_verdict_is_not_a_change_in_the_source() {
+    let held = current_reporter_probe();
+    let mut stored = held.clone();
+    stored[plurx_core::transcode::dv_fel_qualification::PROBE_KEY] = serde_json::json!({
+        "schema": 1, "identity": "a".repeat(64), "admitted": false,
+    });
+    let comparison =
+        super::compare_probe_documents(&stored.to_string(), &held.to_string()).expect("compare");
+    assert!(comparison.same, "{:?}", comparison.differences);
+    stored["streams"][0]["width"] = serde_json::json!(1920);
+    assert!(
+        !super::compare_probe_documents(&stored.to_string(), &held.to_string())
+            .expect("compare")
+            .same
+    );
+}
+
 /// Background content analysis adds application metadata without changing
 /// media. Same-reporter comparison must ignore that record alone, including
 /// unavailable/negative reports, while still rejecting actual stream drift.
@@ -2699,4 +2721,19 @@ async fn nightly_runner_has_ffmpeg_readrate() {
         caps.readrate,
         "nightly arbitration coverage requires ffmpeg 5.1+ (-readrate)"
     );
+}
+
+/// A failed VA-API Main10 decode probe (a device still settling at boot) is
+/// not remembered forever: it is retried on later need after a bounded
+/// backoff. The probe decodes a shipped clip, so it needs no encoder.
+#[test]
+fn a_failed_main10_decode_probe_is_retried_after_a_bounded_backoff() {
+    use std::time::Duration;
+    assert_eq!(super::main10_probe_backoff(1), Duration::from_secs(30));
+    assert_eq!(super::main10_probe_backoff(2), Duration::from_secs(60));
+    assert_eq!(super::main10_probe_backoff(5), Duration::from_secs(480));
+    assert_eq!(super::main10_probe_backoff(40), Duration::from_secs(3600));
+    // Matroska (EBML magic) carrying the two-picture Main10 clip.
+    assert!(super::HEVC_MAIN10_PROBE_CLIP.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
+    assert!(super::HEVC_MAIN10_PROBE_CLIP.len() < 16 * 1024);
 }

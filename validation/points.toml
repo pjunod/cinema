@@ -1013,6 +1013,7 @@ paths = [
   "tests/support/rust_source_inventory.rs",
   "crates/plurx-core/src/fmp4/tests.rs",
   "crates/plurxd/src/ffmpeg/tests.rs",
+  "crates/plurxd/src/ffmpeg/hevc-main10-probe.mkv",
   "crates/plurxd/src/fragindex/equality_tests.rs",
   "crates/plurxd/src/fragindex/ride_along_tests.rs",
   "crates/plurxd/src/fragindex/tests.rs",

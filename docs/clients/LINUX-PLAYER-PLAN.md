@@ -131,8 +131,11 @@ The server already holds every piece:
 - `manager/candidates.rs` routes `DvDestination::Profile81` →
   `ReconstructedProfile81` when `playback.dolby_vision_fel_reencode` is on.
 
-The Developer tab still says that route "is not yet available on playback
-workers". v1 finishes it. The deliverable is a client claiming
+The Developer tab said that route "is not yet available on playback
+workers". v1 finishes it. *(M2, 2026-10-25: built on `claude/lp-fel-p81`;
+root causes, admission and proofs in
+[FEL-P81-RECONSTRUCTION.md](../streaming/FEL-P81-RECONSTRUCTION.md). M2a
+picked the live design: one reconstruction per worker.)* The deliverable is a client claiming
 `dv_profiles:[5,8]` playing a P7 FEL title, receiving a P8.1 stream:
 
 - the BL carries the FEL-composed picture;

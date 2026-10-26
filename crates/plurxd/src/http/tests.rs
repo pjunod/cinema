@@ -8995,6 +8995,14 @@ async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion
         );
     }
     assert_eq!(initial["dolby_vision_convert"], true);
+    #[cfg(target_os = "linux")]
+    let fel_helper_installed = crate::vodencode::dv_runtime::ToolSet::capture()
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    #[cfg(not(target_os = "linux"))]
+    let fel_helper_installed = false;
     // Each new preference can be on or off with either conversion permission.
     // Missing backend evidence never changes the saved choices or permission.
     for convert in [false, true] {
@@ -9040,9 +9048,26 @@ async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion
                     let requirements = item["requirements"]
                         .as_array()
                         .expect("readiness requirements");
-                    assert_eq!(requirements.len(), 4);
-                    assert_eq!(requirements[0]["status"], "unmet");
-                    assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    if field == "dolby_vision_fel_reencode" {
+                        // Computed from this node: the helper and the conversion
+                        // permission decide the backend row, never the saved choice.
+                        assert_eq!(requirements.len(), 6);
+                        assert_eq!(
+                            requirements[0]["status"],
+                            if convert && fel_helper_installed {
+                                "met"
+                            } else {
+                                "unmet"
+                            },
+                            "{requirements:?}"
+                        );
+                        assert_eq!(requirements[1]["id"], "dv_fel_worker_budget");
+                        assert_eq!(requirements[2]["id"], "dv_fel_live_slot");
+                    } else {
+                        assert_eq!(requirements.len(), 4);
+                        assert_eq!(requirements[0]["status"], "unmet");
+                        assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    }
                 }
                 assert_eq!(read["dolby_vision_convert"], convert);
                 assert_eq!(state.transcode.dv_convert_enabled().await, convert);
