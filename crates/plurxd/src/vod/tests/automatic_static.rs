@@ -437,11 +437,20 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         retained_charge,
         "withdrawal alone cannot release the original S charge"
     );
+    let original_static_path = output.path().to_owned();
     drop(ready);
     drop(output);
     drop(rendition);
     drop(logical);
     assert!(serve.end("later-automatic", Terminal::Deleted).await);
+    assert!(!super::cache_budget::pressure_evict_test(&serve.shared, &original_static_path)
+        .await.expect("actual cache pressure callback"),
+        "fresh typed S must not fall through to raw namespace deletion while its actual body is live");
+    assert_eq!(
+        serve.shared.retained_artifacts.test_capacity_snapshot().0,
+        retained_charge,
+        "pressure alone cannot refund the original live-body S"
+    );
     serve.shared.retained_artifacts.collect(base.path()).await;
     assert_eq!(
         serve.shared.retained_artifacts.test_capacity_snapshot().0,

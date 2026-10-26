@@ -226,10 +226,26 @@ impl CacheOwner for VodCacheOwner {
         let Some(shared) = self.0.upgrade() else {
             return Ok(false);
         };
+        #[cfg(target_os = "linux")]
+        if let Some(result) = shared
+            .retained_artifacts
+            .pressure_evict_finite(&candidate.path)
+            .await
+        {
+            return Ok(result);
+        }
         if candidate.path.parent() == Some(shared.base.join(".retained").as_path()) {
+            if shared
+                .resource_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.protects_output_path(&candidate.path))
+            {
+                return Ok(false);
+            }
+
             return shared
                 .retained_artifacts
-                .pressure_evict(&candidate.path)
+                .pressure_evict(&candidate.path, shared.resource_runtime.as_deref())
                 .await;
         }
         if candidate.path.parent() != Some(shared.base.as_path()) {
@@ -243,11 +259,24 @@ impl CacheOwner for VodCacheOwner {
         if !managed_key(key) {
             return Ok(false);
         }
+        #[cfg(target_os = "linux")]
+        if recovered.is_none() {
+            if let Some(result) = shared.pressure_evict_finite_rendition(key).await {
+                return Ok(result);
+            }
+        }
         // Writers and attachments own this same gate. Never queue behind a
         // publisher while a write reservation is asking us to release space.
         let Ok(_gate) = shared.rendition_build_gate(key).try_lock_owned() else {
             return Ok(false);
         };
+        if shared
+            .resource_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.protects_output_path(&candidate.path))
+        {
+            return Ok(false);
+        }
         let Some(bound) = bind_ordinary_directory(&candidate.path).await? else {
             return Ok(false);
         };
@@ -282,6 +311,13 @@ impl CacheOwner for VodCacheOwner {
             charged = Some((manifest.materialized_bytes(), manifest.is_admitted()));
             rendition.closed.store(true, Release);
             rendition.gen_epoch.fetch_add(1, Relaxed);
+        }
+        if shared
+            .resource_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.protects_output_path(&candidate.path))
+        {
+            return Ok(false);
         }
         // Removing names first preserves the charge if unlink fails. A
         // failed closed entry remains discoverable for the next pressure pass.
@@ -574,4 +610,14 @@ mod pressure_regressions {
         assert!(!ordinary_directory(&directory).await.expect("inventory"));
         assert_eq!(tokio::fs::read(outside).await.expect("preserved"), b"keep");
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) async fn pressure_evict_test(shared: &Arc<Shared>, path: &Path) -> io::Result<bool> {
+    VodCacheOwner(Arc::downgrade(shared))
+        .evict(&CacheCandidate {
+            path: path.to_owned(),
+            last_used: std::time::SystemTime::UNIX_EPOCH,
+        })
+        .await
 }

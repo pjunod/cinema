@@ -1801,10 +1801,36 @@ impl Shared {
     /// answering nothing, every GET pending forever. `attach_rendition` keeps
     /// the same per-key gate through session attach, while maintenance skips
     /// a key whose build/attach is active; different keys never wait for it.
-    pub(super) async fn purge_if_dormant(self: &Arc<Shared>, key: &str, ttl: Duration) {
-        if crate::playback_cache::is_pinned(&self.base.join(key)) {
-            return;
+    /// Exact current-owner lookup, independent of namespace spelling. A
+    /// recovered output without an original producer is protected; this does
+    /// not add an obsolete recovered-cache disposer.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn pressure_evict_finite_rendition(
+        self: &Arc<Shared>,
+        key: &str,
+    ) -> Option<bool> {
+        let closing = { self.finite_closing.lock().await.get(key).cloned() };
+        if let Some(closing) = closing {
+            self.retry_finite_closing(key.to_owned(), closing).await;
+            return Some(false);
         }
+        let original = self.renditions.lock().await.get(key).cloned()?;
+        if !original.dir.is_finite() {
+            return None;
+        }
+        let current = original.dir.finite_producer().is_some();
+        drop(original);
+        if current {
+            self.purge_dormant_inner(key, Duration::ZERO, true).await;
+        }
+        Some(false)
+    }
+
+    pub(super) async fn purge_if_dormant(self: &Arc<Shared>, key: &str, ttl: Duration) {
+        self.purge_dormant_inner(key, ttl, false).await;
+    }
+
+    async fn purge_dormant_inner(self: &Arc<Shared>, key: &str, ttl: Duration, pressure: bool) {
         let Ok(build_guard) = self.rendition_build_gate(key).try_lock_owned() else {
             return;
         };
@@ -1823,6 +1849,16 @@ impl Shared {
         let Some(rendition) = rendition else {
             return;
         };
+        // Original finite cancellation must remain reachable while its own
+        // pending global quota grant pins the path. Legacy unlink still obeys
+        // every cache pin.
+        #[cfg(target_os = "linux")]
+        let current_finite = rendition.dir.finite_producer().is_some();
+        #[cfg(not(target_os = "linux"))]
+        let current_finite = false;
+        if !current_finite && crate::playback_cache::is_pinned(&self.base.join(key)) {
+            return;
+        }
         if let Some(storage) = rendition.private_storage.as_ref() {
             if rendition.preparation().is_none() {
                 storage.release();
@@ -1855,7 +1891,7 @@ impl Shared {
         // makes admission and purge mutually exclusive without ever holding
         // the node-wide registry while awaiting a rendition-local lock.
         let manifest = rendition.manifest.lock().await;
-        if manifest.is_admitted() {
+        if manifest.is_admitted() && !(pressure && current_finite) {
             return;
         }
         #[cfg(unix)]
@@ -1977,6 +2013,13 @@ impl Shared {
                 shared.kick_all();
                 return;
             }
+            if shared
+                .resource_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.protects_output_path(rendition.dir.path()))
+            {
+                return;
+            }
             if rendition.ephemeral_processing {
                 let deletion = if shared
                     .hooks
@@ -2013,6 +2056,13 @@ impl Shared {
             }
             {
                 let mut manifest = rendition.manifest.lock().await;
+                if shared
+                    .resource_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.protects_output_path(rendition.dir.path()))
+                {
+                    return;
+                }
                 let freed = rendition.dir.purge(&mut manifest).await;
                 sub_saturating(&shared.working_set, freed.bytes);
                 // Whatever a failing unlink left both on disk and claimed is

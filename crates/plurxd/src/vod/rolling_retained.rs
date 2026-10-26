@@ -951,7 +951,11 @@ async fn attachment_facts_current(
 }
 
 impl RetainedArtifactRegistry {
-    pub(super) async fn pressure_evict_rolling(&self, path: &Path) -> io::Result<bool> {
+    pub(super) async fn pressure_evict_rolling(
+        &self,
+        path: &Path,
+        runtime: Option<&plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
+    ) -> io::Result<bool> {
         let artifact = {
             let mut state = self.state.lock().expect("retained registry lock");
             let identity = state.rolling.iter().find_map(|(identity, entry)| {
@@ -974,7 +978,8 @@ impl RetainedArtifactRegistry {
         let Some(artifact) = artifact else {
             return Ok(false);
         };
-        if !artifact.deletable()
+        if runtime.is_some_and(|runtime| runtime.protects_output_path(path))
+            || !artifact.deletable()
             || !remove_artifact_within(path, Instant::now() + RETAINED_GC_TICK_BUDGET).await?
         {
             return Ok(false);

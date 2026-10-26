@@ -2252,34 +2252,8 @@ impl RetainedArtifactRegistry {
             return;
         }
         #[cfg(target_os = "linux")]
-        if let Some(output) = &artifact.finite_output {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            match output.prepare_eviction(deadline).await {
-                Ok(ticket) => {
-                    let closing = FiniteArtifactClosing {
-                        ticket: Arc::new(tokio::sync::Mutex::new(ticket)),
-                        charge: artifact.charge,
-                    };
-                    // The compact ticket is installed before the last rich
-                    // artifact alias drops. Its original core book survives
-                    // a cancelled waiter or uncertain native/journal result.
-                    let removed = {
-                        let mut state = self.state.lock().expect("retained registry lock");
-                        let removed = state
-                            .retired
-                            .pop_front()
-                            .expect("selected retired artifact");
-                        state.finite_closing.push_back(closing);
-                        removed
-                    };
-                    drop(removed);
-                    drop(artifact);
-                    self.collect_finite_closing().await;
-                }
-                Err(error) => {
-                    tracing::warn!(target: "plurxd::vodserve", %error, artifact = %artifact.id, "finite artifact eviction remains charged")
-                }
-            }
+        if artifact.finite_output.is_some() {
+            self.retire_finite_artifact(artifact).await;
             return;
         }
         let result = remove_artifact_batch(&artifact.directory).await;
@@ -2292,6 +2266,87 @@ impl RetainedArtifactRegistry {
             Ok(false) => {}
             Err(error) => {
                 tracing::warn!(target: "plurxd::vodserve", %error, artifact = %artifact.id, "retained artifact cleanup remains charged")
+            }
+        }
+    }
+
+    /// `Some` identifies an original finite S even when its aliases or
+    /// collector are busy. Such a selection must never fall through to raw
+    /// legacy namespace cleanup.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn pressure_evict_finite(&self, path: &Path) -> Option<bool> {
+        let selected = {
+            let state = self.state.lock().expect("retained registry lock");
+            state
+                .entries
+                .values()
+                .map(|entry| &entry.artifact)
+                .chain(state.retired.iter())
+                .find(|artifact| artifact.directory == path && artifact.finite_output.is_some())
+                .map(|artifact| (Arc::strong_count(artifact) == 1, Arc::clone(artifact)))
+        };
+        let (exclusive, artifact) = selected?;
+        if !exclusive {
+            return Some(false);
+        }
+        let Ok(_collector) = self.collector.try_lock() else {
+            return Some(false);
+        };
+        {
+            let mut state = self.state.lock().expect("retained registry lock");
+            let identity = state.entries.iter().find_map(|(identity, entry)| {
+                Arc::ptr_eq(&entry.artifact, &artifact).then_some(*identity)
+            });
+            if let Some(identity) = identity {
+                let entry = state
+                    .entries
+                    .remove(&identity)
+                    .expect("selected finite artifact");
+                state.retired.push_back(entry.artifact);
+            }
+        }
+        self.retire_finite_artifact(artifact).await;
+        // The budget refreshes real inventory after every callback. Only the
+        // original typed close below may alter S, never this path lookup.
+        Some(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn retire_finite_artifact(&self, artifact: Arc<RetainedVodArtifact>) {
+        if Arc::strong_count(&artifact) != 2 {
+            return;
+        }
+        let Some(output) = &artifact.finite_output else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        match output.prepare_eviction(deadline).await {
+            Ok(ticket) => {
+                let closing = FiniteArtifactClosing {
+                    ticket: Arc::new(tokio::sync::Mutex::new(ticket)),
+                    charge: artifact.charge,
+                };
+                // Install the same compact selector before dropping any rich
+                // original owner. A cancelled waiter leaves it in this book.
+                let removed = {
+                    let mut state = self.state.lock().expect("retained registry lock");
+                    let Some(index) = state
+                        .retired
+                        .iter()
+                        .position(|entry| Arc::ptr_eq(entry, &artifact))
+                    else {
+                        return;
+                    };
+                    let removed = state.retired.remove(index);
+                    state.finite_closing.push_back(closing);
+                    removed
+                };
+                drop(removed);
+                drop(artifact);
+                self.collect_finite_closing().await;
+            }
+            Err(error) => {
+                tracing::warn!(target: "plurxd::vodserve", %error, artifact = %artifact.id, "finite artifact eviction remains charged")
             }
         }
     }
@@ -2457,7 +2512,15 @@ impl RetainedArtifactRegistry {
         candidates
     }
 
-    pub(super) async fn pressure_evict(&self, path: &Path) -> io::Result<bool> {
+    pub(super) async fn pressure_evict(
+        &self,
+        path: &Path,
+        runtime: Option<&plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
+    ) -> io::Result<bool> {
+        #[cfg(target_os = "linux")]
+        if let Some(result) = self.pressure_evict_finite(path).await {
+            return Ok(result);
+        }
         let Ok(_collector) = self.collector.try_lock() else {
             return Ok(false);
         };
@@ -2481,8 +2544,11 @@ impl RetainedArtifactRegistry {
                 .cloned()
         };
         let Some(artifact) = artifact else {
-            return self.pressure_evict_rolling(path).await;
+            return self.pressure_evict_rolling(path, runtime).await;
         };
+        if runtime.is_some_and(|runtime| runtime.protects_output_path(path)) {
+            return Ok(false);
+        }
         if !remove_artifact_within(path, Instant::now() + RETAINED_GC_TICK_BUDGET).await? {
             return Ok(false);
         }
@@ -3168,7 +3234,7 @@ mod tests {
         assert!(!serve
             .shared
             .retained_artifacts
-            .pressure_evict(&path)
+            .pressure_evict(&path, None)
             .await
             .expect("reader protected"));
         assert!(path.join(INIT_NAME).exists());
@@ -3176,7 +3242,7 @@ mod tests {
         assert!(serve
             .shared
             .retained_artifacts
-            .pressure_evict(&path)
+            .pressure_evict(&path, None)
             .await
             .expect("idle eviction"));
         assert!(!path.exists());
