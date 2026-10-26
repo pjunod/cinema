@@ -755,3 +755,220 @@ int main(void) {
     // Deliberately direct native fixture: runtime start_released is false,
     // so its independent identity cross-check must not authorize a refund.
 }
+
+#[tokio::test]
+async fn real_drain_refusal_drops_original_acknowledged_start_and_keeps_acquired_task_charge() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("same admitted application alias");
+    cancel_at(&runtime, &mut owner, CopyStartFixtureStage::TaskObserved).await;
+    let charge = runtime.accounting().expect("full original R").used;
+    assert_ne!(charge, ResourceVector::default());
+    let (binding, original_task, task_member, original_observation) = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role.copy_vod.as_ref().expect("original copy carrier");
+        assert!(copy.task_observed_committed && !copy.start_released);
+        assert!(role.invoked.contains(&copy.task_member));
+        (
+            role.binding,
+            copy.task.expect("same registered parser"),
+            copy.task_member,
+            copy.task_observation,
+        )
+    };
+    runtime
+        .begin_drain()
+        .expect("actual permanent runtime admission drain");
+    {
+        let state = runtime.ledger.inner.lock().expect("same admission ledger");
+        let entry = state
+            .entries
+            .get(&binding.reservation)
+            .expect("same original R");
+        assert!(state.draining && !state.invalid && !state.native_overage_fenced);
+        assert_eq!(state.epoch, binding.allocation_epoch);
+        assert_eq!(entry.binding, binding);
+        assert!(entry.durable.is_some());
+        assert!(matches!(
+            entry.state,
+            ReservationState::Reserved | ReservationState::SpawnPossible
+        ));
+    }
+    let waiter = {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        // Production takes this SAME registered sender, then the real ledger
+        // drain refuses entry and drops that sender. No injected boolean or
+        // replacement latch/process/task is used by this regression.
+        assert!(matches!(
+            runtime.release_copy_task(role).await,
+            Err(OperationError::State)
+        ));
+        let copy = role.copy_vod.as_ref().expect("same copy after refusal");
+        assert!(!copy.start_released && copy.task_observed_committed);
+        assert_eq!(copy.task, Some(original_task));
+        assert_eq!(copy.task_member, task_member);
+        assert_eq!(copy.task_observation, original_observation);
+        role.graph
+            .as_ref()
+            .expect("not yet sealed")
+            .copy_result_waiter(original_task)
+            .await
+            .expect("same original terminal cell")
+    };
+    // BEFORE seal/join can drop any sender: only actual release_native_entry
+    // refusal can have woken this receiver. This terminal alone is no close
+    // proof; the original task, child and pipes are still owned and charged.
+    assert_eq!(
+        bounded(waiter.wait(deadline()))
+            .await
+            .expect("actual refused latch returned"),
+        CopyTaskTerminal::NeverEntered
+    );
+    assert_eq!(
+        runtime.accounting().expect("refusal cannot refund R").used,
+        charge
+    );
+    let (graph, task, child) = seal_registered(&preparation).await;
+    assert_eq!(task, original_task);
+    kill_and_wait(&graph, child).await;
+    assert_eq!(
+        bounded(graph.join_copy_vod(task))
+            .await
+            .expect("natural SAME parser join"),
+        CopyTaskTerminal::NeverEntered
+    );
+    assert_eq!(
+        graph.fixture_copy_disposition(task).await,
+        Some(CopyStartDisposition::TakenBeforeSeal)
+    );
+    assert_eq!(graph.fixture_copy_pipe_close_calls(task).await, [1, 1]);
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("native join alone keeps full R")
+            .used,
+        charge
+    );
+    {
+        let bundle = preparation.state.lock().await;
+        let copy = bundle.roles[0]
+            .copy_vod
+            .as_ref()
+            .expect("same observed carrier");
+        assert!(copy.task_observed_committed && !copy.start_released);
+        assert_eq!(copy.task_observation, original_observation);
+    }
+    drop(graph);
+    let mut ticket = bounded(owner.prepare_retirement(true, deadline()))
+        .await
+        .expect("actual original closure after drain");
+    let operation = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        assert!(!role.refunded);
+        let pending = role
+            .pending_finite_close
+            .as_ref()
+            .expect("same prepared typed settlement");
+        let Mutation::SettleTyped(closed) = &pending.mutation else {
+            panic!("actual typed copy settlement")
+        };
+        assert_eq!(closed.settlement.members.len(), 5);
+        let task_facts: Vec<_> = closed
+            .settlement
+            .members
+            .iter()
+            .filter_map(|disposition| match disposition {
+                v2::MemberDisposition::Closed {
+                    member_id,
+                    fact:
+                        v2::ClosedFact::VodOutputTaskV1 {
+                            task,
+                            join_operation_id,
+                            owners,
+                        },
+                } if member_id.uuid() == task_member => Some((task, join_operation_id, owners)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            task_facts.len(),
+            1,
+            "ACKed acquired parser cannot become NeverAcquired"
+        );
+        assert_eq!(task_facts[0].0.member_id.uuid(), task_member);
+        assert_eq!(task_facts[0].0.actor, v2::VodActor::RollingCopyV1);
+        assert!(!task_facts[0].1.uuid().is_nil());
+        assert_eq!(
+            task_facts[0].2.len(),
+            3,
+            "original buffer and both readers closed"
+        );
+        assert!(
+            !closed.settlement.members.iter().any(|disposition| matches!(
+                disposition,
+                v2::MemberDisposition::Closed {
+                    fact: v2::ClosedFact::VodOutputTaskNeverAcquiredV1 { .. },
+                    ..
+                }
+            ))
+        );
+        pending.key.operation_id
+    };
+    drop(owner);
+    assert_eq!(ticket.fixture_application_released(), Some(false));
+    assert!(
+        bounded(ticket.finish_retirement(Instant::now() + Duration::from_millis(1)))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("output and app aliases charged")
+            .used,
+        charge
+    );
+    drop(output);
+    assert_eq!(ticket.fixture_application_released(), Some(false));
+    assert!(
+        bounded(ticket.finish_retirement(Instant::now() + Duration::from_millis(1)))
+            .await
+            .is_err()
+    );
+    {
+        let bundle = preparation.state.lock().await;
+        assert_eq!(
+            bundle.roles[0]
+                .pending_finite_close
+                .as_ref()
+                .expect("retained original command")
+                .key
+                .operation_id,
+            operation
+        );
+        assert!(!bundle.roles[0].refunded);
+    }
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("last actual application lease still charged")
+            .used,
+        charge
+    );
+    drop(preparation);
+    drop(application);
+    assert_eq!(ticket.fixture_application_released(), Some(true));
+    bounded(ticket.finish_retirement(deadline()))
+        .await
+        .expect("one original typed settlement after real aliases disappear");
+    assert_eq!(
+        runtime.accounting().expect("one exact refund").used,
+        ResourceVector::default()
+    );
+}
