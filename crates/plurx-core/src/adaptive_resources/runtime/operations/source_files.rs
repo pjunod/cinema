@@ -1758,6 +1758,63 @@ impl SourceCell {
             )
     }
 
+    /// Read only the SAME durably acknowledged root-copy metadata. Cleanup
+    /// may already have moved the original File into its retained closer, so
+    /// this must never borrow a descriptor, fstat or reconstruct an envelope.
+    /// A true result is acknowledgment data only, never native-close proof.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn copy_root_observation_committed(
+        &self,
+        root_member: Uuid,
+        acquisition_id: Uuid,
+    ) -> Result<bool, OperationError> {
+        let v2::MemberPlan::SourceV1 { source: plan, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        let v2::SourceRecovery::LocalSourceHandlesV1 { graph_id, .. } = &plan.recovery;
+        let mut roots = plan.planned_copies.iter().filter(|copy| {
+            matches!(copy.owner, v2::CopyOwner::OwnedRoot { graph_id: selected, root_member_id }
+                if selected == *graph_id && root_member_id.uuid() == root_member)
+        });
+        let root = roots.next().ok_or(OperationError::State)?;
+        if roots.next().is_some()
+            || root.acquisition_operation_id.uuid() != acquisition_id
+            || plan.planned_copies.len() != 2
+        {
+            return Err(OperationError::State);
+        }
+        if !self.root_observed_committed {
+            if self.selected_root_member.is_some()
+                || self
+                    .pending_root
+                    .as_ref()
+                    .is_some_and(|(member, copy, _)| *member != root_member || copy != root)
+            {
+                return Err(OperationError::State);
+            }
+            return Ok(false);
+        }
+        let observed = self
+            .result
+            .as_ref()
+            .and_then(|result| result.observed.as_ref())
+            .ok_or(OperationError::State)?;
+        if !self.observed_committed
+            || self.selected_root_member != Some(root_member)
+            || self.pending_root.is_some()
+            || observed.version != 1
+            || observed.holder_id != plan.holder_id
+            || observed.member_id != plan.member_id
+            || observed.source_association != plan.source_association
+            || observed.access != plan.access
+            || observed.native_object.filesystem_domain != plan.filesystem_domain
+            || observed.copies != plan.planned_copies
+        {
+            return Err(OperationError::State);
+        }
+        Ok(true)
+    }
+
     /// The SAME copy root's native closure, with no registered parser, closes
     /// only the inventoried inherited copy after this cell's checked parent
     /// close. Unobserved root-copy enrichment still must match its exact slot.
