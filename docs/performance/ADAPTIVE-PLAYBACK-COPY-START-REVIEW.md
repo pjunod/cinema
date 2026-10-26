@@ -9,7 +9,7 @@ qualified by this document. Behavioral tests remain unrun pending review.
 
 Source is committed on task branch `codex/adaptive-copy-start-and-admission`,
 based on the effort for draft PR #1248, at
-`6619ae94cbc170324f83da17b768e7aaa9d84fab`. The [source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW-SOURCE.json)
+`46dc2805b9b6688b5052494605250898a6b105c7`. The [source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW-SOURCE.json)
 pins the relevant file hashes. Read that commit rather than unrelated main or
 an uncommitted worktree; normal Git fetch/show supplies every cited file.
 This source pin is an ancestor of the continuing effort and remains stable.
@@ -106,8 +106,8 @@ With no known child there is no handle on which to invent a kill/wait receipt.
 **Entry:** the retained Child/ChildJob is installed. **Exit:** the parser's
 JoinHandle and pipe/work ownership are registered (S3).
 
-Copy start sets its entry flag, then awaits source observations before starting
-the task (`runtime/operations/copy_vod.rs::start_copy_vod`); task arming adds
+The physical native-launch scope first marks entry; the successful start path
+then awaits source observations before starting the task (`runtime/operations/copy_vod.rs::start_copy_vod`); task arming adds
 another await before registration (`start_copy_task`). Thus this differs from
 S1. Current runtime join requires a task and committed task observation
 (`join_copy_producer`), and the copy process witness requires a joined parser.
@@ -155,6 +155,16 @@ Delivery permits entry but does not prove that the parser ran. This is the
 full joined path's reference case, not a fifth missing partial adapter. The retained parser and root must join, checked pipe closure
 must succeed, and source/prefix owners must close before process settlement.
 A completed/failed parser summary is not interchangeable with S3 nonentry.
+
+The authored real-owner fixture
+`runtime/copy_vod/tests/cleanup.rs::selected_copy_named_arm_starts_same_root_replays_release_and_fully_joins_originals`
+checks same-root/task/source-observation replay, the existing copy-specific
+joined receipt and the same application fence. It has a failure-only watchdog
+on its original borrowed native wait; elapsed supplies no closure proof.
+Its short retirement failures plus retained charge do not independently prove
+those errors were caused by aliases rather than unrelated latency. It is not
+media-quality evidence and does not cover partial-start states or latch refusal.
+The body remains unexecuted pending completed-candidate review and fixes.
 
 ## 3. Cleanup attempts are bounded; deadlines do not release charge
 

@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "source_commit": "6619ae94cbc170324f83da17b768e7aaa9d84fab",
+  "source_commit": "46dc2805b9b6688b5052494605250898a6b105c7",
   "source_branch": "codex/adaptive-copy-start-and-admission",
   "source_sha256": {
     "Cargo.toml": "72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f",
@@ -13,7 +13,7 @@
     "crates/plurx-core/src/adaptive_resources/physical_graph/source_files.rs": "d5aeebb7ac3045323143f4d3866ab084dfc30377f1162ad67e5e4d0dcf03162b",
     "crates/plurx-core/src/adaptive_resources/runtime/operations.rs": "d8a73bf7fd10c035a868a07ee3d24d35b8c0b031e6c40172e849074529e39d77",
     "crates/plurx-core/src/adaptive_resources/runtime/copy_vod.rs": "4c3ae9da06c4eed9ff73748b798b6f12e231d91a40b2e60ad7acdd9d8981b9b8",
-    "crates/plurx-core/src/adaptive_resources/runtime/copy_vod/owner.rs": "620f67a87160adb756cb371b415e9db79192bee348ee841cce794056d6d90b87",
+    "crates/plurx-core/src/adaptive_resources/runtime/copy_vod/owner.rs": "a59c6b0e5e67e8db7307824b5d50fe9913f7feda68cf1b797a4c3c1501ae02d7",
     "crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs": "053fc4de6614b1664b798a41ecce23b6a179c11c5a5f2f31cba227c779eceb1c",
     "crates/plurx-core/src/adaptive_resources/runtime/operations/copy_close.rs": "0ca130c12c9e1000f3d1f385f77ea4d09e15ade80641e81ffbc1ef20598b6517",
     "crates/plurx-core/src/adaptive_resources/runtime/operations/copy_vod.rs": "342e6a7033a9b3beaac5648fe0682f23e59d5e664a97bac9ff441fca2d0c5689",
@@ -27,7 +27,9 @@
     "crates/plurx-core/src/process/job_control.rs": "16d4f76d6e08df29adcf3c4a059bed5abac589092b1313989f80b05e4bdbfbd9",
     "crates/plurx-core/src/resource_custody/codec_v2.rs": "45ac28d028d223761dceaf26c361649a76cd1ffa3c679886bf5cb67d1f4ce6f5",
     "crates/plurx-core/src/resource_custody/codec_v2/settlement.rs": "b4751d8224d62dadb1c514b2052af9d66c84f4f3c4980074e605118379f686e9",
-    "crates/plurx-core/src/resource_custody/transaction/typed.rs": "a30447d4c3d42057cb5604d757607ca5b60f585f6c6d962aca361bb7b8e63c02"
+    "crates/plurx-core/src/resource_custody/transaction/typed.rs": "a30447d4c3d42057cb5604d757607ca5b60f585f6c6d962aca361bb7b8e63c02",
+    "crates/plurx-core/src/adaptive_resources/runtime/copy_vod/tests/cleanup.rs": "55788340a9635d437b0f94c0b01936163389a5766caf3b3c81cfe5132f988791",
+    "crates/plurx-core/src/adaptive_resources/runtime/finite_lifetime.rs": "45d0b8f9f5c3cb75e4fda9744e945c4df45401662aac2134c8144e744c5873ef"
   },
   "symbols": {
     "CopyCancellationClosure": {
@@ -50,5 +52,5 @@
       "definition_present": false
     }
   },
-  "scope": "Bounded copy-start design review; four partial acquisition boundaries. No implementation, compiler execution, behavioral test or acceptance is implied by this manifest."
+  "scope": "Source identity for bounded copy-start design review and the authored launch/replay/retirement fixture. Named dispatch/replay is implemented; partial-start closure proposals remain unimplemented. This manifest establishes no compiler execution, behavioral result, Fable approval or acceptance."
 }
