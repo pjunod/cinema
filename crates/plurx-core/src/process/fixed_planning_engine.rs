@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
+
+#[cfg(any(test, feature = "fixtures"))]
+pub(crate) mod fixtures;
 use uuid::Uuid;
 
 use crate::process::observation::{Metric, ProcessIdentity, ProcessObserver};
@@ -939,6 +942,10 @@ async fn run_original_command(
         stderr_owner_id,
         stderr_close_operation_id,
     ));
+    // Diagnostic-only gate: the SAME child, Job, pidfd and both pipes are
+    // installed above. PID observation does not assert the child is running.
+    #[cfg(any(test, feature = "fixtures"))]
+    fixtures::after_native_custody(close_operation_id, pid).await;
     let remaining = deadline.saturating_duration_since(Instant::now());
     let observed = tokio::time::timeout(remaining, async {
         tokio::join!(

@@ -244,6 +244,17 @@ impl FixedPlanningProbeRequest {
 
 #[derive(Debug)]
 pub struct FixedPlanningProbeError(pub(crate) super::operations::OperationError);
+impl FixedPlanningProbeError {
+    /// Only this exact upstream tag proves refusal before P/M reservation.
+    /// A generic constructor error may already retain original obligations;
+    /// absence of a returned owner is never native or never-acquired proof.
+    pub fn definitely_before_reservation(&self) -> bool {
+        matches!(
+            self.0,
+            super::operations::OperationError::BeforeReservation(_)
+        )
+    }
+}
 impl std::fmt::Display for FixedPlanningProbeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
@@ -521,7 +532,24 @@ impl Drop for FixedPlanningProbeOwner {
         self.cleanup_requested.store(true, Ordering::Release);
     }
 }
+#[cfg(any(test, feature = "fixtures"))]
+pub use crate::process::fixed_planning_engine::fixtures::{
+    FixedPlanningNativeGate, FixedPlanningNativeStarted,
+};
+
 impl FixedPlanningProbeOwner {
+    /// Fixture-only observation of this SAME original engine command. This
+    /// returns no native owner, liveness guarantee, receipt or release right.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub async fn fixture_native_gate(
+        &self,
+        panic_after_native_return: bool,
+    ) -> Result<FixedPlanningNativeGate, FixedPlanningProbeError> {
+        self.runtime
+            .fixture_planning_native_gate(self.selection()?, panic_after_native_return)
+            .await
+            .map_err(Into::into)
+    }
     fn selection(&self) -> Result<&OwnedPreparation, FixedPlanningProbeError> {
         self.preparation
             .as_ref()
@@ -572,6 +600,28 @@ impl FixedPlanningProbeOwner {
         }
     }
 }
+impl NodeResourceRuntime {
+    /// NEGATIVE fixture ceiling only, after the exclusive fixture's sole real
+    /// observation has returned and immediately before synchronous planning
+    /// admission. No standalone sampler/concurrent refresher may exist in
+    /// this window. This is neither measured capacity nor an operator policy;
+    /// it cannot authorize work, native absence, closure, refund or reset.
+    #[cfg(all(target_os = "linux", any(test, feature = "fixtures")))]
+    pub fn fixture_deny_planning_cpu(&self) -> Result<(), FixedPlanningProbeError> {
+        let mut state = self
+            .ledger
+            .inner
+            .lock()
+            .map_err(|_| OperationError::State)?;
+        let next_epoch = state.epoch.checked_add(1).ok_or(OperationError::State)?;
+        state.cap.cpu_ns_per_second = crate::process::observation::Metric::Known(0);
+        state.epoch = next_epoch;
+        // Preserve other ceilings, all held charges and the actual observation
+        // timestamp. The next plan reads this fresh epoch under the same ledger.
+        Ok(())
+    }
+}
+
 impl NodeResourceRuntime {
     pub fn prepare_fixed_planning_probe(
         self: &Arc<Self>,
