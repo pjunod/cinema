@@ -1,6 +1,6 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** built · final qualification
+**Status:** built · qualification and landing recorded on PR #1292
 
 **Date:** 2026-10-25 · **Updated:** 2026-10-26 · **Owner:** Codex /root · **Branch:** `effort/subtitle-completion`
 
@@ -14,7 +14,7 @@ receipt. Independent review findings, including final worker and native lifecycl
 no agent deployment is authorized. Physical Apple TV acceptance follows that
 deployment and is distinct from server/runtime or simulator evidence.
 
-| Area | Current implementation | Remaining qualification |
+| Area | Current implementation | Qualification and acceptance |
 |---|---|---|
 | On-the-fly captions | Shared progressive worker supports same-language transcription and speech-to-English translation, selected audio ordinal and actual media clock. | Review closed; focused regressions and model self-tests passed. Progressive-worker and final gate results are recorded on PR #1292. |
 | Existing subtitle translation | Pinned local multilingual-to-English Marian model, durable eight-cue slices, bounded partial storage, explicit stable-ID adoption. | Production multilingual self-test and durable-slice regressions passed; broader human accuracy remains acceptance evidence. |
@@ -107,9 +107,10 @@ transport closes. This closes a concrete test transport lifecycle race
 without adding sleeps or changing synchronous player retirement. It is
 simulator evidence, separate from physical Apple TV playback.
 
-The actual multi-audio progressive-worker rerun and final main fast lane are
-the remaining qualification items. Their exact candidate and result are
-recorded on PR #1292, which is also the authoritative landing record.
+The actual multi-audio progressive-worker execution and final main fast lane
+have separate qualification records. Their exact candidate and current result
+are recorded on PR #1292, which is also the authoritative landing record.
+Source review and compilation alone do not establish their success.
 
 ## Scope and initial inventory
 
