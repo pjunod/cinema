@@ -4512,13 +4512,9 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     // commits, so a package created after the plan was drawn is real; a
     // removal that resolved only its opening snapshot would commit and leave
     // this one owned by a node that no longer exists.
-    // A live target must publish its actual post-fence route role/applied
-    // index. Start the real worker after the explicit write-budget controls;
-    // manual pre-fence heartbeats cannot prove the later removal barrier.
-    cluster
-        .request(target, Request::StartHeartbeatLoop)
-        .await?
-        .require_ok()?;
+    // The live worker started after the explicit write-budget controls keeps
+    // publishing the target's post-fence route role/applied index. Manual
+    // pre-fence heartbeats cannot prove the later removal barrier.
     let late_package = format!("{LATE_PACKAGE}-{target_node}");
     cluster
         .request(
@@ -5309,10 +5305,6 @@ async fn run_leader_self_leave_case() -> Result<()> {
             .await?,
         "self_removal_requires_leave",
     )?;
-    cluster
-        .request(departed, Request::StartHeartbeatLoop)
-        .await?
-        .require_ok()?;
     cluster
         .request(departed, Request::LeaveVoter)
         .await?
