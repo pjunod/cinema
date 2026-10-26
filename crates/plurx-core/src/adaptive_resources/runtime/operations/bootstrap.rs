@@ -36,6 +36,13 @@ pub(super) struct BootstrapMember {
 }
 
 impl BootstrapMember {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current rolling producer callers are Linux-only; preserve the original scratch fold and slot guards on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn fold(&self) -> Option<&BootstrapFold> {
         self.fold.as_ref()
     }
@@ -109,6 +116,13 @@ impl BootstrapMember {
     /// it does not arm I/O or grant capacity. The queue rechecks everything
     /// under the same role lock immediately before native entry.
     #[cfg(unix)]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current rolling producer callers are Linux-only; preserve the original scratch fold and slot guards on other platforms."
+        )
+    )]
     pub(super) fn rolling_segment_slot_ready(
         &self,
         next_bytes: u64,

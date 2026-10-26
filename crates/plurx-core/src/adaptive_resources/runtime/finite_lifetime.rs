@@ -30,6 +30,13 @@ pub struct FiniteApplicationLease {
 }
 
 impl FiniteAppState {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The zero-application-limit constructor serves Linux recovered producers and fixtures; retain the same alias fence on other platforms."
+        )
+    )]
     pub(super) fn new() -> Arc<Self> {
         Self::with_application_limit(0)
     }

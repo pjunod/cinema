@@ -7,6 +7,13 @@ use super::*;
 impl NodeResourceRuntime {
     /// Called synchronously after prepare and before any selected-path native
     /// entry. A recovering role never reconstructs allocation authority.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy response builders are Linux-only; preserve the original-budget installation guard on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn install_finite_response_budget(
         &self,
         owner: &OwnedPreparation,

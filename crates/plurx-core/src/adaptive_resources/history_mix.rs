@@ -18,6 +18,13 @@ impl ResourceLedger {
     /// workload recipe is silently collapsed into resource totals.
     /// Random reservation IDs are omitted so equivalent resident mixtures
     /// can still have a useful prior after restart.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current live producer telemetry is Linux-only; retain portable ledger mix queries and their fixture coverage."
+        )
+    )]
     pub(crate) fn actual_history_mix_for(
         &self,
         selected: FamilyIdentity,

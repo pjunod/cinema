@@ -47,6 +47,13 @@ impl ResponseBudget {
         u64::try_from(self.limit).map_err(|_| OperationError::State)
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy no-metadata response builders are Linux-only; retain the same budget checks for portable fixtures."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn new(
         limit: usize,
     ) -> Result<Arc<Self>, OperationError> {

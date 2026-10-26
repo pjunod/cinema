@@ -4,6 +4,13 @@ use super::*;
 use native::cleanup::{CleanupCell, CleanupFact};
 use v2::scratch::{AssetEventV1, AssetIoV1, AssetObservationV1, NativeOutcomeV1, OutputKey};
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Live copy prefix removal is currently entered only on Linux; retain the complete original removal owner and portable close/join path on other platforms."
+    )
+)]
 pub(super) struct LiveRemoval {
     index: u32,
     io: v2::Id,
@@ -30,6 +37,13 @@ impl NodeResourceRuntime {
     /// Remove one expired published segment. The caller's expiry decision is
     /// not native proof: the original reader ledger, exact file identity,
     /// durable Arm, registered unlink job and Observe all remain authoritative.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Live copy prefix removal is currently entered only on Linux; retain the complete original removal owner and portable close/join path on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) async fn remove_copy_segment(
         &self,
         owner: &OwnedPreparation,

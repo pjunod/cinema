@@ -161,6 +161,13 @@ impl RetainedSourceLease {
 
     /// Shares the SAME original native descriptor with an already registered
     /// core read job. Arc cloning creates no file description or FD copy.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn shared_file(&self) -> Arc<File> {
         Arc::clone(&self.file)
     }
@@ -223,6 +230,13 @@ pub(super) struct InheritedSource {
 
 /// Audit-only source child observation after the original P document process
 /// has positively closed. No descriptor or File alias leaves the SourceCell.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+    )
+)]
 pub(in crate::adaptive_resources::runtime) struct FixedProbeChildObservation {
     pub observation_id: Uuid,
     pub envelope: v2::Envelope,
@@ -246,6 +260,13 @@ enum SourceOpenPlan {
 }
 /// Inline original-job frames used by the direct Source component bound.
 /// Dynamic strings and serialized envelopes are charged separately there.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+    )
+)]
 pub(in crate::adaptive_resources::runtime) const fn direct_source_frame_bytes() -> usize {
     std::mem::size_of::<SourceCell>()
         + std::mem::size_of::<SourceResult>()
@@ -254,6 +275,13 @@ pub(in crate::adaptive_resources::runtime) const fn direct_source_frame_bytes() 
         + std::mem::size_of::<JoinHandle<ParentCloseOutcome>>()
 }
 impl SourceCell {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+        )
+    )]
     fn direct_known_open_error_kind(&self) -> Option<std::io::ErrorKind> {
         if !matches!(self.plan, v2::MemberPlan::DirectSourceV1 { .. })
             || self.pending.is_some()
@@ -267,6 +295,13 @@ impl SourceCell {
         }
         result.direct_open_error
     }
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn direct_observed_identity(
         &self,
     ) -> Result<(u64, String), OperationError> {
@@ -313,6 +348,13 @@ impl SourceCell {
 
     /// The scanner-bound P source's observed S1 comes from this retained
     /// original File. It is checked again before the root inherits the fd.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn probe_observed_identity(
         &self,
     ) -> Result<(u64, String), OperationError> {
@@ -357,6 +399,13 @@ impl SourceCell {
 
     /// The original P task is registered under the same bundle lock before
     /// its entry latch opens, so this lease cannot escape an untracked task.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn take_probe_lease(
         &mut self,
     ) -> Result<(RetainedSourceLease, u64, String), OperationError> {
@@ -684,6 +733,13 @@ fn open_source_with_cache(
 impl NodeResourceRuntime {
     /// Diagnostic only: a joined original nofollow-open error before any FD
     /// existed. This does not authorize physical closure or a refund.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn direct_source_known_open_error_kind(
         &self,
         owner: &OwnedPreparation,
@@ -853,6 +909,13 @@ impl NodeResourceRuntime {
 
     /// The one direct lease and its committed actual identity leave the same
     /// locked SourceCell together. No cancellation point follows lease issue.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) async fn open_prepared_direct_source(
         &self,
         owner: &OwnedPreparation,
@@ -1312,6 +1375,13 @@ impl SourceCell {
     /// The direct profile has no inherited/root copy. Join its original open,
     /// then close the exact original File after its one issued lease drains.
     /// A surviving lease makes Arc::try_unwrap refuse without consuming it.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) async fn close_direct_parent(
         &mut self,
     ) -> Result<(), OperationError> {
@@ -1349,6 +1419,13 @@ impl SourceCell {
 
     /// Audit the one original source copy from retained native state, never
     /// from a caller's claim that a pathname or descriptor has disappeared.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct-source and fixed-planning native callers are Linux-only; preserve original File custody and portable refusal/close proof APIs on other platforms."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn direct_closed_fact(
         &self,
         absence_operation_id: Uuid,

@@ -14,14 +14,35 @@ pub(crate) enum TypedMemberPlan {
         slot: v2::MemberSlot,
         source: SourcePlan,
     },
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/fixed planning constructors are Linux-only; preserve the portable typed-plan match and ownership shape."
+        )
+    )]
     DirectSource {
         slot: v2::MemberSlot,
         source: DirectSourcePlan,
     },
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/fixed planning constructors are Linux-only; preserve the portable typed-plan match and ownership shape."
+        )
+    )]
     FixedProbeDiscoverSource {
         slot: v2::MemberSlot,
         source: FixedProbeDiscoverPlan,
     },
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/fixed planning constructors are Linux-only; preserve the portable typed-plan match and ownership shape."
+        )
+    )]
     DirectReadDomain {
         slot: v2::MemberSlot,
         domain_id: v2::Id,
@@ -30,6 +51,13 @@ pub(crate) enum TypedMemberPlan {
         slot: v2::MemberSlot,
         task: VodTaskPlan,
     },
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/fixed planning constructors are Linux-only; preserve the portable typed-plan match and ownership shape."
+        )
+    )]
     CopyOutputTask {
         slot: v2::MemberSlot,
         task: VodTaskPlan,
@@ -42,14 +70,35 @@ pub(crate) enum TypedMemberPlan {
         slot: v2::MemberSlot,
         task: v2::FixedProbeTaskV1,
     },
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/fixed planning constructors are Linux-only; preserve the portable typed-plan match and ownership shape."
+        )
+    )]
     FixedProbeDiscoverTask {
         slot: v2::MemberSlot,
         task: v2::FixedProbeDiscoverTaskV1,
     },
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/fixed planning constructors are Linux-only; preserve the portable typed-plan match and ownership shape."
+        )
+    )]
     FixedPlanningEngineTask {
         slot: v2::MemberSlot,
         task: v2::FixedPlanningEngineTaskV1,
     },
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/fixed planning constructors are Linux-only; preserve the portable typed-plan match and ownership shape."
+        )
+    )]
     FixedProbeMetadata {
         slot: v2::MemberSlot,
         metadata: v2::FixedProbeMetadataV1,
@@ -121,7 +170,21 @@ pub(crate) struct FixedProbeDiscoverPlan {
 
 #[derive(Clone)]
 pub(crate) enum DirectReadDomainRef {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy domain selectors are constructed only on Linux; preserve cross-platform typed binding and refusal paths."
+        )
+    )]
     BatchRole(usize),
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy domain selectors are constructed only on Linux; preserve cross-platform typed binding and refusal paths."
+        )
+    )]
     Existing(Uuid),
 }
 

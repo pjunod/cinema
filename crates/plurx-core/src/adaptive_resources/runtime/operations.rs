@@ -300,6 +300,13 @@ impl JournalOperation {
 
 impl NodeResourceRuntime {
     #[cfg(unix)]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/planning native callers are Linux-only; preserve portable original-owner preparation and cleanup APIs for unsupported-platform refusal coverage."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn finite_app_guard(
         &self,
         owner: &OwnedPreparation,
@@ -316,6 +323,13 @@ impl NodeResourceRuntime {
             .and_then(|state| state.new_guard())
             .ok_or(OperationError::State)
     }
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/planning native callers are Linux-only; preserve portable original-owner preparation and cleanup APIs for unsupported-platform refusal coverage."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn prepared_typed_obligation_id(
         &self,
         owner: &OwnedPreparation,
@@ -438,6 +452,13 @@ impl NodeResourceRuntime {
         .map(|(owner, ())| owner)
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/planning native callers are Linux-only; preserve portable original-owner preparation and cleanup APIs for unsupported-platform refusal coverage."
+        )
+    )]
     pub(crate) fn prepare_typed_families(
         &self,
         families: &[FamilyDemand<'_>],
@@ -446,6 +467,13 @@ impl NodeResourceRuntime {
     ) -> Result<OwnedPreparation, OperationError> {
         self.prepare_typed_families_claiming(families, plans, None, deadline)
     }
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/planning native callers are Linux-only; preserve portable original-owner preparation and cleanup APIs for unsupported-platform refusal coverage."
+        )
+    )]
     pub(in crate::adaptive_resources::runtime) fn prepare_typed_families_claiming(
         &self,
         families: &[FamilyDemand<'_>],
@@ -1469,6 +1497,13 @@ impl NodeResourceRuntime {
 
     /// Explicit existing-supervisor entry, not a timer/TTL task. Handles remain
     /// process-local and permit cleanup only; requests cannot deserialize them.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/planning native callers are Linux-only; preserve portable original-owner preparation and cleanup APIs for unsupported-platform refusal coverage."
+        )
+    )]
     pub(crate) fn retained_preparations(&self) -> Result<Vec<OwnedPreparation>, OperationError> {
         let book = self.operations.lock().map_err(|_| OperationError::State)?;
         Ok(book
@@ -1520,6 +1555,13 @@ impl NodeResourceRuntime {
 
     /// Bounded in-memory operation retention is reclaimed only after ALL exact
     /// roles have refunded and all proof-bearing operations have completed.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current direct/copy/planning native callers are Linux-only; preserve portable original-owner preparation and cleanup APIs for unsupported-platform refusal coverage."
+        )
+    )]
     pub(crate) async fn forget_preparation(
         &self,
         owner: OwnedPreparation,
