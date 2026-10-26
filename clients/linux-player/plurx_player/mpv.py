@@ -20,6 +20,14 @@ DEFAULT_BINARY = "/usr/lib/plurx-player/bin/mpv"
 # presents PQ, with libplacebo mapping.
 VIDEO_ARGS = ["--vo=gpu-next", "--gpu-api=vulkan", "--hwdec=auto-safe",
               "--target-colorspace-hint=yes"]
+# The player only opens plurx URLs from a server the user allowed; mpv's
+# ytdl hook would otherwise run yt-dlp on any other URL it is handed.
+SAFETY_ARGS = ["--ytdl=no"]
+# The dynamic loader honours these before the private mpv's own rpath (or
+# injects code outright), so a stray value in the desktop session could make
+# the private mpv load the system libplacebo or anything else. mpv gets an
+# environment without them.
+LOADER_OVERRIDES = ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")
 CLOSED = "__closed__"
 
 
@@ -38,8 +46,14 @@ def resolve_binary(explicit=None):
 
 
 class Mpv:
-    def __init__(self, binary, socket_path, title="plurx Player"):
+    def __init__(self, binary, socket_path, title="plurx Player", config_dir=None):
         self.binary = binary
+        # plurx Player's own mpv configuration directory instead of the
+        # user's ~/.config/mpv: a stray vo= or tone-mapping= there would
+        # silently defeat the mapping. mpv's built-in key bindings and OSC
+        # still work, and every option below is on the command line, which
+        # wins over anything in this directory.
+        self.config_dir = config_dir
         self.socket_path = socket_path
         self.title = title
         self.proc = None
@@ -53,12 +67,14 @@ class Mpv:
 
     def args(self):
         # idle=once: wait for our loadfile, quit when that playback ends.
-        return [self.binary, "--idle=once", "--force-window=yes", "--no-terminal",
+        config = [f"--config-dir={self.config_dir}"] if self.config_dir else []
+        return [self.binary, *config, "--idle=once", "--force-window=yes", "--no-terminal",
                 f"--input-ipc-server={self.socket_path}", f"--title={self.title}",
-                *VIDEO_ARGS]
+                *VIDEO_ARGS, *SAFETY_ARGS]
 
     def start(self, connect_timeout=15.0):
-        self.proc = subprocess.Popen(self.args(), stdin=subprocess.DEVNULL)
+        env = {key: value for key, value in os.environ.items() if key not in LOADER_OVERRIDES}
+        self.proc = subprocess.Popen(self.args(), stdin=subprocess.DEVNULL, env=env)
         deadline = time.monotonic() + connect_timeout
         while True:
             if self.proc.poll() is not None:

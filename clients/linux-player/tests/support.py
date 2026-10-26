@@ -285,6 +285,10 @@ class MpvFiles:
         with open(os.path.join(self.dir, "argv.json"), encoding="utf-8") as handle:
             return json.load(handle)
 
+    def env(self):
+        with open(os.path.join(self.dir, "env.json"), encoding="utf-8") as handle:
+            return json.load(handle)
+
 
 class LauncherCase(unittest.TestCase):
     """One fake server, one fake mpv, one virtual clock, a private config and runtime dir."""

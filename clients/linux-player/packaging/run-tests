@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Run the launcher tests; fail on any failure, error or skip.
+
+    packaging/run-tests <tests-dir> [--allow-skip TEST_ID ...]
+
+unittest reports a skipped test as a pass. A skip here means a check did not
+run, so it fails unless that exact test id is named with --allow-skip.
+"""
+import argparse
+import sys
+import unittest
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("tests")
+    parser.add_argument("--allow-skip", action="append", default=[], metavar="TEST_ID")
+    args = parser.parse_args()
+    suite = unittest.defaultTestLoader.discover(args.tests, pattern="test_*.py", top_level_dir=args.tests)
+    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    refused = [(test.id(), reason) for test, reason in result.skipped if test.id() not in args.allow_skip]
+    for test_id, reason in refused:
+        print(f"run-tests: skipped, which counts as a failure: {test_id} ({reason})")
+    for test, reason in result.skipped:
+        if test.id() in args.allow_skip:
+            print(f"run-tests: allowed skip: {test.id()} ({reason})")
+    return 0 if result.wasSuccessful() and not refused else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
