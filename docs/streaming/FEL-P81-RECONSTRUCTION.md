@@ -2,9 +2,9 @@
 
 **Status:** built on branch `claude/lp-fel-p81` (milestone M2 of
 [the Linux player plan](../clients/LINUX-PLAYER-PLAN.md) §3.3) · not
-deployed · served-picture quality acceptance not met (§3, §6) · physical
-Dolby Vision display acceptance open · **Written:**
-2026-10-25
+deployed · served only for a title whose own measurement admits it (§7);
+on lab6 neither measured title is admitted · physical Dolby Vision display
+acceptance open · **Written:** 2026-10-25 · **Updated:** 2026-10-26
 
 Companion to [DV_PROCESSING_TOOLS.md](DV_PROCESSING_TOOLS.md) (the helpers)
 and [the authoring notes](../../tools/dv_processing/AUTHORING.md) (the P8.1
@@ -67,7 +67,9 @@ Title B (P7 FEL, CM v4.0, 23.976 fps, origin 83 ms).
 selects `ReconstructedProfile81` on both, proves the slot is held and a
 second play is refused, and verifies windows 0, 1 and 2: 48/48 frames with
 the EL bound, VA-API decode, 9-thread graph. Before the fix it refused at
-admission on lab6.
+admission on lab6. Since §7 it first proves an unmeasured title keeps the
+plain conversion ("… is being measured …"), then stores an admitting
+verdict for the excerpt and serves it.
 
 **The served window** (`tools/dv_processing/controls/check_p81_window.py`):
 
@@ -183,14 +185,14 @@ python3 -I tools/dv_processing/controls/fel_composition_proof.py proof clip.mkv 
 
 ## 6. Open
 
-- **Served quality (M2 acceptance not met).** The current recipe serves a
-  picture further from the FEL master than the fallback on both titles. A
-  60 Mb/s `-qmax 14` recipe for this route wins on Title B and cannot win
-  inside Title A's picture at any rate tried (§3). Choosing the rate (and
-  whether to reconstruct a title whose EL changes the picture less than the
-  encode loses) is an owner decision; no recipe change is committed. A
-  `-qmax` floor can push a hard scene past `-maxrate`, which the advertised
-  peak would then understate, so a recipe with it needs a VBV check.
+- **No measured title is admitted on lab6** (§7). The route, its recipe and
+  its qualification ship gated; a title is reconstructed only when its own
+  verdict says the reconstruction is the better picture. A better encoder
+  (another GPU, a two-pass or longer-GOP window encode) changes the recipe
+  identity and re-measures every title.
+- **A node that cannot measure** (no radeonsi VA-API) may still run a
+  title's scan job; the verdict then stays missing and the next play on a
+  capable node asks again (at most once per title per node every 6 h).
 - **Concurrency.** One slot until two concurrent graphs are measured.
 - **A device whose VA-API driver fails HEVC Main10** decodes in software
   and is debited for it; one whose probe passes but whose renderer still
@@ -198,3 +200,152 @@ python3 -I tools/dv_processing/controls/fel_composition_proof.py proof clip.mkv 
   keeps that play on its ordinary route).
 - **Physical acceptance** on an Apple TV, Android TV and the Linux player
   (M6): startup, seeking, the badges, and the display's rendering.
+
+## 7. Route recipe and per-title qualification
+
+**Decision record.** Coordinator decision, 2026-10-25 (the owner had
+delegated decisions while away): the reconstruction is served only where it
+is the better picture, decided per title by measurement, and the route gets
+its own encode recipe. §3 showed why a single answer cannot exist: the
+fallback serves the disc's base layer untouched, the reconstruction
+re-encodes everything, so it wins only on a title whose enhancement layer
+changes the picture by more than the encode loses.
+
+### Recipe
+
+`RECONSTRUCTED_P81_RECIPE` (`p81-vbr:b=min(source,60000k):maxrate=1.5b:bufsize=2b:bf=0:radeonsi-compression_level=0:v1`):
+VBR at the source's average bitrate capped at 60 Mb/s
+(`reconstructed_p81_video_kbps`), the ordinary VBV (`-maxrate` 1.5×,
+`-bufsize` 2×), `-bf 0`, and radeonsi compression level 0 (VBAQ off). It is
+applied by `CompletedReconstructedOutputPlan::with_reconstructed_profile81`
+for this route only; every other radeonsi encode keeps compression level 19,
+and Software and NVENC are untouched (pinned by
+`the_reconstructed_profile81_route_alone_drops_vbaq_and_never_caps_qp`).
+
+**VBV check.** The decision asked for `-qmax 14`. radeonsi obeys `-qmax`
+over `-maxrate`, so a QP cap lets a hard scene run past the rate the variant
+advertises. The processed variant advertises `BANDWIDTH` = video × 1.5 +
+audio (`vbv_maxrate_kbps`), 90 Mb/s + audio at the 60 Mb/s target. 2 s
+window encodes at b = 60 Mb/s on lab6:
+
+| Rate control | Worst 2 s segment | Within the advertised 90 Mb/s |
+|---|---|---|
+| VBR, `-qmax 14` | 153 Mb/s (grain-heavy film), 149 Mb/s (bright 70 mm) | no |
+| VBR, `-qmax 18` | 94 Mb/s | no |
+| QVBR quality 16 | 72.7 Mb/s | yes, but a worse picture than VBR at every point tried |
+| **VBR, no `-qmax` (chosen)** | 57 Mb/s on those titles (worst 1 s: 58.8); 50–63 Mb/s on the 16 qualification windows | yes |
+
+So the recipe has no `-qmax`; `maxrate` and `bufsize` stay the ordinary
+1.5× and 2×, and the advertised peak follows the route's own rate
+(`processed_candidate` reads the processed options). The numbers are pinned
+in `the_window_encode_is_the_routes_recipe` (`-b:v 60000k -maxrate 90000k
+-bufsize 120000k -compression_level 0 -bf 0`, no `-qmax`).
+
+**Throughput** on lab6 with this recipe, the production graph
+(`actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_seek`,
+`profile81`, a 12 s excerpt of Title B, 9-thread graph, VA-API decode):
+1.40, 1.46 and 1.54 s per 2.002 s window (1.43×, 1.37×, 1.30×; mean
+1.37×), above the 1.25× floor. The windows carried 52.9, 57.2 and 57.5
+Mb/s of video (worst 1 s: 59.5 Mb/s) against the advertised 90 Mb/s.
+
+Two faults this physical run found, both fixed with it: the streaming
+graph's encoder check accepted only compression level 19, so every 8.1
+window would have been refused (`check_encoder_budget` now admits the
+route's 0 and nothing else); and a stored verdict made the held-source
+probe comparison see an unknown field and refuse every later start of the
+title as `vod_source_rescan_required` (the verdict is now application
+metadata there, like the title aggregate).
+
+### Qualification
+
+- **Where.** Inside the title's Dolby Vision title scan job
+  (`JobKind::DvTitleScan`, `source_probe/title_work.rs`), after the
+  complete-title scan and before its aggregate is published. That job is
+  already the once-per-title analysis of every Dolby Vision title; it is
+  listed in Activity with the title, its node, a Cancel and (while running)
+  the reason "Complete-title Dolby Vision scan. A Profile 7 FEL title is
+  also measured on the GPU …"; its children appear under Processes as `Dolby
+  Vision FEL qualification render / encode / sample`, each stoppable. No new
+  job type, thread or schedule.
+- **When.** For a Profile 7 FEL title, with HDR processing and FEL re-encode
+  on, on a node whose encoder is radeonsi VA-API with its Main10 graph
+  proved, when the title has no verdict for this renderer and recipe.
+- **Admission.** The node's one live reconstruction slot, then a background
+  GPU bundle (`try_admit_frozen_bundle(…, Priority::Background)`, the
+  renderer's debit + 3 encoder threads). Either busy: the qualification is
+  skipped, the aggregate still publishes, and the next play asks again.
+  Foreground work preempts it (`run_admitted_probe`): its children are
+  killed and reaped, the aggregate still publishes.
+- **What.** K = 8 windows of 48 pictures at (i+1)/9 of the title, snapped to
+  the picture grid with the held source origin. Each is rendered by the
+  deployed helper (the streaming protocol: source fd 3, evidence fd 4, NUT
+  fd 5) three ways: `fel` 16-bit R'G'B' (the reference), `base-rpu` 16-bit
+  R'G'B' (what the plain conversion shows), and `fel` 10-bit 4:2:0 piped
+  into the route's encode (`-r` on the picture grid, as the route's own pipe
+  recipe reads it; without it the encoder drops and repeats pictures, ΔE
+  10.7 instead of 3.1 on the same window), decoded back with the BT.2020
+  limited-range matrix. Delta E ITP (BT.2124, the equations of
+  `tools/dv_quality/metrics.py`, unit-tested against it) on a 32-pixel
+  lattice inside the reference's letterbox (16-bit PQ code > 1024), pooled
+  over all windows.
+- **Rule.** Admit only if the served mean is at least 10% below the
+  EL-dropped mean **and** the served p99 ≤ EL-dropped p99 + 2σ.
+- **σ = 0.** σ is the run-to-run spread of the served p99 over repeated
+  encodes of one window. hevc_vaapi on radeonsi is deterministic: three
+  encodes of each of six windows (both titles, final recipe and the earlier
+  `-qmax 14` one) were byte-identical. So the tolerance is 0.
+- **K = 8, from the variance.** On Title B, whose windows vary most, one
+  window's mean gain ranged −26% to +17% with a standard deviation of 15%,
+  so K windows give the title's gain a standard error of 15%/√K. At K = 4
+  (7.5%) a title the EL does not help at all would clear the 10% bar about
+  one time in eleven; at K = 8 (5.3%) about one in thirty-four. A title is
+  measured once, in the background, in about two minutes.
+- **Stored** in the title's probe document beside its Dolby Vision facts
+  (`files.probe_json.plurx_dv_fel_v1`, a guarded `json_set`: same file id,
+  size and mtime, P7 with an EL), keyed by the source size/mtime and an
+  identity hash of the renderer bundle identity (the scanner digest) and the
+  recipe string. A changed source, helper or recipe reads as no verdict; a
+  reprobe rewrites the document. Re-measuring rotates the title's scan
+  demand to a binding no scanner equals, so the scan worker rebinds and
+  reruns the title job.
+- **Gated** where the ingress offers the route (`prepare_processed_hdr10`)
+  and again where every start builds its processed graph
+  (`prepare_vod_encoding`), before the slot or any render. Until a verdict
+  exists the play gets the plain conversion, its FEL row reading "whether
+  this title's enhancement layer adds more than re-encoding loses is being
+  measured on this server's GPU"; a refused title's reads "the enhancement
+  layer adds less than re-encoding loses for this title (measured ΔE ITP
+  mean … reconstructed vs … without the EL, p99 … vs …)"; a node without a
+  qualified encoder says so.
+- **Developer tab.** The "Per-title quality qualification" row
+  (`dv_fel_bitrate_quality`) is computed: the rule, whether this node's
+  encoder is qualified, and how many titles hold a verdict for this renderer
+  and recipe and how many are admitted. Advisory; never read on Save.
+
+### Results (lab6, the production measurement)
+
+`physical_fel_qualification_of_one_title`, the code the title job runs,
+without a store, on the whole files (60 Mb/s target, GPU decode):
+
+| | Title A | Title B |
+|---|---|---|
+| Served (reconstructed, encoded) ΔE mean / p99 | 3.08 / 10.14 | 3.02 / 9.68 |
+| EL dropped (plain conversion) ΔE mean / p99 | 1.75 / 8.98 | 2.94 / 6.61 |
+| Mean gain (needs ≥ +10%) | −76% | −2.8% |
+| Windows the reconstruction wins on the mean | 1 of 8 | 3 of 8 |
+| Verdict | not admitted | not admitted |
+| Time | 104 s | 112 s |
+
+Title B's earlier single-window win (§3: one 12 s excerpt at `-qmax 14`)
+does not hold across the title: without the QP cap the VBV-honest encode
+loses at p99 in every window, and on the mean the title is a wash. Neither
+title is reconstructed on lab6; both play the plain conversion with the
+measured reason.
+
+Reproduce (inside the `plurxd` container, scratch directory deleted
+afterwards):
+
+```bash
+PLURX_FEL_QUALIFY_SOURCE="<P7 FEL title>.mkv" PLURX_FEL_QUALIFY_SCRATCH=$PWD/scratch \
+  ./plurxd-test physical_fel_qualification_of_one_title --ignored --nocapture
+```
