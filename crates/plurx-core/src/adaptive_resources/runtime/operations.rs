@@ -591,12 +591,22 @@ impl NodeResourceRuntime {
                 .map(|members| {
                     let owner_id = v2::Id::new(identity.process_instance)?;
                     let graph_id = v2::Id::new(identity.generation)?;
-                    Ok::<_, CustodyError>(
-                        members
-                            .into_iter()
-                            .map(|member| member.bind(owner_id, graph_id, &typed_obligation_ids))
-                            .collect::<Result<Vec<_>, _>>()?,
-                    )
+                    let bound = members
+                        .into_iter()
+                        .map(|member| member.bind(owner_id, graph_id, &typed_obligation_ids))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // M admits one MemberPlan allocation and settlement checks
+                    // capacity <= 1. Collector capacity is not that contract:
+                    // establish the exact survivor layout before publication.
+                    let bound = if matches!(
+                        bound.as_slice(),
+                        [v2::MemberPlan::FixedProbeMetadataV1 { .. }]
+                    ) {
+                        bound.into_boxed_slice().into_vec()
+                    } else {
+                        bound
+                    };
+                    Ok::<_, CustodyError>(bound)
                 })
                 .transpose()?;
             let (resources, memory_claim) = {

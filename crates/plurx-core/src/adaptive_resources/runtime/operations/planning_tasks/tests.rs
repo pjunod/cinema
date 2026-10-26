@@ -29,6 +29,15 @@ async fn prepared_config(
     runtime
         .register_planning_tasks(&preparation, &mut planned, request)
         .unwrap();
+    assert_eq!(
+        preparation.state.lock().await.roles[1]
+            .typed_members
+            .as_ref()
+            .unwrap()
+            .capacity(),
+        1,
+        "M survivor allocation must not depend on collection growth"
+    );
     if resolve {
         runtime
             .resolve_preparation(&preparation, deadline())

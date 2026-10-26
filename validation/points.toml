@@ -835,6 +835,7 @@ paths = [
   "crates/plurxd/src/subtitle_work.rs",
   "crates/plurxd/src/background_job_metrics.rs",
   "crates/plurxd/src/background_job_faults.rs",
+  "crates/plurxd/src/background_job_controller_tests.rs",
   "crates/plurxd/src/transcode.rs",
   "crates/plurxd/src/transcode/**",
 ]
