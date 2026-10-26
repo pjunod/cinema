@@ -7609,3 +7609,29 @@ source = "crates/plurxd/src/web/player/decode-tiers.js"
 source_anchor = "function watchDisplayDynamicRange(){"
 test = "tests/web/hdr-display-change.test.js"
 test_anchor = "test(\"a display that turns HDR after boot is claimed for the next session\""
+
+# Subtitle completion client corrections: each row keeps the shipped behavior
+# tied to the focused regression added or strengthened by that corrective commit.
+[[fixes]]
+id = "web.subtitle-caption-manifest-window-delta"
+commits = ["90f6b40d401c07eb57d528070591c04dd43c0de8"]
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "const track=video._translationTrack,Cue=window.VTTCue||window.TextTrackCue,desired=new Map();"
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "test('manifest refresh preserves unchanged cue objects and applies only the window delta',()=>"
+
+[[fixes]]
+id = "android.subtitle-caption-owned-demand-polling"
+commits = ["13a81038698f8dd1d3faabbc24c6ab588b24c69a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ProgressiveCaptions.kt"
+source_anchor = "internal class CaptionDemandAttempt {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/CaptionPollingLifecycleTest.kt"
+test_anchor = "@Test fun demandRenewalContinuesWhileOneWindowReadIsHeldBeyondItsTtl() = runBlocking {"
+
+[[fixes]]
+id = "android.subtitle-shared-caption-read-owner"
+commits = ["e0af4a57ae07de0ecee57f8b7f06fac37c50d4a0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedProgressiveCaptions.kt"
+source_anchor = "internal class SharedProgressiveCaptions("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedProgressiveCaptionsTest.kt"
+test_anchor = "@Test fun sharedReadsUseOnlyClosedOpaqueGetResourcesAndNeverEnqueue(): Unit = runBlocking {"
