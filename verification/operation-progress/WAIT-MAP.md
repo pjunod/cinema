@@ -32,6 +32,21 @@ whole-file mapping hash is refreshed; exact anchors, executable source-anchor
 records, model/configurations and worker correspondence are unchanged. The
 readiness API's completion and latency acquire no liveness or qualification claim.
 
+## Physical admission correspondence refresh — 2026-10-25
+
+The reviewed subtitle-setup change adds `admit_fragment_queued` for model
+installation and verification. It waits cancellably in FIFO order for the
+shared heavy permit, then uses the factored `admit_source_work_with_heavy`
+helper to reserve CPU capacity and attempt bundle admission. The original
+`admit_source_work` path retains its idle check and try-only heavy and bundle
+admission; the selected `library_scan` / `metadata_refresh` callers still use
+that original try-only path. The factored helper now rechecks worker idleness
+after heavy-permit acquisition: newly observed foreground demand returns
+`None` and drops the permit before the library worker can claim a job. The
+queued method is outside the selected library model. Foreground admission
+checks remain in force, and cancellation is observed before proceeding. This
+correspondence adds no model liveness or qualification claim.
+
 ## Selected binding refresh — 2026-10-22
 
 The five drifted source files were compared with the revisions whose contents
