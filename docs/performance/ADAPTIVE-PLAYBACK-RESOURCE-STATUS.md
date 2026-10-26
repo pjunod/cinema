@@ -33,26 +33,32 @@ Root-scoped worker intent, bounded durable-fence retry and foreign-fence cleanup
 are connected. Origin never issues Close or refunds native ownership.
 Shared storage domains and the unclosed-provisional inventory consumer remain
 missing. Original probe/inference/library/subtitle workers retain their
-admissions through their original inputs and results. The source-opener task
-now retains the same admission after waiter loss and records persistent
-Unknown before its last keeper can drop; a known result cannot clear prior
-uncertainty. Remaining fragment/native adapters and selective recovery are open.
+admissions through their original inputs and results. The source open/fstat
+jobs now retain the same admission through unclaimed File+metadata results;
+waiter loss records persistent Unknown. Continuous admission resolves saved
+Automatic intent coherently. Selected finite ordinary/static encodes reserve
+the same software pool before possible R using the actual finalized thread
+count, retain the original exclusive worker claim, and bind family attachments
+to that same credit. Unknown cleanup retains it; positive original native
+close/R→S releases it. This does not qualify P/legacy CPU coexistence or all
+fragment/native adapters. Plain Source P/M work and selective recovery remain
+open.
 
-**Compiler evidence:** published effort `647e4bb68` includes exact native
-x86_64 core+daemon all-target+cluster strict Clippy PASS at `ec6cee689066`
-plus one static catalog-only commit. Pinned Rust1.97.1, source stable,
-622.959s; log SHA-256
-`43d5ef03106a485d4f5ddb8a45806d0b362b3c75ab398032ae6f90eea5640357`.
-Default-feature Linux-cfg strict also passed that source (check-only stubs,
-no executable). The joined copy-launch/timed-opener source `4de016221d93` passed native
-strict Clippy in503.932s, source stable; log SHA-256
-`03e22f142c69b0c69665cececa7a1790a71f520548fa674311f4d50717c31c90`.
-Their separate host/Linux-cfg strict checks also passed; the authored copy
-wait watchdog and same-fence diagnostic are included in the native pin. Local compilers run sequentially at j1 after an actual host
-file-handle failure. Published-source paperwork passed15/15;622 declared
-regression anchors resolve, including the original490 unchanged fields.
-Task paperwork also passed15/15 with its four new regression declarations.
-These are static/compile facts, not behavioral execution or completed review.
+**Compiler evidence:** joined software-pool, copy and original source-opener
+source `48aea35a7bc5` passed native x86_64 core+daemon all-target+cluster strict
+Clippy with Rust1.97.1:350.823s, source stable; log SHA-256
+`39922deb253e11e65c1acecb5f37a13af2ab409ee3e4ea29b45f99378947abb1`.
+Task PR #1293 targets effort PR #1248. Separate host/Linux-cfg checks passed
+for the software bridge and legacy opener; Linux-cfg stubs link no executable.
+Earlier native4de includes the copy watchdog and same-fence diagnostic;
+published effort647 adds only catalog metadata after ec6 native compilation.
+Local compilers run sequentially at j1. Static paperwork passed15/15; declared
+regression bodies resolve, including original490 fields preserved in PR1248.
+All three offline formal mapping checks pass after source review, with failed
+join/ambiguous retirement/last-alias gaps explicit and no theorem transfer.
+These are compilation/source checks: behavioral tests and final Fable review
+remain NOT RUN. The current compile-only effort gate must pass before task
+integration. No completed global M2/M3/M6 or native-peak qualification.
 
 No deployment. Bounded direct recovery retains its held-lock and positive
 same-boot/PID-namespace old-daemon-exit requirements. Separate obsolete

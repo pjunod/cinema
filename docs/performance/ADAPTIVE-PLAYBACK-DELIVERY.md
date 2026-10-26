@@ -33,26 +33,32 @@ Root-scoped worker intent, bounded durable-fence retry and foreign-fence cleanup
 are connected. Origin never issues Close or refunds native ownership.
 Shared storage domains and the unclosed-provisional inventory consumer remain
 missing. Original probe/inference/library/subtitle workers retain their
-admissions through their original inputs and results. The source-opener task
-now retains the same admission after waiter loss and records persistent
-Unknown before its last keeper can drop; a known result cannot clear prior
-uncertainty. Remaining fragment/native adapters and selective recovery are open.
+admissions through their original inputs and results. The source open/fstat
+jobs now retain the same admission through unclaimed File+metadata results;
+waiter loss records persistent Unknown. Continuous admission resolves saved
+Automatic intent coherently. Selected finite ordinary/static encodes reserve
+the same software pool before possible R using the actual finalized thread
+count, retain the original exclusive worker claim, and bind family attachments
+to that same credit. Unknown cleanup retains it; positive original native
+close/R→S releases it. This does not qualify P/legacy CPU coexistence or all
+fragment/native adapters. Plain Source P/M work and selective recovery remain
+open.
 
-**Compiler evidence:** published effort `647e4bb68` includes exact native
-x86_64 core+daemon all-target+cluster strict Clippy PASS at `ec6cee689066`
-plus one static catalog-only commit. Pinned Rust1.97.1, source stable,
-622.959s; log SHA-256
-`43d5ef03106a485d4f5ddb8a45806d0b362b3c75ab398032ae6f90eea5640357`.
-Default-feature Linux-cfg strict also passed that source (check-only stubs,
-no executable). The joined copy-launch/timed-opener source `4de016221d93` passed native
-strict Clippy in503.932s, source stable; log SHA-256
-`03e22f142c69b0c69665cececa7a1790a71f520548fa674311f4d50717c31c90`.
-Their separate host/Linux-cfg strict checks also passed; the authored copy
-wait watchdog and same-fence diagnostic are included in the native pin. Local compilers run sequentially at j1 after an actual host
-file-handle failure. Published-source paperwork passed15/15;622 declared
-regression anchors resolve, including the original490 unchanged fields.
-Task paperwork also passed15/15 with its four new regression declarations.
-These are static/compile facts, not behavioral execution or completed review.
+**Compiler evidence:** joined software-pool, copy and original source-opener
+source `48aea35a7bc5` passed native x86_64 core+daemon all-target+cluster strict
+Clippy with Rust1.97.1:350.823s, source stable; log SHA-256
+`39922deb253e11e65c1acecb5f37a13af2ab409ee3e4ea29b45f99378947abb1`.
+Task PR #1293 targets effort PR #1248. Separate host/Linux-cfg checks passed
+for the software bridge and legacy opener; Linux-cfg stubs link no executable.
+Earlier native4de includes the copy watchdog and same-fence diagnostic;
+published effort647 adds only catalog metadata after ec6 native compilation.
+Local compilers run sequentially at j1. Static paperwork passed15/15; declared
+regression bodies resolve, including original490 fields preserved in PR1248.
+All three offline formal mapping checks pass after source review, with failed
+join/ambiguous retirement/last-alias gaps explicit and no theorem transfer.
+These are compilation/source checks: behavioral tests and final Fable review
+remain NOT RUN. The current compile-only effort gate must pass before task
+integration. No completed global M2/M3/M6 or native-peak qualification.
 
 Bounded direct recovery retains positive old-daemon completion and held-lock
 requirements; uncertainty keeps charges. Obsolete recovered-cache eviction
@@ -163,7 +169,7 @@ Each missing adapter remains open.
 
 | Work | Construct, terminal owner and current admission | Adaptive adapter still needed |
 |---|---|---|
-| Direct play, byte ranges and cached segments | HTTP handlers; selected VOD serves materialized files through its retained producer owner. Direct/range source paths use `SourceFence` / source actors; response bodies retain their reader owners. | Selected finite VOD is connected. Direct/range adapters still need to bind source reads, response body lifetime and egress to the same runtime claim. |
+| Direct play, byte ranges and cached segments | HTTP handlers; selected VOD serves materialized files through its retained producer owner. Direct/range source paths use `SourceFence` / source actors; response bodies retain their reader owners. | Selected finite VOD and Linux local/file-grant/shared direct ranges are connected to original `DirectSourceOwner` read jobs, escaping buffers and body retirement. Their behavioral/native acceptance remains open. Legacy probe/index child-copy admission is separate; the direct lease cannot fund a new inherited child. |
 | Progressive/HLS copy and remux | [`produce_copy_output_job`](../../crates/plurxd/src/transcode/manager/produce.rs) opens the source; [`spawn_copy_reader_owner`](../../crates/plurxd/src/transcode/producer/prepublication_executor.rs) owns stdout and the scratch writer. Rolling retirement owns child reap and scratch cleanup. | [`EncodePermit::admit_source_copy`](../../crates/plurxd/src/vodencode.rs) estimates CPU/decoder capacity; copy preparation also uses `admit_fragment`. A runtime adapter must join source, child, reader, package/scratch and egress through retirement. |
 | Software and hardware transcode | Rolling start constructs session and child in [`manager/start.rs`](../../crates/plurxd/src/transcode/manager/start.rs) / [`rolling/session.rs`](../../crates/plurxd/src/transcode/rolling/session.rs); `RollingRetirementSettlement` owns reap and scratch convergence. | Existing `Admissions` bundles and rolling settlement remain separate from whole-graph runtime accounting, including helper processes and response delivery. |
 | HDR/DV/HLG/tone mapping, scaling and deinterlacing | DV runtime, Mac processing and ordinary filtered encode construct distinct processing graphs and helper children. | Adapter must account the complete graph, transfers, authoring and helper-child terminal ownership; an encoder-only claim does not cover this row. |
@@ -186,7 +192,7 @@ growth. It cannot be declared done by adding another private proof helper.
 |---|---|---|
 | C1 — supported owned-workload cleanup and recovery | Final C1 amendment accepts trusted fixed-software/known-helper normal ownership, without hostile arbitrary-descendant claims or a custom broker. Implement that concrete graph; preserve uncertainty, write-ahead and all real owners. | Normal actual waits/joins/FD/sink closure or transfer; restart needs positive exact old-domain completion, not a restart request/new namespace. Current managed-runtime evidence transport remains missing; normal source work does not wait for it. No host setup implied. |
 | C2 — real graph/member settlement | Original fixed source/root/task/pipe and prearmed output/sync owners connect to typed journal settlement and atomic R→S transfer. Metadata, client and native partitions survive S. Complete native/index/private-runtime peaks, selective recovery and remaining pipeline graphs are still missing. | Compiled source is not accepted execution. Every actual owner must close or transfer before the same-ledger swap; unknown outcomes stay charged. Required behavioral cases wait for completed-candidate Fable review/fixes. |
-| C3 — connect the existing VOD owner | Selected Linux ordinary software VOD connects held source/output, producer/HTTP, original partial-start cleanup and operator cache quota through finite admission. Selected copy app/control custody is connected; its remaining partial-start native witnesses, global quota and preparation-controller barriers are active work. Full memory bounds and cold adoption remain open. | The actual request must produce, stop and return finite capacity through its original receipts. Source is connected; behavior, reuse and physical acceptance remain unqualified. Broader recipes still need their concrete adapters. |
+| C3 — connect the existing VOD owner | Selected Linux ordinary software VOD connects held source/output, producer/HTTP, original partial-start cleanup and operator cache quota through finite admission. Selected copy app/control custody, quota, controller barrier and named launch/release replay are connected. Partial-start native witnesses/schema remain open. Full memory bounds and cold adoption remain open. | The actual request must produce, stop and return finite capacity through its original receipts. Source is connected; behavior, reuse and physical acceptance remain unqualified. Broader recipes still need their concrete adapters. |
 | R1 / C4 — restart availability and acceptance (separate from first live-path connection) | Replace the all-startup pending refusal in `resource_runtime.rs` with protected selective reconciliation and applicable admission refusal; keep unrelated serving safe. Author exact normal/cancel/crash/restart/capacity-reuse cases now; execute required behavioral cases only after complete candidate review/fixes. | Conservative restored holds are mandatory. Positive old-domain completion and selective recovery remain required before final acceptance, not a universal restart-backend gate on V1–V5. Acceptance needs actual applicable post-review evidence. Other M3 adapters and M4–M6 remain separate rows. |
 
 The final C1/SourceFile-v2/retained-output and first-root bootstrap contracts are
