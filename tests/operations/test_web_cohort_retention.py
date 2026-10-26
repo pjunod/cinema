@@ -50,7 +50,14 @@ class WebCohortRetentionTests(unittest.TestCase):
             'tools/web-types/package.json':b'{}','tools/web-types/package-lock.json':json.dumps(
                 {'packages':{'node_modules/typescript':{'version':'6.0.3'}}}).encode(),
             web.BASELINE:b'# fixed baseline\n','tests/web/check.test.js':b'// fixed test\n',
-            'crates/plurxd/src/web/player.js':b'// shipped asset\n'})
+            'crates/plurxd/src/web/player.js':b'// shipped executable\n',
+            'crates/plurxd/src/web/playback-policy.js':b'module.exports = {};\n',
+            'crates/plurxd/src/web/index.html':b'<script src="/assets/player.js"></script>\n',
+            'crates/plurxd/src/web/jsconfig.json':b'{"files":["player.js"]}\n',
+            'crates/plurxd/src/web/globals.d.ts':b'declare const fixture: string;\n',
+            'crates/plurxd/src/web/theme.css':b':root { color: white; }\n',
+            'crates/plurxd/src/web/icon.png':b'fixed image fixture',
+            'crates/plurxd/src/web/site.webmanifest':b'{"name":"fixture"}\n'})
         def rows():
             return sorted([{'path':path,'mode':'100644','blob':hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest(),
                 'sha256':web.digest(raw)} for path,raw in contents.items()],key=lambda row:row['path'])
@@ -93,10 +100,13 @@ class WebCohortRetentionTests(unittest.TestCase):
         contents,roots,git,shape = self.source()
         with mock.patch.object(web,'git',side_effect=git),mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}),mock.patch.object(web,'SHAPE_FAMILIES',{'fixture':shape}):
             before = web.manifest(ROOT,COMMIT,BASE); frozen = copy.deepcopy(before)
-            contents['crates/plurxd/src/web/player.js'] += b'// changed\n'
-            after = web.manifest(ROOT,COMMIT,BASE)
-            self.assertNotEqual(web.execution_key(before),web.execution_key(after))
-            self.assertEqual(before,frozen)
+            after = before
+            for resource in ('theme.css','icon.png','site.webmanifest'):
+                previous = after
+                contents['crates/plurxd/src/web/'+resource] += b' changed resource'
+                after = web.manifest(ROOT,COMMIT,BASE)
+                self.assertNotEqual(web.execution_key(previous),web.execution_key(after))
+                self.assertEqual(before,frozen)
             different_base = web.manifest(ROOT,COMMIT,'d'*40)
             self.assertNotEqual(web.execution_key(after),web.execution_key(different_base))
             self.assertEqual(after['baseline']['sha256'],different_base['baseline']['sha256'])
@@ -438,3 +448,31 @@ class WebCohortRetentionTests(unittest.TestCase):
             with mock.patch.object(web,'selectors'),mock.patch.object(web,'git',return_value=(name+'\0').encode()):
                 with self.assertRaisesRegex(receipts.ReceiptError,'Untracked/ignored web closure'):
                     web.live_inputs(ROOT)
+
+    def test_production_executable_and_loader_shapes_refuse_outside_dependencies_before_fallback(self):
+        contents,roots,git,shape=self.source()
+        api,pull,event,run,job=self.context();context=(api,SCOPE,COMMIT,run,job,BASE)
+        cases={
+            'crates/plurxd/src/web/playback-policy.js':b'module.exports=require("../../../../outside.js");\n',
+            'crates/plurxd/src/web/index.html':b'<script src="../../outside.js"></script>\n',
+            'crates/plurxd/src/web/jsconfig.json':b'{"files":["../../outside.ts"]}\n',
+            'crates/plurxd/src/web/globals.d.ts':b'/// <reference path="../../outside.d.ts" />\n',
+        }
+        with mock.patch.object(web,'git',side_effect=git), \
+             mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}), \
+             mock.patch.object(web,'SHAPE_FAMILIES',{'fixture':shape}), \
+             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1'}), \
+             mock.patch.object(web,'live_inputs'),mock.patch.object(web,'live_script_resolvers'), \
+             mock.patch.object(web,'legacy_result') as legacy,mock.patch.object(web,'matching_result') as history, \
+             mock.patch.object(web.subprocess,'run') as launch:
+            for path,raw in cases.items():
+                original=contents[path];contents[path]=raw
+                with self.subTest(path=path),self.assertRaisesRegex(receipts.ReceiptError,'executable/recipe/dependency shape'):
+                    web.run_gate(ROOT,context,ROOT/'target/web-retention-never-created',{},True)
+                contents[path]=original
+            for suffix in ('.js','.mjs','.cjs','.ts','.d.ts','.html','.json'):
+                path='crates/plurxd/src/web/new-loader'+suffix;contents[path]=b'new unreviewed member'
+                with self.subTest(suffix=suffix),self.assertRaisesRegex(receipts.ReceiptError,'executable/recipe/dependency shape'):
+                    web.run_gate(ROOT,context,ROOT/'target/web-retention-never-created',{},True)
+                del contents[path]
+            legacy.assert_not_called();history.assert_not_called();launch.assert_not_called()

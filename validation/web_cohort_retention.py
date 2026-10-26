@@ -94,7 +94,7 @@ LEGACY_JOB = '''  web_compile:
         run: make web-unit-check
 
 '''
-SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '25edd3b640253bafa72154e1964132306dc55eb435da96cb628346ea3429f364', '087e836d369eb2b8f94ec1d0454ea6c157612df9': 'e7aeb40c4d124799231c120944bc510f46f87b1a7c595a111a722d057c3f58c7'}
+SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '66cdaa073066e41f496829d2075e29521ff3ea2c4265b4c0a2204af3e7542c52', '087e836d369eb2b8f94ec1d0454ea6c157612df9': 'bddc527173b7247e1033ddfe7d8d008a7328ada44e9f00f2fa0eb8bda09ed83c'}
 HELPERS = ('scripts/js-check', 'scripts/web-types', 'scripts/web-jsconfig', 'scripts/playback-lab', 'scripts/playback-frame-clock.js', 'scripts/continuous-quality-qualification', 'scripts/player-contract-table', 'scripts/ui-baseline', 'scripts/subtitle-readiness-browser-check', 'scripts/cq-native-shipping/check-evidence.js', 'tests/vendor/acorn.js', 'scripts/playback-startup-lab')
 WRAPPER = '''      - name: Retain or execute the reviewed whole web cohort
         env:
@@ -215,7 +215,8 @@ def live_script_resolvers(workspace,commit):
 def shape_row(row):
     path = row['path']
     return path in ('Makefile','Cargo.toml',*HELPERS,'tools/web-types/package.json','tools/web-types/package-lock.json') or (
-        path.startswith(('tests/web/','tests/playback/')) and path.endswith(('.js','.mjs','.cjs','.py','.sh')))
+        path.startswith(('tests/web/','tests/playback/')) and path.endswith(('.js','.mjs','.cjs','.py','.sh'))) or (
+        path.startswith('crates/plurxd/src/web/') and path.endswith(('.js','.mjs','.cjs','.ts','.html','.json')))
 
 
 def manifest(workspace,commit,base):
