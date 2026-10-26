@@ -1613,7 +1613,7 @@
             panic!("late exact retry must receive the committed response");
         };
         assert_eq!(
-            serde_json::to_value(*retry_response).expect("retry response JSON"),
+            serde_json::to_value(&retry_response.response).expect("retry response JSON"),
             first_body
         );
     }
@@ -2729,4 +2729,194 @@ quality_catalog: None,
         );
         assert_eq!(continuation.route.recipe_json.as_ptr(), route_allocation);
         assert_eq!(continuation.state.node_id().as_ptr(), node_id_allocation);
+    }
+
+    #[tokio::test]
+    async fn original_preparation_abort_requires_same_store_receipt_and_positive_join() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        let (_, staged) = acknowledge_rolling_preparation(
+            &fixture,
+            &session_id,
+            &route,
+            crate::playback_control::AcknowledgementState::Failed,
+            0,
+        )
+        .await;
+        let (key, receipt) = fixture_preparation_receipt(&route.incarnation_id, &staged)
+            .expect("same original retained operation");
+        assert!(
+            receipt.fixture_original_closed(),
+            "Store outcome and original join are both required"
+        );
+        let context = receipt
+            .fixture_context_weak()
+            .expect("same original context");
+        let now = std::time::Instant::now();
+        assert!(!fixture_prune_preparation(&key, now));
+        assert!(fixture_prune_preparation(
+            &key,
+            now + Duration::from_millis(
+                crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS as u64 + 1
+            )
+        ));
+        assert!(
+            context.upgrade().is_some(),
+            "receipt alias keeps the original context alive"
+        );
+        drop(receipt);
+        assert!(context.upgrade().is_none());
+        // This is logical controller/context reclamation, never evidence that
+        // a separately owned successor native process or role is extinct.
+    }
+
+    #[tokio::test]
+    async fn cancelled_preparation_join_retains_original_handle_and_unknown_context() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        let context = Arc::new(PreparationSettlementContext {
+            gate: fixture
+                .state
+                .transcode
+                .session_preparation_gate(&session_id)
+                .await
+                .expect("original gate"),
+            start: control_start_response(&route).expect("start"),
+            recipe: serde_json::from_str(&route.recipe_json).expect("recipe"),
+            request: control_request(route.incarnation_id.clone()),
+            route,
+            status: None,
+            _allocation: None,
+            state: PreparationSettlementServices::fixture(&fixture.state),
+        });
+        let weak = Arc::downgrade(&context);
+        let (release, wait) = tokio::sync::oneshot::channel();
+        // This actual task performs no Store operation and returns no receipt.
+        // It cannot manufacture a successful cleanup result.
+        let receipt = PreparationSettlementReceipt::fixture_uncertain(context, wait);
+        assert!(tokio::time::timeout(
+            Duration::from_millis(10),
+            receipt.fixture_join_before(tokio::time::Instant::now() + Duration::from_secs(30))
+        )
+        .await
+        .is_err());
+        assert!(
+            receipt.fixture_original_registered(),
+            "cancellation detached the sole original handle"
+        );
+        assert!(weak.upgrade().is_some());
+        release.send(()).expect("release original task");
+        receipt
+            .fixture_join_before(tokio::time::Instant::now() + Duration::from_secs(2))
+            .await;
+        assert!(!receipt.fixture_original_registered());
+        assert!(
+            !receipt.fixture_original_closed(),
+            "a positive join without Store evidence is Unknown"
+        );
+        assert!(!receipt.fixture_expired(std::time::Instant::now() + Duration::from_secs(120)));
+        assert!(
+            weak.upgrade().is_some(),
+            "Unknown cannot prune its original context"
+        );
+        drop(receipt);
+        assert!(
+            weak.upgrade().is_none(),
+            "fixture task/frame was not joined"
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_preparation_answer_keeps_context_through_rewritten_body_aliases() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+            AcceptedAsk {
+                prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
+        )
+        .await;
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
+            .await
+            .expect("original ledger")
+            .expect("staged successor")
+            .staged_incarnation_id;
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec![
+            crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()
+        ]);
+        let (status, offer) = control_body(
+            control_local_inner(&fixture.state, &route, request.clone(), unix_ms() + 4_000).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        tokio::time::sleep(Duration::from_millis(260)).await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.acknowledgement = Some(crate::playback_control::ActionAcknowledgement {
+            action_id: offer["action"]["action_id"]
+                .as_str()
+                .expect("offer action")
+                .to_owned(),
+            state: crate::playback_control::AcknowledgementState::Committed,
+            buffered_through_ms: None,
+            committed_media_origin_ms: offer["action"]["media_origin_ms"].as_i64(),
+            first_frame_unix_ms: Some(unix_ms()),
+        });
+        let mut response =
+            control_local_inner(&fixture.state, &route, request, unix_ms() + 4_000).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (key, receipt) = fixture_preparation_receipt(&route.incarnation_id, &staged)
+            .expect("original controller");
+        assert!(receipt.fixture_original_closed());
+        let context = receipt.fixture_context_weak().expect("original context");
+        // Force the real public JSON rewrite without inventing a processing
+        // report. Its parser may decline the header; the body still rewrites.
+        response.headers_mut().insert(
+            "x-plurx-dv-processing",
+            axum::http::HeaderValue::from_static("unavailable"),
+        );
+        let response = public_control_processing(response).await;
+        let body = response.into_body();
+        let now = std::time::Instant::now();
+        assert!(!fixture_prune_preparation(&key, now));
+        assert!(fixture_prune_preparation(
+            &key,
+            now + Duration::from_millis(
+                crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS as u64 + 1
+            )
+        ));
+        drop(receipt);
+        assert!(
+            context.upgrade().is_some(),
+            "actual body owner lost original context"
+        );
+        let bytes = axum::body::to_bytes(body, crate::playback_control::MAX_RESPONSE_BYTES)
+            .await
+            .expect("original response bytes");
+        let last_alias = bytes.clone();
+        drop(bytes);
+        assert!(
+            context.upgrade().is_some(),
+            "last Bytes alias released context too early"
+        );
+        drop(last_alias);
+        assert!(
+            context.upgrade().is_none(),
+            "canonical answer/context survived its final consumer"
+        );
     }

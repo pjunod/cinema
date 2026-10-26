@@ -6130,7 +6130,128 @@ pub(crate) enum PreparationCommitOutcome {
     Refused,
 }
 
+/// Private logical Store settlement evidence for an original preparation
+/// controller. This grants no native entry, closure, or resource refund.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PreparationStoreOperation {
+    scope: [u8; 32],
+    request: [u8; 32],
+}
+
+pub(crate) struct PreparationStoreTerminal {
+    operation: PreparationStoreOperation,
+}
+impl PreparationStoreTerminal {
+    pub(crate) fn matches(&self, operation: PreparationStoreOperation) -> bool {
+        self.operation == operation
+    }
+}
+
+pub(crate) struct RetainedPreparationResult<T> {
+    pub(crate) value: T,
+    pub(crate) terminal: Option<PreparationStoreTerminal>,
+}
+
 impl PreparationExecutor {
+    /// Bind the exact request and Store predecessor fence without owning or
+    /// cloning any source payload. Neither digest grants settlement authority.
+    pub(crate) fn retained_operation_for_route(
+        route: &plurx_core::domain::MediaSessionRoute,
+        staged_incarnation_id: &str,
+        original_request_identity: &str,
+        request_fingerprint: &str,
+    ) -> PreparationStoreOperation {
+        let scope = Self::retained_scope(
+            &route.principal,
+            &route.playback_id,
+            &route.owner_node_id,
+            route.owner_epoch,
+            staged_incarnation_id,
+        );
+        let mut request = Sha256::new();
+        for value in [
+            original_request_identity.as_bytes(),
+            request_fingerprint.as_bytes(),
+        ] {
+            request.update((value.len() as u64).to_le_bytes());
+            request.update(value);
+        }
+        PreparationStoreOperation {
+            scope,
+            request: request.finalize().into(),
+        }
+    }
+
+    fn retained_scope(
+        principal: &plurx_core::playback_principal::PlaybackPrincipal,
+        playback_id: &str,
+        expected_owner: &str,
+        expected_epoch: i64,
+        staged_incarnation_id: &str,
+    ) -> [u8; 32] {
+        fn part(hash: &mut Sha256, bytes: &[u8]) {
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+        let mut hash = Sha256::new();
+        part(&mut hash, b"preparation-controller-store-operation-v1");
+        match principal {
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id } => {
+                part(&mut hash, b"local");
+                part(&mut hash, &user_id.to_le_bytes());
+            }
+            plurx_core::playback_principal::PlaybackPrincipal::Sharing {
+                grant_id,
+                viewer_key,
+            } => {
+                part(&mut hash, b"sharing");
+                part(&mut hash, grant_id.as_bytes());
+                part(&mut hash, viewer_key.as_str().as_bytes());
+            }
+        }
+        part(&mut hash, playback_id.as_bytes());
+        part(&mut hash, expected_owner.as_bytes());
+        part(&mut hash, &expected_epoch.to_le_bytes());
+        part(&mut hash, staged_incarnation_id.as_bytes());
+        hash.finalize().into()
+    }
+
+    fn store_terminal_for_route(
+        &self,
+        operation: Option<PreparationStoreOperation>,
+        staged_incarnation_id: &str,
+        route: &plurx_core::domain::MediaSessionRoute,
+        aborted: bool,
+    ) -> Option<PreparationStoreTerminal> {
+        let operation = operation?;
+        if operation.scope
+            != Self::retained_scope(
+                &self.principal,
+                &self.playback_id,
+                &self.expected_predecessor_owner_node_id,
+                self.expected_predecessor_owner_epoch,
+                staged_incarnation_id,
+            )
+        {
+            return None;
+        }
+        if route.principal != self.principal
+            || route.playback_id != self.playback_id
+            || route.incarnation_id != staged_incarnation_id
+            || if aborted {
+                route.state != "ended" || route.terminal_reason.as_deref() != Some("replaced")
+            } else {
+                route.state != "active"
+            }
+        {
+            return None;
+        }
+        // The Store transaction used this executor's exact predecessor fence.
+        // The returned route belongs to the successor, possibly on another
+        // worker; it must not be compared with the predecessor's owner.
+        Some(PreparationStoreTerminal { operation })
+    }
+
     pub(crate) fn new(
         store: std::sync::Arc<dyn plurx_core::store::Store>,
         control: std::sync::Arc<dyn PreparationGate>,
@@ -6252,6 +6373,7 @@ impl PreparationExecutor {
     /// generation and **never reaps the newer player generation** that won,
     /// which is why the predecessor is recorded at preparation time rather
     /// than read fresh at commit.
+    #[cfg(test)]
     pub(crate) async fn commit(
         &self,
         staged_incarnation_id: &str,
@@ -6259,6 +6381,26 @@ impl PreparationExecutor {
         lease_expires_at_ms: i64,
         control_receipt: Option<plurx_core::domain::MediaSessionTerminalAck>,
     ) -> Result<PreparationCommitOutcome, plurx_core::error::StoreError> {
+        self.commit_retained(
+            staged_incarnation_id,
+            now_ms,
+            lease_expires_at_ms,
+            control_receipt,
+            None,
+        )
+        .await
+        .map(|result| result.value)
+    }
+
+    pub(crate) async fn commit_retained(
+        &self,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+        control_receipt: Option<plurx_core::domain::MediaSessionTerminalAck>,
+        operation: Option<PreparationStoreOperation>,
+    ) -> Result<RetainedPreparationResult<PreparationCommitOutcome>, plurx_core::error::StoreError>
+    {
         if !self
             .control
             .may_commit_preparation_for_owner(
@@ -6267,7 +6409,10 @@ impl PreparationExecutor {
             )
             .await
         {
-            return Ok(PreparationCommitOutcome::Refused);
+            return Ok(RetainedPreparationResult {
+                value: PreparationCommitOutcome::Refused,
+                terminal: None,
+            });
         }
         let committed = self
             .store
@@ -6297,6 +6442,9 @@ impl PreparationExecutor {
                 },
             )
             .await?;
+        let terminal = committed.as_ref().and_then(|commit| {
+            self.store_terminal_for_route(operation, staged_incarnation_id, &commit.route, false)
+        });
         let outcome = match committed {
             Some(commit) if commit.predecessor.is_some() => {
                 PreparationCommitOutcome::Committed(commit)
@@ -6333,17 +6481,21 @@ impl PreparationExecutor {
                 )
                 .await;
         }
-        Ok(outcome)
+        Ok(RetainedPreparationResult {
+            value: outcome,
+            terminal,
+        })
     }
 
     /// Recover a commit reservation whose durable answer stayed transient.
     /// The exact actor token is converted to an abort before Store cleanup, so
     /// neither the ordinary deadline task nor a stale epoch can steal it.
-    pub(crate) async fn reject_commit(
+    pub(crate) async fn reject_commit_retained(
         &self,
         staged_incarnation_id: &str,
         now_ms: i64,
-    ) -> Result<bool, plurx_core::error::StoreError> {
+        operation: Option<PreparationStoreOperation>,
+    ) -> Result<RetainedPreparationResult<bool>, plurx_core::error::StoreError> {
         if !self
             .control
             .reject_preparation_commit_for_owner(
@@ -6352,9 +6504,13 @@ impl PreparationExecutor {
             )
             .await
         {
-            return Ok(false);
+            return Ok(RetainedPreparationResult {
+                value: false,
+                terminal: None,
+            });
         }
-        self.store
+        let aborted = self
+            .store
             .abort_media_session_preparation(
                 &self.principal,
                 &self.playback_id,
@@ -6375,7 +6531,13 @@ impl PreparationExecutor {
                 self.expected_predecessor_owner_epoch,
             )
             .await;
-        Ok(true)
+        let terminal = aborted.as_ref().and_then(|route| {
+            self.store_terminal_for_route(operation, staged_incarnation_id, route, true)
+        });
+        Ok(RetainedPreparationResult {
+            value: true,
+            terminal,
+        })
     }
 
     /// Discard a staged successor and leave the current stream authoritative.
@@ -6389,6 +6551,17 @@ impl PreparationExecutor {
         staged_incarnation_id: &str,
         now_ms: i64,
     ) -> Result<bool, plurx_core::error::StoreError> {
+        self.abort_retained(staged_incarnation_id, now_ms, None)
+            .await
+            .map(|result| result.value)
+    }
+
+    pub(crate) async fn abort_retained(
+        &self,
+        staged_incarnation_id: &str,
+        now_ms: i64,
+        operation: Option<PreparationStoreOperation>,
+    ) -> Result<RetainedPreparationResult<bool>, plurx_core::error::StoreError> {
         if !self
             .control
             .begin_abort_preparation_for_owner(
@@ -6397,7 +6570,10 @@ impl PreparationExecutor {
             )
             .await
         {
-            return Ok(false);
+            return Ok(RetainedPreparationResult {
+                value: false,
+                terminal: None,
+            });
         }
         let aborted = self
             .store
@@ -6413,8 +6589,11 @@ impl PreparationExecutor {
                     now_ms,
                 },
             )
-            .await?
-            .is_some();
+            .await?;
+        let terminal = aborted.as_ref().and_then(|route| {
+            self.store_terminal_for_route(operation, staged_incarnation_id, route, true)
+        });
+        let aborted = aborted.is_some();
         if aborted {
             self.control
                 .settle_preparation_for_owner(
@@ -6424,7 +6603,10 @@ impl PreparationExecutor {
                 )
                 .await;
         }
-        Ok(aborted)
+        Ok(RetainedPreparationResult {
+            value: aborted,
+            terminal,
+        })
     }
 }
 

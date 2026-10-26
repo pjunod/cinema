@@ -16,6 +16,27 @@ struct FiniteControlHold(
 struct FiniteControlBody {
     bytes: Vec<u8>,
     _slot: Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+    _preparation_copy: Option<crate::playback_control::ActorPayloadAllocation>,
+    _preparation: Option<Arc<PreparationCommittedAnswer>>,
+}
+
+#[derive(Clone)]
+struct PreparationControlHold {
+    copy: Option<crate::playback_control::ActorPayloadAllocation>,
+    answer: Arc<PreparationCommittedAnswer>,
+}
+
+/// Portable preparation answers retain their original physical context even
+/// when no finite native client partition exists on this platform/path.
+struct PreparationControlBody {
+    bytes: Vec<u8>,
+    _copy: Option<crate::playback_control::ActorPayloadAllocation>,
+    _answer: Arc<PreparationCommittedAnswer>,
+}
+impl AsRef<[u8]> for PreparationControlBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -76,10 +97,18 @@ fn fixed_finite_control_json(value: &impl serde::Serialize) -> Option<Vec<u8>> {
 fn finite_control_body_response(
     bytes: Vec<u8>,
     slot: Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+    preparation_copy: Option<crate::playback_control::ActorPayloadAllocation>,
+    preparation: Option<Arc<PreparationCommittedAnswer>>,
 ) -> Response {
+    let preparation_hold = preparation.as_ref().map(|answer| PreparationControlHold {
+        copy: preparation_copy.clone(),
+        answer: Arc::clone(answer),
+    });
     let body = axum::body::Body::from(Bytes::from_owner(FiniteControlBody {
         bytes,
         _slot: Arc::clone(&slot),
+        _preparation_copy: preparation_copy,
+        _preparation: preparation,
     }));
     let mut response = (
         StatusCode::OK,
@@ -91,6 +120,9 @@ fn finite_control_body_response(
     )
         .into_response();
     response.extensions_mut().insert(FiniteControlHold(slot));
+    if let Some(hold) = preparation_hold {
+        response.extensions_mut().insert(hold);
+    }
     response
 }
 
@@ -248,13 +280,17 @@ async fn with_current_processing_header(
 
 /// The internal relay retains its exact legacy JSON body. Only public ingress
 /// projects the bounded current-owner header onto the additive client field.
-async fn public_control_processing(mut response: Response) -> Response {
+pub(super) async fn public_control_processing(mut response: Response) -> Response {
     let Some(header) = response.headers_mut().remove("x-plurx-dv-processing") else {
         return response;
     };
     if response.status() != StatusCode::OK {
         return response;
     }
+    let preparation_hold = response
+        .extensions()
+        .get::<PreparationControlHold>()
+        .cloned();
     #[cfg(target_os = "linux")]
     let finite_hold = response.extensions().get::<FiniteControlHold>().cloned();
     #[cfg(target_os = "linux")]
@@ -306,13 +342,25 @@ async fn public_control_processing(mut response: Response) -> Response {
         };
         return Response::from_parts(
             parts,
-            axum::body::Body::from(Bytes::from_owner(FiniteControlBody { bytes, _slot: slot })),
+            axum::body::Body::from(Bytes::from_owner(FiniteControlBody {
+                bytes,
+                _slot: slot,
+                _preparation_copy: preparation_hold.as_ref().and_then(|hold| hold.copy.clone()),
+                _preparation: preparation_hold.map(|hold| hold.answer),
+            })),
         );
     }
-    Response::from_parts(
-        parts,
-        axum::body::Body::from(serde_json::to_vec(&value).expect("control JSON")),
-    )
+    let bytes = serde_json::to_vec(&value).expect("control JSON");
+    let body = if let Some(hold) = preparation_hold {
+        axum::body::Body::from(Bytes::from_owner(PreparationControlBody {
+            bytes,
+            _copy: hold.copy,
+            _answer: hold.answer,
+        }))
+    } else {
+        axum::body::Body::from(bytes)
+    };
+    Response::from_parts(parts, body)
 }
 
 #[cfg(test)]
@@ -565,27 +613,238 @@ pub(super) const PREPARATION_SETTLEMENT_RETRY_MAX: Duration = Duration::from_mil
 
 #[derive(Clone)]
 pub(super) enum PreparationSettlement {
-    Committed(Box<crate::playback_control::ControlResponseV1>),
+    Committed(Arc<PreparationCommittedAnswer>),
     Aborted,
     Rejected,
     Unavailable,
 }
 
+/// Every replay shares the same physical canonical answer. It retains the
+/// original context until its final HTTP consumer releases the answer alias.
+pub(super) struct PreparationCommittedAnswer {
+    pub(super) response: crate::playback_control::ControlResponseV1,
+    _capacity: Arc<PreparationSettlementCapacity>,
+    _context: Arc<PreparationSettlementContext>,
+}
+
+type PreparationControllerTask =
+    tokio::task::JoinHandle<Option<crate::playback_control::PreparationStoreTerminal>>;
+type PreparationControllerJoinResult =
+    Result<Option<crate::playback_control::PreparationStoreTerminal>, tokio::task::JoinError>;
+
+struct OriginalPreparationJoin {
+    task: Option<PreparationControllerTask>,
+    failed: bool,
+}
+
+/// The original run input independently retains the context before its start
+/// latch. Neither the task nor its result holds a strong link to this owner.
+struct OriginalPreparationController {
+    task: tokio::sync::Mutex<OriginalPreparationJoin>,
+    joined: std::sync::atomic::AtomicBool,
+    terminal: std::sync::atomic::AtomicBool,
+    operation: crate::playback_control::PreparationStoreOperation,
+    _capacity: Option<Arc<PreparationSettlementCapacity>>,
+    // Last: task storage/selectors are destroyed before application custody.
+    _context: Arc<PreparationSettlementContext>,
+}
+impl OriginalPreparationController {
+    fn record_join(
+        &self,
+        original: &mut OriginalPreparationJoin,
+        result: PreparationControllerJoinResult,
+    ) {
+        original.task.take();
+        match result {
+            Ok(receipt) => {
+                self.terminal.store(
+                    receipt.is_some_and(|receipt| receipt.matches(self.operation)),
+                    std::sync::atomic::Ordering::Release,
+                );
+                self.joined
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            Err(_) => original.failed = true,
+        }
+    }
+    async fn join_before(&self, deadline: tokio::time::Instant) {
+        let Ok(mut original) = tokio::time::timeout_at(deadline, self.task.lock()).await else {
+            return;
+        };
+        if original.failed {
+            return;
+        }
+        let Some(task) = original.task.as_mut() else {
+            return;
+        };
+        // Borrow the actual retained handle. Cancelling this wait cannot
+        // detach it or let a subsequent map prune claim its task drained.
+        if let Ok(result) = tokio::time::timeout_at(deadline, task).await {
+            self.record_join(&mut original, result);
+        }
+    }
+    fn try_join_finished(&self) {
+        use futures_util::FutureExt as _;
+        let Ok(mut original) = self.task.try_lock() else {
+            return;
+        };
+        if original.failed {
+            return;
+        }
+        let Some(task) = original.task.as_mut() else {
+            return;
+        };
+        if task.is_finished() {
+            // is_finished is only a polling hint, never the drain evidence.
+            if let Some(result) = task.now_or_never() {
+                self.record_join(&mut original, result);
+            }
+        }
+    }
+    fn closed(&self) -> bool {
+        self.joined.load(std::sync::atomic::Ordering::Acquire)
+            && self.terminal.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+struct PreparationRunInput {
+    start: tokio::sync::oneshot::Receiver<()>,
+    context: Arc<PreparationSettlementContext>,
+    capacity: Arc<PreparationSettlementCapacity>,
+    serving_commit: tokio::sync::OwnedRwLockReadGuard<()>,
+    outcome: crate::playback_control::PreparationControlOutcome,
+    operation: crate::playback_control::PreparationStoreOperation,
+    sender: tokio::sync::watch::Sender<Option<PreparationSettlement>>,
+}
+async fn run_original_preparation(
+    input: PreparationRunInput,
+) -> Option<crate::playback_control::PreparationStoreTerminal> {
+    let PreparationRunInput {
+        start,
+        context,
+        capacity,
+        serving_commit,
+        outcome,
+        operation,
+        sender,
+    } = input;
+    if start.await.is_err() {
+        return None;
+    }
+    let mut terminal = None;
+    let result = settle_preparation_control(
+        context,
+        capacity,
+        serving_commit,
+        outcome,
+        operation,
+        &mut terminal,
+    )
+    .await;
+    sender.send_replace(Some(result));
+    terminal
+}
+
 #[derive(Clone)]
 pub(super) struct PreparationSettlementReceipt {
     result: tokio::sync::watch::Receiver<Option<PreparationSettlement>>,
+    original: Option<Arc<OriginalPreparationController>>,
 }
 
 impl PreparationSettlementReceipt {
+    #[cfg(test)]
+    pub(super) fn fixture_original_closed(&self) -> bool {
+        self.original
+            .as_ref()
+            .is_some_and(|original| original.closed())
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_original_registered(&self) -> bool {
+        self.original.as_ref().is_some_and(|original| {
+            original
+                .task
+                .try_lock()
+                .is_ok_and(|join| join.task.is_some())
+        })
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_expired(&self, now: std::time::Instant) -> bool {
+        let Some(original) = self.original.as_ref() else {
+            return false;
+        };
+        let mut entry = ActivePreparationSettlement {
+            request_fingerprint: "fixture-observation".to_owned(),
+            receipt: self.clone(),
+            replay_until: Some(now - Duration::from_secs(1)),
+            _context: Arc::clone(&original._context),
+        };
+        preparation_settlement_expired(&mut entry, now)
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_context_weak(
+        &self,
+    ) -> Option<std::sync::Weak<PreparationSettlementContext>> {
+        self.original
+            .as_ref()
+            .map(|original| Arc::downgrade(&original._context))
+    }
+    #[cfg(test)]
+    pub(super) async fn fixture_join_before(&self, deadline: tokio::time::Instant) {
+        if let Some(original) = self.original.as_ref() {
+            original.join_before(deadline).await;
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_uncertain(
+        context: Arc<PreparationSettlementContext>,
+        wait: tokio::sync::oneshot::Receiver<()>,
+    ) -> Self {
+        // An actual task with NO Store operation/terminal receipt. It can
+        // exercise join cancellation but can never become known-closed.
+        let operation = crate::playback_control::PreparationExecutor::retained_operation_for_route(
+            &context.route,
+            "no-store-operation",
+            "unknown-fixture",
+            "unknown-fixture",
+        );
+        let run_context = Arc::clone(&context);
+        let task = tokio::spawn(async move {
+            let _ = wait.await;
+            drop(run_context);
+            None
+        });
+        let original = Arc::new(OriginalPreparationController {
+            task: tokio::sync::Mutex::new(OriginalPreparationJoin {
+                task: Some(task),
+                failed: false,
+            }),
+            joined: std::sync::atomic::AtomicBool::new(false),
+            terminal: std::sync::atomic::AtomicBool::new(false),
+            operation,
+            _capacity: None,
+            _context: context,
+        });
+        let (_sender, result) =
+            tokio::sync::watch::channel(Some(PreparationSettlement::Unavailable));
+        Self {
+            result,
+            original: Some(original),
+        }
+    }
     pub(super) async fn wait_before(&self, deadline_unix_ms: i64) -> Option<PreparationSettlement> {
         let remaining = crate::playback_control::inherited_exchange_budget(
             deadline_unix_ms,
             crate::media_sessions::unix_ms(),
         )?;
         let mut result = self.result.clone();
+        let deadline = tokio::time::Instant::now() + remaining;
         let wait = async move {
             loop {
-                if let Some(outcome) = result.borrow().clone() {
+                let outcome = result.borrow().clone();
+                if let Some(outcome) = outcome {
+                    if let Some(original) = self.original.as_ref() {
+                        original.join_before(deadline).await;
+                    }
                     return Some(outcome);
                 }
                 if result.changed().await.is_err() {
@@ -593,11 +852,10 @@ impl PreparationSettlementReceipt {
                 }
             }
         };
-        tokio::time::timeout(remaining, wait).await.ok().flatten()
+        tokio::time::timeout_at(deadline, wait).await.ok().flatten()
     }
 }
 
-#[derive(Clone)]
 pub(super) struct ActivePreparationSettlement {
     request_fingerprint: String,
     receipt: PreparationSettlementReceipt,
@@ -605,6 +863,54 @@ pub(super) struct ActivePreparationSettlement {
     /// joinable through the same durable replay window as their Store row.
     replay_until: Option<std::time::Instant>,
     _context: Arc<PreparationSettlementContext>,
+}
+
+fn preparation_settlement_expired(
+    operation: &mut ActivePreparationSettlement,
+    now: std::time::Instant,
+) -> bool {
+    let Some(original) = operation.receipt.original.as_ref() else {
+        return false;
+    };
+    original.try_join_finished();
+    if !original.closed() {
+        return false;
+    }
+    let replay_until = operation.replay_until.get_or_insert_with(|| {
+        now + Duration::from_millis(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS as u64)
+    });
+    *replay_until <= now
+    // External receipts/canonical answers retain their original context even
+    // after the eligible map alias is removed.
+}
+
+#[cfg(test)]
+pub(super) fn fixture_preparation_receipt(
+    incarnation: &str,
+    staged: &str,
+) -> Option<(String, PreparationSettlementReceipt)> {
+    preparation_settlements()
+        .lock()
+        .expect("fixture map")
+        .iter()
+        .find(|(key, entry)| {
+            entry._context.route.incarnation_id == incarnation && key.ends_with(staged)
+        })
+        .map(|(key, entry)| (key.clone(), entry.receipt.clone()))
+}
+
+#[cfg(test)]
+pub(super) fn fixture_prune_preparation(key: &str, now: std::time::Instant) -> bool {
+    let mut operations = preparation_settlements().lock().expect("fixture map");
+    if operations
+        .get_mut(key)
+        .is_some_and(|entry| preparation_settlement_expired(entry, now))
+    {
+        operations.remove(key);
+        true
+    } else {
+        false
+    }
 }
 
 pub(super) fn preparation_settlements(
@@ -765,6 +1071,12 @@ pub(super) struct DurablePreparationSettlementAdmission {
     pub(super) context: Arc<PreparationSettlementContext>,
 }
 
+/// Original capacity remains held through Unknown and escaped body aliases.
+/// Serving mutation authority stays only in the actual run frame.
+struct PreparationSettlementCapacity {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 pub(super) struct PreparationSettlementReservation {
     _permit: tokio::sync::OwnedSemaphorePermit,
     _serving_commit: tokio::sync::OwnedRwLockReadGuard<()>,
@@ -843,11 +1155,7 @@ impl crate::playback_control::PreparationSettlementAdmission
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = std::time::Instant::now();
-        operations.retain(|_, operation| {
-            operation
-                .replay_until
-                .is_none_or(|replay_until| replay_until > now)
-        });
+        operations.retain(|_, operation| !preparation_settlement_expired(operation, now));
         if let Some(active) = operations.get(&key) {
             if active.request_fingerprint == request_fingerprint {
                 *self
@@ -873,11 +1181,49 @@ impl crate::playback_control::PreparationSettlementAdmission
                 .receipt
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some(PreparationSettlementReceipt { result });
+                Some(PreparationSettlementReceipt {
+                    result,
+                    original: None,
+                });
             return;
         };
+        let PreparationSettlementReservation {
+            _permit,
+            _serving_commit,
+        } = reservation;
+        let capacity = Arc::new(PreparationSettlementCapacity { _permit });
         let (sender, receiver) = tokio::sync::watch::channel(None);
-        let receipt = PreparationSettlementReceipt { result: receiver };
+        let (start, start_wait) = tokio::sync::oneshot::channel();
+        let operation = crate::playback_control::PreparationExecutor::retained_operation_for_route(
+            &self.context.route,
+            staged_incarnation_id,
+            &key,
+            &request_fingerprint,
+        );
+        let task = tokio::spawn(run_original_preparation(PreparationRunInput {
+            start: start_wait,
+            context: Arc::clone(&self.context),
+            capacity: Arc::clone(&capacity),
+            serving_commit: _serving_commit,
+            outcome,
+            operation,
+            sender,
+        }));
+        let original = Arc::new(OriginalPreparationController {
+            task: tokio::sync::Mutex::new(OriginalPreparationJoin {
+                task: Some(task),
+                failed: false,
+            }),
+            joined: std::sync::atomic::AtomicBool::new(false),
+            terminal: std::sync::atomic::AtomicBool::new(false),
+            operation,
+            _capacity: Some(capacity),
+            _context: Arc::clone(&self.context),
+        });
+        let receipt = PreparationSettlementReceipt {
+            result: receiver,
+            original: Some(original),
+        };
         operations.insert(
             key.clone(),
             ActivePreparationSettlement {
@@ -893,38 +1239,44 @@ impl crate::playback_control::PreparationSettlementAdmission
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(receipt);
         drop(operations);
 
-        let context = Arc::clone(&self.context);
-        tokio::spawn(async move {
-            let result = settle_preparation_control(context, reservation, outcome).await;
-            let retain = !matches!(result, PreparationSettlement::Unavailable);
-            sender.send_replace(Some(result));
-            let mut operations = preparation_settlements()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if retain {
-                if let Some(operation) = operations.get_mut(&key) {
-                    operation.replay_until = Some(
-                        std::time::Instant::now()
-                            + Duration::from_millis(
-                                crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS as u64,
-                            ),
-                    );
-                }
-            } else {
-                operations.remove(&key);
-            }
-        });
+        // The actual original handle is registered before its task may run.
+        let _ = start.send(());
     }
+}
+
+fn preparation_executor_for_context(
+    context: &PreparationSettlementContext,
+) -> crate::playback_control::PreparationExecutor {
+    crate::playback_control::PreparationExecutor::new(
+        Arc::clone(&context.state.store),
+        Arc::clone(&context.gate),
+        context.route.principal.clone(),
+        context.route.playback_id.clone(),
+        context.route.owner_node_id.clone(),
+        context.route.owner_epoch,
+    )
+}
+
+fn retain_preparation_store_result<T>(
+    result: crate::playback_control::RetainedPreparationResult<T>,
+    expected: crate::playback_control::PreparationStoreOperation,
+    terminal: &mut Option<crate::playback_control::PreparationStoreTerminal>,
+) -> T {
+    if let Some(receipt) = result.terminal.filter(|receipt| receipt.matches(expected)) {
+        *terminal = Some(receipt);
+    }
+    result.value
 }
 
 async fn settle_preparation_control(
     context: Arc<PreparationSettlementContext>,
-    _reservation: PreparationSettlementReservation,
+    capacity: Arc<PreparationSettlementCapacity>,
+    _serving_commit: tokio::sync::OwnedRwLockReadGuard<()>,
     outcome: crate::playback_control::PreparationControlOutcome,
+    operation: crate::playback_control::PreparationStoreOperation,
+    terminal: &mut Option<crate::playback_control::PreparationStoreTerminal>,
 ) -> PreparationSettlement {
-    let context = context;
     let state = &context.state;
-    let gate = Arc::clone(&context.gate);
     let route = &context.route;
     let start = &context.start;
     let recipe = &context.recipe;
@@ -932,14 +1284,7 @@ async fn settle_preparation_control(
     // The one acknowledgement status copy was reserved before actor mutation.
     // Arc-sharing removes all other repeated request/service DTO copies.
     let status = context.status.as_ref();
-    let executor = crate::playback_control::PreparationExecutor::new(
-        Arc::clone(&state.store),
-        gate,
-        route.principal.clone(),
-        route.playback_id.clone(),
-        route.owner_node_id.clone(),
-        route.owner_epoch,
-    );
+    let executor = preparation_executor_for_context(&context);
     let now = tokio::time::Instant::now();
     let deadline = now + PREPARATION_SETTLEMENT_RETRY_BUDGET;
     state
@@ -1043,8 +1388,9 @@ async fn settle_preparation_control(
                 .await
                 {
                     if executor
-                        .reject_commit(staged_incarnation_id, unix_ms())
+                        .reject_commit_retained(staged_incarnation_id, unix_ms(), Some(operation))
                         .await
+                        .map(|result| retain_preparation_store_result(result, operation, terminal))
                         .is_ok_and(|rejected| rejected)
                     {
                         retire_prepared_incarnation(
@@ -1076,8 +1422,15 @@ async fn settle_preparation_control(
                                     )
                                     .await;
                                 } else if executor
-                                    .reject_commit(staged_incarnation_id, unix_ms())
+                                    .reject_commit_retained(
+                                        staged_incarnation_id,
+                                        unix_ms(),
+                                        Some(operation),
+                                    )
                                     .await
+                                    .map(|result| {
+                                        retain_preparation_store_result(result, operation, terminal)
+                                    })
                                     .is_ok_and(|rejected| rejected)
                                 {
                                     retire_prepared_incarnation(
@@ -1097,8 +1450,9 @@ async fn settle_preparation_control(
                     && !planned_preparation_still_current(state, staged_incarnation_id).await
                 {
                     match executor
-                        .reject_commit(staged_incarnation_id, unix_ms())
+                        .reject_commit_retained(staged_incarnation_id, unix_ms(), Some(operation))
                         .await
+                        .map(|result| retain_preparation_store_result(result, operation, terminal))
                     {
                         Ok(rejected) => {
                             if rejected {
@@ -1128,13 +1482,15 @@ async fn settle_preparation_control(
                 }
                 if let Some(acknowledgement) = commit_acknowledgement.clone() {
                     let committed = executor
-                        .commit(
+                        .commit_retained(
                             staged_incarnation_id,
                             unix_ms(),
                             outcome.lease_expires_at_unix_ms,
                             Some(acknowledgement),
+                            Some(operation),
                         )
-                        .await;
+                        .await
+                        .map(|result| retain_preparation_store_result(result, operation, terminal));
                     // A cancellation/exit request needs this same gate, so it
                     // cannot clear the exact fence between the predicate above
                     // and the durable pointer CAS.
@@ -1160,7 +1516,13 @@ async fn settle_preparation_control(
                                     .ok()
                                 })
                                 .map(|retained| {
-                                    PreparationSettlement::Committed(Box::new(retained.response))
+                                    PreparationSettlement::Committed(Arc::new(
+                                        PreparationCommittedAnswer {
+                                            response: retained.response,
+                                            _capacity: Arc::clone(&capacity),
+                                            _context: Arc::clone(&context),
+                                        },
+                                    ))
                                 })
                                 .unwrap_or(PreparationSettlement::Unavailable))
                         }
@@ -1192,8 +1554,9 @@ async fn settle_preparation_control(
                     // acceptance, convert the reserved commit to an abort and
                     // durably clean it up instead of leaving Committing stuck.
                     match executor
-                        .reject_commit(staged_incarnation_id, unix_ms())
+                        .reject_commit_retained(staged_incarnation_id, unix_ms(), Some(operation))
                         .await
+                        .map(|result| retain_preparation_store_result(result, operation, terminal))
                     {
                         Ok(rejected) => {
                             if rejected {
@@ -1211,7 +1574,11 @@ async fn settle_preparation_control(
                 }
             }
             crate::playback_control::PreparationDirective::Abort { .. } => {
-                match executor.abort(staged_incarnation_id, unix_ms()).await {
+                match executor
+                    .abort_retained(staged_incarnation_id, unix_ms(), Some(operation))
+                    .await
+                    .map(|result| retain_preparation_store_result(result, operation, terminal))
+                {
                     Ok(aborted) => {
                         if aborted {
                             if let Some(active) = active_preparation.as_ref() {
@@ -1259,8 +1626,9 @@ async fn settle_preparation_control(
         &outcome.preparation_directive,
         crate::playback_control::PreparationDirective::Commit { .. }
     ) && executor
-        .reject_commit(staged_incarnation_id, unix_ms())
+        .reject_commit_retained(staged_incarnation_id, unix_ms(), Some(operation))
         .await
+        .map(|result| retain_preparation_store_result(result, operation, terminal))
         .is_ok_and(|rejected| rejected)
     {
         retire_prepared_incarnation(
@@ -3305,6 +3673,11 @@ async fn control_local_with_observation(
     } else {
         None
     };
+    let mut retained_preparation_answer = None;
+    #[cfg(target_os = "linux")]
+    let mut preparation_copy_allocation = None;
+    #[cfg(not(target_os = "linux"))]
+    let preparation_copy_allocation = None;
     let retained_preparation_response = if result.preparation_directive.is_some() {
         let settlement = match preparation_admission
             .as_ref()
@@ -3314,7 +3687,40 @@ async fn control_local_with_observation(
             None => None,
         };
         match settlement {
-            Some(PreparationSettlement::Committed(response)) => Some(*response),
+            Some(PreparationSettlement::Committed(answer)) => {
+                #[cfg(target_os = "linux")]
+                if let Some(source) = answer._context._allocation.as_ref() {
+                    let Some(bytes) = answer.response.requested_heap_bytes().and_then(|bytes| {
+                        bytes.checked_add(std::mem::size_of::<
+                            crate::playback_control::ControlResponseV1,
+                        >())
+                    }) else {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    };
+                    let Ok(allocation) = source.reserve_related(bytes) else {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    };
+                    // This is distinct from the canonical answer allocation:
+                    // reserve BEFORE this final consumer deep-copies the DTO.
+                    preparation_copy_allocation = Some(allocation);
+                }
+                let response = answer.response.clone();
+                #[cfg(target_os = "linux")]
+                if let Some(allocation) = preparation_copy_allocation.as_ref() {
+                    let Some(actual) = response.requested_heap_bytes().and_then(|bytes| {
+                        bytes.checked_add(std::mem::size_of::<
+                            crate::playback_control::ControlResponseV1,
+                        >())
+                    }) else {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    };
+                    if allocation.validate_actual(actual).is_err() {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                }
+                retained_preparation_answer = Some(answer);
+                Some(response)
+            }
             Some(PreparationSettlement::Aborted) => None,
             Some(PreparationSettlement::Rejected) => {
                 crate::playback_control::record(crate::playback_control::MetricOutcome::Stale);
@@ -3770,7 +4176,12 @@ async fn control_local_with_observation(
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
         return match fixed_finite_control_json(&response) {
-            Some(bytes) => finite_control_body_response(bytes, slot),
+            Some(bytes) => finite_control_body_response(
+                bytes,
+                slot,
+                preparation_copy_allocation,
+                retained_preparation_answer,
+            ),
             None => control_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "control_unavailable",
@@ -3781,6 +4192,32 @@ async fn control_local_with_observation(
                 None,
             ),
         };
+    }
+    if let Some(answer) = retained_preparation_answer {
+        // Same JSON serializer as Json(response), now with original context
+        // custody on the actual Bytes owner through the last body alias.
+        let Ok(bytes) = serde_json::to_vec(&response) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let hold = PreparationControlHold {
+            copy: preparation_copy_allocation.clone(),
+            answer: Arc::clone(&answer),
+        };
+        let mut response = (
+            StatusCode::OK,
+            [
+                (header::CACHE_CONTROL, "no-store"),
+                (header::CONTENT_TYPE, "application/json"),
+            ],
+            axum::body::Body::from(Bytes::from_owner(PreparationControlBody {
+                bytes,
+                _copy: preparation_copy_allocation,
+                _answer: answer,
+            })),
+        )
+            .into_response();
+        response.extensions_mut().insert(hold);
+        return response;
     }
     (
         StatusCode::OK,

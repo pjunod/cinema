@@ -502,6 +502,29 @@ fn preparation_status_bytes(status: Option<&crate::transcode::HlsSessionInfo>) -
     }
 }
 
+fn preparation_controller_bytes() -> Option<usize> {
+    fn frame<A, F: std::future::Future>(_: impl Fn(A) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let owner = crate::playback_control::arc_requested_layout(std::alloc::Layout::new::<
+        OriginalPreparationController,
+    >())?;
+    let answer = crate::playback_control::arc_requested_layout(std::alloc::Layout::new::<
+        PreparationCommittedAnswer,
+    >())?;
+    // The unpolled compiler-generated frame is measured by its actual type.
+    // This does not include private Tokio task/watch/latch allocator layouts,
+    // HashMap bucket growth or nested response/JSON payloads: those remain
+    // explicit Unknown components until their own preflight is established.
+    let capacity = crate::playback_control::arc_requested_layout(std::alloc::Layout::new::<
+        PreparationSettlementCapacity,
+    >())?;
+    add(
+        add(add(owner, answer)?, capacity)?,
+        frame(run_original_preparation),
+    )
+}
+
 pub(super) fn preparation_context_parts(
     route_value: &MediaSessionRoute,
     start: &StartResponse,
@@ -522,6 +545,16 @@ pub(super) fn preparation_context_parts(
     bytes = add(bytes, start_response(start)?)?;
     bytes = add(bytes, recipe(recipe_value)?)?;
     bytes = add(bytes, request(request_value)?)?;
+    bytes = add(bytes, preparation_controller_bytes()?)?;
+    // One executor owns these source-backed strings inside that original
+    // frame. Hashing its operation at acceptance uses borrowed values only.
+    bytes = add(bytes, route_value.playback_id.capacity())?;
+    bytes = add(bytes, route_value.owner_node_id.capacity())?;
+    if let plurx_core::playback_principal::PlaybackPrincipal::Sharing { viewer_key, .. } =
+        &route_value.principal
+    {
+        bytes = add(bytes, viewer_key.as_str().len())?;
+    }
     // One status moves into the shared context; the commit path makes exactly
     // one independent acknowledgement status copy while this context lives.
     add(bytes, preparation_status_bytes(status)?.checked_mul(2)?)
