@@ -3,7 +3,7 @@
 **Status:** open · final qualification
 
 Build: 277
-Issue: #1283
+Issue: #1292
 
 Continues the subtitle setup work in #1283 with native client support for
 translating an existing text subtitle and reading committed AI captions during

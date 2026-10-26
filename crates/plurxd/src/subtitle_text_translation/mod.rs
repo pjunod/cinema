@@ -7,6 +7,7 @@ pub(crate) mod engine;
 pub(crate) mod manager;
 pub(crate) mod text;
 mod tokenizer;
+mod weights;
 
 use crate::{http::error::ApiError, state::AppState};
 use plurx_core::{

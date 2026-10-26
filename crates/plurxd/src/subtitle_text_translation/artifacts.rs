@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::Path,
     sync::LazyLock,
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -111,20 +112,121 @@ pub(crate) async fn install(
         files,
     })
 }
-/// Read the already verified held object, never a replacement at its cache pathname.
-pub(crate) fn held_path(model: &ManagedModel) -> PathBuf {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        PathBuf::from(format!("/proc/self/fd/{}", model.handle.as_raw_fd()))
+/// Metadata reads never reopen descriptor paths or change a shared file cursor.
+pub(crate) fn read_metadata(
+    model: &ManagedModel,
+    limit: usize,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<Vec<u8>, String> {
+    let active = || {
+        if cancel.is_cancelled() {
+            Err("worker_interrupted".to_owned())
+        } else if Instant::now() >= deadline {
+            Err("text_inference_timeout".to_owned())
+        } else {
+            Ok(())
+        }
+    };
+    active()?;
+    let size = usize::try_from(model.identity.size)
+        .ok()
+        .filter(|size| *size > 0 && *size <= limit)
+        .ok_or("text_model_invalid")?;
+    let identity = || {
+        plurx_core::fs_secure::std_file_identity(&model.handle)
+            .map_err(|_| "model_changed".to_owned())
+    };
+    if identity()? != model.identity {
+        return Err("model_changed".into());
     }
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        use std::os::fd::AsRawFd;
-        PathBuf::from(format!("/dev/fd/{}", model.handle.as_raw_fd()))
+    active()?;
+    let mut bytes = vec![0_u8; size];
+    for (index, chunk) in bytes.chunks_mut(128 * 1024).enumerate() {
+        active()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            model
+                .handle
+                .read_exact_at(chunk, (index * 128 * 1024) as u64)
+                .map_err(|error| {
+                    tracing::warn!(%error, "Text model metadata read failed");
+                    "text_model_invalid".to_owned()
+                })?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (index, chunk);
+            return Err("engine_unavailable".into());
+        }
     }
-    #[cfg(not(unix))]
-    {
-        model.path.clone()
+    if identity()? != model.identity {
+        return Err("model_changed".into());
+    }
+    active()?;
+    Ok(bytes)
+}
+
+#[cfg(all(test, unix))]
+mod metadata_tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom};
+    fn fixture() -> (tempfile::TempDir, ManagedModel) {
+        let dir = tempfile::tempdir().expect("metadata fixture");
+        let path = dir.path().join("vocab.json");
+        std::fs::write(&path, b"verified vocabulary").expect("fixture bytes");
+        let handle = std::fs::File::open(&path).expect("held metadata");
+        let identity = plurx_core::fs_secure::std_file_identity(&handle).expect("held identity");
+        (
+            dir,
+            ManagedModel {
+                handle,
+                path,
+                identity,
+                sha256: "a".repeat(64),
+            },
+        )
+    }
+    #[test]
+    fn repeated_metadata_reads_ignore_and_preserve_the_held_cursor() {
+        let (_dir, mut model) = fixture();
+        let end = model
+            .handle
+            .seek(SeekFrom::End(0))
+            .expect("held cursor at EOF");
+        let cancel = CancellationToken::new();
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        for _ in 0..2 {
+            assert_eq!(
+                read_metadata(&model, 128, &cancel, deadline).expect("positional bytes"),
+                b"verified vocabulary"
+            );
+            assert_eq!(model.handle.stream_position().expect("held cursor"), end);
+        }
+    }
+    #[test]
+    fn metadata_limits_cancellation_deadline_and_identity_fail_closed() {
+        let (_dir, model) = fixture();
+        let cancel = CancellationToken::new();
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        assert_eq!(
+            read_metadata(&model, 1, &cancel, deadline).expect_err("size bound"),
+            "text_model_invalid"
+        );
+        assert_eq!(
+            read_metadata(&model, 128, &cancel, Instant::now()).expect_err("deadline"),
+            "text_inference_timeout"
+        );
+        cancel.cancel();
+        assert_eq!(
+            read_metadata(&model, 128, &cancel, deadline).expect_err("cancellation"),
+            "worker_interrupted"
+        );
+        std::fs::write(&model.path, b"replaced").expect("changed held object");
+        assert_eq!(
+            read_metadata(&model, 128, &CancellationToken::new(), deadline).expect_err("identity"),
+            "model_changed"
+        );
     }
 }

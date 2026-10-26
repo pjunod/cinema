@@ -34,7 +34,6 @@
 
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
-use std::path::Path;
 
 use tokenizers::decoders::metaspace::Metaspace as MetaspaceDecoder;
 use tokenizers::models::unigram::Unigram;
@@ -139,18 +138,10 @@ struct SpmModel {
 }
 
 impl SpmModel {
-    fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
-        let data = std::fs::read(path)
-            .with_context(|| format!("cannot read the spm model {}", path.display()))?;
+    fn from_spm_bytes(data: &[u8]) -> Result<Self> {
         if data.len() > 2 * 1024 * 1024 {
             bail!("sentencepiece model exceeds limit")
         }
-        Self::from_slice(&data)
-            .with_context(|| format!("cannot parse the spm model {}", path.display()))
-    }
-
-    fn from_slice(data: &[u8]) -> Result<Self> {
         let mut model = Self::default();
         let mut reader = Reader::new(data);
         while !reader.is_empty() {
@@ -211,17 +202,12 @@ impl SpmModel {
 ///
 /// Marian uses a single `vocab.json` for both translation directions, only the spm model differs
 /// between the encoder and the decoder side.
-pub fn tokenizer<P: AsRef<Path>, Q: AsRef<Path>>(spm_file: P, vocab_file: Q) -> Result<Tokenizer> {
-    let spm = SpmModel::from_file(spm_file)?;
-    let vocab_file = vocab_file.as_ref();
-    let vocab: HashMap<String, usize> = {
-        let vocab = std::fs::read(vocab_file)
-            .with_context(|| format!("cannot read the vocab {}", vocab_file.display()))?;
-        serde_json::from_slice(&vocab)
-            .with_context(|| format!("cannot parse the vocab {}", vocab_file.display()))?
-    };
+pub fn tokenizer(spm_bytes: &[u8], vocab_bytes: &[u8]) -> Result<Tokenizer> {
+    let spm = SpmModel::from_spm_bytes(spm_bytes)?;
+    let vocab: HashMap<String, usize> =
+        serde_json::from_slice(vocab_bytes).context("cannot parse the vocab")?;
     let Some(vocab_size) = vocab.values().max().map(|max| max + 1) else {
-        bail!("{} is empty", vocab_file.display())
+        bail!("vocab.json is empty")
     };
 
     // The spm pieces are a subset of the vocab and are not in vocab order, so the vocabulary is
@@ -250,7 +236,7 @@ pub fn tokenizer<P: AsRef<Path>, Q: AsRef<Path>>(spm_file: P, vocab_file: Q) -> 
     let unk_id = match vocab.get("<unk>") {
         Some(&unk_id) => unk_id,
         None if spm.unk_id >= 0 && (spm.unk_id as usize) < vocab_size => spm.unk_id as usize,
-        None => bail!("no <unk> token in {}", vocab_file.display()),
+        None => bail!("no <unk> token in vocab.json"),
     };
 
     let model = Unigram::from(pieces, Some(unk_id), spm.byte_fallback)

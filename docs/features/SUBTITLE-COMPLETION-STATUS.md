@@ -7,20 +7,22 @@
 Companion to the [subtitle generation plan](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md)
 and [progressive translation plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).
 
-The complete implementation is being integrated in one owned clone and one
-batched PR. Owner: Codex /root. Merge state: review findings resolved and independently checked; final qualification is starting. No fast-lane or unit/runtime success is claimed yet. The user will deploy the merged result. **No agent
-deployment is authorized.** Target acceptance includes the server and Apple TV;
-compile evidence alone does not establish physical playback or model accuracy.
+The implementation is built in one owned clone and batched in
+[PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292), owned by Codex /root.
+The PR records current qualification results, merge blockers and the landing
+receipt. Independent review findings are resolved. The user owns deployment;
+no agent deployment is authorized. Physical Apple TV acceptance follows that
+deployment and is distinct from server/runtime or simulator evidence.
 
 | Area | Current implementation | Remaining qualification |
 |---|---|---|
-| On-the-fly captions | Shared progressive worker supports same-language transcription and speech-to-English translation, selected audio ordinal and actual media clock. | Final review, focused regressions, model/runtime and playback evidence. |
-| Existing subtitle translation | Pinned local multilingual-to-English Marian model, durable eight-cue slices, bounded partial storage, explicit stable-ID adoption. | Real model self-test, final regressions and accuracy evidence. |
+| On-the-fly captions | Shared progressive worker supports same-language transcription and speech-to-English translation, selected audio ordinal and actual media clock. | Review closed; focused regressions and model self-tests passed. Progressive-worker and final gate results are recorded on PR #1292. |
+| Existing subtitle translation | Pinned local multilingual-to-English Marian model, durable eight-cue slices, bounded partial storage, explicit stable-ID adoption. | Production multilingual self-test and durable-slice regressions passed; broader human accuracy remains acceptance evidence. |
 | Apple/iOS/tvOS | Setup, three caption operations, synchronized rendering, Stop/seek/audio/auth ownership and Shared read-only delivery implemented. App and test targets compile. | Final tests and Apple TV physical acceptance after user deployment. |
 | Android | Equivalent caption operations and Shared reader; direct downloaded caption attachment repaired. Main and JVM test sources compile. | Final tests and device acceptance. |
 | Web | Speech/text setup and controls, explicit track adoption, attachment handoff and Shared reader integrated. | Final protocol/UI regressions and playback acceptance. |
-| Source/B sharing | Opaque grant-scoped catalog/manifest/segments, snapshot retention, read-only source verification. No Shared viewer inference authority. | Final authorization, retention and restart regressions. |
-| Landing | Construction compilation in progress; no completion PR published yet. | Reconcile current main, commit, final adversarial review, run final checks once, merge green candidate. |
+| Source/B sharing | Opaque grant-scoped catalog/manifest/segments, snapshot retention, read-only source verification. No Shared viewer inference authority. | Focused grant, retention and restart regressions passed; deployed acceptance is separate. |
+| Landing | PR #1292 is the owned integration and qualification record. | Current check results, blockers and merge receipt are maintained on the PR. |
 
 The historical inventory below records the starting point; it is not a claim
 that the newly implemented operations remain absent.
@@ -41,8 +43,36 @@ separate Apple and Android/web readers. It executed no tests.
 | Android transient reads end polling and can starve demand renewal | Android owner | Resolved: bounded concurrent read/renewal children, exact replay and lease expiry. |
 | Text cue IDs accepted at 256 bytes but stored at 128 | Integrator | Resolved: shared 256-byte bound; parser and durable-publication regression definitions. |
 
-The independent reviewer closed all six findings by bounded source review. An additional installer integration blocker was found during preparation: the shared downloader accepted only Whisper URLs. The fix admits only exact immutable compiled text-catalog entries and preserves the existing HTTPS/redirect checks; bounded source review also closed this issue. Real fresh download and inference remain required final checks. No physical Apple TV
+The independent reviewer closed all six findings by bounded source review. An additional installer integration blocker was found during preparation: the shared downloader accepted only Whisper URLs. The fix admits only exact immutable compiled text-catalog entries and preserves the existing HTTPS/redirect checks; bounded source review also closed this issue. Fresh publisher download and production multilingual inference subsequently passed. No physical Apple TV
 or deployed acceptance is implied by static review or compilation.
+
+## Runtime qualification — 2026-10-26
+
+The isolated Linux compiler/runtime target passed 295 focused daemon tests,
+19 core translation/slice contracts and four new weight-loader safety tests.
+Passing cases are retained; failures are rerun individually. Core commands
+used `--features hiqlite-store`; this does not claim a deployed replica run.
+
+Four real durable Install/Verify jobs qualified both speech tasks using the
+pinned whisper.cpp1.9.2 engine, small model and German fixture. The worker used
+its real decoder/inference and receipt publisher; the private SQLite receipts
+survived reopen. This proves the fixture and setup/runtime path, not arbitrary
+movie quality or realtime throughput.
+
+Fresh Marian bundle download and SHA verification succeeded. Inference exposed
+a concrete format mismatch: the publisher's authenticated PyTorch file uses
+legacy protocol1001 serialization, while Candle's normal PTH loader expects a
+ZIP archive. The pinned adapter now reads raw little-endian tensor data through
+a compiled, authenticated layout and the verified held file. Production never
+parses pickle. The developer-only generator checks the full model hash before
+restricted metadata inspection; it reproduced the same 256-storage/258-tensor
+layout twice. Bounds, aliases, cancellation and changed-file tests pass, and
+production French/German/Spanish-to-English inference passed.
+
+The actual progressive worker qualification uses a finite multi-audio clip
+and canonical leased readback; its result and the final fast lane are recorded
+on PR #1292. Device, broader language accuracy, long-form and deployed evidence
+remain separately attributable; none is implied by these fixtures.
 
 ## Scope and initial inventory
 

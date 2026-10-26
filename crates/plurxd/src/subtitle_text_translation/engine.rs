@@ -2,10 +2,9 @@
 use super::{
     artifacts::{self, VerifiedBundle},
     text::TextCue,
-    tokenizer,
+    tokenizer, weights,
 };
-use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
+use candle_core::{Device, Tensor};
 use candle_transformers::models::marian;
 use std::{
     sync::{
@@ -68,9 +67,11 @@ fn run(
     let deadline = Instant::now() + Duration::from_secs(120);
     active(cancel, deadline)?;
     let config: marian::Config = checked(
-        serde_json::from_slice(&checked(
-            std::fs::read(artifacts::held_path(bundle.file("config")?)),
-            "text_model_invalid",
+        serde_json::from_slice(&artifacts::read_metadata(
+            bundle.file("config")?,
+            16 * 1024,
+            cancel,
+            deadline,
         )?),
         "text_model_invalid",
     )?;
@@ -80,28 +81,28 @@ fn run(
     {
         return Err("text_model_invalid".into());
     }
+    let source_spm = artifacts::read_metadata(
+        bundle.file("source_spm")?,
+        2 * 1024 * 1024,
+        cancel,
+        deadline,
+    )?;
+    let target_spm = artifacts::read_metadata(
+        bundle.file("target_spm")?,
+        2 * 1024 * 1024,
+        cancel,
+        deadline,
+    )?;
+    let vocab = artifacts::read_metadata(bundle.file("vocab")?, 8 * 1024 * 1024, cancel, deadline)?;
     let source = checked(
-        tokenizer::tokenizer(
-            artifacts::held_path(bundle.file("source_spm")?),
-            artifacts::held_path(bundle.file("vocab")?),
-        ),
+        tokenizer::tokenizer(&source_spm, &vocab),
         "text_tokenizer_invalid",
     )?;
     let target = checked(
-        tokenizer::tokenizer(
-            artifacts::held_path(bundle.file("target_spm")?),
-            artifacts::held_path(bundle.file("vocab")?),
-        ),
+        tokenizer::tokenizer(&target_spm, &vocab),
         "text_tokenizer_invalid",
     )?;
-    let vb = checked(
-        VarBuilder::from_pth(
-            artifacts::held_path(bundle.file("weights")?),
-            DType::F32,
-            &Device::Cpu,
-        ),
-        "text_model_invalid",
-    )?;
+    let vb = weights::load(bundle.file("weights")?, cancel, deadline)?;
     let mut model = checked(marian::MTModel::new(&config, vb), "text_model_invalid")?;
     let mut output = Vec::with_capacity(cues.len());
     for mut cue in cues {
@@ -230,6 +231,10 @@ mod qualification {
     #[tokio::test]
     #[ignore = "downloads the pinned publisher bundle; requires PLURX_TEXT_QUALIFICATION_ROOT"]
     async fn pinned_publisher_bundle_passes_production_multilingual_self_test() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_test_writer()
+            .try_init();
         let root = std::env::var_os("PLURX_TEXT_QUALIFICATION_ROOT")
             .map(std::path::PathBuf::from)
             .expect("supply an owned persistent model cache outside temporary directories");
