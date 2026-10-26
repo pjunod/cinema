@@ -8562,11 +8562,22 @@ impl RollingProducerIngress {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let sealed_flow_barriers = state.flow.len();
-        state.sealed_flow_barriers = state
-            .sealed_flow_barriers
-            .saturating_add(sealed_flow_barriers);
-        let preceding_producer = Self::take_blocks(&mut state);
+        #[cfg(target_os = "linux")]
+        let pure_probe = matches!(
+            &command,
+            RollingControlCommand::PreparationRequirement { .. }
+        );
+        #[cfg(not(target_os = "linux"))]
+        let pure_probe = false;
+        // A pure control probe must leave producer facts in the original
+        // ingress for its normal actor fold; consuming them would lose them.
+        let (sealed_flow_barriers, preceding_producer) = if pure_probe {
+            (0, RollingProducerIngressBlocks::new())
+        } else {
+            let count = state.flow.len();
+            state.sealed_flow_barriers = state.sealed_flow_barriers.saturating_add(count);
+            (count, Self::take_blocks(&mut state))
+        };
         state.next_sequence = state.next_sequence.saturating_add(1);
         let sequence = state.next_sequence;
         // Stamp only after both ingress fences are held. A publisher cannot
@@ -8886,7 +8897,20 @@ struct OwnedLocalControlRequest {
     _allocation: Option<ActorPayloadAllocation>,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) struct PreparationRequirement {
+    pub(crate) needed: bool,
+    #[cfg(test)]
+    pub(crate) control_peak: usize,
+}
+
 enum RollingControlCommand {
+    #[cfg(target_os = "linux")]
+    PreparationRequirement {
+        request: Box<OwnedLocalControlRequest>,
+        deadline_unix_ms: i64,
+        reply: tokio::sync::oneshot::Sender<Result<PreparationRequirement, ControlStateError>>,
+    },
     StagedObservationIsCurrent {
         fence: AcceptedControlFence,
         incarnation: String,
@@ -9106,6 +9130,8 @@ impl RollingControlCommand {
             Self::SettleProducerFlowSignal { .. } => Some(20),
             Self::StagePreparation { .. } => Some(21),
             Self::RecordDesiredPersisted { .. } => None,
+            #[cfg(target_os = "linux")]
+            Self::PreparationRequirement { .. } => None,
             Self::MayCommitPreparation { .. }
             | Self::BeginAbortPreparation { .. }
             | Self::RejectPreparationCommit { .. } => Some(22),
@@ -12935,6 +12961,28 @@ impl RollingControlActor {
             sealed_flow_barriers,
             command,
         } = envelope;
+        // This probe computes a detached control plan only. In particular it
+        // must not fold producer facts, advance the accepted sequence, claim
+        // expiry, renew a lease, or adopt private observation tokens.
+        #[cfg(target_os = "linux")]
+        let command = match command {
+            RollingControlCommand::PreparationRequirement {
+                request,
+                deadline_unix_ms,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let result = if crate::media_sessions::unix_ms() < deadline_unix_ms {
+                        self.preparation_requirement(published_at, &request)
+                    } else {
+                        Err(ControlStateError::Unavailable)
+                    };
+                    let _ = reply.send(result);
+                }
+                return;
+            }
+            command => command,
+        };
         // Keep the non-Send transition guard inside a lexical scope rather
         // than relying on an explicit `drop` for async Send analysis.
         let (previous_decision_sequence, previous_probe_sequence, was_retired) = {
@@ -13001,6 +13049,10 @@ impl RollingControlActor {
                 ROLLING_CONTROL_COMMANDS[metric_index].fetch_add(1, Ordering::Relaxed);
             }
             match command {
+                #[cfg(target_os = "linux")]
+                RollingControlCommand::PreparationRequirement { .. } => {
+                    unreachable!("pure preparation probe returned before actor mutation")
+                }
                 #[cfg(test)]
                 RollingControlCommand::Renew {
                     kind,
@@ -14858,6 +14910,53 @@ impl RollingControlHandle {
             None,
         )
         .await
+    }
+
+    /// Only a selected rolling owner pays this probe. The original client
+    /// partition and mailbox permit precede every snapshot/Box/oneshot clone.
+    /// The result grants no adoption authority; real Control recomputes it.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn preparation_requirement_before(
+        &self,
+        generation: &str,
+        owner_epoch: u64,
+        request: &ControlRequestV1,
+        deadline_unix_ms: i64,
+    ) -> Result<Option<PreparationRequirement>, ControlStateError> {
+        if self.reply_budget.is_none() {
+            return Ok(None);
+        }
+        let remaining =
+            inherited_exchange_budget(deadline_unix_ms, crate::media_sessions::unix_ms())
+                .ok_or(ControlStateError::Unavailable)?;
+        tokio::time::timeout(remaining, async {
+            let response = self
+                .request_allocated_control(
+                    OwnedLocalControlRequest::projected_wire_bytes(generation, request),
+                    |reply, allocation| RollingControlCommand::PreparationRequirement {
+                        request: Box::new(OwnedLocalControlRequest {
+                            generation: generation.to_owned(),
+                            owner_epoch,
+                            client_instance_id: request.client_instance_id.clone(),
+                            sequence: request.sequence,
+                            snapshot: PlaybackDemandSnapshot::from(request),
+                            prepared_successor: PreparedSuccessorObservation::Inactive,
+                            consumer_metadata_bytes: Some(0),
+                            _allocation: allocation,
+                        }),
+                        deadline_unix_ms,
+                        reply,
+                    },
+                )
+                .await
+                .map_err(|_| ControlStateError::Unavailable)?;
+            response
+                .await
+                .map_err(|_| ControlStateError::Unavailable)?
+                .map(Some)
+        })
+        .await
+        .map_err(|_| ControlStateError::Unavailable)?
     }
 
     pub(crate) async fn control_before_with_consumer(

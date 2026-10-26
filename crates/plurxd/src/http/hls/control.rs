@@ -3386,137 +3386,190 @@ async fn control_local_with_observation(
             }
             Arc::new(committer) as Arc<dyn crate::playback_control::TerminalControlCommitter>
         });
-    // Resolve the engine-local gate before actor acceptance. It must remain
-    // available even on a request without an acknowledgement: an owner-epoch
-    // rollover can itself produce the abort directive that transfers an
-    // inherited preparation away from the now-fenced old executor.
-    let Some(preparation_gate) = state
-        .transcode
-        .session_preparation_gate(&route.session_id)
-        .await
-    else {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
-        return control_error(
-            StatusCode::TOO_EARLY,
-            "owner_transition",
-            "the durable route is active but its local worker is not yet available",
-            Some(route.incarnation_id.clone()),
-            Some(owner_epoch),
-            Some(500),
-            None,
-        );
-    };
     #[cfg(target_os = "linux")]
-    let service_bytes = terminal_memory::preparation_services(&state.node_id);
+    let (needs_preparation_context, selected_end) =
+        if request.demand == crate::playback_control::PlaybackDemand::End {
+            match state
+                .transcode
+                .selected_preparation_requirement(
+                    &route.session_id,
+                    &route.incarnation_id,
+                    owner_epoch,
+                    &request,
+                    deadline_unix_ms,
+                )
+                .await
+            {
+                Ok(Some(required)) => (required, true),
+                Ok(None) => (true, false),
+                Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            }
+        } else {
+            (true, false)
+        };
     #[cfg(not(target_os = "linux"))]
-    let service_bytes = None;
-    let Some(service_wait_budget) =
-        crate::playback_control::inherited_exchange_budget(deadline_unix_ms, unix_ms())
-    else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    let (service_allocation, service_lifetime) = match tokio::time::timeout(
-        service_wait_budget,
-        state
+    let needs_preparation_context = true;
+    let preparation_admission = if needs_preparation_context {
+        // Resolve the engine-local gate before actor acceptance. It must remain
+        // available even on a request without an acknowledgement: an owner-epoch
+        // rollover can itself produce the abort directive that transfers an
+        // inherited preparation away from the now-fenced old executor.
+        let Some(preparation_gate) = state
             .transcode
-            .reserve_rolling_control_context(&route.session_id, service_bytes),
-    )
-    .await
-    {
-        Ok(Ok(custody)) => custody,
-        _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-    let services =
-        PreparationSettlementServices::capture(state, service_allocation, service_lifetime);
-    #[cfg(target_os = "linux")]
-    if let Some(allocation) = services._allocation.as_ref() {
-        allocation
-            .validate_actual(
-                terminal_memory::preparation_services_value(&services)
-                    .expect("same service view projection"),
-            )
-            .expect("service node ID clone exceeded original source capacity");
-    }
-    let services = Arc::new(services);
-    let preparation_status = state
-        .transcode
-        .hls_session_status_publication(&route.session_id)
-        .await
-        .and_then(|publication| publication.result.ok());
-    // A missing ledger can mean maintenance already removed an Aborting
-    // successor. Acknowledgements still need an owned executor to settle the
-    // exact actor slot. Unknown reads must also reach frozen actor replay.
-    let preparation_reservation = if staged_generation.is_some()
-        || ledger_unavailable
-        || request.acknowledgement.is_some()
-        || owner_epoch > 1
-        || request.demand == crate::playback_control::PlaybackDemand::End
-    {
-        let Some(reservation) =
-            reserve_preparation_settlement(state, deadline_unix_ms, slots).await
+            .session_preparation_gate(&route.session_id)
+            .await
         else {
-            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
             return control_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "control_unavailable",
-                "preparation settlement capacity or serving authority is unavailable",
+                StatusCode::TOO_EARLY,
+                "owner_transition",
+                "the durable route is active but its local worker is not yet available",
                 Some(route.incarnation_id.clone()),
                 Some(owner_epoch),
                 Some(500),
                 None,
             );
         };
-        Some(reservation)
+        #[cfg(target_os = "linux")]
+        let service_bytes = terminal_memory::preparation_services(&state.node_id);
+        #[cfg(not(target_os = "linux"))]
+        let service_bytes = None;
+        let Some(service_wait_budget) =
+            crate::playback_control::inherited_exchange_budget(deadline_unix_ms, unix_ms())
+        else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let (service_allocation, service_lifetime) = match tokio::time::timeout(
+            service_wait_budget,
+            state
+                .transcode
+                .reserve_rolling_control_context(&route.session_id, service_bytes),
+        )
+        .await
+        {
+            Ok(Ok(custody)) => custody,
+            _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        let services =
+            PreparationSettlementServices::capture(state, service_allocation, service_lifetime);
+        #[cfg(target_os = "linux")]
+        if let Some(allocation) = services._allocation.as_ref() {
+            allocation
+                .validate_actual(
+                    terminal_memory::preparation_services_value(&services)
+                        .expect("same service view projection"),
+                )
+                .expect("service node ID clone exceeded original source capacity");
+        }
+        let services = Arc::new(services);
+        let preparation_status = state
+            .transcode
+            .hls_session_status_publication(&route.session_id)
+            .await
+            .and_then(|publication| publication.result.ok());
+        // A missing ledger can mean maintenance already removed an Aborting
+        // successor. Acknowledgements still need an owned executor to settle the
+        // exact actor slot. Unknown reads must also reach frozen actor replay.
+        let preparation_reservation = if staged_generation.is_some()
+            || ledger_unavailable
+            || request.acknowledgement.is_some()
+            || owner_epoch > 1
+            || request.demand == crate::playback_control::PlaybackDemand::End
+        {
+            let Some(reservation) =
+                reserve_preparation_settlement(state, deadline_unix_ms, slots).await
+            else {
+                crate::playback_control::record(
+                    crate::playback_control::MetricOutcome::Unavailable,
+                );
+                return control_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_unavailable",
+                    "preparation settlement capacity or serving authority is unavailable",
+                    Some(route.incarnation_id.clone()),
+                    Some(owner_epoch),
+                    Some(500),
+                    None,
+                );
+            };
+            Some(reservation)
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let context_allocation = if let Some(source) = services._allocation.as_ref() {
+            let Some(bytes) = terminal_memory::preparation_context_parts(
+                route,
+                &start,
+                &recipe,
+                &request,
+                preparation_status.as_ref(),
+            ) else {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            match source.reserve_related(bytes) {
+                Ok(allocation) => Some(allocation),
+                Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            }
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
+        let context_allocation = None;
+        let context = Arc::new(PreparationSettlementContext {
+            gate: preparation_gate,
+            route: route.clone(),
+            start: start.clone(),
+            recipe: recipe.clone(),
+            request: request.clone(),
+            status: preparation_status,
+            _allocation: context_allocation,
+            state: services,
+        });
+        #[cfg(target_os = "linux")]
+        if let Some(allocation) = context._allocation.as_ref() {
+            allocation
+                .validate_actual(
+                    terminal_memory::preparation_context_value(&context)
+                        .expect("same immutable preparation context projection"),
+                )
+                .expect("preparation DTO clones exceeded original source capacities");
+        }
+        Some(Arc::new(DurablePreparationSettlementAdmission {
+            reservation: std::sync::Mutex::new(preparation_reservation),
+            receipt: std::sync::Mutex::new(None),
+            context,
+        }))
     } else {
         None
     };
+    let preparation_admission_trait = preparation_admission.as_ref().map(|admission| {
+        Arc::clone(admission) as Arc<dyn crate::playback_control::PreparationSettlementAdmission>
+    });
     #[cfg(target_os = "linux")]
-    let context_allocation = if let Some(source) = services._allocation.as_ref() {
-        let Some(bytes) = terminal_memory::preparation_context_parts(
-            route,
-            &start,
-            &recipe,
-            &request,
-            preparation_status.as_ref(),
-        ) else {
+    let _original_control_input = if selected_end {
+        let Some(bytes) = request.requested_control_input_bytes() else {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
-        match source.reserve_related(bytes) {
-            Ok(allocation) => Some(allocation),
-            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        let Some(remaining) =
+            crate::playback_control::inherited_exchange_budget(deadline_unix_ms, unix_ms())
+        else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        match tokio::time::timeout(
+            remaining,
+            state
+                .transcode
+                .reserve_rolling_control_payload(&route.session_id, bytes),
+        )
+        .await
+        {
+            Ok(Ok(Some(allocation))) => Some(allocation),
+            _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     } else {
         None
     };
-    #[cfg(not(target_os = "linux"))]
-    let context_allocation = None;
-    let context = Arc::new(PreparationSettlementContext {
-        gate: preparation_gate,
-        route: route.clone(),
-        start: start.clone(),
-        recipe: recipe.clone(),
-        request: request.clone(),
-        status: preparation_status,
-        _allocation: context_allocation,
-        state: services,
-    });
-    #[cfg(target_os = "linux")]
-    if let Some(allocation) = context._allocation.as_ref() {
-        allocation
-            .validate_actual(
-                terminal_memory::preparation_context_value(&context)
-                    .expect("same immutable preparation context projection"),
-            )
-            .expect("preparation DTO clones exceeded original source capacities");
-    }
-    let preparation_admission = Some(Arc::new(DurablePreparationSettlementAdmission {
-        reservation: std::sync::Mutex::new(preparation_reservation),
-        receipt: std::sync::Mutex::new(None),
-        context,
-    }));
-    let preparation_admission_trait = preparation_admission.as_ref().map(|admission| {
-        Arc::clone(admission) as Arc<dyn crate::playback_control::PreparationSettlementAdmission>
-    });
     let result = match state
         .transcode
         .hls_session_control_with_terminal(

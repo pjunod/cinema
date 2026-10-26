@@ -6,6 +6,27 @@ use super::*;
 pub(crate) use crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
 
 impl TranscodeManager {
+    /// None identifies the existing legacy/VOD route; selected rolling End
+    /// probes its own actor with the same original exchange deadline.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn selected_preparation_requirement(
+        &self,
+        session_id: &str,
+        generation: &str,
+        owner_epoch: u64,
+        request: &crate::playback_control::ControlRequestV1,
+        deadline_unix_ms: i64,
+    ) -> Result<Option<bool>, crate::playback_control::ControlStateError> {
+        let Some(session) = self.sessions.lock().await.get(session_id).cloned() else {
+            return Ok(None);
+        };
+        session
+            .control
+            .preparation_requirement_before(generation, owner_epoch, request, deadline_unix_ms)
+            .await
+            .map(|requirement| requirement.map(|value| value.needed))
+    }
+
     pub(crate) async fn reserve_rolling_control_context(
         &self,
         session_id: &str,

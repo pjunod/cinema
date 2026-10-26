@@ -827,6 +827,22 @@ impl ControlState {
         snapshot: &PlaybackDemandSnapshot,
     ) -> PreparedFiniteControl {
         let (mut next, result, private) = accept_step_detached(self, now, request);
+        // Selected End owns the same abort that terminal actor retirement
+        // would perform. Compute it on private tokens before accounting and
+        // adoption, so a newly staged slot cannot outrun missing admission.
+        // Preserve an acknowledgement/rollover directive already bound here.
+        if snapshot.demand == PlaybackDemand::End
+            && matches!(&result, Ok(value) if value.disposition == ControlDisposition::Accepted)
+            && next.prior_preparation_directive.is_none()
+        {
+            if let Some(staged) = next.preparation.staged_incarnation_id().map(str::to_owned) {
+                next.abort_preparation(&staged);
+                next.prior_preparation_directive = Some(PreparationDirective::Abort {
+                    staged_incarnation_id: staged,
+                    acknowledgement_rejected: false,
+                });
+            }
+        }
         let directive = next.preparation_directive();
         let observation = if matches!(
             &result,
@@ -934,7 +950,62 @@ impl RollingControlActor {
     }
 }
 
+impl ControlRequestV1 {
+    /// Exactly the owned fields in PlaybackDemandSnapshot::from, including
+    /// its 64-byte digest. Private serializer/wire scratch remains Unknown.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn requested_snapshot_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = 64;
+        bytes = add(
+            bytes,
+            self.intent
+                .as_ref()
+                .map_or(0, |value| value.lifetime_id.capacity()),
+        )?;
+        bytes = add(
+            bytes,
+            self.capabilities
+                .as_ref()
+                .map_or(Some(0), DynamicCapabilities::requested_heap_bytes)?,
+        )?;
+        bytes = add(
+            bytes,
+            self.observation
+                .as_ref()
+                .map_or(0, |value| string(&value.error_detail)),
+        )?;
+        add(
+            bytes,
+            self.acknowledgement
+                .as_ref()
+                .map_or(0, |value| value.action_id.capacity()),
+        )
+    }
+
+    /// The input snapshot and the manager's temporary VOD-lookup clone share
+    /// this short original-client reservation. Actor-owned Box/replies have
+    /// their independent reservation before construction/adoption.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn requested_control_input_bytes(&self) -> Option<usize> {
+        self.requested_snapshot_heap_bytes()?.checked_mul(2)
+    }
+}
+
 impl OwnedLocalControlRequest {
+    #[cfg(target_os = "linux")]
+    pub(super) fn projected_wire_bytes(
+        generation: &str,
+        request: &ControlRequestV1,
+    ) -> Option<usize> {
+        add(
+            add(std::mem::size_of::<Self>(), generation.len())?,
+            add(
+                request.client_instance_id.capacity(),
+                request.requested_snapshot_heap_bytes()?,
+            )?,
+        )
+    }
+
     pub(super) fn projected_borrowed_bytes(request: &LocalControlRequest<'_>) -> Option<usize> {
         let LocalControlRequest {
             generation,
@@ -958,6 +1029,71 @@ impl OwnedLocalControlRequest {
 }
 
 #[cfg(target_os = "linux")]
+struct PreparedActorLayout {
+    state_bytes: usize,
+    reply_bytes: usize,
+    consumer_bytes: usize,
+    preparation_bytes: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl RollingControlActor {
+    fn finite_actor_layout(
+        &self,
+        request: &OwnedLocalControlRequest,
+        plan: &PreparedFiniteControl,
+    ) -> Result<PreparedActorLayout, ()> {
+        let incoming = request.snapshot.requested_heap_bytes().ok_or(())?;
+        let retained_caps = plan
+            .next
+            .last_capabilities
+            .as_ref()
+            .map_or(Some(0), DynamicCapabilities::requested_heap_bytes)
+            .ok_or(())?;
+        let state_bytes = add(
+            add(plan.retained_state_bytes().ok_or(())?, incoming).ok_or(())?,
+            retained_caps,
+        )
+        .ok_or(())?;
+        // Current state covers an exact terminal replay before the private
+        // plan is adopted. External plan payload covers an accepted exchange.
+        let external = add(
+            plan.external_payload_bytes().ok_or(())?,
+            self.control.requested_heap_bytes().ok_or(())?,
+        )
+        .ok_or(())?;
+        let reply_bytes = add(
+            add(std::mem::size_of::<RollingControlOutcome>(), external).ok_or(())?,
+            self.finite_snapshot_control_bound(request).ok_or(())?,
+        )
+        .ok_or(())?;
+        // Immutable Session metadata is borrowed before request construction;
+        // the producer strings come from this SAME accepted snapshot source.
+        let metadata = request.consumer_metadata_bytes.ok_or(())?;
+        let consumer_bytes = add(
+            add(
+                std::mem::size_of::<LocalControlResult>(),
+                std::mem::size_of::<crate::transcode::SessionInfo>(),
+            )
+            .ok_or(())?,
+            add(
+                add(metadata, external).ok_or(())?,
+                self.finite_operational_snapshot_bound().ok_or(())?,
+            )
+            .ok_or(())?,
+        )
+        .ok_or(())?;
+        Ok(PreparedActorLayout {
+            state_bytes,
+            reply_bytes,
+            consumer_bytes,
+            preparation_bytes: add(std::mem::size_of::<PreparationControlOutcome>(), external)
+                .ok_or(())?,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub(super) struct PreparedActorAccounting {
     pub(super) _transient: ActorPayloadAllocation,
     pub(super) state: ActorPayloadAllocation,
@@ -970,6 +1106,87 @@ pub(super) struct PreparedActorAccounting {
 
 #[cfg(target_os = "linux")]
 impl RollingControlActor {
+    /// Same detached compute/measure step as real Control, without adoption.
+    pub(super) fn preparation_requirement(
+        &self,
+        now: Instant,
+        request: &OwnedLocalControlRequest,
+    ) -> Result<PreparationRequirement, ControlStateError> {
+        let budget = self
+            .reply_budget
+            .as_ref()
+            .ok_or(ControlStateError::Unavailable)?;
+        let bytes = self
+            .control
+            .finite_prepare_transient_bytes(
+                &request.generation,
+                &request.snapshot,
+                &request.prepared_successor,
+            )
+            .and_then(|bytes| add(bytes, std::mem::size_of::<PreparedFiniteControl>()))
+            .ok_or(ControlStateError::Unavailable)?;
+        let transient = budget
+            .reserve(bytes)
+            .map_err(|_| ControlStateError::Unavailable)?;
+        let plan = self.control.prepare_finite_actor_control_at(
+            now,
+            ControlRequestView {
+                generation: &request.generation,
+                owner_epoch: request.owner_epoch,
+                client_instance_id: &request.client_instance_id,
+                sequence: request.sequence,
+                acceptance: ControlAcceptance::observed(
+                    request.snapshot.platform(),
+                    &request.prepared_successor,
+                    request.snapshot.acknowledgement.as_ref(),
+                    request.snapshot.request_fingerprint.as_deref(),
+                    &request.snapshot.selection,
+                    request.snapshot.capabilities.as_ref(),
+                ),
+            },
+            &request.snapshot,
+        );
+        transient
+            .validate_actual(
+                plan.requested_heap_bytes()
+                    .ok_or(ControlStateError::Unavailable)?,
+            )
+            .map_err(|_| ControlStateError::Unavailable)?;
+        #[cfg(test)]
+        let control_peak = {
+            use plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot;
+            let layout = self
+                .finite_actor_layout(request, &plan)
+                .map_err(|_| ControlStateError::Unavailable)?;
+            let payloads = [
+                ControlState::initial_finite_heap_bytes(),
+                request
+                    .snapshot
+                    .requested_heap_bytes()
+                    .and_then(|n| n.checked_mul(2)),
+                Some(std::mem::size_of::<OwnedLocalControlRequest>())
+                    .and_then(|n| add(n, request.generation.len()))
+                    .and_then(|n| add(n, request.client_instance_id.capacity()))
+                    .and_then(|n| add(n, request.snapshot.requested_heap_bytes()?)),
+                self.finite_control_transient_bound(request),
+                Some(layout.state_bytes),
+                Some(layout.reply_bytes),
+                Some(layout.consumer_bytes),
+            ];
+            payloads
+                .into_iter()
+                .try_fold(0usize, |total, bytes| {
+                    add(total, FiniteClientSlot::required_bytes(bytes?)?)
+                })
+                .ok_or(ControlStateError::Unavailable)?
+        };
+        Ok(PreparationRequirement {
+            needed: plan.directive.is_some(),
+            #[cfg(test)]
+            control_peak,
+        })
+    }
+
     pub(super) fn prepare_finite_actor_accounting(
         &mut self,
         now: Instant,
@@ -1000,62 +1217,27 @@ impl RollingControlActor {
             &request.snapshot,
         );
         transient.validate_actual(plan.requested_heap_bytes().ok_or(())?)?;
-        let incoming = request.snapshot.requested_heap_bytes().ok_or(())?;
-        let retained_caps = plan
-            .next
-            .last_capabilities
-            .as_ref()
-            .map_or(Some(0), DynamicCapabilities::requested_heap_bytes)
-            .ok_or(())?;
-        let state_bytes = add(
-            add(plan.retained_state_bytes().ok_or(())?, incoming).ok_or(())?,
-            retained_caps,
-        )
-        .ok_or(())?;
-        let state = budget.reserve(state_bytes)?;
-        // Current state covers an exact terminal replay before the private
-        // plan is adopted. External plan payload covers an accepted exchange.
-        let external = add(
-            plan.external_payload_bytes().ok_or(())?,
-            self.control.requested_heap_bytes().ok_or(())?,
-        )
-        .ok_or(())?;
-        let reply_bytes = add(
-            add(std::mem::size_of::<RollingControlOutcome>(), external).ok_or(())?,
-            self.finite_snapshot_control_bound(request).ok_or(())?,
-        )
-        .ok_or(())?;
-        // Immutable Session metadata is borrowed before request construction;
-        // the producer strings come from this SAME accepted snapshot source.
-        let metadata = request.consumer_metadata_bytes.ok_or(())?;
-        let consumer_bytes = add(
-            add(
-                std::mem::size_of::<LocalControlResult>(),
-                std::mem::size_of::<crate::transcode::SessionInfo>(),
-            )
-            .ok_or(())?,
-            add(
-                add(metadata, external).ok_or(())?,
-                self.finite_operational_snapshot_bound().ok_or(())?,
-            )
-            .ok_or(())?,
-        )
-        .ok_or(())?;
-        let consumer = Some(budget.reserve(consumer_bytes)?);
+        // The probe is advisory: a staged/rollover race can change this same
+        // actor's plan. Refuse before adoption, sequence, or lease mutation.
+        if plan.directive.is_some() && !preparation {
+            return Err(());
+        }
+        let layout = self.finite_actor_layout(request, &plan)?;
+        let state = budget.reserve(layout.state_bytes)?;
+        let consumer = Some(budget.reserve(layout.consumer_bytes)?);
         let terminal_consumer = if terminal {
-            Some(budget.reserve(consumer_bytes)?)
+            Some(budget.reserve(layout.consumer_bytes)?)
         } else {
             None
         };
-        let reply = budget.reserve(reply_bytes)?;
+        let reply = budget.reserve(layout.reply_bytes)?;
         let terminal = if terminal {
-            Some(budget.reserve(reply_bytes)?)
+            Some(budget.reserve(layout.reply_bytes)?)
         } else {
             None
         };
         let preparation = if preparation {
-            let bytes = add(std::mem::size_of::<PreparationControlOutcome>(), external).ok_or(())?;
-            Some(budget.reserve(bytes)?)
+            Some(budget.reserve(layout.preparation_bytes)?)
         } else {
             None
         };
