@@ -2578,3 +2578,178 @@ fn a_line_logged_by_a_vod_child_keeps_the_vodserve_target() {
         .expect("the failed discovery is logged");
     assert_eq!(refused.target, "plurxd::vodserve");
 }
+
+/// This is compatibility admission before native entry. A requested hardware
+/// encoder is not evidence of an available device, and no producer is started.
+#[tokio::test]
+async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_zero_limits() {
+    use plurx_core::resource_settings::{CapacityUpdate, LimitChoice, ReadState};
+    use plurx_core::store::SettingsStore as _;
+
+    let base = crate::test_tempdir().expect("continuous settings fixture");
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    let sqlite = Arc::new(SqliteStore::open_in_memory().expect("actual capacity Store"));
+    for key in [
+        plurx_core::store::keys::MAX_HW_SESSIONS,
+        plurx_core::store::keys::SW_POOL_THREADS,
+    ] {
+        sqlite
+            .put_setting(key, "0")
+            .await
+            .expect("legacy zero cache");
+    }
+    let frozen = Arc::get_mut(&mut encoding).expect("unshared frozen request");
+    frozen.plan = encoded_plan(&file, &frozen.options, plurx_core::transcode::Encoder::Qsv);
+    frozen.resources = crate::admission::TranscodeResourceEstimate::of(
+        &frozen.plan,
+        &crate::admission::Workload::of(&file, frozen.options.target_height),
+    );
+    assert!(
+        frozen.resources.hardware_slot,
+        "request needs compatibility slot"
+    );
+    frozen.store = Arc::clone(&sqlite) as Arc<dyn Store>;
+    let mut rendition = synthetic_rendition(base.path()).await;
+    let unpublished = Arc::get_mut(&mut rendition).expect("unpublished original rendition");
+    unpublished.recipe.file = file;
+    unpublished.recipe.encoding = Some(Arc::clone(&encoding));
+    let serve = local_serve(
+        base.path().join("continuous-group"),
+        Arc::clone(&sqlite) as Arc<dyn Store>,
+    );
+    let _build_gate = serve
+        .shared
+        .rendition_build_gate(&rendition.key)
+        .lock_owned()
+        .await;
+    assert!(
+        serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .insert(rendition.key.clone(), Arc::clone(&rendition))
+            .is_none()
+    );
+    let media = [rendition];
+    let baseline = encoding.admissions.snapshot();
+    let snapshot = sqlite
+        .resource_capacity_snapshot()
+        .await
+        .expect("coherent legacy snapshot")
+        .expect("installed capacity schema");
+    assert_eq!(
+        plurx_core::resource_settings::ResourceSettings::from_snapshot(&snapshot.values)
+            .hardware_sessions
+            .state,
+        ReadState::LegacyAmbiguous
+    );
+    assert!(
+        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+            .await
+            .is_err(),
+        "legacy hardware zero remains disabled"
+    );
+
+    assert!(
+        sqlite
+            .put_resource_capacity(&CapacityUpdate {
+                expected_revision: snapshot.revision,
+                hardware_sessions: Some(LimitChoice::Explicit { value: 0 }),
+                software_pool_threads: Some(LimitChoice::Explicit { value: 0 }),
+            })
+            .await
+            .expect("typed explicit zero")
+    );
+    assert!(
+        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+            .await
+            .is_err(),
+        "explicit hardware zero remains disabled"
+    );
+
+    let explicit = sqlite
+        .resource_capacity_snapshot()
+        .await
+        .expect("explicit snapshot")
+        .expect("installed capacity schema");
+    assert!(
+        sqlite
+            .put_resource_capacity(&CapacityUpdate {
+                expected_revision: explicit.revision,
+                hardware_sessions: Some(LimitChoice::Automatic),
+                software_pool_threads: Some(LimitChoice::Automatic),
+            })
+            .await
+            .expect("explicit Automatic selection")
+    );
+    let automatic = sqlite
+        .resource_capacity_snapshot()
+        .await
+        .expect("Automatic snapshot")
+        .expect("installed capacity schema");
+    for key in [
+        plurx_core::store::keys::MAX_HW_SESSIONS,
+        plurx_core::store::keys::SW_POOL_THREADS,
+    ] {
+        assert_eq!(
+            automatic.values.get(key).map(String::as_str),
+            Some("0"),
+            "Automatic preserves the original conservative rollback cache"
+        );
+    }
+    let permits =
+        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+            .await
+            .expect("verified Automatic ignores both zero rollback caches");
+    assert_eq!(permits.len(), 1);
+    assert_eq!(
+        encoding.admissions.snapshot().hardware_used,
+        baseline.hardware_used + 1
+    );
+    drop(permits);
+    assert_eq!(
+        encoding.admissions.snapshot().hardware_used,
+        baseline.hardware_used
+    );
+    assert_eq!(
+        encoding.admissions.snapshot().software_used,
+        baseline.software_used
+    );
+
+    let before_zero = sqlite
+        .resource_capacity_snapshot()
+        .await
+        .expect("current revision")
+        .expect("installed capacity schema");
+    assert!(
+        sqlite
+            .put_resource_capacity(&CapacityUpdate {
+                expected_revision: before_zero.revision,
+                hardware_sessions: None,
+                software_pool_threads: Some(LimitChoice::Explicit { value: 0 }),
+            })
+            .await
+            .expect("explicit serialized software policy")
+    );
+    let permits =
+        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+            .await
+            .expect("software zero permits the original idle-pool family");
+    assert!(
+        encoding
+            .admissions
+            .try_admit_software(usize::MAX, 1, crate::admission::Priority::Speculative)
+            .is_none(),
+        "the actual exclusive zero-budget family blocks another software claimant"
+    );
+    drop(permits);
+    assert_eq!(
+        encoding.admissions.snapshot().hardware_used,
+        baseline.hardware_used
+    );
+    assert_eq!(
+        encoding.admissions.snapshot().software_used,
+        baseline.software_used
+    );
+}

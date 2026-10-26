@@ -1427,10 +1427,7 @@ impl VodServe {
         }
         let Ok(Ok((hardware, software))) = tokio::time::timeout(
             Duration::from_secs(1),
-            first.store.get_setting_pair(
-                plurx_core::store::keys::MAX_HW_SESSIONS,
-                plurx_core::store::keys::SW_POOL_THREADS,
-            ),
+            plurx_core::resource_settings::admission_pair(first.store.as_ref()),
         )
         .await
         else {
