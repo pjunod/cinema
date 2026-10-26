@@ -33,6 +33,10 @@ const MAX_LOCAL_ATTEMPTS: usize = 64;
 /// or allocator upper bound.
 pub(super) const PLANNING_TO_R_HANDOFF_BYTES: usize = 16 * 1024 * 1024;
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the original prepared acknowledgment inline in the bounded coordinator handoff; boxing introduces a new allocation beside the measured owner frame."
+)]
 pub(crate) enum AdaptivePrepareStart {
     Prepared(crate::media_sessions::AdaptiveAttemptPreparedV1),
     Pending,
@@ -92,9 +96,7 @@ pub(super) fn planning_snapshot_requested_heap_bytes(
 fn control_binding_bytes(
     binding: &plurx_core::store::adaptive_resource_attempts::RequestBinding,
 ) -> Option<usize> {
-    if binding.principal.local_user_id().is_none() {
-        return None;
-    }
+    binding.principal.local_user_id()?;
     checked_caps([
         binding.key.request_id.capacity(),
         binding.request_fingerprint.capacity(),
@@ -235,9 +237,7 @@ pub(super) fn projected_application_owner_bytes(
     coordinator_frame_bytes: usize,
     control_frame_bytes: usize,
 ) -> Option<usize> {
-    if claim.binding.principal.local_user_id().is_none() {
-        return None;
-    }
+    claim.binding.principal.local_user_id()?;
     let binding = &claim.binding;
     let key = &claim.key;
     let strings = [
@@ -319,7 +319,6 @@ enum PlanningState {
     Empty,
     Original(FixedPlanningProbeOwner),
     Closing(FixedPlanningProbeCleanup),
-    Closed,
 }
 
 fn handoff_planning_cleanup(planning: &mut PlanningState) {
@@ -340,7 +339,7 @@ async fn finish_original_planning(
             .await
             .map_err(|error| format!("closing adaptive fixed planning native owner: {error}"))?,
         PlanningState::Closing(_) => return Ok(()),
-        PlanningState::Empty | PlanningState::Closed => {
+        PlanningState::Empty => {
             return Err("adaptive fixed planning original owner is absent".into());
         }
     }
@@ -528,7 +527,7 @@ impl AttemptEntry {
             .await?;
         }
         match &mut *planning {
-            PlanningState::Empty | PlanningState::Closed => Ok(true),
+            PlanningState::Empty => Ok(true),
             PlanningState::Original(_) => unreachable!("original P close was attempted above"),
             PlanningState::Closing(cleanup) => {
                 cleanup
@@ -784,7 +783,7 @@ impl super::TranscodeManager {
     /// negative checks. The admitted P collector supplies the sole fresh
     /// source/probe observation; no daemon pathname open or legacy FFprobe
     /// may precede it on this selected path.
-    pub(crate) async fn prepare_adaptive_worker_recipe(
+    pub(super) async fn prepare_adaptive_worker_recipe(
         &self,
         _state: &crate::state::AppState,
         envelope: &crate::media_sessions::RemoteStartRequest,
@@ -1172,7 +1171,7 @@ impl super::TranscodeManager {
 
     /// Store Adopt is replayed from the one retained DTO; only a known exact
     /// result lets this worker publish the already prepared Rendition.
-    pub(crate) async fn adopt_adaptive_attempt(
+    pub(super) async fn adopt_adaptive_attempt(
         &self,
         entry: &Arc<AttemptEntry>,
         adoption: plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
@@ -1559,7 +1558,7 @@ impl super::TranscodeManager {
     /// Fence the exact Store attempt, then hand its original finite owner to
     /// the existing closing registry. The control task calling this method is
     /// retained on `AttemptEntry`; HTTP cancellation cannot drop the owner.
-    pub(crate) async fn cancel_adaptive_attempt(
+    pub(super) async fn cancel_adaptive_attempt(
         &self,
         entry: &Arc<AttemptEntry>,
         fence: plurx_core::store::adaptive_resource_attempts::AttemptFence,
@@ -1895,7 +1894,11 @@ impl super::TranscodeManager {
     /// Install the charged original owner and its immutable Store Prepared
     /// operation before the first Store await. A lost peer reply replays that
     /// exact operation from this same entry; it never mints a replacement.
-    pub(crate) async fn record_adaptive_prepared(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "This atomic handoff binds the original entry, claim, recipe, settings, deadline and charged size before Store await; no replacement owner or heap argument bundle is introduced."
+    )]
+    pub(super) async fn record_adaptive_prepared(
         &self,
         entry: &Arc<AttemptEntry>,
         claim: AttemptClaim,
@@ -2213,17 +2216,19 @@ mod tests {
             .expect("retain original coordinator before entry");
         assert!(frame_rx.await.expect("measured original frame") > 0);
         entered_rx.await.expect("entered after registration");
-        let task = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 if let Some(task) = entry.take_finished_coordinator() {
-                    break task;
+                    break tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                        .await
+                        .expect("original task join deadline")
+                        .expect("original task joined");
                 }
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("original task finished");
-        task.await.expect("original task joined");
         assert!(entry.no_original_tasks_or_application());
     }
 }

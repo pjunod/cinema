@@ -1,3 +1,7 @@
+#![allow(
+    clippy::unwrap_used,
+    reason = "Original-file fixture assertions deliberately fail the test on the opposite result; production is checked separately."
+)]
 use super::*;
 use std::io::Write;
 

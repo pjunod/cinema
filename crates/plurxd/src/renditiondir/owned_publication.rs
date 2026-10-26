@@ -12,7 +12,10 @@ impl PendingWrites {
         tokio::sync::oneshot::Receiver<()>,
         std::sync::mpsc::Sender<()>,
     ) {
-        let mut barrier = self.native_barrier.lock().unwrap();
+        let mut barrier = self
+            .native_barrier
+            .lock()
+            .expect("original publication fixture");
         assert!(barrier.is_none());
         let (acquired, observed) = tokio::sync::oneshot::channel();
         let (resume, release) = std::sync::mpsc::channel();
@@ -25,17 +28,27 @@ impl PendingWrites {
         &self,
         native: &std::sync::Arc<std::sync::Mutex<native_publication::PublicationIo>>,
     ) -> io::Result<()> {
-        let barrier = self.native_barrier.lock().unwrap().take();
+        let barrier = self
+            .native_barrier
+            .lock()
+            .expect("original publication fixture")
+            .take();
         if let Some(barrier) = barrier {
-            native.lock().unwrap().acquire()?;
+            native
+                .lock()
+                .expect("original publication fixture")
+                .acquire()?;
             let _ = barrier.acquired.send(());
             barrier
                 .release
                 .recv()
                 .map_err(|_| io::Error::other("native test barrier closed after acquisition"))?;
-            native.lock().unwrap().publish_acquired()
+            native
+                .lock()
+                .expect("original publication fixture")
+                .publish_acquired()
         } else {
-            native.lock().unwrap().run()
+            native.lock().expect("original publication fixture").run()
         }
     }
 
@@ -96,7 +109,7 @@ fn start_publication(
         {
             #[cfg(test)]
             {
-                return _owner.run_native(&native);
+                _owner.run_native(&native)
             }
             #[cfg(not(test))]
             {
@@ -141,6 +154,10 @@ impl RenditionDir {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Original-owner fixture assertions deliberately fail the test on the opposite result; production is checked separately."
+)]
 mod tests {
     use super::*;
 

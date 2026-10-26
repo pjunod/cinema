@@ -448,7 +448,6 @@ async fn playlist_owner_sampling_cannot_cross_a_complete_replacement_aba() {
 #[tokio::test]
 async fn segment_owner_sampling_cannot_cross_a_complete_replacement_aba() {
     use plurx_core::store::SqliteStore;
-    use tokio::io::AsyncReadExt as _;
 
     let dir = crate::test_tempdir().expect("tempdir");
     let manager_dir = crate::test_tempdir().expect("manager tempdir");

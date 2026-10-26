@@ -1,3 +1,7 @@
+#![allow(
+    clippy::unwrap_used,
+    reason = "Original-owner fixture assertions deliberately fail the test on the opposite result; production is checked separately."
+)]
 //! Authored real blocking-I/O custody regressions; run after final review only.
 use super::*;
 use std::sync::{mpsc, Arc};

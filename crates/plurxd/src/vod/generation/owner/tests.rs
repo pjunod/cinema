@@ -1,3 +1,7 @@
+#![allow(
+    clippy::unwrap_used,
+    reason = "Original-owner fixture assertions deliberately fail the test on the opposite result; production is checked separately."
+)]
 //! Authored with the production owner; execute only after final candidate review.
 use super::*;
 

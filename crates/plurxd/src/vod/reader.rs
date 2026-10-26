@@ -59,6 +59,7 @@ pub(super) struct Reader {
 }
 
 impl Reader {
+    #[cfg(test)]
     pub(super) fn new(frontier: u32) -> Self {
         Self::with_priority(frontier, crate::admission::Priority::Live)
     }
@@ -201,6 +202,13 @@ pub(super) enum MaterializeVerdict {
     /// The producer delivered the entry's fragment; publication did not make
     /// it servable.
     Publication(String),
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     Finite(Arc<crate::waitpool::FiniteWaitFailure>),
 }
 
@@ -506,14 +514,14 @@ impl Drop for MaterializeDemand {
 #[test]
 fn finite_deadline_diagnostic_bounds_unicode_without_changing_capacity_class() {
     use std::fmt::Write as _;
-    let mut text = BoundedVerdict::new().unwrap();
+    let mut text = BoundedVerdict::new().expect("bounded diagnostic fixture");
     write!(
         &mut text,
         "encoder permit unavailable: {}",
         "🎞".repeat(1024)
     )
-    .unwrap();
-    write!(&mut text, "ignored after truncation").unwrap();
+    .expect("bounded diagnostic fixture");
+    write!(&mut text, "ignored after truncation").expect("bounded diagnostic fixture");
     let verdict = MaterializeVerdict::Capacity(text.0);
     assert!(matches!(&verdict, MaterializeVerdict::Capacity(_)));
     assert!(verdict.message().starts_with("encoder permit unavailable:"));

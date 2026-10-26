@@ -33,10 +33,6 @@ pub(crate) struct PreparedAdaptiveRecipe {
 
 #[cfg(target_os = "linux")]
 impl PreparedAdaptiveRecipe {
-    pub(crate) fn key(&self) -> &str {
-        &self.key
-    }
-
     /// Actual requested capacities of the recipe held between P closure and
     /// R admission. The M handoff partition must fit this with the original
     /// coordinator envelope before `build_adaptive_recipe` enters native work.
@@ -2809,7 +2805,7 @@ impl VodServe {
         let lifecycle = self.shared.session_lifecycle(&session_id);
         let _lifecycle = lifecycle.lock().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
-        let mut replacement = Session {
+        let replacement = Session {
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
@@ -2876,6 +2872,8 @@ impl VodServe {
             tombstone: None,
         };
 
+        #[cfg(target_os = "linux")]
+        let mut replacement = replacement;
         #[cfg(target_os = "linux")]
         replacement.reserve_finite_session_state(&session_id)?;
 

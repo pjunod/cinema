@@ -1289,12 +1289,10 @@ impl TranscodeManager {
                     .map(|owner| owner.output());
                 #[cfg(not(target_os = "linux"))]
                 let core_copy_output: Option<()> = None;
-                let playlist_bytes = if core_copy_output.is_some() {
+                let playlist_bytes = if let Some(core_copy_output) = core_copy_output.as_ref() {
                     #[cfg(target_os = "linux")]
                     {
                         core_copy_output
-                            .as_ref()
-                            .expect("selected copy output")
                             .playlist_buffer(deadline)
                             .await
                             .ok()
@@ -1303,6 +1301,7 @@ impl TranscodeManager {
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
+                        let _ = core_copy_output;
                         None
                     }
                 } else if session.scratch.is_none() && !session.cached {

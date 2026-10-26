@@ -280,12 +280,26 @@ fn original_claim_binding(token: &JobToken) -> [u8; 32] {
 
 /// Application-task and logical Store facts only; never a native close or
 /// accounting capability. The constructor stays inside the original owner.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+    )
+)]
 pub(crate) struct BackgroundControllerClosed {
     binding: [u8; 32],
     joined: bool,
     logical_closed: bool,
 }
 impl BackgroundControllerClosed {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(crate) fn closes_original(&self, token: &JobToken) -> bool {
         self.binding == original_claim_binding(token) && self.joined && self.logical_closed
     }
@@ -341,6 +355,13 @@ impl BackgroundJobController {
     }
     /// The exact owned outer finish future, measured without constructing or
     /// polling a job/controller. Private Tokio task headers stay separate.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(crate) fn frame_bytes() -> usize {
         fn size<A, F: std::future::Future>(_: impl Fn(A) -> F) -> usize {
             std::mem::size_of::<F>()
@@ -604,15 +625,36 @@ impl Drop for ActiveBackgroundJob {
 }
 
 impl JobFence {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(crate) fn same_controller_as(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(crate) fn outer_payloads_dropped(&self) -> bool {
         self.0.payloads_dropped.load(Ordering::Acquire)
     }
 
     /// Known requested owner/frame capacity only. Private Tokio task/channel
     /// and cancellation-token allocations remain an explicit wider unknown.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(crate) async fn controller_requested_heap_bytes(&self) -> Option<usize> {
         let Inner {
             kind: _,
@@ -3675,6 +3717,10 @@ mod tests {
         assert_eq!(store.job_attempts(&id).await.expect("attempts").len(), 1);
         active.finish().await;
     }
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixture setup and expected-refusal assertions deliberately fail the test on the opposite result; production is checked separately."
+    )]
     mod controller_lifetime {
         use super::*;
         include!("background_job_controller_tests.rs");

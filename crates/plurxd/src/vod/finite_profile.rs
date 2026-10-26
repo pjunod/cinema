@@ -101,6 +101,10 @@ pub(super) fn source_version(recipe: &Recipe) -> Result<String, String> {
 }
 
 #[cfg(target_os = "linux")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The finite plan binds borrowed source, key, index, segment plan, observed epoch/capacity and thread policy together before native entry; its measured projection introduces no argument allocation."
+)]
 pub(super) fn compile(
     shared: &Shared,
     key: &str,
@@ -191,9 +195,8 @@ pub(super) fn compile(
     let resident_file_objects = segments
         .checked_add(3)
         .ok_or_else(|| "finite software resident file count overflows".to_owned())?;
-    let resident_logical_bytes = u64::try_from(resident_file_objects)
-        .ok()
-        .and_then(|count| count.checked_mul(FILE_BYTES as u64))
+    let resident_logical_bytes = u64::from(resident_file_objects)
+        .checked_mul(FILE_BYTES as u64)
         .ok_or_else(|| "finite software logical output bound overflows".to_owned())?;
     let aligned_logical_bytes = align_up(resident_logical_bytes, ALLOCATION_UNIT_BYTES)?;
     let reserved_storage_bytes = aligned_logical_bytes
@@ -400,6 +403,10 @@ fn encoder_threads(
 }
 
 #[cfg(all(test, target_os = "linux"))]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixture setup and expected-refusal assertions deliberately fail the test on the opposite result; production is checked separately."
+)]
 mod tests {
     use super::*;
 

@@ -244,6 +244,10 @@ fn preflight_stbl_shape(
     })
 }
 
+fn workspace_overflow() -> Fmp4Error {
+    Fmp4Error::Unsupported("borrowed init metadata workspace overflow".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,8 +365,4 @@ mod tests {
             Err(Fmp4Error::Unsupported(_))
         ));
     }
-}
-
-fn workspace_overflow() -> Fmp4Error {
-    Fmp4Error::Unsupported("borrowed init metadata workspace overflow".into())
 }

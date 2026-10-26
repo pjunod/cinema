@@ -453,6 +453,13 @@ impl Rendition {
             .remove(&index);
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(super) fn clear_all_demands(&self) {
         self.demand_since.lock().expect("demand lock").clear();
     }
@@ -994,6 +1001,7 @@ impl Session {
 
     /// An immutable retained response keeps the viewer's control identity,
     /// but has no missing bytes for this rendition's producer to generate.
+    #[cfg(test)]
     pub(super) fn attachment_reader(&self, frontier: u32) -> Reader {
         let mut reader = Reader::new(frontier);
         reader.authority_only =

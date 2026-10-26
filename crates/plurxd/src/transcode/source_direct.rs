@@ -726,7 +726,9 @@ impl TranscodeManager {
                     SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unavailable)
                 })?
         };
-        let mut direct_file = prepared.into_direct_file();
+        let direct_file = prepared.into_direct_file();
+        #[cfg(target_os = "linux")]
+        let mut direct_file = direct_file;
         #[cfg(target_os = "linux")]
         direct_file.install_admitted(admitted, application_lease);
         let owner = Arc::new(SourceViewerInner {
@@ -1067,7 +1069,7 @@ impl TranscodeManager {
                 current.finished = true;
             }
             owner.changed.notify_waiters();
-            return ticket;
+            ticket
         }
         #[cfg(not(target_os = "linux"))]
         {

@@ -24,8 +24,8 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     config.storage.data_dir = base.path().join("database");
     let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("fixture Raft port");
     let api = std::net::TcpListener::bind("127.0.0.1:0").expect("fixture API port");
-    config.cluster.raft_bind = raft.local_addr().unwrap();
-    config.cluster.api_bind = api.local_addr().unwrap();
+    config.cluster.raft_bind = raft.local_addr().expect("fixture Raft address");
+    config.cluster.api_bind = api.local_addr().expect("fixture API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
     let mut selected_store = crate::sharing_fixture_clock::select_applied_singleton(&config)

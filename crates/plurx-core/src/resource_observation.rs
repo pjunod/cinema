@@ -158,6 +158,10 @@ impl ServiceWindow {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Observation fixture assertions deliberately fail tests on the opposite result; production is checked separately."
+)]
 mod tests {
     use super::*;
 

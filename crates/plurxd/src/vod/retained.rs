@@ -2297,15 +2297,10 @@ impl RetainedArtifactRegistry {
         match result {
             Ok(()) => {
                 let mut state = self.state.lock().expect("retained registry lock");
-                if state
+                if let Some(finished) = state
                     .finite_closing
-                    .front()
-                    .is_some_and(|entry| Arc::ptr_eq(&entry.ticket, &ticket))
+                    .pop_front_if(|entry| Arc::ptr_eq(&entry.ticket, &ticket))
                 {
-                    let finished = state
-                        .finite_closing
-                        .pop_front()
-                        .expect("selected finite close");
                     state.bytes = state.bytes.saturating_sub(finished.charge);
                 }
             }

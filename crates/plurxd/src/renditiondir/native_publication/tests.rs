@@ -1,3 +1,7 @@
+#![allow(
+    clippy::unwrap_used,
+    reason = "Original-owner fixture assertions deliberately fail the test on the opposite result; production is checked separately."
+)]
 //! Authored native regressions. Execution remains after whole-candidate review.
 use super::*;
 use plurx_core::fs_secure::{open_directory_nofollow_blocking, std_file_identity};

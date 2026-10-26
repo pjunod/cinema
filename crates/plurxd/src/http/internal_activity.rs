@@ -789,6 +789,10 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded activity selection retains the owned observations inline; boxing would add a separate per-candidate allocation to the telemetry workspace."
+)]
 enum ActivityCandidate {
     Transcode(crate::transcode::DeliveryCandidate),
     Vod(crate::vodserve::VodDeliveryInfo),

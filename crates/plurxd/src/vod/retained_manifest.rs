@@ -9,6 +9,13 @@ pub(super) const MAX_MANIFEST: u64 = 4 * 1024 * 1024;
 /// The first typed static-software artifact fits one charged scratch IO
 /// payload. Static and legacy manifests share the same published size limit;
 /// the static admission must charge this whole capacity before entry.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+    )
+)]
 pub(super) const STATIC_MANIFEST_LIMIT: usize = MAX_MANIFEST as usize;
 
 /// Requested application workspace for the selected static writer. The
@@ -16,6 +23,13 @@ pub(super) const STATIC_MANIFEST_LIMIT: usize = MAX_MANIFEST as usize;
 /// manifest can simultaneously own the completed observation, its parsed
 /// validation copy, and the 4 MiB serialization buffer. This counts those
 /// concrete Vec/String requests, not allocator or Tokio private overhead.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+    )
+)]
 pub(super) fn projected_static_manifest_workspace_bytes(
     entries: usize,
     playlist_capacity: usize,
@@ -156,6 +170,13 @@ struct LogicalProduction {
 }
 
 impl LogicalProduction {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     fn requested_heap_bytes(&self) -> Option<usize> {
         let mut bytes = self
             .plan
@@ -177,6 +198,13 @@ impl LogicalProduction {
 }
 
 impl LogicalOutput {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
         let mut bytes = self
             .copy_video_args
@@ -388,6 +416,13 @@ pub(super) struct ArtifactManifest {
 impl ArtifactManifest {
     /// Build the historical manifest shape from the original finite pump's
     /// post-publication observations. No second hard-link directory is made.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(super) fn from_finite_observation(
         id: uuid::Uuid,
         observation: CompleteOutputObservation,
@@ -407,6 +442,13 @@ impl ArtifactManifest {
     /// Serialize into one pre-reserved buffer that cannot grow beyond the
     /// static scratch plan's IO bound. Its digest is the same historical
     /// complete-v1 JSON seal used by Store output identity.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(super) fn encode_finite_bounded(&self) -> io::Result<(Vec<u8>, [u8; 32])> {
         self.observation()?;
         struct Bounded(Vec<u8>);

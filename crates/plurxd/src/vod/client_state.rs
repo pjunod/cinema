@@ -42,6 +42,13 @@ pub(super) type DemandTable = ClientTable<u32, super::MaterializeClock>;
 
 pub(super) enum ClientTable<K, V> {
     Legacy(HashMap<K, V>),
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     Finite(FixedVecMap<K, V>),
 }
 
@@ -113,6 +120,13 @@ impl<K: Eq + Hash + Ord, V> ClientTable<K, V> {
         self.len() == 0
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(super) fn clear(&mut self) {
         match self {
             Self::Legacy(map) => map.clear(),

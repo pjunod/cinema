@@ -4548,45 +4548,45 @@ async fn create_with_purpose_inner(
         owner_candidates.push(state.node_id.clone());
     }
     #[cfg(target_os = "linux")]
-    let adaptive_software_offers: std::collections::HashSet<String> = if source.is_some()
-        && planning_snapshot.is_some()
-        && matches!(
-            request.kind,
-            crate::transcode::SessionKind::Transcode { .. }
-        )
-        && request.start_seconds == 0.0
-        && request.subtitle_burn.is_none()
-        && !request.hdr10
-        && !native_subtitles
-        && request.continuous_media.is_none()
-        && library_channel.is_none()
-        && source
-            .as_ref()
-            .is_some_and(|file| file.dolby_vision.is_empty())
-    {
-        let file = source.as_ref().expect("adaptive source was checked");
-        match MediaOfferRequest::new(
-            file,
-            height,
-            0,
-            request.audio_index,
-            request.subtitle_burn,
-            request.hdr10,
-        ) {
-            Ok(offer) => state
-                .media_pool
-                .offers(&state, offer)
-                .await
-                .offers
-                .into_iter()
-                .filter(|row| row.eligible && row.encoder == "software")
-                .map(|row| row.node_id)
-                .collect(),
-            Err(_) => std::collections::HashSet::new(),
-        }
-    } else {
-        std::collections::HashSet::new()
-    };
+    let adaptive_software_source = source.as_ref().filter(|file| {
+        planning_snapshot.is_some()
+            && matches!(
+                request.kind,
+                crate::transcode::SessionKind::Transcode { .. }
+            )
+            && request.start_seconds == 0.0
+            && request.subtitle_burn.is_none()
+            && !request.hdr10
+            && !native_subtitles
+            && request.continuous_media.is_none()
+            && library_channel.is_none()
+            && file.dolby_vision.is_empty()
+    });
+    #[cfg(target_os = "linux")]
+    let adaptive_software_offers: std::collections::HashSet<String> =
+        if let Some(file) = adaptive_software_source {
+            match MediaOfferRequest::new(
+                file,
+                height,
+                0,
+                request.audio_index,
+                request.subtitle_burn,
+                request.hdr10,
+            ) {
+                Ok(offer) => state
+                    .media_pool
+                    .offers(&state, offer)
+                    .await
+                    .offers
+                    .into_iter()
+                    .filter(|row| row.eligible && row.encoder == "software")
+                    .map(|row| row.node_id)
+                    .collect(),
+                Err(_) => std::collections::HashSet::new(),
+            }
+        } else {
+            std::collections::HashSet::new()
+        };
     crate::media_pool::mark_create_phase("placement");
 
     let mut started = None;

@@ -2023,7 +2023,7 @@ fn append_sei_array_to_hevc_entry(init: &mut Init, index: usize, nal: &[u8]) {
     let delta = array.len();
     let at = target.payload.end;
     let count_at = target.payload.start + 22;
-    let ancestors = target.ancestors.clone();
+    let ancestors = target.ancestors;
     init.bytes.splice(at..at, array);
     init.bytes[count_at] += 1;
     for ancestor in ancestors {

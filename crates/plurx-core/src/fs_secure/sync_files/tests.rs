@@ -1,3 +1,7 @@
+#![allow(
+    clippy::unwrap_used,
+    reason = "Original-file fixture assertions deliberately fail the test on the opposite result; production is checked separately."
+)]
 use super::{SyncFile, SyncIo, SyncRequest};
 use crate::fs_secure::std_file_identity;
 use std::fs::{self, File};

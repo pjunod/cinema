@@ -23,6 +23,13 @@ pub(crate) struct AcceptedVodRunway {
 /// a trial permit. The peer fact is optional because a worker does not know
 /// the controller's current capacity-peer selection.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+    )
+)]
 pub(crate) struct AdaptiveTrialReadiness {
     pub refusal: plurx_core::resource_policy::TrialRefusal,
     pub active_vod_sessions: usize,
@@ -34,6 +41,13 @@ impl VodServe {
     /// accepted buffer report has no server-produced frontier; the separate
     /// `accepted_policy_runway` read supplies that evidence for a particular
     /// incumbent, but cannot turn this registry into an all-work inventory.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite/adaptive production callers are Linux-only; preserve this portable metadata/owner interface for unsupported-platform behavior and fixtures."
+        )
+    )]
     pub(crate) async fn observe_adaptive_trial_readiness(
         &self,
         original_deadline: Instant,

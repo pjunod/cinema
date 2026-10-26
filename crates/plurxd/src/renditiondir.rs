@@ -130,6 +130,13 @@ impl RenditionDir {
         &self.dir
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite application heap projection is consumed by Linux admission; preserve the portable renderer metadata interface."
+        )
+    )]
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         let bytes = Self::projected_heap_bytes(self.dir.capacity())?;
         #[cfg(unix)]
@@ -145,6 +152,13 @@ impl RenditionDir {
         Some(bytes)
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Current finite application heap projection is consumed by Linux admission; preserve the portable renderer metadata interface."
+        )
+    )]
     pub(crate) fn projected_heap_bytes(path_capacity: usize) -> Option<usize> {
         path_capacity
             .checked_add(std::mem::size_of::<PendingWrites>())?
@@ -196,6 +210,13 @@ impl RenditionDir {
     ///
     /// Refused for an index the plan does not contain, rather than writing a
     /// segment no playlist will ever name.
+    #[cfg_attr(
+        all(target_os = "linux", not(test)),
+        expect(
+            dead_code,
+            reason = "Linux production uses registered materialize_owned; preserve the legacy portable convenience entry and its fixture callers."
+        )
+    )]
     pub async fn materialize(
         &self,
         manifest: &mut Manifest,

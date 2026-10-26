@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        reason = "Parser fixture setup and expected-refusal assertions deliberately fail the test on the opposite result; production is checked separately."
+    )
+)]
 //! Fragmented-MP4 surgery for the copy path: read ffmpeg's continuous
 //! fragment stream, classify each fragment's opening keyframe, and merge runs
 //! of fragments back into single HLS segments.

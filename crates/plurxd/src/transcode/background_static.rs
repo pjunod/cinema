@@ -42,7 +42,7 @@ pub(super) struct StaticArtifactEntry {
 pub(super) enum StaticPlanning {
     Empty,
     Original(FixedPlanningProbeOwner),
-    Closing(FixedPlanningProbeCleanup),
+    Closing { _cleanup: FixedPlanningProbeCleanup },
     Closed,
 }
 
@@ -534,7 +534,9 @@ impl TranscodeManager {
         if let StaticPlanning::Original(_) = &*planning {
             let old = std::mem::replace(&mut *planning, StaticPlanning::Closed);
             if let StaticPlanning::Original(owner) = old {
-                *planning = StaticPlanning::Closing(owner.into_cleanup());
+                *planning = StaticPlanning::Closing {
+                    _cleanup: owner.into_cleanup(),
+                };
             }
         }
         drop(planning);
@@ -813,7 +815,9 @@ impl TranscodeManager {
                     .map_err(|error| PreparationError::Retry(error.to_string()))?;
                 let old = std::mem::replace(&mut *planning, StaticPlanning::Closed);
                 if let StaticPlanning::Original(owner) = old {
-                    *planning = StaticPlanning::Closing(owner.into_cleanup());
+                    *planning = StaticPlanning::Closing {
+                        _cleanup: owner.into_cleanup(),
+                    };
                 }
             }
         }
@@ -917,4 +921,8 @@ impl TranscodeManager {
 
 #[cfg(test)]
 #[path = "background_static/tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixture setup and expected-refusal assertions deliberately fail the test on the opposite result; production is checked separately."
+)]
 mod tests;
