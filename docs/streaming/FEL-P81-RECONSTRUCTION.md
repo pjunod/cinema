@@ -233,7 +233,7 @@ window encodes at b = 60 Mb/s on lab6:
 | VBR, `-qmax 14` | 153 Mb/s (grain-heavy film), 149 Mb/s (bright 70 mm) | no |
 | VBR, `-qmax 18` | 94 Mb/s | no |
 | QVBR quality 16 | 72.7 Mb/s | yes, but a worse picture than VBR at every point tried |
-| **VBR, no `-qmax` (chosen)** | 57 Mb/s on those titles (worst 1 s: 58.8); 50–63 Mb/s on the 16 qualification windows | yes |
+| **VBR, no `-qmax` (chosen)** | 57 Mb/s on those titles (worst 1 s: 58.8); 50.0–56.8 Mb/s on 8 windows of Titles A and B; 52.9–57.5 Mb/s in the production graph | yes |
 
 So the recipe has no `-qmax`; `maxrate` and `bufsize` stay the ordinary
 1.5× and 2×, and the advertised peak follows the route's own rate
