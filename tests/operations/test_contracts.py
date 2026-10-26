@@ -3238,6 +3238,30 @@ assert.equal(context.ACT_TIMER, null);
                 {"general", "high-cpu", "ci-store", "ci-topology"} & labels, name
             )
 
+    def test_web_layout_budget_covers_cold_build_and_all_browser_stages(self):
+        job = workflow_job_blocks(".github/workflows/ci.yml")["web_layout"]
+        self.assertRegex(job, r"(?m)^    timeout-minutes: 45$")
+        steps = workflow_step_blocks(job)
+        required = (
+            ("Check every affected web layout", "make ui-check"),
+            ("Run the playback-control reporter in a real browser", "make control-browser-check"),
+            ("Test Cinema remote browser contracts", "make cinema-remote-browser-check"),
+            ("Test grouped library rows in a real browser", "make library-rows-browser-check"),
+            ("Test subtitle model setup and generated-caption completion in a real browser", "make subtitle-generation-browser-check"),
+        )
+        positions = []
+        for name, command in required:
+            self.assertEqual(workflow_step_scalar(steps[name], "run"), command)
+            positions.append(list(steps).index(name))
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("continue-on-error", job)
+        ui = read("Makefile").split("ui-check:", 1)[1].split(".PHONY:", 1)[0]
+        self.assertIn("scripts/ui-baseline --self-host --check", ui)
+        self.assertIn("python3 scripts/live-tv-browser --self-host --out target/live-tv-browser", ui)
+        capture = read("scripts/ui-baseline")
+        self.assertIn('p.add_argument("--timeout", type=int, default=45000,', capture)
+        self.assertRegex(capture, r"(?m)^                attempts = 2$")
+
     def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         for name, minutes in (("check", 120), ("cluster_store_legacy", 95), ("cluster_wal", 60)):

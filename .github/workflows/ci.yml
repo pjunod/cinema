@@ -1220,7 +1220,8 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    timeout-minutes: 30
+    # Cold builds, fixture setup and 104 captures need room for later browser gates.
+    timeout-minutes: 45
     steps:
       - name: Capture mounted runner workspace owner
         run: |

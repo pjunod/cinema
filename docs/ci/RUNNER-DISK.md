@@ -160,6 +160,21 @@ canceled the running coverage measurement and its six queued successors, and
 disabled automatic coverage in Forgejo during the workflow transition. The
 manual-only definition is now merged and enabled in Forgejo.
 
+## Browser qualification wall-time budget
+
+The complete web-layout job has a 45-minute overall cap. Full run 6007
+(internal 6036) passed in 25m39s, including an 8m04s cold build and 4m45s after
+its 104 captures. Run 6030 (internal 6059) instead spent 13m56s compiling and
+about 4m40s preparing the fixture; its former 30-minute cap canceled the job
+after 103 successful captures. The observed stages project about 35 minutes
+for completion, with roughly ten minutes of margin at the new cap. This is
+budget calibration, not evidence of a passing qualification.
+
+The job still runs all registered layouts and the live-TV acceptance, reporter,
+Cinema, library-row and subtitle browser contracts. Per-step capture timeouts
+remain 45 seconds, with the existing restricted two-attempt retry policy; no assertion, golden,
+required step, downstream VOD dependency or promotion gate is relaxed.
+
 ## A full runner does not report a full disk
 
 It reports a linker crash:
