@@ -63,8 +63,11 @@ and SHA-256 under the audited test, playback, daemon-source and fixture roots,
 plus their external contract data, helpers, Make/Cargo parse inputs and locked
 TypeScript configuration. The reviewed executable/helper/member-set aggregate
 is pinned. The exact fbbf and observed-main 087 shape families both include
-Acorn and the transitively invoked startup-lab helper. These are raw supported
-families, with no applicability normalization: the reviewed changed inputs
+Acorn and the transitively invoked startup-lab helper. Every row under
+`tests/web` and `tests/playback` is a reviewed shape, regardless of suffix:
+source, bytecode, native modules, extensionless files, package members and data
+that can select further inputs. These are raw supported families, with no
+applicability normalization: the reviewed changed inputs
 still produce a genuinely different key. Executable and loader inputs under
 `crates/plurxd/src/web` include `.js`, `.mjs`, `.cjs`, `.ts` (including `.d.ts`),
 `.html` and `.json`, with exact member sets. Their changes require closure
@@ -74,7 +77,9 @@ images and webmanifest resources remain ordinary raw inputs; their changes
 produce a new key without weakening the executable guard. Unknown code, dependencies,
 alternate case-folded Make selectors, unsupported workflow shape or untracked closure inputs require closure review;
 they never become a silent first-run escape. Ordinary supported non-executable
-resource or baseline input changes produce a different execution key. The
+resource changes produce a different execution key. Baseline files within the
+test roots require review too; changed baseline comparison metadata still
+affects the raw key. The
 key includes event base, resolved merge-base and baseline bytes. Only the
 semantic web job recipe is bound; unrelated Rust workflow edits do not change
 this cohort's applicability.
@@ -82,9 +87,23 @@ this cohort's applicability.
 The bounded scripts-level resolver inventory binds names, types and modes,
 not unrelated script bodies. New Python file/package shadows, including
 transitive `socket` imports, and Node's extensionless `playback-frame-clock`
-selector require closure review. Live guards apply too; a normal generated
-`scripts/__pycache__` directory is ignored without deletion. Tracked source and
-live selectors are rechecked before the final cohort receipt.
+selector require closure review. Finite repository-local ancestor
+`package.json` scopes bind reviewed presence, mode and bytes or exact absence,
+including scopes above the complete source roots. Live checks apply too;
+there is no host-level package crawl.
+
+Committed cache rows remain reviewed shapes. Existing normal untracked
+`__pycache__` directories at the scripts and playback Python search roots may
+remain untouched only with bounded regular `.pyc` members and no aliases.
+Their bytes are not declared equivalent to source. Every fresh child receives
+an explicit reserved absent `PYTHONPYCACHEPREFIX` beneath its owned output and
+`PYTHONDONTWRITEBYTECODE=1`. A sys-only observation confirms the effective
+policy; the prefix must remain absent. This redirects reads away from old
+source caches and prevents writes, including for Python spawned by Node.
+The fixed policy and observed interpreter are bound in fresh receipts without
+the run-specific absolute prefix. Retention executes no current test helper;
+legacy cache behavior remains unrecorded. Tracked source and live selectors
+are rechecked before the final cohort receipt.
 
 The bootstrap origin is the successful web job in run 5964, job 57771, task
 23006, attempt 1 at `fbbf4078`. Overall Rust failure does not erase that web

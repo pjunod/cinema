@@ -68,6 +68,8 @@ class WebCohortRetentionTests(unittest.TestCase):
             if args[0]=='ls-tree':
                 if args[-1].endswith(':scripts'):
                     return b'\0'.join((row['mode']+' '+row['kind']+' '+('a'*40)+'\t'+row['name']).encode() for row in resolver_rows)+b'\0'
+                if '-r' not in args and '--' in args:
+                    return b'\0'.join((row['mode']+' blob '+row['blob']+'\t'+row['path']).encode() for row in rows() if row['path'] in web.NODE_PACKAGE_SCOPES)+b'\0'
                 if '-r' not in args:return b'\0'.join(roots)+b'\0'
                 return b'\0'.join((row['mode']+' blob '+row['blob']+'\t'+row['path']).encode() for row in rows())+b'\0'
             if args[0]=='cat-file':
@@ -201,17 +203,22 @@ class WebCohortRetentionTests(unittest.TestCase):
              mock.patch.object(web,'matching_result',return_value=None),mock.patch.object(web,'current_context',return_value=context), \
              mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:b'' if args[0]=='diff' else COMMIT.encode() if args[0]=='rev-parse' and args[1]=='HEAD' else b'd'*40), \
              mock.patch.object(web.subprocess,'run',return_value=mock.Mock(returncode=0)) as launch, \
-             mock.patch.object(web.subprocess,'check_output',return_value='Version 6.0.3\n'), \
-             mock.patch.dict(os.environ,{'GITHUB_TOKEN':'secret','GH_TOKEN':'secret','ACTIONS_RUNTIME_TOKEN':'secret','PATH':'/tools','TMPDIR':'/scratch'}):
+             mock.patch.object(web.subprocess,'check_output',side_effect=lambda argv,**kw:('cpython\n3.12.3\n'+kw['env']['PYTHONPYCACHEPREFIX']+'\n1\n') if argv[0]=='python3' else 'Version 6.0.3\n'), \
+             mock.patch.dict(os.environ,{'GITHUB_TOKEN':'secret','GH_TOKEN':'secret','ACTIONS_RUNTIME_TOKEN':'secret','PATH':'/tools','TMPDIR':'/scratch','PYTHONPYCACHEPREFIX':'/untrusted/cache','PYTHONDONTWRITEBYTECODE':'0'}):
             # Different policy/input key selects explicit fresh, never a legacy re-run.
             out=Path(directory)/'fresh';out.mkdir()
             with mock.patch.object(web,'manifest',side_effect=[inputs,{**inputs,'different':True},inputs,inputs]):
                 result=web.run_gate(ROOT,context,out,{'typescript':{'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}},True)
             self.assertTrue(result['current_test_events']);self.assertIsNone(result['origin'])
+            self.assertEqual(result['python_cache_execution']['cache_policy'],web.PYTHON_CACHE_POLICY)
+            self.assertNotIn(str(out),json.dumps(result['python_cache_execution']))
+            self.assertFalse((out/'python-cache').exists())
             self.assertEqual([call.args[0][-1] for call in launch.call_args_list],list(web.COMMANDS))
             for call in launch.call_args_list:
                 env=call.kwargs['env'];self.assertEqual(env['PATH'],'/tools')
                 self.assertFalse({'GITHUB_TOKEN','GH_TOKEN','ACTIONS_RUNTIME_TOKEN'} & set(env))
+                self.assertEqual(env['PYTHONPYCACHEPREFIX'],str(out.absolute()/'python-cache'))
+                self.assertEqual(env['PYTHONDONTWRITEBYTECODE'],'1')
             self.assertNotIn('PR_BASE_SHA',launch.call_args_list[0].kwargs['env'])
             self.assertEqual(launch.call_args_list[1].kwargs['env']['PR_BASE_SHA'],BASE)
             self.assertNotIn('PR_BASE_SHA',launch.call_args_list[2].kwargs['env'])
@@ -223,6 +230,12 @@ class WebCohortRetentionTests(unittest.TestCase):
                     web.run_gate(ROOT,context,out,{'typescript':{'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}},True)
             self.assertEqual(launch.call_count,1)
             self.assertNotIn(b'WEB-COHORT-FINISH',(out/'web-cohort.log').read_bytes())
+            launch.reset_mock();out=Path(directory)/'unsupported-cache';out.mkdir()
+            with mock.patch.object(web,'manifest',side_effect=[inputs,{**inputs,'different':True},inputs]), \
+                 mock.patch.object(web.subprocess,'check_output',return_value='cpython\n3.12.3\n/wrong-prefix\n0\n'):
+                with self.assertRaisesRegex(receipts.ReceiptError,'cache isolation is unsupported'):
+                    web.run_gate(ROOT,context,out,{'typescript':{}},True)
+            launch.assert_not_called()
 
     def test_retention_emits_original_log_and_zero_current_web_events(self):
         api,pull,event,run,job=self.context();context=(api,SCOPE,COMMIT,run,job,BASE)
@@ -255,6 +268,7 @@ class WebCohortRetentionTests(unittest.TestCase):
                 'policy_compatible':{'python':web.PYTHON_POLICY},
                 'current_diagnostics':{'python':{'implementation':'CPython','version':'3.12.3'}},
                 'typescript':{'declared_locked':'6.0.3','current_binary_observed':'Version 6.0.3','current_qualification_execution':True}},
+            'python_cache_execution':{'implementation':'cpython','version':'3.12.3','cache_policy':web.PYTHON_CACHE_POLICY},
             'origin':None,'log_sha256':web.digest(log),'current_test_events':True}
         envelope={'id':7000,'name':'web-cohort-6000-1','run_id':6000,'expired':False}
         state={'receipt':receipt,'log':log,'data':b'','lines':[]}
@@ -290,7 +304,7 @@ class WebCohortRetentionTests(unittest.TestCase):
         api,run,job,inputs,receipt,state,seal,adapter,tree=self.v1_fixture()
         raw=b'original legacy raw log';key=web.execution_key(inputs)
         origin={'kind':'legacy','run':web.ORIGIN_RUN,'job':web.ORIGIN_JOB,'input_key':key,'log_sha256':web.digest(raw)}
-        receipt.update(mode='retained_prior_execution',origin=origin,current_test_events=False,log_sha256=web.digest(raw))
+        receipt.update(mode='retained_prior_execution',origin=origin,current_test_events=False,python_cache_execution=None,log_sha256=web.digest(raw))
         receipt['runtime']['typescript']={'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}
         state['log']=raw;seal()
         with mock.patch.object(web,'authenticate_job',side_effect=lambda *a:(run,job,b'authenticated job log',state['lines'],inputs)), \
@@ -476,3 +490,99 @@ class WebCohortRetentionTests(unittest.TestCase):
                     web.run_gate(ROOT,context,ROOT/'target/web-retention-never-created',{},True)
                 del contents[path]
             legacy.assert_not_called();history.assert_not_called();launch.assert_not_called()
+
+    def test_all_test_members_refuse_bytecode_native_extensions_packages_and_node_selectors(self):
+        contents,roots,git,shape=self.source()
+        api,pull,event,run,job=self.context();context=(api,SCOPE,COMMIT,run,job,BASE)
+        paths=('tests/playback/socket.pyc','tests/playback/socket.cpython-312-x86_64-linux-gnu.so',
+            'tests/playback/socket/__init__.pyc','tests/playback/socket/__init__.so',
+            'tests/playback/__pycache__/native-hls-browser-fixture.cpython-312.pyc',
+            'tests/web/socket.node','tests/web/shell-source','tests/playback/new-package/package.json')
+        with mock.patch.object(web,'git',side_effect=git), \
+             mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}), \
+             mock.patch.object(web,'SHAPE_FAMILIES',{'fixture':shape}), \
+             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1'}), \
+             mock.patch.object(web,'live_inputs'),mock.patch.object(web,'live_script_resolvers'), \
+             mock.patch.object(web,'legacy_result') as legacy,mock.patch.object(web,'matching_result') as history, \
+             mock.patch.object(web.subprocess,'run') as launch:
+            for path in paths:
+                contents[path]=b'unreviewed committed resolver input'
+                with self.subTest(path=path),self.assertRaisesRegex(receipts.ReceiptError,'executable/recipe/dependency shape'):
+                    web.run_gate(ROOT,context,ROOT/'target/web-retention-never-created',{},True)
+                del contents[path]
+            legacy.assert_not_called();history.assert_not_called();launch.assert_not_called()
+
+    def test_node_package_scopes_pin_absence_and_reviewed_bytes_in_git_and_live_checkout(self):
+        contents,roots,git,shape=self.source()
+        candidates=('package.json','tests/package.json','tests/vendor/package.json','scripts/package.json',
+            'scripts/cq-native-shipping/package.json','crates/package.json','crates/plurxd/package.json',
+            'crates/plurxd/src/package.json','tests/web/package.json','tests/playback/package.json')
+        with mock.patch.object(web,'git',side_effect=git):
+            self.assertTrue(all(row['identity'] is None for row in web.node_package_scope(ROOT,COMMIT)))
+            for path in candidates:
+                self.assertIn(path,web.NODE_PACKAGE_SCOPES);contents[path]=b'{"main":"../../outside.js"}'
+                with self.subTest(committed=path),self.assertRaisesRegex(receipts.ReceiptError,'Node package scope'):
+                    web.node_package_scope(ROOT,COMMIT)
+                del contents[path]
+            path='tests/vendor/package.json';raw=b'{"type":"commonjs"}\n';contents[path]=raw
+            identity={'mode':'100644','blob':hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest(),
+                'sha256':web.digest(raw)}
+            with mock.patch.object(web,'NODE_PACKAGE_PINS',{path:identity}):
+                self.assertEqual(next(row['identity'] for row in web.node_package_scope(ROOT,COMMIT) if row['path']==path),identity)
+                contents[path]+=b' changed'
+                with self.assertRaisesRegex(receipts.ReceiptError,'Node package scope'):web.node_package_scope(ROOT,COMMIT)
+            del contents[path]
+        scratch=ROOT/'target/web-retention-fixtures';scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            workspace=Path(directory);web.live_node_packages(workspace)
+            for relative in candidates:
+                path=workspace/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('{"main":"outside.js"}')
+                with self.subTest(live=relative),self.assertRaisesRegex(receipts.ReceiptError,'live web Node package scope'):
+                    web.live_node_packages(workspace)
+                path.unlink()
+            external=workspace/'external.json';external.write_text('{}')
+            (workspace/'package.json').symlink_to(external)
+            with self.assertRaisesRegex(receipts.ReceiptError,'package scope type'):web.live_node_packages(workspace)
+
+    def test_live_cache_allowance_is_bounded_regular_and_never_exempts_parent_packages(self):
+        scratch=ROOT/'target/web-retention-fixtures';scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            workspace=Path(directory);cache=workspace/'tests/playback/__pycache__';cache.mkdir(parents=True)
+            cached=cache/'generated.cpython-312.pyc';cached.write_bytes(b'opaque cache bytes, never certified')
+            relative=cached.relative_to(workspace).as_posix();before=cached.read_bytes()
+            with mock.patch.object(web,'selectors'),mock.patch.object(web,'git',return_value=(relative+'\0').encode()):
+                web.live_inputs(workspace)
+                self.assertEqual(cached.read_bytes(),before)
+            for bad in ('socket.pyc','socket.platform.so','socket/__pycache__/module.pyc'):
+                path='tests/playback/'+bad
+                with mock.patch.object(web,'selectors'),mock.patch.object(web,'git',return_value=(path+'\0').encode()):
+                    with self.subTest(path=path),self.assertRaisesRegex(receipts.ReceiptError,'Untracked/ignored web closure'):
+                        web.live_inputs(workspace)
+            unwanted=cache/'package.json';unwanted.write_text('{}')
+            with self.assertRaisesRegex(receipts.ReceiptError,'cache member/bound'):web.live_cache_paths(workspace)
+            unwanted.unlink();target=workspace/'outside.pyc';target.write_bytes(b'outside')
+            alias=cache/'alias.pyc';alias.symlink_to(target)
+            with self.assertRaisesRegex(receipts.ReceiptError,'cache member/bound'):web.live_cache_paths(workspace)
+            alias.unlink()
+            with mock.patch.object(web,'MAX_CACHE_FILES',0):
+                with self.assertRaisesRegex(receipts.ReceiptError,'cache member/bound'):web.live_cache_paths(workspace)
+
+    def test_fresh_python_isolation_ignores_unchecked_cache_and_preserves_its_bytes(self):
+        import py_compile
+        import subprocess
+        import sys
+        scratch=ROOT/'target/web-retention-fixtures';scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            workspace=Path(directory);source=workspace/'selected_fixture.py';source.write_text('VALUE="unchecked-cache"\n')
+            cache=workspace/'__pycache__'/('selected_fixture.'+sys.implementation.cache_tag+'.pyc')
+            py_compile.compile(str(source),cfile=str(cache),doraise=True,
+                invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+            before=cache.read_bytes();self.assertEqual(int.from_bytes(before[4:8],'little') & 3,1)
+            source.write_text('VALUE="source"\n');output=workspace/'owned-output';output.mkdir(mode=0o700)
+            prefix=output/'python-cache';facts=web.verify_fresh_cache(workspace,prefix)
+            self.assertEqual(facts['cache_policy'],web.PYTHON_CACHE_POLICY)
+            env=web.fresh_environment(prefix)
+            code='import sys;sys.path.insert(0,sys.argv[1]);import selected_fixture;print(selected_fixture.VALUE)'
+            result=subprocess.check_output([sys.executable,'-c',code,str(workspace)],cwd=workspace,text=True,env=env).strip()
+            self.assertEqual(result,'source');self.assertEqual(cache.read_bytes(),before)
+            self.assertFalse(prefix.exists());self.assertNotIn(str(prefix),json.dumps(facts))

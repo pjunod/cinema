@@ -36,6 +36,11 @@ RUNTIME = {'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','typescri
 POLICY_VERSION = 2
 SCRIPTS_RESOLVER_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '48743b916c2a75d4e0e9531a52abff0b9f318d726be407f84d5fe1cc760e3a99', '087e836d369eb2b8f94ec1d0454ea6c157612df9': '72f0accba4f82129287fb12cb8b53c5739cf49f4dff530eb6d64bc464be6ec61'}
 PYTHON_POLICY = 'python3 stdlib planning, summary and loopback HTTP fixtures v1'
+NODE_PACKAGE_SCOPES = ('crates/package.json', 'crates/plurxd/package.json', 'crates/plurxd/src/package.json', 'crates/plurxd/src/web/core/package.json', 'crates/plurxd/src/web/detail/package.json', 'crates/plurxd/src/web/layouts/package.json', 'crates/plurxd/src/web/package.json', 'crates/plurxd/src/web/pages/package.json', 'crates/plurxd/src/web/player/package.json', 'crates/plurxd/src/web/types/package.json', 'package.json', 'scripts/cq-native-shipping/package.json', 'scripts/package.json', 'tests/package.json', 'tests/playback/continuous-quality/package.json', 'tests/playback/package.json', 'tests/vendor/package.json', 'tests/web/package.json')
+NODE_PACKAGE_PINS = {}
+PYTHON_CACHE_POLICY = {'kind':'owned-absent-prefix-no-bytecode-v1','prefix':'owned output/python-cache','write_bytecode':False}
+CACHE_ROOTS = ('scripts','tests/playback')
+MAX_CACHE_FILES, MAX_CACHE_BYTES = 128, 16*1024*1024
 MAX_FILES, MAX_BLOB, MAX_SOURCE = 1500, 32*1024*1024, 128*1024*1024
 MAX_LOG, MAX_ZIP, MAX_JSON = 4*1024*1024, 4*1024*1024, 1024*1024
 ROOTS = ('Makefile','Cargo.toml','tests/web','tests/playback','crates/plurxd/src',
@@ -94,7 +99,7 @@ LEGACY_JOB = '''  web_compile:
         run: make web-unit-check
 
 '''
-SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '66cdaa073066e41f496829d2075e29521ff3ea2c4265b4c0a2204af3e7542c52', '087e836d369eb2b8f94ec1d0454ea6c157612df9': 'bddc527173b7247e1033ddfe7d8d008a7328ada44e9f00f2fa0eb8bda09ed83c'}
+SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '97f338f93705406847d3987b80bf2f0fa8402755a4d1b80003f2434d5d44b814', '9569dd03dcbd4a84b408078f90601d075fe726a9': '4bddf7fb49972695846029e71e65c488052eefbd39a52e747b17b9c86dd28c6c'}
 HELPERS = ('scripts/js-check', 'scripts/web-types', 'scripts/web-jsconfig', 'scripts/playback-lab', 'scripts/playback-frame-clock.js', 'scripts/continuous-quality-qualification', 'scripts/player-contract-table', 'scripts/ui-baseline', 'scripts/subtitle-readiness-browser-check', 'scripts/cq-native-shipping/check-evidence.js', 'tests/vendor/acorn.js', 'scripts/playback-startup-lab')
 WRAPPER = '''      - name: Retain or execute the reviewed whole web cohort
         env:
@@ -125,6 +130,27 @@ def child_environment():
     secrets = {'GITHUB_TOKEN','GH_TOKEN','FORGEJO_TOKEN','GITEA_TOKEN','WEB_COHORT_API_TOKEN',
         'ACTIONS_RUNTIME_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN'}
     return {key:value for key,value in os.environ.items() if key not in secrets}
+
+
+def fresh_environment(prefix):
+    env=child_environment()
+    env.update(PYTHONPYCACHEPREFIX=str(prefix),PYTHONDONTWRITEBYTECODE='1')
+    return env
+
+
+def verify_fresh_cache(workspace,prefix):
+    require(prefix.is_absolute() and not prefix.exists() and not prefix.is_symlink()
+        and prefix.parent.is_dir() and prefix.parent.stat().st_uid == os.geteuid()
+        and not any(p.is_symlink() for p in prefix.parents),
+        'Fresh web cache prefix must be reserved, absent and nonaliased')
+    code=('import sys;print(sys.implementation.name);print(sys.version.split()[0]);'
+          'print(sys.pycache_prefix);print(int(sys.dont_write_bytecode))')
+    observed=subprocess.check_output(['python3','-c',code],cwd=workspace,text=True,timeout=10,
+        env=fresh_environment(prefix)).splitlines()
+    require(len(observed)==4 and observed[0] and re.fullmatch(r'3\.[0-9]+\.[0-9]+',observed[1])
+        and observed[2]==str(prefix) and observed[3]=='1' and not prefix.exists(),
+        'Fresh web Python cache isolation is unsupported')
+    return {'implementation':observed[0],'version':observed[1],'cache_policy':PYTHON_CACHE_POLICY}
 
 
 def git(workspace,*args,limit=MAX_SOURCE):
@@ -169,10 +195,73 @@ def selectors(workspace,commit=None):
         'Unsupported web Make selector; closure review required')
 
 
+def node_package_scope(workspace,commit):
+    """Finite repository-local ancestor configs; no host/package crawler."""
+    present = {}
+    raw = git(workspace,'ls-tree','-z',commit,'--',*NODE_PACKAGE_SCOPES,limit=64*1024)
+    for record in raw.split(b'\0'):
+        if not record:continue
+        header,name = record.split(b'\t',1);mode,kind,blob = header.decode().split();path = name.decode('utf-8')
+        require(path in NODE_PACKAGE_SCOPES and path not in present and kind == 'blob'
+            and mode in ('100644','100755'),'Unsupported web Node package scope type')
+        require(int(git(workspace,'cat-file','-s',blob,limit=32)) <= MAX_JSON,'Web package configuration exceeds bound')
+        data = git(workspace,'cat-file','blob',blob,limit=MAX_JSON)
+        present[path] = {'mode':mode,'blob':blob,'sha256':digest(data)}
+    require(present == NODE_PACKAGE_PINS,'Unsupported web Node package scope; closure review required')
+    return [{'path':path,'identity':present.get(path)} for path in NODE_PACKAGE_SCOPES]
+
+
+def live_node_packages(workspace):
+    for relative in NODE_PACKAGE_SCOPES:
+        location = workspace;present = None
+        for index,part in enumerate(relative.split('/')):
+            location = location/part
+            try: mode = location.lstat().st_mode
+            except FileNotFoundError:break
+            if index < len(relative.split('/'))-1:
+                require(stat.S_ISDIR(mode),'Unsupported live web package ancestor type')
+                continue
+            require(stat.S_ISREG(mode),'Unsupported live web Node package scope type')
+            require(location.stat().st_size <= MAX_JSON,'Live web package configuration exceeds bound')
+            data = location.read_bytes()
+            present = {'mode':'100755' if mode & 0o111 else '100644',
+                'blob':hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest(),'sha256':digest(data)}
+        require(present == NODE_PACKAGE_PINS.get(relative),
+            'Unsupported live web Node package scope; closure review required')
+
+
+def live_cache_paths(workspace):
+    """Only bounded real cache artifacts, never sibling import selectors.
+
+    Their bytes are not certified: fresh execution uses a separate absent
+    prefix and cannot consume these caches. Retention executes no helper.
+    """
+    allowed=set();count=total=0
+    for root in CACHE_ROOTS:
+        parent=workspace
+        for part in root.split('/'):
+            parent=parent/part
+            require(not parent.is_symlink(),'Web cache search root contains a symlink')
+        cache=parent/'__pycache__'
+        try:mode=cache.lstat().st_mode
+        except FileNotFoundError:continue
+        require(stat.S_ISDIR(mode),'Unsupported web cache directory type')
+        with os.scandir(cache) as children:
+            for child in children:
+                count += 1;info=child.stat(follow_symlinks=False);total += info.st_size
+                require(count <= MAX_CACHE_FILES and total <= MAX_CACHE_BYTES
+                    and stat.S_ISREG(info.st_mode) and child.name.endswith('.pyc'),
+                    'Unsupported web cache member/bound')
+                allowed.add((Path(root)/'__pycache__'/child.name).as_posix())
+    return allowed
+
+
 def live_inputs(workspace):
-    selectors(workspace)
+    selectors(workspace);live_node_packages(workspace)
+    caches=live_cache_paths(workspace)
     for options in (('--others','--exclude-standard'),('--others','--ignored','--exclude-standard')):
-        require(not git(workspace,'ls-files','-z',*options,'--',*ROOTS,*HELPERS,limit=512*1024),
+        untracked=git(workspace,'ls-files','-z',*options,'--',*ROOTS,*HELPERS,limit=512*1024)
+        require(all(path.decode('utf-8') in caches for path in untracked.split(b'\0') if path),
             'Untracked/ignored web closure input; clean reviewed checkout required')
     require(not any(os.environ.get(name) for name in ('MAKEFILES','MAKEFLAGS','GNUMAKEFLAGS',
         'NODE_OPTIONS','NODE_PATH','BASH_ENV','ENV','PYTHONPATH','PYTHONSTARTUP')),
@@ -215,7 +304,7 @@ def live_script_resolvers(workspace,commit):
 def shape_row(row):
     path = row['path']
     return path in ('Makefile','Cargo.toml',*HELPERS,'tools/web-types/package.json','tools/web-types/package-lock.json') or (
-        path.startswith(('tests/web/','tests/playback/')) and path.endswith(('.js','.mjs','.cjs','.py','.sh'))) or (
+        path.startswith(('tests/web/','tests/playback/'))) or (
         path.startswith('crates/plurxd/src/web/') and path.endswith(('.js','.mjs','.cjs','.ts','.html','.json')))
 
 
@@ -223,6 +312,7 @@ def manifest(workspace,commit,base):
     receipts.sha(commit); receipts.sha(base)
     selectors(workspace,commit)
     resolver = script_resolver_layout(workspace,commit)
+    packages = node_package_scope(workspace,commit)
     rows, contents, total = [], {}, 0
     raw = git(workspace,'ls-tree','-r','-z',commit,'--',*ROOTS,*HELPERS,limit=512*1024)
     for record in raw.split(b'\0'):
@@ -247,12 +337,13 @@ def manifest(workspace,commit,base):
     merge = git(workspace,'merge-base',commit,base,limit=64).decode().strip(); receipts.sha(merge)
     baseline = git(workspace,'show',merge+':'+BASELINE,limit=MAX_JSON)
     return {'files':rows,'baseline':{'event_base':base,'merge_base':merge,'sha256':digest(baseline)},
-        'runtime_contract':RUNTIME,'script_resolver_sha256':digest(canonical(resolver)),'policy_sha256':policy_fingerprint()}
+        'runtime_contract':RUNTIME,'script_resolver_sha256':digest(canonical(resolver)),'node_package_scope_sha256':digest(canonical(packages)),'policy_sha256':policy_fingerprint()}
 
 
 def policy_fingerprint():
     return digest(canonical({'version':POLICY_VERSION,'roots':ROOTS,'helpers':HELPERS,'shape_families':SHAPE_FAMILIES,
-        'runtime':RUNTIME,'python_policy':PYTHON_POLICY,'script_resolver_families':SCRIPTS_RESOLVER_FAMILIES,'commands':COMMANDS,'legacy_job':digest(LEGACY_JOB.encode()),
+        'runtime':RUNTIME,'python_policy':PYTHON_POLICY,'fresh_python_cache':PYTHON_CACHE_POLICY,'cache_roots':CACHE_ROOTS,
+        'cache_bounds':[MAX_CACHE_FILES,MAX_CACHE_BYTES],'node_package_scopes':NODE_PACKAGE_SCOPES,'node_package_pins':NODE_PACKAGE_PINS,'script_resolver_families':SCRIPTS_RESOLVER_FAMILIES,'commands':COMMANDS,'legacy_job':digest(LEGACY_JOB.encode()),
         'adapter_job':digest(adapted_job().encode()),'baseline':'event-base+merge-base+bytes',
         'host':'Linux/X64 host; python3 stdlib and fixed Make recipe compatibility v1'}))
 
@@ -270,7 +361,7 @@ def runtime():
         'policy_compatible':{'host':'Linux/X64 host executor','python':PYTHON_POLICY,'make':'fixed reviewed recipe'},
         'current_diagnostics':{'python':{'implementation':platform.python_implementation(),'version':platform.python_version()},'make':subprocess.check_output(['make','--version'],
             text=True,env=child_environment(),timeout=10).splitlines()[0]},
-        'historical_not_recorded':['OS distribution','kernel','Python version','Make version','immutable host/image identity']}
+        'historical_not_recorded':['OS distribution','kernel','Python version','Python cache policy','Make version','immutable host/image identity']}
 
 
 def current_context(workspace):
@@ -378,7 +469,7 @@ def legacy_result(api,scope,workspace):
     return {'kind':'legacy','run':ORIGIN_RUN,'job':ORIGIN_JOB,'attempt':1,'commit':PRODUCER,
         'log_sha256':digest(raw),'input_key':execution_key(inputs),
         'origin_observed_tools':{'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','typescript':'6.0.3'},
-        'historical_not_recorded':['OS distribution','kernel','Python version','Make version','immutable host/image identity']},raw
+        'historical_not_recorded':['OS distribution','kernel','Python version','Python cache policy','Make version','immutable host/image identity']},raw
 
 
 def unpack(data):
@@ -422,7 +513,7 @@ def v1_result(api,scope,workspace,rid,jid,current,*,root_only=False):
     require(len(data) == size and digest(data) == sha,'Web cohort uploaded archive digest/size differs')
     receipt,log = unpack(data)
     require(set(receipt) == {'schema_version','mode','commit','tree','run','job','attempt','scope','inputs','input_key',
-        'policy_sha256','adapter_sha256','web_job','runtime','origin','log_sha256','current_test_events'},'Web receipt field set differs')
+        'policy_sha256','adapter_sha256','web_job','runtime','python_cache_execution','origin','log_sha256','current_test_events'},'Web receipt field set differs')
     key = execution_key(inputs)
     require(type(receipt['schema_version']) is int and receipt['schema_version'] == 1
         and type(receipt['run']) is int and type(receipt['job']) is int
@@ -443,11 +534,17 @@ def v1_result(api,scope,workspace,rid,jid,current,*,root_only=False):
     marker = 'WEB-COHORT-RECEIPT '+digest(canonical(receipt))
     require(lines.count(marker) == 1,'Web receipt not bound to authenticated job log')
     if receipt['mode'] == 'fresh_execution':
+        cache=receipt['python_cache_execution']
+        require(isinstance(cache,dict) and set(cache)=={'implementation','version','cache_policy'}
+            and isinstance(cache['implementation'],str) and cache['implementation']
+            and re.fullmatch(r'3\.[0-9]+\.[0-9]+',cache['version']) is not None
+            and cache['cache_policy']==PYTHON_CACHE_POLICY,'Web fresh Python cache policy differs')
         require(receipt['origin'] is None and receipt['current_test_events'] is True,'Web fresh origin/event claim differs')
         fresh_log(log,key)
         return {'kind':'v1_fresh','run':rid,'job':jid,'attempt':1,'commit':run['commit_sha'],
             'log_sha256':digest(log),'input_key':key,'artifact_id':aid,'artifact_sha256':sha,'job_log_sha256':digest(raw)},log
-    require(not root_only and receipt['mode'] == 'retained_prior_execution' and receipt['current_test_events'] is False,
+    require(not root_only and receipt['mode'] == 'retained_prior_execution' and receipt['current_test_events'] is False
+        and receipt['python_cache_execution'] is None,
         'Web retained origin must point directly to real execution')
     pointer = receipt['origin']; require(isinstance(pointer,dict),'Web retained origin missing')
     if pointer.get('kind') == 'legacy': result,original = legacy_result(api,scope,workspace)
@@ -515,7 +612,7 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
         'commit':current,'tree':git(workspace,'rev-parse',current+'^{tree}',limit=64).decode().strip(),
         'run':run['id'],'job':job['id'],'attempt':1,'scope':scope,'inputs':inputs,'input_key':key,
         'policy_sha256':policy_fingerprint(),'adapter_sha256':digest(git(workspace,'show',current+':'+ADAPTER,limit=256*1024)),
-        'web_job':workflow_identity(workspace,current),'runtime':actual_runtime,'origin':None,'log_sha256':None,'current_test_events':False}
+        'web_job':workflow_identity(workspace,current),'runtime':actual_runtime,'python_cache_execution':None,'origin':None,'log_sha256':None,'current_test_events':False}
     # Reauthenticate the ready head and live selector/source boundary immediately
     # before either applicability emission or the first web command.
     again = current_context(workspace)
@@ -530,6 +627,8 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
     else:
         require(fresh_on_new_inputs,'New web inputs require explicit fresh execution policy')
         receipt['current_test_events'] = True
+        cache_prefix=output.absolute()/'python-cache'
+        receipt['python_cache_execution']=verify_fresh_cache(workspace,cache_prefix)
         path = output/'web-cohort.log'
         with path.open('xb') as stream:
             def marker(value): stream.write((value+'\n').encode()); stream.flush(); os.fsync(stream.fileno())
@@ -538,7 +637,7 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
             write_receipt(output,receipt)
             for i,command in enumerate(COMMANDS):
                 marker(f'WEB-COHORT-COMMAND {i} START')
-                env = child_environment(); env.pop('PR_BASE_SHA',None)
+                env = fresh_environment(cache_prefix); env.pop('PR_BASE_SHA',None)
                 if i == 1: env['PR_BASE_SHA'] = base
                 if i == 2: env['TMPDIR'] = '/tmp'
                 completed = subprocess.run(['bash','-euo','pipefail','-c',command],cwd=workspace,env=env,stdout=stream,stderr=subprocess.STDOUT)
@@ -546,11 +645,13 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
                 require(path.stat().st_size <= MAX_LOG,'Fresh web log exceeds bound')
                 marker(f'WEB-COHORT-COMMAND {i} PASS')
             version = subprocess.check_output(['node','tools/web-types/node_modules/typescript/bin/tsc','--version'],
-                cwd=workspace,text=True,timeout=10,env=child_environment()).strip()
+                cwd=workspace,text=True,timeout=10,env=fresh_environment(cache_prefix)).strip()
             require(version == 'Version 6.0.3','Fresh web TypeScript binary differs from locked compiler')
             marker('WEB-COHORT-TYPESCRIPT '+version)
             receipt['runtime']['typescript'] = {'declared_locked':'6.0.3','current_binary_observed':version,'current_qualification_execution':True}
             marker('WEB-COHORT-FINISH '+key+' 0')
+        require(not cache_prefix.exists() and not cache_prefix.is_symlink(),
+            'Fresh web Python cache prefix was populated or aliased')
         raw = path.read_bytes(); fresh_log(raw,key)
     live_inputs(workspace);live_script_resolvers(workspace,current)
     require(git(workspace,'rev-parse','HEAD',limit=64).decode().strip() == current
