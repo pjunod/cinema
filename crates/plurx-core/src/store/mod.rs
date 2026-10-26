@@ -82,6 +82,14 @@ pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
 pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_playback_handoffs;
+pub mod playback_handoffs;
+pub use playback_handoffs::{
+    NewPlaybackHandoff, PlaybackHandoff, PlaybackHandoffRedeemOutcome, PlaybackHandoffRedemption,
+    PlaybackHandoffStore, PlaybackHandoffTokenScope, PLAYBACK_HANDOFF_CODE_TTL_SECS,
+    PLAYBACK_HANDOFF_TOKEN_TTL_SECS,
+};
 mod candidate_link;
 mod candidate_recovery;
 pub use candidate_recovery::{
@@ -358,17 +366,22 @@ pub struct TokenSummary {
 /// Which surface a login token was issued for. A Jellyfin compatibility
 /// login authenticates only the compatibility facade; native and Plex
 /// surfaces refuse it, so a token pulled off a shared TV is not a native
-/// account bearer.
+/// account bearer. A playback handoff token (redeemed from a one-time code,
+/// `playback_handoffs.rs`) is likewise refused by every native route; it
+/// authenticates only while unexpired and while the token that minted it
+/// still exists, and only the handoff routes accept it, for one file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenAudience {
     Native,
     JellyfinCompatibility,
+    PlaybackHandoff,
 }
 impl TokenAudience {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
             Self::JellyfinCompatibility => "jellyfin",
+            Self::PlaybackHandoff => "playback_handoff",
         }
     }
 }
@@ -5813,6 +5826,7 @@ pub trait Store:
     + PretranscodeJobStore
     + OfflinePackageStore
     + FileGrantStore
+    + PlaybackHandoffStore
     + RemoteStore
     + InvitationStore
     + PlaybackTelemetryStore
@@ -5873,6 +5887,7 @@ impl<T> Store for T where
         + PretranscodeJobStore
         + OfflinePackageStore
         + FileGrantStore
+        + PlaybackHandoffStore
         + RemoteStore
         + InvitationStore
         + PlaybackTelemetryStore

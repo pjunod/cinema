@@ -31,6 +31,7 @@ mod live_tv_resource;
 mod media;
 mod offline;
 mod outbox;
+mod playback_handoffs;
 mod pretranscode;
 mod publication;
 mod reading;
@@ -1314,6 +1315,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::library_annotations_schema::SCHEMA,
     // v114: source-revision title acquisition, independent of ordinary probes.
     super::dv_title_jobs::SCHEMA,
+    // v115: one-time playback handoff codes and their file-scoped tokens.
+    super::playback_handoffs::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1853,6 +1856,7 @@ impl SqliteStore {
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
         super::dv_title_jobs_schema::verify_sqlite(conn)?;
+        super::playback_handoffs::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

@@ -3193,7 +3193,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # The task owns its Arc manager and physical admission while awaiting the
 # cancellable bounded child. The test cancels it and consumes its JoinHandle
 # before asserting released credit; timeout is failure, never reap evidence.
-expected_occurrences = 996
+expected_occurrences = 997
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4863,7 +4863,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # observation deadlines grants reap, publication or admission-release evidence.
 # Frame-MDCV repair: +1 awaited creation-budget timeout around held-source
 # metadata resolution; expiry refuses preparation and creates no recovery owner.
-expected_occurrences = 1851
+expected_occurrences = 1852
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

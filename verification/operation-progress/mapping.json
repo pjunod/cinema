@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc"
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc"
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc"
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -249,7 +249,7 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "81301304f54d595ffc1d10d742d757f34ddd5c1046c0a6c9ca3f5bdeaa9a1828"
+        "sha256": "96f3038cd2f6e474af66e4c09e240233e15915fffca351db41f799313654b597"
       },
       {
         "table": "42 daemon schedule loop no token",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "28150af6c4f83ed44a28063832f34404908d794e1026c4f89803772e91844894"
+        "sha256": "c054f493dc028dee81d8222bea811cf4c9585c479c91bd3a6d0448f158ef71ed"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",

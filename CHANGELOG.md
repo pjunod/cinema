@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Server playback handoff for the Linux player: a signed-in client mints a
+  one-time code (`POST /api/v1/playback-handoffs`, single use, 120 s) that
+  another local app redeems for a token limited to one title's decision, HLS
+  create, direct play, text subtitles, progress and client log. The token lives six hours, shows in the
+  account's devices list, and is revoked with the session that minted it.
+
 - Optional display-targeted HDR10-E selects a supported downward bucket from
   the viewer's reported peak, with platform/viewer provenance, complete-title
   L1 eligibility and master elision. The independent Developer preference is
@@ -121,6 +127,11 @@ bump may break compatibility and a **patch** bump never does.
   without claiming FEL was discarded or the base picture copied before the
   session selects its processing. Session enhancement details distinguish
   FEL reconstruction from basic Profile 8.1 conversion.
+
+- English subtitle translation setup follows accepted model downloads and tests,
+  explains failures and capacity waits, and recovers model choices after a
+  failed status load without losing unsaved settings. Model tests keep a FIFO
+  place for background capacity so repeated library work cannot skip them.
 
 - All playback caches share one disk budget with reader-safe global eviction,
   pre-write capacity reservations and a filesystem free-space reserve, preventing
