@@ -1,6 +1,6 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** open · final qualification
+**Status:** built · final qualification
 
 **Date:** 2026-10-25 · **Updated:** 2026-10-26 · **Owner:** Codex /root · **Branch:** `effort/subtitle-completion`
 
@@ -10,7 +10,7 @@ and [progressive translation plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).
 The implementation is built in one owned clone and batched in
 [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292), owned by Codex /root.
 The PR records current qualification results, merge blockers and the landing
-receipt. Independent review findings are resolved. The user owns deployment;
+receipt. Independent review findings, including final worker and native lifecycle deltas, are resolved. The user owns deployment;
 no agent deployment is authorized. Physical Apple TV acceptance follows that
 deployment and is distinct from server/runtime or simulator evidence.
 
@@ -89,21 +89,27 @@ formats. Caption rendering reconciles cue identities instead of clearing the
 entire track on every manifest refresh. Bounded review closed both changes;
 the packaging regression and two cue-delta/reselection regressions passed.
 
-Atomic operation completion and worker reassignment are implemented and
-frozen for bounded review. Completion requires all expected immutable core
-segments with exact bounds and accepted manifest revisions. Reassignment
-retains viewer demand and cached segments while replacing the preparation
-job identity; old jobs cannot publish after a move, including a move back to
-the original node. The SQLite117 and replicated-store upgrade accept only
-the recognized previous trigger shape. Unknown schemas remain refused.
-Focused regressions and the failed actual worker case remain to execute.
+Atomic operation completion and worker reassignment passed bounded review.
+Completion requires all expected immutable core segments with exact bounds
+and accepted manifest revisions. Reassignment retains viewer demand and
+cached segments while replacing the preparation job identity; old jobs cannot
+publish after a move back to the original node. The SQLite117 and replicated
+upgrade accept only the recognized previous trigger shape; unknown schemas
+remain refused. Focused authority, replay, gapped/completed coverage, cached
+rebinding and300-window lease regressions passed. The actual replicated-store
+upgrade test also passed; this remains separate from fleet deployment.
 
-All52 focused Android caption cases are covered by passing results. Two
-fixture corrections were reviewed, then only the failed/affected cases were
-rerun. Apple TV testing retained ten passing methods before one semantic
-seek-clear assertion and a stalled fake-network handoff fixture. The isolated
-fixture corrections are built and await bounded review and rerun; this is
+All35 selected Apple TV unit cases and52 focused Android caption cases are
+covered by passing results. Failed/affected fixture cases were reviewed and
+rerun individually. Native caption owners now track their network tasks,
+including captured demand cleanup, and expose awaitable retirement before a
+transport closes. This closes a concrete test transport lifecycle race
+without adding sleeps or changing synchronous player retirement. It is
 simulator evidence, separate from physical Apple TV playback.
+
+The actual multi-audio progressive-worker rerun and final main fast lane are
+the remaining qualification items. Their exact candidate and result are
+recorded on PR #1292, which is also the authoritative landing record.
 
 ## Scope and initial inventory
 

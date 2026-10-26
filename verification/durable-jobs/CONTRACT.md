@@ -328,3 +328,9 @@ completion, producer recovery, remote-worker liveness or admission fairness.
 Model/configuration bytes, fairness premises and historical receipts remain
 unchanged. Offline mapping validation checks the reviewed inputs and anchors;
 it is not Rust test execution, TLC qualification or a refinement proof.
+
+The later 2026-10-26 formatter pass only moved the unchanged feature-gated
+`subtitle_translation_upgrade` test-module declaration into lexical order.
+Its visibility, feature condition and source path are unchanged. The one
+inspected `store_contract.rs` mapping hash was rebound; this adds no model
+semantics or execution evidence.

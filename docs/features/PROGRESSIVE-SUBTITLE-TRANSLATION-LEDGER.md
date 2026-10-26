@@ -201,8 +201,8 @@ now records native clients, actual selected audio ordinals, remux/encoded
 attachments and the three caption operations. Linux packages now stage the
 readable fixture notice, and manifest rendering applies cue changes without
 re-adding unchanged cues; their focused regressions passed. Atomic operation
-completion, durable multi-node reassignment, and rapid-seek lease qualification
-are being closed in PR #1292. Fleet/device acceptance, long-film throughput and
+completion, durable producer reassignment and rapid-seek lease reuse now pass
+focused regression qualification in PR #1292. Fleet/device acceptance, long-film throughput and
 bilingual human quality remain distinct from implementation and fixture
 qualification. The P0 timing figures do not prove realtime on other hardware.
 

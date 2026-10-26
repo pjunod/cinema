@@ -835,8 +835,17 @@ mod qualification {
                 },
                 "selected German audio must produce task-specific words"
             );
+            // viewer_pass awaits each heartbeat reply before observing worker
+            // completion. Release, like renewal, carries the next generation.
+            let release_generation = viewer["demand_generation"]
+                .as_str()
+                .expect("last acknowledged generation")
+                .parse::<i64>()
+                .expect("canonical generation")
+                .checked_add(1)
+                .expect("next release generation");
             reply(api::release(AdminUser(admin.clone()),State(state.clone()),Path((operation_id.clone(),viewer["demand_id"].as_str().expect("demand").into())),Json(serde_json::from_value(json!({"version":1,"request_id":uuid::Uuid::new_v4().to_string(),
-                "intent_expires_at_ms":crate::state::clock_ms()+300000,"expected_operation_epoch":viewer["operation_epoch"],"demand_generation":viewer["demand_generation"],"playback_id":viewer["playback_id"]})).expect("typed release"))).await.expect("release owned viewer")).await;
+                "intent_expires_at_ms":crate::state::clock_ms()+300000,"expected_operation_epoch":viewer["operation_epoch"],"demand_generation":release_generation.to_string(),"playback_id":viewer["playback_id"]})).expect("typed release"))).await.expect("release owned viewer")).await;
             operations.push(json!({"operation_id":operation_id,"task":selected.task,"profile_id":selected.id().expect("profile"),"first_committed_ms":first_ms,"complete_ms":started.elapsed().as_millis(),"segments":segments}));
         }
         let jobs = state
