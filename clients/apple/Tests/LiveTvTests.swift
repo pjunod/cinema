@@ -841,7 +841,7 @@ final class LiveTvTests: XCTestCase {
                 .components(separatedBy: "Section(\"")[0]
             XCTAssertTrue(card.contains("Awaiting "), title)
             if title == "Remote diagnostics · advisory readiness" {
-                XCTAssertTrue(card.contains("leaves Developer after those checks pass"), title)
+                XCTAssertTrue(card.contains("graduates from Developer after those checks pass"), title)
             } else {
                 XCTAssertTrue(card.contains("graduates "), title)
             }
