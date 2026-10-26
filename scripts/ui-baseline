@@ -678,6 +678,28 @@ def default_server_bin():
     return target_dir / "debug" / "plurxd"
 
 
+def pin_fixture_software_encoder(base_url, token):
+    """Choose one real backend on this throwaway node before its next boot."""
+    system = api(base_url, "/system", token)
+    node_id = system.get("node_id") if isinstance(system, dict) else None
+    if not isinstance(node_id, str) or not node_id:
+        raise Fail("capture fixture cannot identify its transcoder node")
+    saved = api(base_url, "/system/transcoder", token, "PUT",
+                {"node_id": node_id, "preference": "software"})
+    if not isinstance(saved, dict) or saved.get("node_id") != node_id \
+            or saved.get("preference") != "software" \
+            or type(saved.get("restart_required")) is not bool:
+        raise Fail("capture fixture did not save Software on its own node")
+
+
+def require_fixture_software_encoder(base_url, token):
+    """Verify the restarted manager's actual observation, not the saved desire."""
+    settings = api(base_url, "/settings", token)
+    observation = settings.get("content_encoding_applicability") if isinstance(settings, dict) else None
+    if not isinstance(observation, dict) or observation.get("selected_encoder") != "software":
+        raise Fail("capture fixture Software preference did not become effective after restart")
+
+
 class SelfHost:
     """Boot, seed, freeze and serve a plurxd nobody else is using."""
 
@@ -789,6 +811,7 @@ class SelfHost:
         self.spawn()
         self.wait_for_caption_probe(probe_log_offset)
         self.require_jellyfin_listener()
+        require_fixture_software_encoder(self.base_url, self.token)
         self.discover()
 
     def wait_for_caption_probe(self, log_offset):
@@ -878,6 +901,11 @@ class SelfHost:
         # account is a valid 200 response rather than a disabled-feature 503.
         api(self.base_url, "/settings", self.token, "PUT",
             {"vod_index_mins": 0, "cinema_remote_control": True})
+        # Auto selects VideoToolbox on some Macs and Software on Linux. Pin a
+        # real node-scoped choice, then apply it at the existing recovery boot;
+        # the browser still renders the unmodified settings/readiness APIs.
+        # This seed is reached only by --self-host, never a live --base-url.
+        pin_fixture_software_encoder(self.base_url, self.token)
         libs = []
         for name, kind, share in LIBRARIES:
             library = api(self.base_url, "/libraries", self.token, "POST", {

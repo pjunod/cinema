@@ -1,9 +1,12 @@
 """Portable layout capture pins host observations, not readiness contracts."""
 import copy
+from contextlib import redirect_stdout
+import io
 from pathlib import Path
 import runpy
+import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -100,6 +103,58 @@ class UiReadinessFixtureCase(unittest.TestCase):
         self.harness['capture_runtime_readiness'](intercepted, problems)
         self.assertEqual(problems, ['invalid JSON'])
         intercepted.fulfill.assert_called_once_with(response=response)
+
+
+    def test_software_seed_targets_observed_node_and_checks_server_acknowledgement(self):
+        pin = self.harness['pin_fixture_software_encoder']
+        for node in ['mac-fixture', 'linux-fixture']:
+            calls = []
+            def api(base, path, token, method='GET', body=None):
+                calls.append((path, method, body))
+                if path == '/system':
+                    return {'node_id': node}
+                return {'node_id': node, 'preference': 'software', 'restart_required': True}
+            with patch.dict(pin.__globals__, {'api': api}):
+                pin('http://fixture', 'fixture-token')
+            self.assertEqual(calls, [('/system', 'GET', None), ('/system/transcoder', 'PUT',
+                {'node_id': node, 'preference': 'software'})])
+        bad_replies = [None, {'node_id': 'different-node', 'preference': 'software', 'restart_required': True},
+                       {'node_id': 'owned-node', 'preference': 'auto', 'restart_required': False}]
+        for reply in bad_replies:
+            with patch.dict(pin.__globals__, {'api': Mock(side_effect=[{'node_id': 'owned-node'}, reply])}):
+                with self.assertRaises(self.harness['Fail']):
+                    pin('http://fixture', 'fixture-token')
+        rejected = self.harness['Fail']('HTTP 409: different server node')
+        with patch.dict(pin.__globals__, {'api': Mock(side_effect=[{'node_id': 'owned-node'}, rejected])}):
+            with self.assertRaisesRegex(self.harness['Fail'], 'HTTP 409'):
+                pin('http://fixture', 'fixture-token')
+
+    def test_saved_software_requires_effective_post_restart_observation(self):
+        require = self.harness['require_fixture_software_encoder']
+        for actual in ['videotoolbox', 'auto', None]:
+            with patch.dict(require.__globals__, {'api': Mock(return_value={
+                    'content_encoding_applicability': {'selected_encoder': actual}})}):
+                with self.assertRaisesRegex(self.harness['Fail'], 'did not become effective'):
+                    require('http://fixture', 'fixture-token')
+        with patch.dict(require.__globals__, {'api': Mock(return_value={
+                'content_encoding_applicability': {'selected_encoder': 'software'}})}):
+            require('http://fixture', 'fixture-token')
+        with patch.dict(require.__globals__, {'api': Mock(side_effect=self.harness['Fail']('HTTP 503'))}):
+            with self.assertRaisesRegex(self.harness['Fail'], 'HTTP 503'):
+                require('http://fixture', 'fixture-token')
+
+    def test_external_base_url_never_enters_seed_or_changes_encoder_preference(self):
+        main = self.harness['main']
+        forbidden = Mock(side_effect=AssertionError('external capture mutated server'))
+        empty = {key: {} for key in ['surfaces', 'focus', 'requests', 'dom', 'pixels']}
+        empty.update(layouts=[], failures=[])
+        with tempfile.TemporaryDirectory() as out, redirect_stdout(io.StringIO()), patch.dict(main.__globals__, {
+                'preflight': Mock(), 'discover_routes': Mock(return_value={}),
+                'run_capture': Mock(return_value=empty), 'SelfHost': forbidden,
+                'pin_fixture_software_encoder': forbidden, 'require_fixture_software_encoder': forbidden}):
+            self.assertEqual(main(['--base-url', 'http://external-read-only', '--token', 'fixture-token',
+                                   '--out', out]), 0)
+        forbidden.assert_not_called()
 
 
 if __name__ == '__main__':
