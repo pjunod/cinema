@@ -902,7 +902,7 @@ async fn apply_graph(
     Ok((applied.result, applied.resolved_token))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Applied {
     result: String,
     resolved_token: Option<usize>,
@@ -916,22 +916,69 @@ async fn apply(
     action: &Action,
     observe_refusals: bool,
 ) -> Result<Applied, String> {
-    let now = episode.now;
-    // The extracted oracle enables durable observation here and additionally
-    // compares full canonical state on refusals before memoization. Direct
-    // conformance can enable this observer; resolve always observes its reads.
-    let before_rows = if matches!(
-        action,
-        Action::Resolve { .. } | Action::ResolveInitialClaim { .. } | Action::ReadClaimJob { .. }
-    ) || (observe_refusals
-        && !matches!(
-            action,
-            Action::RemoveOwner { .. } | Action::ClockAdvance { .. }
-        )) {
+    let before_rows = if observes_rows(action, observe_refusals) {
         Some(snapshot(&fixture.store).await)
     } else {
         None
     };
+    let applied = apply_primitive(fixture, episode, action).await?;
+    if read_only(action) || (observe_refusals && refused(&applied.result)) {
+        compare_rows(
+            action,
+            before_rows.as_ref().expect("guarded primitive preimage"),
+            &snapshot(&fixture.store).await,
+        )?;
+    }
+    Ok(applied)
+}
+
+fn read_only(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Resolve { .. } | Action::ResolveInitialClaim { .. } | Action::ReadClaimJob { .. }
+    )
+}
+
+fn refused(result: &str) -> bool {
+    matches!(
+        result,
+        "refused"
+            | "cancelled"
+            | "expired_or_pruned"
+            | "held"
+            | "validation_error_yield_time"
+            | "validation_error_retry_time"
+    )
+}
+
+fn observes_rows(action: &Action, observe_refusals: bool) -> bool {
+    read_only(action)
+        || (observe_refusals
+            && !matches!(
+                action,
+                Action::RemoveOwner { .. } | Action::ClockAdvance { .. }
+            ))
+}
+
+fn compare_rows(action: &Action, before: &Value, after: &Value) -> Result<(), String> {
+    if before != after {
+        return Err(if read_only(action) {
+            "ResolutionReadOnly: logical resolution changed durable rows".into()
+        } else {
+            "FailedCasAtomicity: refused primitive changed durable rows".into()
+        });
+    }
+    Ok(())
+}
+
+// Only observation ownership changes: every branch below still invokes the
+// original production Store API with the original exact request and Episode.
+async fn apply_primitive(
+    fixture: &Fixture,
+    episode: &mut Episode,
+    action: &Action,
+) -> Result<Applied, String> {
+    let now = episode.now;
     let mut resolved_token = None;
     let mut claim_request = None;
     let mut job_read = None;
@@ -1367,32 +1414,6 @@ async fn apply(
             "advanced"
         }
     };
-    // Observe durable no-apply behavior here, not merely when BFS discovers
-    // a new state or reaches its cap. Resolution may append a local capture,
-    // but every actual API read must leave all durable snapshot rows equal.
-    let read_only = matches!(
-        action,
-        Action::Resolve { .. } | Action::ResolveInitialClaim { .. } | Action::ReadClaimJob { .. }
-    );
-    let refused = matches!(
-        result,
-        "refused"
-            | "cancelled"
-            | "expired_or_pruned"
-            | "held"
-            | "validation_error_yield_time"
-            | "validation_error_retry_time"
-    );
-    if read_only || (observe_refusals && refused) {
-        let before = before_rows.as_ref().expect("guarded primitive preimage");
-        if snapshot(&fixture.store).await != *before {
-            return Err(if read_only {
-                "ResolutionReadOnly: logical resolution changed durable rows".into()
-            } else {
-                "FailedCasAtomicity: refused primitive changed durable rows".into()
-            });
-        }
-    }
     Ok(Applied {
         result: result.into(),
         resolved_token,
@@ -1423,7 +1444,10 @@ async fn omitted_dv_state(store: &SqliteStore) -> Result<Value, String> {
 }
 
 async fn omitted_dv_invariants(fixture: &Fixture) -> Result<(), String> {
-    let state = omitted_dv_state(&fixture.store).await?;
+    check_omitted_dv(fixture, &omitted_dv_state(&fixture.store).await?)
+}
+
+fn check_omitted_dv(fixture: &Fixture, state: &Value) -> Result<(), String> {
     if state["files"] != json!(0)
         || state["demand"] != json!(0)
         || state["marker"] != json!([[1, 1]])
@@ -1505,6 +1529,54 @@ async fn invariants(fixture: &Fixture, episode: &Episode) -> Result<(), String> 
         return Err("NoTwoSourceReaders: same-root non-live claims overlap".into());
     }
     Ok(())
+}
+
+/// One actual sequential writer boundary, never a database restoration image.
+/// The complete nine-table rows and exact Episode determine canonical identity;
+/// omitted DV rows/sequence are independently observed and checked each time.
+/// No SQL action or mutable Episode change may occur while carrying this value.
+struct BoundaryObservation {
+    rows: Value,
+    episode: Episode,
+    omitted_dv: Value,
+    canonical: String,
+}
+
+impl BoundaryObservation {
+    async fn observe(fixture: &Fixture, episode: &Episode) -> Result<Self, String> {
+        let rows = snapshot(&fixture.store).await;
+        let omitted_dv = omitted_dv_state(&fixture.store).await?;
+        check_omitted_dv(fixture, &omitted_dv)?;
+        let canonical = serde_json::to_string(&json!({"rows": rows, "episode": episode}))
+            .expect("canonical JSON");
+        Ok(Self {
+            rows,
+            episode: episode.clone(),
+            omitted_dv,
+            canonical,
+        })
+    }
+
+    fn compare_action(
+        &self,
+        action: &Action,
+        applied: &Applied,
+        after: &Self,
+    ) -> Result<(), String> {
+        if read_only(action) || refused(&applied.result) {
+            compare_rows(action, &self.rows, &after.rows)?;
+        }
+        if refused(&applied.result) && self.canonical != after.canonical {
+            return Err(
+                "FailedCasAtomicity: refused operation changed durable rows or captured state"
+                    .into(),
+            );
+        }
+        if self.omitted_dv != after.omitted_dv {
+            return Err("OmittedDvState: operation changed separately observed DV state".into());
+        }
+        Ok(())
+    }
 }
 
 async fn canonical(fixture: &Fixture, episode: &Episode) -> String {
@@ -1816,6 +1888,9 @@ pub(super) struct OracleState {
     pub(super) view: Value,
     parent: Option<(StoreHandle, Action)>,
     inputs: Vec<Action>,
+    // Private to this Oracle's fixed fixture, installed schema and mutation.
+    // Published only after independent invariants, domain and projection checks.
+    certified: bool,
 }
 
 // A cache is bound to one migrated fixture/source/mutation identity for its
@@ -1838,6 +1913,11 @@ struct OracleDiagnostics {
     invariants: Duration,
     controls: Duration,
     replayed_apply: Duration,
+    observations: usize,
+    certifications: usize,
+    certificate_reuses: usize,
+    replay_comparisons: usize,
+    invalidations: usize,
 }
 
 // Fixed host-only totals. Await exactly once and preserve the original Result;
@@ -1857,6 +1937,8 @@ pub(super) struct Oracle {
     prefix: Vec<(Action, Episode)>,
     root_savepoint: bool,
     materialization_failed: bool,
+    // Core-local reference fixture disables substitution; closure always enables it.
+    reuse_certificates: bool,
     pub(super) states: Vec<OracleState>,
     pub(super) edges: Vec<OracleEdge>,
     index: HashMap<String, StoreHandle>,
@@ -1886,12 +1968,14 @@ impl Oracle {
             prefix: Vec::new(),
             root_savepoint: false,
             materialization_failed: false,
+            reuse_certificates: true,
             states: vec![OracleState {
                 canonical: key.clone(),
                 episode,
                 view,
                 parent: None,
                 inputs,
+                certified: true,
             }],
             edges: vec![],
             index: HashMap::from([(key, 0)]),
@@ -1907,16 +1991,21 @@ impl Oracle {
         mutation: TriggerMutation,
     ) -> Result<(), String> {
         self.restore_root().await?;
+        for state in &mut self.states {
+            state.certified = false;
+        }
+        self.diagnostics.invalidations = self.diagnostics.invalidations.saturating_add(1);
         self.mutation = install_mutation(&self.fixture, mutation).await;
-        if let Err(error) = oracle_timed!(
-            self.diagnostics,
-            invariants,
-            invariants(&self.fixture, &Episode::initial())
-        ) {
+        self.schema = schema_bindings(&self.fixture).await;
+        let rebuilt = async {
+            let observed = self.observe(&Episode::initial()).await?;
+            self.check_endpoint(0, &observed).await
+        }
+        .await;
+        if let Err(error) = rebuilt {
             self.materialization_failed = true;
             return Err(error);
         }
-        self.schema = schema_bindings(&self.fixture).await;
         self.states.truncate(1);
         self.edges.clear();
         self.cache.clear();
@@ -2045,6 +2134,104 @@ impl Oracle {
         sources
     }
 
+    async fn observe(&mut self, episode: &Episode) -> Result<BoundaryObservation, String> {
+        self.diagnostics.observations = self.diagnostics.observations.saturating_add(1);
+        oracle_timed!(
+            self.diagnostics,
+            canonical,
+            BoundaryObservation::observe(&self.fixture, episode)
+        )
+    }
+
+    /// Induction certificate read set: invariants read selected job/attempt,
+    /// reservation and request rows; actions additionally read domain ownership;
+    /// projection reads those same rows and exact Episode captures/budgets/time.
+    /// All are in the full-column snapshot. Fixture job/library IDs, schema,
+    /// constants and mutation are fixed for this Oracle; omitted DV is freshly
+    /// checked by observe, never inferred from a canonical match. Therefore
+    /// exact equality permits substitution of derived predicates ONLY. It never
+    /// substitutes production apply/replay, its complete outcome, or rollback.
+    async fn check_endpoint(
+        &mut self,
+        handle: StoreHandle,
+        observed: &BoundaryObservation,
+    ) -> Result<(), String> {
+        let expected = &self.states[handle];
+        if observed.canonical != expected.canonical
+            || serde_json::to_value(&observed.episode).expect("observed Episode")
+                != serde_json::to_value(&expected.episode).expect("certified Episode")
+        {
+            return Err("MaterializationRoundTrip: complete canonical/Episode mismatch".into());
+        }
+        if expected.certified && self.reuse_certificates {
+            self.diagnostics.certificate_reuses =
+                self.diagnostics.certificate_reuses.saturating_add(1);
+            return Ok(());
+        }
+        let view = projection(
+            &self.fixture,
+            &observed.episode,
+            handle,
+            &observed.canonical,
+        )
+        .await;
+        let inputs = oracle_timed!(
+            self.diagnostics,
+            actions,
+            actions(&self.fixture, &observed.episode)
+        );
+        oracle_timed!(
+            self.diagnostics,
+            invariants,
+            invariants(&self.fixture, &observed.episode)
+        )?;
+        if inputs != expected.inputs || view != expected.view {
+            return Err("StateCertificate: independently derived input/projection mismatch".into());
+        }
+        self.states[handle].certified = true;
+        self.diagnostics.certifications = self.diagnostics.certifications.saturating_add(1);
+        Ok(())
+    }
+
+    fn replay_edge(&self, from: StoreHandle, action: &Action) -> Result<OracleEdge, String> {
+        // Fixtures may remove a memo lookup to force actual execution, but the
+        // immutable certified edge still supplies the complete expected outcome.
+        if let Some(id) = self.cache.get(&(from, action.clone())) {
+            return Ok(self.edges[*id].clone());
+        }
+        self.edges
+            .iter()
+            .rev()
+            .find(|edge| edge.from == from && &edge.action == action)
+            .cloned()
+            .ok_or_else(|| "ReplayCertificate: missing certified transition".into())
+    }
+
+    fn compare_replay(
+        edge: &OracleEdge,
+        applied: &Applied,
+        episode: &Episode,
+    ) -> Result<(), String> {
+        let expected = Applied {
+            result: edge.result.clone(),
+            resolved_token: edge.resolved_token,
+            claim_request: edge.claim_request.clone(),
+            job_read: edge.job_read.clone(),
+        };
+        let claim_snapshot =
+            if matches!(edge.action, Action::Claim { .. }) && applied.result == "claimed" {
+                episode.claim_snapshots.last().cloned()
+            } else {
+                None
+            };
+        if &expected != applied || claim_snapshot != edge.claim_snapshot {
+            return Err(
+                "ReplayCertificate: complete Applied outcome/claim snapshot mismatch".into(),
+            );
+        }
+        Ok(())
+    }
+
     pub(super) async fn restore_root(&mut self) -> Result<(), String> {
         if self.materialization_failed {
             return Err("MaterializationPoisoned: prior restore failed".into());
@@ -2055,29 +2242,13 @@ impl Oracle {
                     self.diagnostics,
                     controls,
                     self.fixture.store.async_refinement_control(
-                        "ROLLBACK TO async_product_root; RELEASE async_product_root;".into(),
+                        "ROLLBACK TO async_product_root; RELEASE async_product_root;".into()
                     )
                 )
                 .map_err(|e| format!("RootRollback: {e}"))?;
             }
-            if oracle_timed!(
-                self.diagnostics,
-                canonical,
-                canonical(&self.fixture, &Episode::initial())
-            ) != self.states[0].canonical
-                || oracle_timed!(
-                    self.diagnostics,
-                    actions,
-                    actions(&self.fixture, &Episode::initial())
-                ) != self.states[0].inputs
-            {
-                return Err("RootRollback: Init canonical/input mismatch".into());
-            }
-            oracle_timed!(
-                self.diagnostics,
-                invariants,
-                invariants(&self.fixture, &Episode::initial())
-            )?;
+            let observed = self.observe(&Episode::initial()).await?;
+            self.check_endpoint(0, &observed).await?;
             Ok(())
         }
         .await;
@@ -2090,7 +2261,7 @@ impl Oracle {
         result
     }
 
-    async fn materialize(&mut self, trace: &[Action]) -> Result<Episode, String> {
+    async fn materialize(&mut self, trace: &[Action]) -> Result<BoundaryObservation, String> {
         if self.materialization_failed {
             return Err("MaterializationPoisoned: prior failure".into());
         }
@@ -2119,8 +2290,6 @@ impl Oracle {
                 } else {
                     format!("async_product_prefix_{common}")
                 };
-                // ROLLBACK TO retains the named checkpoint and discards every
-                // deeper checkpoint. Its owned Episode is restored separately.
                 oracle_timed!(
                     self.diagnostics,
                     controls,
@@ -2131,47 +2300,32 @@ impl Oracle {
                 .map_err(|e| format!("PrefixRollback: {e}"))?;
                 self.prefix.truncate(common);
             }
+            let mut handle = 0;
+            for action in &trace[..common] {
+                handle = self.replay_edge(handle, action)?.to;
+            }
             let mut episode = self
                 .prefix
                 .last()
                 .map(|(_, ep)| ep.clone())
                 .unwrap_or_else(Episode::initial);
+            // Always read the actual starting/rolled-back endpoint. Never carry
+            // an observation across calls, where fixture mutation could intervene.
+            let mut observed = self.observe(&episode).await?;
+            self.check_endpoint(handle, &observed).await?;
             for action in &trace[common..] {
-                let before = oracle_timed!(
-                    self.diagnostics,
-                    canonical,
-                    canonical(&self.fixture, &episode)
-                );
-                let result = oracle_timed!(
+                let expected = self.replay_edge(handle, action)?;
+                let applied = oracle_timed!(
                     self.diagnostics,
                     replayed_apply,
-                    apply(&self.fixture, &mut episode, action, true)
-                )?
-                .result;
-                let after = oracle_timed!(
-                    self.diagnostics,
-                    canonical,
-                    canonical(&self.fixture, &episode)
-                );
-                if matches!(
-                    result.as_str(),
-                    "refused"
-                        | "cancelled"
-                        | "expired_or_pruned"
-                        | "held"
-                        | "validation_error_yield_time"
-                        | "validation_error_retry_time"
-                ) && before != after
-                {
-                    return Err(
-                        "FailedCasAtomicity: replay refusal changed full canonical state".into(),
-                    );
-                }
-                oracle_timed!(
-                    self.diagnostics,
-                    invariants,
-                    invariants(&self.fixture, &episode)
+                    apply_primitive(&self.fixture, &mut episode, action)
                 )?;
+                let after = self.observe(&episode).await?;
+                observed.compare_action(action, &applied, &after)?;
+                Self::compare_replay(&expected, &applied, &episode)?;
+                self.diagnostics.replay_comparisons =
+                    self.diagnostics.replay_comparisons.saturating_add(1);
+                self.check_endpoint(expected.to, &after).await?;
                 let depth = self.prefix.len() + 1;
                 oracle_timed!(
                     self.diagnostics,
@@ -2184,8 +2338,11 @@ impl Oracle {
                 self.prefix.push((action.clone(), episode.clone()));
                 self.diagnostics.replay_performed =
                     self.diagnostics.replay_performed.saturating_add(1);
+                handle = expected.to;
+                // Only SAVEPOINT (no SQL/Episode mutation) intervened.
+                observed = after;
             }
-            Ok(episode)
+            Ok(observed)
         }
         .await;
         if result.is_err() {
@@ -2263,28 +2420,18 @@ impl Oracle {
             .replay_depth_total
             .saturating_add(trace.len());
         self.diagnostics.replay_depth_max = self.diagnostics.replay_depth_max.max(trace.len());
-        let mut episode = self.materialize(&trace).await?;
-        let fixture = &self.fixture;
-        let parent = &self.states[handle];
-        // A checked prefix is still required to match the complete demanded
-        // parent before any requested SQL operation can run.
-        if oracle_timed!(self.diagnostics, canonical, canonical(fixture, &episode))
-            != parent.canonical
-            || oracle_timed!(self.diagnostics, actions, actions(fixture, &episode)) != parent.inputs
-        {
+        let parent_observed = self.materialize(&trace).await?;
+        if parent_observed.canonical != self.states[handle].canonical {
             self.materialization_failed = true;
-            return Err("MaterializationRoundTrip: parent canonical/input mismatch".into());
+            return Err("MaterializationRoundTrip: demanded parent differs".into());
         }
-        if let Err(error) =
-            oracle_timed!(self.diagnostics, invariants, invariants(fixture, &episode))
-        {
-            self.materialization_failed = true;
-            return Err(error);
-        }
+        let mut episode = parent_observed.episode.clone();
+        let parent_canonical = self.states[handle].canonical.clone();
+        let parent_view = self.states[handle].view.clone();
         oracle_timed!(
             self.diagnostics,
             controls,
-            fixture
+            self.fixture
                 .store
                 .async_refinement_control("SAVEPOINT async_product_demand;".into())
         )
@@ -2292,44 +2439,58 @@ impl Oracle {
             self.materialization_failed = true;
             format!("DemandSavepoint: {e}")
         })?;
-        let parent_episode = episode.clone();
         let evaluated: Result<_, String> = async {
-            // The complete parent canonical/domain/invariant observations above
-            // remain authoritative: only SAVEPOINT intervened, with no mutation.
+            // The owned parent observation was checked at the final replay
+            // endpoint; only SAVEPOINT intervened, with no SQL/Episode change.
             self.diagnostics.replay = self
                 .diagnostics
                 .replay
                 .saturating_add(replay_started.elapsed());
-            let before = parent.canonical.clone();
-            let requested_started = Instant::now();
-            let applied = apply(fixture, &mut episode, input, true).await;
-            self.diagnostics.requested_apply = self
-                .diagnostics
-                .requested_apply
-                .saturating_add(requested_started.elapsed());
-            let applied = applied?;
+            let applied = oracle_timed!(
+                self.diagnostics,
+                requested_apply,
+                apply_primitive(&self.fixture, &mut episode, input)
+            )?;
             let checks_started = Instant::now();
-            let result = applied.result;
-            let next = oracle_timed!(self.diagnostics, canonical, canonical(fixture, &episode));
-            if matches!(
-                result.as_str(),
-                "refused"
-                    | "cancelled"
-                    | "expired_or_pruned"
-                    | "held"
-                    | "validation_error_yield_time"
-                    | "validation_error_retry_time"
-            ) && before != next
+            let observed = self.observe(&episode).await?;
+            parent_observed.compare_action(input, &applied, &observed)?;
+            let next = observed.canonical;
+            // Look up COMPLETE bytes before reusing only derived checks. Every
+            // novel exact state still gets independent production-query checks.
+            let known = self.index.get(&next).copied();
+            let (view, inputs, invariant) = if let Some(to) =
+                known.filter(|to| self.reuse_certificates && self.states[*to].certified)
             {
-                return Err(
-                    "FailedCasAtomicity: refused operation changed durable rows or captured state"
-                        .into(),
+                self.diagnostics.certificate_reuses =
+                    self.diagnostics.certificate_reuses.saturating_add(1);
+                let mut view = self.states[to].view.clone();
+                view["id"] = json!(self.states.len());
+                (view, self.states[to].inputs.clone(), Ok(()))
+            } else {
+                let view = projection(&self.fixture, &episode, self.states.len(), &next).await;
+                let inputs =
+                    oracle_timed!(self.diagnostics, actions, actions(&self.fixture, &episode));
+                let mut invariant = oracle_timed!(
+                    self.diagnostics,
+                    invariants,
+                    invariants(&self.fixture, &episode)
                 );
-            }
-            let view = projection(fixture, &episode, self.states.len(), &next).await;
-            let inputs = oracle_timed!(self.diagnostics, actions, actions(fixture, &episode));
-            let invariant =
-                oracle_timed!(self.diagnostics, invariants, invariants(fixture, &episode));
+                if let Some(to) = known {
+                    let mut expected = self.states[to].view.clone();
+                    expected["id"] = json!(self.states.len());
+                    if invariant.is_ok() && (inputs != self.states[to].inputs || view != expected) {
+                        invariant = Err(
+                            "StateCertificate: independently derived input/projection mismatch"
+                                .into(),
+                        );
+                    }
+                }
+                if invariant.is_ok() {
+                    self.diagnostics.certifications =
+                        self.diagnostics.certifications.saturating_add(1);
+                }
+                (view, inputs, invariant)
+            };
             self.diagnostics.requested_checks = self
                 .diagnostics
                 .requested_checks
@@ -2339,7 +2500,7 @@ impl Oracle {
                 episode.clone(),
                 view,
                 inputs,
-                result,
+                applied.result,
                 applied.resolved_token,
                 applied.claim_request,
                 applied.job_read,
@@ -2348,35 +2509,28 @@ impl Oracle {
         }
         .await;
         let rollback_started = Instant::now();
-        // Every Result failure restores the real writer and checks its exact parent; an
-        // actual SQL panic also aborts the test and can never publish closure.
+        // Every Result failure still rolls back the actual writer, then reads
+        // its entire endpoint. A panic aborts the run and cannot emit closure.
         oracle_timed!(
             self.diagnostics,
             controls,
-            fixture.store.async_refinement_control(
-                "ROLLBACK TO async_product_demand; RELEASE async_product_demand;".into(),
+            self.fixture.store.async_refinement_control(
+                "ROLLBACK TO async_product_demand; RELEASE async_product_demand;".into()
             )
         )
         .map_err(|error| {
             self.materialization_failed = true;
             format!("RollbackRoundTrip: {error}")
         })?;
-        if oracle_timed!(
-            self.diagnostics,
-            canonical,
-            canonical(fixture, &parent_episode)
-        ) != parent.canonical
-            || oracle_timed!(self.diagnostics, actions, actions(fixture, &parent_episode))
-                != parent.inputs
-        {
-            self.materialization_failed = true;
-            return Err("RollbackRoundTrip: demand rollback changed parent".into());
+        let restored = async {
+            let observed = self.observe(&parent_observed.episode).await?;
+            if observed.omitted_dv != parent_observed.omitted_dv {
+                return Err("OmittedDvState: demand rollback changed omitted rows".into());
+            }
+            self.check_endpoint(handle, &observed).await
         }
-        if let Err(error) = oracle_timed!(
-            self.diagnostics,
-            invariants,
-            invariants(fixture, &parent_episode)
-        ) {
+        .await;
+        if let Err(error) = restored {
             self.materialization_failed = true;
             return Err(error);
         }
@@ -2394,22 +2548,24 @@ impl Oracle {
             claim_request,
             job_read,
             invariant,
-        ) = evaluated?;
+        ) = evaluated.inspect_err(|_| {
+            self.materialization_failed = true;
+        })?;
         if invariant.is_err() || (!self.index.contains_key(&next) && self.states.len() >= STATE_CAP)
         {
             self.failure = Some(self.normalize(&json!({
                 "complete": false, "from": handle, "action": input, "result": result,
-                "predecessor_sha256": format!("{:x}", Sha256::digest(parent.canonical.as_bytes())),
+                "predecessor_sha256": format!("{:x}", Sha256::digest(parent_canonical.as_bytes())),
                 "successor_sha256": format!("{:x}", Sha256::digest(next.as_bytes())),
-                "trace": trace, "predecessor": parent.view, "successor": view,
-                "predecessor_canonical_json": parent.canonical, "successor_canonical_json": next,
+                "trace": trace, "predecessor": parent_view, "successor": view,
+                "predecessor_canonical_json": parent_canonical, "successor_canonical_json": next,
             })));
         }
         if invariant.is_err() {
             self.materialization_failed = true;
         }
         invariant?;
-        for (old, new) in parent.view["jobs"]
+        for (old, new) in parent_view["jobs"]
             .as_array()
             .expect("jobs")
             .iter()
@@ -2419,9 +2575,9 @@ impl Oracle {
                 return Err("MonotoneFence: oracle edge decreased job fence".into());
             }
         }
-        if parent.view["domain"].is_object()
+        if parent_view["domain"].is_object()
             && view["domain"].is_object()
-            && view["domain"]["fence"].as_u64() < parent.view["domain"]["fence"].as_u64()
+            && view["domain"]["fence"].as_u64() < parent_view["domain"]["fence"].as_u64()
         {
             return Err("MonotoneFence: oracle edge decreased domain fence".into());
         }
@@ -2431,7 +2587,9 @@ impl Oracle {
             None
         };
         let to = if let Some(to) = self.index.get(&next) {
-            *to
+            let to = *to;
+            self.states[to].certified = true;
+            to
         } else {
             if self.states.len() >= STATE_CAP {
                 return Err(format!(
@@ -2447,6 +2605,7 @@ impl Oracle {
                 view,
                 parent: Some((handle, input.clone())),
                 inputs,
+                certified: true,
             });
             to
         };
@@ -3051,6 +3210,21 @@ async fn refusal_snapshot_guard_detects_mutation_in_apply() {
         failure.starts_with("FailedCasAtomicity"),
         "observed {failure}"
     );
+    let before = BoundaryObservation::observe(&fixture, &episode)
+        .await
+        .expect("oracle preimage");
+    let action = Action::Renew { job: 0, token: 0 };
+    let applied = apply_primitive(&fixture, &mut episode, &action)
+        .await
+        .expect("actual refused renewal");
+    assert!(refused(&applied.result));
+    let after = BoundaryObservation::observe(&fixture, &episode)
+        .await
+        .expect("oracle postimage");
+    assert!(before
+        .compare_action(&action, &applied, &after)
+        .expect_err("shared actual boundary must retain refusal row observation")
+        .starts_with("FailedCasAtomicity:"));
     eprintln!(
         "async_store_refusal_guard={}",
         json!({"named_failure": failure, "detected_in": "apply"})
@@ -3259,12 +3433,16 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
     for (from, input) in cases {
         oracle.restore_root().await.expect("baseline Init");
         oracle.cache.remove(&(from, input.clone()));
+        oracle.reuse_certificates = false;
         let baseline = oracle
             .apply(from, &input)
             .await
             .expect("full root replay transition");
         let edge = serde_json::to_value(&oracle.edges[baseline]).expect("baseline exact edge");
         let state = oracle.export_state(oracle.edges[baseline].to);
+        let inputs = oracle.states[oracle.edges[baseline].to].inputs.clone();
+        let certifications = oracle.diagnostics.certifications;
+        let observations = oracle.diagnostics.observations;
         assert_eq!(
             omitted_dv_state(&oracle.fixture.store)
                 .await
@@ -3274,6 +3452,7 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
         saw_refusal |= oracle.edges[baseline].result == "refused";
         let performed = oracle.diagnostics.replay_performed;
         oracle.cache.remove(&(from, input.clone()));
+        oracle.reuse_certificates = true;
         let reused = oracle
             .apply(from, &input)
             .await
@@ -3283,6 +3462,16 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
             edge
         );
         assert_eq!(oracle.export_state(oracle.edges[reused].to), state);
+        assert_eq!(oracle.states[oracle.edges[reused].to].inputs, inputs);
+        assert_eq!(
+            oracle.diagnostics.certifications, certifications,
+            "exact known states reuse independently certified predicates"
+        );
+        assert_eq!(
+            oracle.diagnostics.observations - observations,
+            3,
+            "actual parent, requested successor and rollback each observed once"
+        );
         assert_eq!(
             omitted_dv_state(&oracle.fixture.store)
                 .await
@@ -3300,6 +3489,8 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
     }
     assert!(saw_refusal);
     assert!(oracle.diagnostics.replay_saved > 0);
+    assert!(oracle.diagnostics.certificate_reuses > 0);
+    assert!(oracle.diagnostics.replay_comparisons > 0);
     let host = oracle.diagnostic_summary();
     for field in [
         "canonical_ms",
@@ -3388,6 +3579,12 @@ async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
     assert!(oracle.prefix.is_empty());
     assert!(!oracle.root_savepoint);
     assert_eq!(oracle.states.len(), 1);
+    assert!(oracle.states[0].certified);
+    assert_eq!(oracle.diagnostics.invalidations, 1);
+    assert!(
+        oracle.diagnostics.certifications > 0,
+        "paired mutation independently rebuilds the root certificate"
+    );
     assert_eq!(
         omitted_dv_state(&oracle.fixture.store)
             .await
@@ -3410,6 +3607,72 @@ async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
     assert!(
         oracle.apply(0, &action).await.is_err(),
         "a prior cached edge cannot hide failed restore"
+    );
+
+    // Every retained outcome component is authoritative, including captures
+    // which do not change SQL rows. Actual replay must reject each corruption.
+    for field in [
+        "result",
+        "resolved_token",
+        "claim_request",
+        "job_read",
+        "claim_snapshot",
+    ] {
+        let mut replay = Oracle::new(None).await.expect("replay corruption fixture");
+        let id = replay
+            .apply(0, &action)
+            .await
+            .expect("certified actual claim");
+        let to = replay.edges[id].to;
+        let count = replay.states.len();
+        match field {
+            "result" => replay.edges[id].result = "refused".into(),
+            "resolved_token" => replay.edges[id].resolved_token = Some(999),
+            "claim_request" => replay.edges[id].claim_request = Some(json!({"corrupt": true})),
+            "job_read" => replay.edges[id].job_read = Some(json!({"corrupt": true})),
+            "claim_snapshot" => {
+                replay.edges[id]
+                    .claim_snapshot
+                    .as_mut()
+                    .expect("claim capture")
+                    .failed_attempts += 1
+            }
+            _ => unreachable!(),
+        }
+        let error = replay
+            .apply(to, &Action::ReadClaimJob { job: 0 })
+            .await
+            .expect_err("actual replay must compare the complete certified outcome");
+        assert!(error.starts_with("ReplayCertificate:"), "{field}: {error}");
+        assert!(replay.materialization_failed);
+        assert_eq!(replay.states.len(), count, "no state published on mismatch");
+        assert_eq!(replay.edges.len(), 1, "no edge published on mismatch");
+        assert!(replay
+            .apply(0, &action)
+            .await
+            .expect_err("no cached fallback")
+            .starts_with("MaterializationPoisoned:"));
+    }
+
+    let mut uncertified = Oracle::new(None)
+        .await
+        .expect("failed first certification fixture");
+    uncertified.fixture.store.async_refinement_control(
+        "CREATE TRIGGER corrupt_first_certificate AFTER INSERT ON background_job_reservations BEGIN DELETE FROM background_job_reservations WHERE job_id = NEW.job_id; END;".into()
+    ).await.expect("deliberate test-only resource loss");
+    let error = uncertified
+        .apply(0, &action)
+        .await
+        .expect_err("novel successor needs independent invariants");
+    assert!(error.starts_with("ReservationConservation:"), "{error}");
+    assert!(uncertified.materialization_failed);
+    assert_eq!(uncertified.states.len(), 1);
+    assert!(uncertified.edges.is_empty());
+    assert!(uncertified.cache.is_empty());
+    assert_eq!(
+        canonical(&uncertified.fixture, &Episode::initial()).await,
+        uncertified.states[0].canonical,
+        "failed certification still rolls back actual SQL"
     );
 
     let mut hidden = Oracle::new(None).await.expect("omitted-state fixture");
