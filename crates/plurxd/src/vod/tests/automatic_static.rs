@@ -361,6 +361,8 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     );
     assert!(artifact.observation.rates.wire_bytes > 0);
     assert!(artifact.facts().peak_bps >= artifact.facts().average_bps);
+    let policy_facts = artifact.facts();
+    let policy_identity = artifact.observation.rates.identity;
     let rendition = Arc::clone(session.live_rendition().expect("rendition"));
     let logical = rendition.recipe.retained_logical.clone();
     drop(sessions);
@@ -381,7 +383,6 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         .expect("counted retained init body");
     assert!(matches!(&body, ReadyBytes::Finite(_)));
     assert_eq!(body.len() as u64, len);
-    drop(body);
     let mut wrong_offset = selected.clone();
     wrong_offset.audio_offset_ms += 1;
     assert!(
@@ -408,9 +409,60 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
             .is_none(),
         "a different candidate geometry cannot borrow the settled origin"
     );
+    let retained_charge = serve.shared.retained_artifacts.test_capacity_snapshot().0;
+    assert!(retained_charge > 0);
+    store
+        .put_setting(plurx_core::store::keys::HWACCEL, "vaapi")
+        .await
+        .expect("current policy changes after exposure");
+    serve
+        .shared
+        .retained_artifacts
+        .reconcile_static_policy(store.as_ref())
+        .await;
+    assert!(!serve
+        .shared
+        .retained_artifacts
+        .test_has_artifact(&policy_facts));
+    assert!(
+        serve
+            .shared
+            .retained_artifacts
+            .acquire(&policy_identity)
+            .is_none(),
+        "policy withdrawal prevents a new attachment before any refund"
+    );
+    assert_eq!(
+        serve.shared.retained_artifacts.test_capacity_snapshot().0,
+        retained_charge,
+        "withdrawal alone cannot release the original S charge"
+    );
     drop(ready);
     drop(output);
     drop(rendition);
+    drop(logical);
+    assert!(serve.end("later-automatic", Terminal::Deleted).await);
+    serve.shared.retained_artifacts.collect(base.path()).await;
+    assert_eq!(
+        serve.shared.retained_artifacts.test_capacity_snapshot().0,
+        retained_charge,
+        "the counted HTTP body still prevents native S settlement"
+    );
+    drop(body);
+    // Existing maintenance resumes the same queued original eviction; no
+    // replacement native operation or daemon/path-based refund is minted.
+    for _ in 0..16 {
+        serve.shared.retained_artifacts.collect(base.path()).await;
+        if serve.shared.retained_artifacts.test_capacity_snapshot().0 == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        serve.shared.retained_artifacts.test_capacity_snapshot().0,
+        0,
+        "only positive original native/journal completion releases static S"
+    );
     drop(manager);
     drop(serve);
     drop(runtime);

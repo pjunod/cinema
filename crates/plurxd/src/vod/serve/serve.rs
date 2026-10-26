@@ -512,6 +512,11 @@ impl VodServe {
             .await;
         self.shared.preparation_storage.maintain(&self.shared).await;
         self.shared.reconcile_obsolete_encoded_generations().await;
+        #[cfg(target_os = "linux")]
+        self.shared
+            .retained_artifacts
+            .reconcile_static_policy(self.shared.store.as_ref())
+            .await;
         self.shared
             .retained_artifacts
             .collect(&self.shared.base)

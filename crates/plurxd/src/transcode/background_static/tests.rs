@@ -337,3 +337,36 @@ async fn static_original_registry_allows_claim_renewal_but_refuses_a_changed_sav
     assert!(Arc::ptr_eq(&original, &registry.current().unwrap()));
     active.finish().await;
 }
+
+#[test]
+fn static_policy_stamp_binds_settings_generation_and_all_source_metadata() {
+    let (_, mut snapshot, _) = fixture();
+    let original = crate::vodserve::StaticArtifactPolicy::from_snapshot(&snapshot)
+        .expect("bounded original snapshot");
+    assert_eq!(
+        crate::vodserve::StaticArtifactPolicy::from_snapshot(&snapshot),
+        Some(original)
+    );
+    Arc::make_mut(&mut snapshot).generation += 1;
+    assert_ne!(
+        crate::vodserve::StaticArtifactPolicy::from_snapshot(&snapshot),
+        Some(original)
+    );
+    Arc::make_mut(&mut snapshot).generation -= 1;
+    // Audio offset is logical source state even when size/mtime stay equal.
+    Arc::make_mut(&mut snapshot).file.audio_offset_ms += 1;
+    assert_ne!(
+        crate::vodserve::StaticArtifactPolicy::from_snapshot(&snapshot),
+        Some(original)
+    );
+}
+
+#[test]
+fn static_policy_stamp_refuses_negative_generation_and_overbound_source() {
+    let (_, mut snapshot, _) = fixture();
+    Arc::make_mut(&mut snapshot).generation = -1;
+    assert!(crate::vodserve::StaticArtifactPolicy::from_snapshot(&snapshot).is_none());
+    Arc::make_mut(&mut snapshot).generation = 0;
+    Arc::make_mut(&mut snapshot).file.path = "x".repeat(64 * 1024).into();
+    assert!(crate::vodserve::StaticArtifactPolicy::from_snapshot(&snapshot).is_none());
+}

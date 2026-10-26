@@ -1552,7 +1552,9 @@ pub(crate) mod retained;
 #[path = "vod/retained_manifest.rs"]
 mod retained_manifest;
 #[cfg(target_os = "linux")]
-pub(crate) use background_artifact::{StaticArtifactAdmission, StaticArtifactRun};
+pub(crate) use background_artifact::{
+    StaticArtifactAdmission, StaticArtifactExposure, StaticArtifactPolicy, StaticArtifactRun,
+};
 // split: end vod-generation
 
 // split: begin vod-plan

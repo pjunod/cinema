@@ -806,6 +806,7 @@ impl VodServe {
     pub(crate) async fn plan_static_artifact(
         &self,
         prepared: PreparedAdaptiveRecipe,
+        policy: super::background_artifact::StaticArtifactPolicy,
         registry_owner_bytes: usize,
         planning_handoff_limit_bytes: usize,
         deadline: Instant,
@@ -908,6 +909,7 @@ impl VodServe {
         publication.set_epoch(epoch);
         let admission = super::background_artifact::StaticArtifactAdmission {
             request,
+            policy,
             workspace,
             publication,
             logical,
@@ -941,6 +943,7 @@ impl VodServe {
                 })?;
         let super::background_artifact::StaticArtifactAdmission {
             request,
+            policy,
             workspace,
             publication,
             logical,
@@ -959,6 +962,7 @@ impl VodServe {
             publication,
             logical,
             application_lease,
+            policy,
         ))
     }
 
@@ -973,7 +977,9 @@ impl VodServe {
         file: &MediaFile,
         continuous: bool,
     ) -> Result<Option<Arc<crate::vodserve::retained::RetainedVodArtifact>>, String> {
-        Ok(match capture {
+        #[cfg(target_os = "linux")]
+        let issued_restore = matches!(&capture, RetainedOutputCapture::Restore(_));
+        let selected = match capture {
             RetainedOutputCapture::Restore(Some(ref expected)) => Some(
                 self.shared
                     .retained_artifacts
@@ -1020,7 +1026,26 @@ impl VodServe {
                         .await
                 }
             }
-        })
+        };
+        #[cfg(target_os = "linux")]
+        if let Some(artifact) = selected.as_ref() {
+            if !artifact
+                .static_policy_current(self.shared.store.as_ref())
+                .await?
+            {
+                self.shared
+                    .retained_artifacts
+                    .withdraw_static_policy(artifact);
+                if issued_restore {
+                    return Err(crate::transcode::vod_refusal_error(
+                        "retained_artifact_unavailable",
+                        "the issued static output policy is obsolete",
+                    ));
+                }
+                return Ok(None);
+            }
+        }
+        Ok(selected)
     }
 
     /// Resolve native prerequisites without reserving a reader or attaching a

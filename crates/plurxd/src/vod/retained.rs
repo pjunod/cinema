@@ -356,6 +356,8 @@ pub(crate) struct RetainedVodArtifact {
     #[cfg(target_os = "linux")]
     pub(super) finite_output:
         Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput>,
+    #[cfg(target_os = "linux")]
+    pub(super) static_policy: Option<super::background_artifact::StaticArtifactPolicy>,
     pub(super) charge: u64,
     pub(super) init_bytes: u64,
     pub(super) repair: Mutex<()>,
@@ -446,6 +448,26 @@ pub(crate) fn encoded_policy_generation(
 }
 
 impl RetainedVodArtifact {
+    #[cfg(target_os = "linux")]
+    pub(super) async fn static_policy_current(
+        &self,
+        store: &dyn plurx_core::store::Store,
+    ) -> Result<bool, String> {
+        if self.finite_output.is_none() {
+            return Ok(true);
+        }
+        let policy = self
+            .static_policy
+            .ok_or("static S has no original policy binding")?;
+        let current = store
+            .playback_planning_snapshot(policy.file_id, &[])
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(current
+            .as_ref()
+            .is_some_and(|snapshot| policy.matches_snapshot(snapshot)))
+    }
+
     pub(super) fn facts(&self) -> crate::transcode::RetainedOutputFacts {
         crate::transcode::RetainedOutputFacts {
             artifact_id: self.id.to_string(),
@@ -692,6 +714,8 @@ struct RetainedState {
     retired: VecDeque<Arc<RetainedVodArtifact>>,
     #[cfg(target_os = "linux")]
     finite_closing: VecDeque<FiniteArtifactClosing>,
+    #[cfg(target_os = "linux")]
+    static_policy_cursor: Option<[u8; 32]>,
     rolling: HashMap<[u8; 32], rolling_retained::RollingEntry>,
     rolling_retired: VecDeque<Arc<RollingArtifact>>,
     bytes: u64,
@@ -778,7 +802,11 @@ impl RetainedArtifactRegistry {
         artifact: Arc<RetainedVodArtifact>,
         budget: u64,
     ) -> Result<(), Arc<RetainedVodArtifact>> {
-        if artifact.finite_output.is_none() || !artifact.durable || artifact.logical.is_none() {
+        if artifact.finite_output.is_none()
+            || artifact.static_policy.is_none()
+            || !artifact.durable
+            || artifact.logical.is_none()
+        {
             return Err(artifact);
         }
         let mut state = self.state.lock().expect("retained registry lock");
@@ -1830,6 +1858,8 @@ impl RetainedArtifactRegistry {
             directory,
             #[cfg(target_os = "linux")]
             finite_output: None,
+            #[cfg(target_os = "linux")]
+            static_policy: None,
             charge,
             init_bytes,
             repair: Mutex::new(()),
@@ -2078,6 +2108,76 @@ impl RetainedArtifactRegistry {
                 .map_err(|_| trace_io("seal_already_set", io::ErrorKind::InvalidData.into()))?;
         }
         Ok(())
+    }
+
+    /// Reconcile one original finite S per existing maintenance pass. The
+    /// compact cursor prevents a Store error or a hot reader from starving
+    /// other entries; no growing selection Vec or second scheduler is needed.
+    /// A successful changed/missing snapshot removes exposure only. Original
+    /// readers and typed native/journal cleanup still precede any refund.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn reconcile_static_policy(&self, store: &dyn plurx_core::store::Store) {
+        let Ok(_collector) = self.collector.try_lock() else {
+            return;
+        };
+        let selected = {
+            let mut state = self.state.lock().expect("retained registry lock");
+            let eligible = |entry: &&RetainedEntry| {
+                entry.artifact.finite_output.is_some() && entry.artifact.static_policy.is_some()
+            };
+            let after = state
+                .entries
+                .iter()
+                .filter(|(identity, entry)| {
+                    eligible(entry)
+                        && state
+                            .static_policy_cursor
+                            .is_none_or(|cursor| **identity > cursor)
+                })
+                .min_by_key(|(identity, _)| **identity)
+                .or_else(|| {
+                    state
+                        .entries
+                        .iter()
+                        .filter(|(_, entry)| eligible(entry))
+                        .min_by_key(|(identity, _)| **identity)
+                })
+                .map(|(identity, entry)| (*identity, Arc::clone(&entry.artifact)));
+            if let Some((identity, _)) = &after {
+                state.static_policy_cursor = Some(*identity);
+            }
+            after
+        };
+        let Some((_identity, artifact)) = selected else {
+            return;
+        };
+        match artifact.static_policy_current(store).await {
+            Ok(true) => {}
+            Ok(false) => self.withdraw_static_policy(&artifact),
+            Err(error) => {
+                tracing::warn!(target: "plurxd::vodserve", %error, "static policy observation unavailable; original S remains charged");
+            }
+        }
+    }
+
+    /// Stop new lookups atomically against this exact original Arc. Current
+    /// readers retain their rich owner; retirement uses the same typed queue.
+    #[cfg(target_os = "linux")]
+    pub(super) fn withdraw_static_policy(&self, artifact: &Arc<RetainedVodArtifact>) {
+        let identity = artifact.observation.rates.identity;
+        let mut state = self.state.lock().expect("retained registry lock");
+        if artifact.finite_output.is_some()
+            && state
+                .entries
+                .get(&identity)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.artifact, artifact))
+        {
+            let entry = state
+                .entries
+                .remove(&identity)
+                .expect("same selected static entry");
+            state.retired.push_back(entry.artifact);
+        }
     }
 
     /// The single maintenance owner keeps failed cleanup charged. An artifact

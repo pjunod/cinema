@@ -8,11 +8,77 @@ use plurx_core::adaptive_resources::runtime::finite_vod::{
     SoftwareVodOwner, SoftwareVodRequest,
 };
 
+/// Compact process-private policy facts from the original admitted snapshot.
+/// Equality only withdraws logical exposure. It never grants native custody or
+/// proves an output closed; that still requires the original finite S owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StaticArtifactPolicy {
+    pub(super) file_id: i64,
+    generation: i64,
+    metadata: [u8; 32],
+}
+
+impl StaticArtifactPolicy {
+    pub(crate) fn from_snapshot(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> Option<Self> {
+        use sha2::Digest;
+        struct BoundedDigest {
+            digest: sha2::Sha256,
+            bytes: usize,
+        }
+        impl std::io::Write for BoundedDigest {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes = self
+                    .bytes
+                    .checked_add(bytes.len())
+                    .filter(|bytes| *bytes <= 64 * 1024)
+                    .ok_or(io::ErrorKind::InvalidData)?;
+                self.digest.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        if snapshot.generation < 0 {
+            return None;
+        }
+        let mut digest = BoundedDigest {
+            digest: sha2::Sha256::new(),
+            bytes: 0,
+        };
+        serde_json::to_writer(&mut digest, &snapshot.file).ok()?;
+        Some(Self {
+            file_id: snapshot.file.id,
+            generation: snapshot.generation,
+            metadata: digest.digest.finalize().into(),
+        })
+    }
+
+    pub(super) fn matches_snapshot(
+        self,
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> bool {
+        Self::from_snapshot(snapshot) == Some(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StaticArtifactExposure {
+    Exposed,
+    /// Registry pressure is retryable; it says nothing about policy or S.
+    Retry,
+    /// A successful current Store read positively refused the original policy.
+    Obsolete,
+}
+
 /// Complete pure P-side output plan. The original P owner remains charged
 /// while the request, immutable plan and publication buffers are allocated.
 /// After its native close, R admission consumes this object synchronously.
 pub(crate) struct StaticArtifactAdmission {
     pub(super) request: SoftwareVodRequest,
+    pub(super) policy: StaticArtifactPolicy,
     pub(super) workspace: u64,
     pub(super) publication: StaticArtifactPublication,
     pub(super) logical: retained_manifest::LogicalOutput,
@@ -208,6 +274,7 @@ impl StaticArtifactPublication {
 /// before `start` enters native work and keeps it until a known S handoff or
 /// its original cancellation ticket has settled.
 pub(crate) struct StaticArtifactRun {
+    policy: StaticArtifactPolicy,
     owner: SoftwareVodOwner,
     output: FiniteOutput,
     events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
@@ -226,10 +293,12 @@ impl StaticArtifactRun {
         publication: StaticArtifactPublication,
         logical: retained_manifest::LogicalOutput,
         application_lease: FiniteApplicationLease,
+        policy: StaticArtifactPolicy,
     ) -> Self {
         let events = owner.take_events();
         let output = owner.output();
         Self {
+            policy,
             owner,
             output,
             events,
@@ -325,7 +394,9 @@ impl StaticArtifactRun {
             .as_ref()
             .ok_or(io::ErrorKind::InvalidData)?
             .clone();
-        manifest.into_finite_artifact(retained)
+        let mut artifact = manifest.into_finite_artifact(retained)?;
+        artifact.static_policy = Some(self.policy);
+        Ok(artifact)
     }
 }
 
@@ -410,6 +481,21 @@ impl VodServe {
             .map_err(|error| error.to_string())
     }
 
+    pub(crate) async fn prepare_static_artifact_eviction(
+        &self,
+        artifact: &super::retained::RetainedVodArtifact,
+        deadline: Instant,
+    ) -> Result<plurx_core::adaptive_resources::runtime::finite_vod::FiniteCloseTicket, String>
+    {
+        artifact
+            .finite_output
+            .as_ref()
+            .ok_or("static artifact has no original retained S")?
+            .prepare_eviction(deadline)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     /// Store has acknowledged the same exact output. A lost waiter between
     /// that acknowledgement and registry insertion can retry this step
     /// without reusing the now-consumed Store job token.
@@ -420,25 +506,36 @@ impl VodServe {
         file_id: i64,
         expected_policy_generation: &str,
         budget: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<StaticArtifactExposure, String> {
+        let policy = artifact
+            .static_policy
+            .ok_or("static artifact has no original policy snapshot")?;
         let current = self
             .shared
             .store
-            .get_file(file_id)
+            .playback_planning_snapshot(file_id, &[])
             .await
             .map_err(|error| error.to_string())?;
         if current
             .as_ref()
-            .and_then(|file| super::retained::encoded_policy_generation(file, intent))
+            .filter(|snapshot| policy.matches_snapshot(snapshot))
+            .and_then(|snapshot| super::retained::encoded_policy_generation(&snapshot.file, intent))
             .as_deref()
             != Some(expected_policy_generation)
         {
-            return Ok(false);
+            return Ok(StaticArtifactExposure::Obsolete);
         }
-        Ok(self
-            .shared
-            .retained_artifacts
-            .expose_finite_static(artifact, budget)
-            .is_ok())
+        Ok(
+            if self
+                .shared
+                .retained_artifacts
+                .expose_finite_static(artifact, budget)
+                .is_ok()
+            {
+                StaticArtifactExposure::Exposed
+            } else {
+                StaticArtifactExposure::Retry
+            },
+        )
     }
 }

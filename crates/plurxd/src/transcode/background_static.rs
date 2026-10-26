@@ -55,6 +55,9 @@ pub(super) enum StaticFinite {
     Running(crate::vodserve::StaticArtifactRun),
     Retained(Arc<crate::vodserve::retained::RetainedVodArtifact>),
     PublishedPendingExposure(Arc<crate::vodserve::retained::RetainedVodArtifact>),
+    /// A definite logical refusal is sticky. Only original typed S cleanup
+    /// may turn this into Closed; a later setting change cannot re-expose it.
+    Refused(Arc<crate::vodserve::retained::RetainedVodArtifact>),
     Closing(FiniteCloseTicket),
     Exposed,
     Closed,
@@ -471,30 +474,47 @@ impl TranscodeManager {
                 }
             }
             StaticFinite::Retained(artifact) => {
-                if matches!(
-                    self.vod
-                        .reconcile_static_artifact_store(artifact, &entry.original, &entry.intent,)
-                        .await,
-                    Ok(Some(true))
-                ) {
-                    let retained = Arc::clone(artifact);
-                    *finite = StaticFinite::PublishedPendingExposure(retained);
+                match self
+                    .vod
+                    .reconcile_static_artifact_store(artifact, &entry.original, &entry.intent)
+                    .await
+                {
+                    Ok(Some(true)) => {
+                        *finite = StaticFinite::PublishedPendingExposure(Arc::clone(artifact))
+                    }
+                    Ok(Some(false)) => *finite = StaticFinite::Refused(Arc::clone(artifact)),
+                    Ok(None) | Err(_) => {}
                 }
             }
             StaticFinite::PublishedPendingExposure(artifact) => {
-                if matches!(
-                    self.vod
-                        .expose_published_static_artifact(
-                            Arc::clone(artifact),
-                            &entry.intent,
-                            entry.file_id,
-                            &entry.policy_generation,
-                            entry.budget,
-                        )
-                        .await,
-                    Ok(true)
-                ) {
-                    *finite = StaticFinite::Exposed;
+                match self
+                    .vod
+                    .expose_published_static_artifact(
+                        Arc::clone(artifact),
+                        &entry.intent,
+                        entry.file_id,
+                        &entry.policy_generation,
+                        entry.budget,
+                    )
+                    .await
+                {
+                    Ok(crate::vodserve::StaticArtifactExposure::Exposed) => {
+                        *finite = StaticFinite::Exposed
+                    }
+                    Ok(crate::vodserve::StaticArtifactExposure::Obsolete) => {
+                        *finite = StaticFinite::Refused(Arc::clone(artifact))
+                    }
+                    Ok(crate::vodserve::StaticArtifactExposure::Retry) | Err(_) => {}
+                }
+            }
+            StaticFinite::Refused(artifact) => {
+                if let Ok(ticket) = self
+                    .vod
+                    .prepare_static_artifact_eviction(artifact, deadline)
+                    .await
+                {
+                    let old = std::mem::replace(&mut *finite, StaticFinite::Closing(ticket));
+                    drop(old); // original rich S aliases must precede its final refund
                 }
             }
             StaticFinite::Empty
@@ -773,6 +793,8 @@ impl TranscodeManager {
                 .vod
                 .plan_static_artifact(
                     prepared,
+                    crate::vodserve::StaticArtifactPolicy::from_snapshot(&snapshot)
+                        .ok_or(PreparationError::Stop("static_policy_snapshot_overbound"))?,
                     std::mem::size_of::<StaticArtifactEntry>(),
                     super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES,
                     deadline,
@@ -845,6 +867,7 @@ impl TranscodeManager {
             {
                 Some(true) => {}
                 Some(false) => {
+                    *entry.finite.lock().await = StaticFinite::Refused(Arc::clone(&artifact));
                     return Err(PreparationError::Retry(
                         "original static publication has a nonpositive verdict".into(),
                     ));
@@ -856,6 +879,7 @@ impl TranscodeManager {
                         .await
                         .map_err(PreparationError::Retry)?
                     {
+                        *entry.finite.lock().await = StaticFinite::Refused(Arc::clone(&artifact));
                         return Ok(false);
                     }
                 }
@@ -863,10 +887,10 @@ impl TranscodeManager {
             *entry.finite.lock().await =
                 StaticFinite::PublishedPendingExposure(Arc::clone(&artifact));
         }
-        if !self
+        match self
             .vod
             .expose_published_static_artifact(
-                artifact,
+                Arc::clone(&artifact),
                 &entry.intent,
                 entry.file_id,
                 &entry.policy_generation,
@@ -875,9 +899,15 @@ impl TranscodeManager {
             .await
             .map_err(PreparationError::Retry)?
         {
-            return Ok(false);
+            crate::vodserve::StaticArtifactExposure::Exposed => {
+                *entry.finite.lock().await = StaticFinite::Exposed
+            }
+            crate::vodserve::StaticArtifactExposure::Obsolete => {
+                *entry.finite.lock().await = StaticFinite::Refused(artifact);
+                return Ok(false);
+            }
+            crate::vodserve::StaticArtifactExposure::Retry => return Ok(false),
         }
-        *entry.finite.lock().await = StaticFinite::Exposed;
         // Store publication is logical Close, not destruction of the outer
         // worker's job payload or a join of its original heartbeat. Existing
         // reconciliation removes this entry only after all three facts hold.

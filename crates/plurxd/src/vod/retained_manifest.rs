@@ -49,7 +49,20 @@ pub(super) fn projected_static_manifest_workspace_bytes(
         .checked_add(logical_heap_bytes.checked_mul(3)?)?
         .checked_add(4096)? // retained display path cloned from the selected finite output
         .checked_add(std::mem::size_of::<ArtifactManifest>())?
-        .checked_add(std::mem::size_of::<CompleteOutputObservation>())
+        .checked_add(std::mem::size_of::<CompleteOutputObservation>())?
+        // The original static run and its rich retained Arc overlap at R-to-S.
+        // Count the requested artifact layout (including its compact policy),
+        // with the two strong/weak counters and required alignment padding.
+        .checked_add(
+            std::alloc::Layout::new::<(usize, usize)>()
+                .extend(std::alloc::Layout::new::<
+                    super::retained::RetainedVodArtifact,
+                >())
+                .ok()?
+                .0
+                .pad_to_align()
+                .size(),
+        )
 }
 
 /// Logical delivery facts are separate from the original salted execution.
@@ -628,6 +641,8 @@ impl ArtifactManifest {
             directory,
             #[cfg(target_os = "linux")]
             finite_output: None,
+            #[cfg(target_os = "linux")]
+            static_policy: None,
             charge,
             init_bytes: self.init_bytes,
             repair: Mutex::new(()),
@@ -659,6 +674,7 @@ impl ArtifactManifest {
             observation,
             directory: output.path().to_path_buf(),
             finite_output: Some(output),
+            static_policy: None,
             charge,
             init_bytes: self.init_bytes,
             repair: Mutex::new(()),
