@@ -810,13 +810,16 @@ pub(crate) fn start_source_fixed_probe(
 }
 
 /// Requested layouts introduced by the original Source carrier, separate
-/// from the snapshot and the checked P-to-R recipe allowance. Tokio/native
-/// and allocator peaks remain Unknown; this is not an RSS upper bound.
+/// from the snapshot and the checked P-to-R recipe allowance. The synchronous
+/// move-only failure return has its own compiler-measured storage component;
+/// it need not survive an await to occupy the caller's stack. Tokio/native,
+/// private-stack and allocator peaks remain Unknown, not an RSS upper bound.
 #[cfg(target_os = "linux")]
 pub(crate) fn fixed_source_requested_bytes() -> usize {
     std::mem::size_of::<FixedSourceState>()
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<SourceProbeOperation>()
+        + std::mem::size_of::<SourceFixedStartFailure>()
 }
 
 #[allow(clippy::too_many_arguments)]
