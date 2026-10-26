@@ -571,6 +571,9 @@ impl SourceProbeOperation {
         self.cancel.cancel();
     }
     pub(crate) async fn settle(&self) -> SourceProbeSettlement {
+        #[cfg(not(target_os = "linux"))]
+        let SourceProbeState::Legacy(state) = &self.state;
+        #[cfg(target_os = "linux")]
         let state = match &self.state {
             SourceProbeState::Legacy(state) => state,
             #[cfg(target_os = "linux")]
@@ -619,6 +622,9 @@ impl SourceProbeOperation {
         }
     }
     pub(crate) async fn outcome(&self) -> Result<SourceHeldProbeEvidence, String> {
+        #[cfg(not(target_os = "linux"))]
+        let SourceProbeState::Legacy(state) = &self.state;
+        #[cfg(target_os = "linux")]
         let state = match &self.state {
             SourceProbeState::Legacy(state) => state,
             #[cfg(target_os = "linux")]
