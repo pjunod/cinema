@@ -145,7 +145,7 @@ async fn pending_command(preparation: &OwnedPreparation, task_acquired: bool) ->
 }
 async fn retire_with_actual_alias_barriers(
     runtime: Arc<NodeResourceRuntime>,
-    mut owner: CopyVodOwner,
+    owner: CopyVodOwner,
     preparation: OwnedPreparation,
     task_acquired: bool,
 ) {
@@ -800,4 +800,212 @@ async fn copy_cancelled_settlement_reply_after_real_commit_reuses_same_ticket_op
         .expect("sole original runtime")
         .drain()
         .expect("same journal drained");
+}
+
+// R19: checked source parents and original process proof already exist; retry
+// must read committed metadata, never fstat/reopen a closed original File.
+async fn cancellation_after_native_close(stage: CopyStartFixtureStage, task_acquired: bool) {
+    let root = tempfile::tempdir().expect("actual post-native cleanup retry fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(&runtime, &mut owner, stage).await;
+    let original = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role.copy_vod.as_ref().expect("same original copy");
+        (
+            *role
+                .roots
+                .get(&copy.root_member)
+                .expect("same original child"),
+            copy.task,
+            copy.task_observation,
+            copy.acquisition_id,
+        )
+    };
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("actual original application allocation");
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupNativeClosed);
+    let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
+    tokio::select! {result=&mut cleanup=>panic!("cleanup returned before actual native closure gate: {}",result.is_ok()),()=gate.reached()=>{},()=tokio::time::sleep(Duration::from_secs(15))=>panic!("actual source-close retry watchdog")}
+    let bundle = preparation.state.lock().await;
+    let role = &bundle.roles[0];
+    let copy = role.copy_vod.as_ref().expect("same native-closed copy");
+    assert!(
+        role.sources.values().all(|source| source.parent_closed()),
+        "actual original parent close must precede retry"
+    );
+    for source in role.sources.values() {
+        assert!(source
+            .copy_root_observation_committed(copy.root_member, copy.acquisition_id)
+            .expect("same metadata acknowledgment without File/fstat"));
+    }
+    assert_eq!(
+        (
+            *role
+                .roots
+                .get(&copy.root_member)
+                .expect("retained original root selector"),
+            copy.task,
+            copy.task_observation,
+            copy.acquisition_id
+        ),
+        original
+    );
+    let close = if task_acquired {
+        copy.process_closure
+            .as_ref()
+            .expect("original joined proof")
+            .close_operation_id()
+    } else {
+        copy.root_only_closure
+            .as_ref()
+            .expect("original root-only proof")
+            .close_operation_id()
+    };
+    assert!(!close.is_nil());
+    drop(cleanup); // real contention: original bundle guard remains held here
+    drop(bundle);
+    drop(gate);
+    let ticket = owner
+        .prepare_retirement(true, deadline())
+        .await
+        .expect("retry uses metadata and SAME stored native proof");
+    {
+        let bundle = preparation.state.lock().await;
+        let pending = bundle.roles[0]
+            .pending_finite_close
+            .as_ref()
+            .expect("same pending close");
+        let Mutation::SettleTyped(closed) = &pending.mutation else {
+            panic!("original typed close")
+        };
+        assert!(
+            closed.settlement.members.iter().any(|d| match d {
+                v2::MemberDisposition::Closed {
+                    fact:
+                        v2::ClosedFact::VodOutputTaskV1 {
+                            join_operation_id, ..
+                        },
+                    ..
+                } if task_acquired => join_operation_id.uuid() == close,
+                v2::MemberDisposition::Closed {
+                    fact: v2::ClosedFact::VodOutputTaskNeverAcquiredV1 { operation_id, .. },
+                    ..
+                } if !task_acquired => operation_id.uuid() == close,
+                _ => false,
+            }),
+            "retry replaced the original process/task close operation"
+        );
+    }
+    drop(ticket); // losing a returned selector still cannot replace its receipt
+    retire_with_retained_aliases(
+        runtime,
+        owner,
+        preparation,
+        task_acquired,
+        output,
+        application,
+    )
+    .await;
+}
+#[tokio::test]
+async fn copy_root_only_cleanup_cancelled_after_parent_close_reuses_original_acknowledgments_and_proof(
+) {
+    cancellation_after_native_close(CopyStartFixtureStage::TaskArmed, false).await;
+}
+#[tokio::test]
+async fn copy_joined_cleanup_cancelled_after_parent_close_reuses_original_acknowledgments_and_proof(
+) {
+    cancellation_after_native_close(CopyStartFixtureStage::TaskObserved, true).await;
+}
+
+// R19: force original members/bundle lock contention at the no-root proof
+// handoff. Poll only borrowed fixture/cleanup futures; spawn no native task.
+#[tokio::test]
+async fn copy_never_root_witness_is_stored_before_cancellable_contended_bundle_handoff() {
+    use std::future::Future;
+    use std::task::Poll;
+    let root = tempfile::tempdir().expect("actual one-shot no-root handoff fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    original_prefix(&runtime, &mut owner, &preparation).await;
+    let graph = {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        if let Some(graph) = role.graph.take() {
+            role.sealed = Some(graph.seal());
+        }
+        role.sealed
+            .as_ref()
+            .expect("same original sealed graph")
+            .select_same()
+    };
+    let entered = tokio::sync::Notify::new();
+    let release = tokio::sync::Notify::new();
+    let mut members = Box::pin(graph.fixture_hold_copy_members(&entered, &release));
+    tokio::select! {()=&mut members=>panic!("members guard unexpectedly released"),()=entered.notified()=>{},()=tokio::time::sleep(Duration::from_secs(15))=>panic!("actual members lock watchdog")}
+    let before = runtime.fixture_pause_copy_start(CopyStartFixtureStage::NeverRootProofReadyToMint);
+    let after = runtime.fixture_pause_copy_start(CopyStartFixtureStage::NeverRootProofStored);
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("actual app allocation before sealing");
+    let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
+    tokio::select! {result=&mut cleanup=>panic!("cleanup returned before physical proof handoff: {}",result.is_ok()),()=before.reached()=>{},()=tokio::time::sleep(Duration::from_secs(15))=>panic!("actual no-root constructor watchdog")}
+    // If minting left the bundle unlocked, this SAME contender takes it and
+    // forces a minted local proof to face a cancellable post-mint lock await.
+    let contender = preparation.state.try_lock().ok();
+    drop(before);
+    release.notify_one();
+    members.await; // release ONLY the original members lock
+    let mut stored = Box::pin(after.reached());
+    let stored_before_cancellation = std::future::poll_fn(|cx| {
+        assert!(
+            cleanup.as_mut().poll(cx).is_pending(),
+            "fixture expected a borrowed cleanup wait"
+        );
+        Poll::Ready(stored.as_mut().poll(cx).is_ready())
+    })
+    .await;
+    drop(stored);
+    drop(cleanup);
+    drop(contender);
+    drop(after);
+    assert!(
+        stored_before_cancellation,
+        "minted original no-root proof was stranded before guarded storage"
+    );
+    let close = {
+        let bundle = preparation.state.lock().await;
+        let copy = bundle.roles[0]
+            .copy_vod
+            .as_ref()
+            .expect("same original copy");
+        let proof = copy
+            .never_root_closure
+            .as_ref()
+            .expect("original one-shot proof retained despite cancellation");
+        assert!(proof.matches(&graph));
+        proof.close_operation_id()
+    };
+    let ticket = owner
+        .prepare_retirement(true, deadline())
+        .await
+        .expect("same one-shot absence proof resumed");
+    {
+        let bundle = preparation.state.lock().await;
+        let Mutation::SettleTyped(closed) = &bundle.roles[0]
+            .pending_finite_close
+            .as_ref()
+            .expect("same typed close")
+            .mutation
+        else {
+            panic!("original typed close")
+        };
+        assert!(closed.settlement.members.iter().any(|d|matches!(d,v2::MemberDisposition::Closed{fact:v2::ClosedFact::LegacyNeverAcquiredV1{operation_id,..},..} if operation_id.uuid()==close)),"retry minted a replacement no-root proof");
+    }
+    drop(ticket);
+    drop(graph);
+    retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
 }

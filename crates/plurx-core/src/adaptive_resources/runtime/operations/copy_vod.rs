@@ -736,6 +736,18 @@ impl NodeResourceRuntime {
         let source_members = copy.source_members;
         if role.roots.contains_key(&root_member) {
             for member in source_members {
+                // A prior cleanup may already have checked-closed the parent
+                // File or retained its original close JoinHandle. Committed
+                // acknowledgment metadata is sufficient here; never fstat or
+                // reopen an already acknowledged original parent on retry.
+                if role
+                    .sources
+                    .get(&member)
+                    .ok_or(OperationError::State)?
+                    .copy_root_observation_committed(root_member, acquisition_id)?
+                {
+                    continue;
+                }
                 let source = role
                     .sources
                     .get_mut(&member)

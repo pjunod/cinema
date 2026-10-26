@@ -425,6 +425,9 @@ impl NodeResourceRuntime {
         } else {
             self.join_copy_producer(owner, index, abort).await?;
         }
+        #[cfg(all(test, feature = "fixtures"))]
+        self.fixture_copy_stage(super::copy_vod::CopyStartFixtureStage::CleanupNativeClosed)
+            .await;
         let has_output = {
             let bundle = owner.state.lock().await;
             let role = bundle.roles.get(index).ok_or(OperationError::State)?;
@@ -493,41 +496,36 @@ impl NodeResourceRuntime {
             }
             self.close_retained_entry(role.binding)?;
         }
-        let candidate = {
-            let bundle = owner.state.lock().await;
-            let role = bundle.roles.get(index).ok_or(OperationError::State)?;
-            let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
-            if copy.never_root_closure.is_none() {
-                Some((
-                    role.sealed
-                        .as_ref()
-                        .ok_or(OperationError::State)?
-                        .select_same(),
+        // No parser/root has entered in this state. Keep the ORIGINAL
+        // bundle guard while the sealed graph proves absence, and install
+        // the one-shot proof synchronously before another cancellable await.
+        // A contender can never leave a minted proof in a disposable waiter.
+        let mut bundle = owner.state.lock().await;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let graph = role
+            .sealed
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .select_same();
+        let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
+        if copy.never_root_closure.is_none() {
+            #[cfg(all(test, feature = "fixtures"))]
+            self.fixture_copy_stage(
+                super::copy_vod::CopyStartFixtureStage::NeverRootProofReadyToMint,
+            )
+            .await;
+            let proof = graph
+                .try_finite_vod_never_root_closure(
                     copy.root_member,
                     copy.task_member,
                     copy.acquisition_id,
-                ))
-            } else {
-                None
-            }
-        };
-        if let Some((graph, root, task, acquisition)) = candidate {
-            let proof = graph
-                .try_finite_vod_never_root_closure(root, task, acquisition)
+                )
                 .await?;
-            let mut bundle = owner.state.lock().await;
-            let copy = bundle
-                .roles
-                .get_mut(index)
-                .and_then(|r| r.copy_vod.as_mut())
-                .ok_or(OperationError::State)?;
-            if copy.never_root_closure.is_some() {
-                return Err(OperationError::State);
-            }
             copy.never_root_closure = Some(proof);
+            #[cfg(all(test, feature = "fixtures"))]
+            self.fixture_copy_stage(super::copy_vod::CopyStartFixtureStage::NeverRootProofStored)
+                .await;
         }
-        let mut bundle = owner.state.lock().await;
-        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         let proof = role
             .copy_vod
             .as_ref()
