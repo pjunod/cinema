@@ -220,7 +220,7 @@ impl RenditionDir {
         bytes: &[u8],
         at_ms: i64,
     ) -> io::Result<()> {
-        self.materialize_owned(manifest, index, bytes.to_vec(), at_ms)
+        self.materialize_owned(manifest, index, bytes.to_vec(), at_ms, None)
             .await
     }
 
@@ -233,6 +233,7 @@ impl RenditionDir {
         index: u32,
         bytes: Vec<u8>,
         at_ms: i64,
+        reservation: Option<crate::playback_cache::CacheReservation>,
     ) -> io::Result<()> {
         if manifest.state(index).is_none() {
             return Err(io::Error::new(
@@ -245,7 +246,7 @@ impl RenditionDir {
             ));
         }
         let len = u64::try_from(bytes.len()).map_err(io::Error::other)?;
-        self.publish_owned(&segment_name(u64::from(index)), bytes)
+        self.publish_reserved_owned(&segment_name(u64::from(index)), bytes, reservation)
             .await?;
         manifest.materialize(index, len, at_ms);
         Ok(())

@@ -1988,7 +1988,11 @@ impl RenditionSink {
             .get()
             .after_cache_presence_observed()
             .await;
-        let reservation = if already_present {
+        #[cfg(unix)]
+        let finite_output = self.rendition.dir.is_finite();
+        #[cfg(not(unix))]
+        let finite_output = false;
+        let reservation = if already_present || finite_output {
             None
         } else {
             crate::playback_cache::reserve(self.rendition.dir.path(), bytes.len() as u64).await?
@@ -2162,11 +2166,8 @@ impl RenditionSink {
             }
             self.rendition
                 .dir
-                .materialize_owned(&mut manifest, entry, bytes, now_ms())
+                .materialize_owned(&mut manifest, entry, bytes, now_ms(), reservation)
                 .await?;
-            if let Some(reservation) = reservation {
-                reservation.commit(len);
-            }
             let publication =
                 credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
             if let Some(init) = init.as_ref() {

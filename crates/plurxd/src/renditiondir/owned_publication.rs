@@ -165,6 +165,22 @@ impl RenditionDir {
         } else {
             None
         };
+        self.publish_reserved_owned(name, bytes, reservation).await
+    }
+
+    /// Move an existing grant into the original blocking publication. The
+    /// caller acquires it before its manifest/component locks; cancellation
+    /// after registration must not release its bytes or namespace pin early.
+    pub(super) async fn publish_reserved_owned(
+        &self,
+        name: &str,
+        bytes: Vec<u8>,
+        reservation: Option<crate::playback_cache::CacheReservation>,
+    ) -> io::Result<()> {
+        #[cfg(unix)]
+        if let Some(finite) = &self.writes.finite {
+            return finite.publish(name, bytes).await;
+        }
         let mut pending = self.writes.pending.lock().await;
         join_pending_write(&mut pending).await?;
         let (write, release) = start_reserved_publication(
@@ -191,6 +207,102 @@ impl RenditionDir {
 )]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_segment_waiter_keeps_original_cache_grant_until_blocking_publication_finishes(
+    ) {
+        use plurx_core::segplan::{
+            PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SEGPLAN_VERSION,
+        };
+        use plurx_core::store::SqliteStore;
+        use std::sync::Arc;
+
+        let temporary = crate::test_tempdir().expect("real cache/publication fixture");
+        let base = std::fs::canonicalize(temporary.path()).expect("canonical cache root");
+        let cache_root = base.join("renditions");
+        let directory = cache_root.join("a".repeat(64));
+        std::fs::create_dir_all(&directory).expect("actual rendition namespace");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("real cache settings store"));
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(store, vec![cache_root]);
+        budget.configure_for_test(1024 * 1024);
+        let baseline = budget
+            .used_bytes()
+            .await
+            .expect("actual baseline inventory");
+        let dir = RenditionDir::new(directory);
+        let payload = vec![0x5a; 64 * 1024];
+        let len = payload.len() as u64;
+        // The production caller reserves BEFORE taking the manifest lock.
+        // This is the same real move-only cache grant passed to publication.
+        let reservation = crate::playback_cache::reserve(dir.path(), len)
+            .await
+            .expect("real pre-publication cache grant")
+            .expect("registered budget");
+        let mut manifest = Manifest::new(SegmentPlan {
+            version: SEGPLAN_VERSION,
+            timescale: 1,
+            entries: vec![PlanEntry {
+                index: 0,
+                kind: PlanEntryKind::Video,
+                start_ticks: 0,
+                duration_ticks: 1,
+                est_bytes: len,
+                cut: PlanCut::EndOfStream,
+                fragments: 1,
+            }],
+            target_duration: 1,
+        });
+        let (acquired, resume) = dir.writes.test_barrier();
+        {
+            let write = dir.materialize_owned(&mut manifest, 0, payload, 0, Some(reservation));
+            tokio::pin!(write);
+            tokio::select! {
+                _ = acquired => {},
+                result = &mut write => panic!("original worker must wait with its actual File acquired: {result:?}"),
+            }
+            // Dropping this borrowed materialization frame cannot release the
+            // grant: the registered original blocking worker now owns it.
+        }
+        assert!(
+            dir.writes.pending.lock().await.is_some(),
+            "same blocking task retained"
+        );
+        assert!(
+            crate::playback_cache::is_pinned(dir.path()),
+            "live native write still owns namespace pin"
+        );
+        assert!(
+            budget.used_bytes().await.expect("held grant accounting") >= baseline + len,
+            "future bytes remain charged even before the blocked worker writes them"
+        );
+        assert!(
+            !manifest
+                .state(0)
+                .expect("same plan entry")
+                .is_materialized(),
+            "cancelled logical publication does not fabricate a manifest claim"
+        );
+        resume.send(()).expect("release original native writer");
+        dir.join_writes()
+            .await
+            .expect("join same blocking publication");
+        assert!(
+            !crate::playback_cache::is_pinned(dir.path()),
+            "worker settled its own grant"
+        );
+        assert!(
+            budget
+                .used_bytes()
+                .await
+                .expect("committed byte accounting")
+                >= baseline + len
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(segment_name(0))).expect("actual committed segment"),
+            vec![0x5a; len as usize]
+        );
+    }
 
     #[tokio::test]
     async fn unregistered_native_publication_cannot_enter_and_original_handle_is_joined() {
