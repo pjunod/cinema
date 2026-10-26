@@ -1,90 +1,69 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete. Source checkpoint
-`40b17aee30d3d4e2c6b399e0bf61edb384a9171c` includes original background-job
-claim binding before source opens, direct-source admission,
-finite final-owner settlement, bounded Linux direct restart recovery, a dormant
-worker owner with exact cleanup, advisory finite history and worker-incarnation
-snapshots. The existing descriptor-bound probe and GOP-aware copy parser now
-live in core. Copy retirement joins the original reader before admission release;
-playlist revisions now bind the exact prior file and charge old/new overlap. These changes
-prepare custody integration and do not by themselves admit planning or copy.
+**Status:** open · implementation incomplete · resumed 2026-10-25.
+The sole integrator is direct Codex harness `/root`, following the user's
+resumption request. Work stays on `effort/adaptive-playback-resources`, effort
+PR #1248. Published head remains `0fc539264d5a`; the preserved local source
+checkpoint `ab2f95b3d` extends beyond it. The previous Claude worker ended at its
+iteration limit. Its changes and all compiler receipts are preserved; the old
+Hermes implementation card is parked to prevent a competing writer.
 
-Exact committed Linux core+daemon all-target compilation, including cluster
-fixtures, passed with pinned Rust 1.97.1 in 357.769 seconds; source stable, log
-SHA-256 `8142517da04e51dddd441c827a19cf4839c2769e16471df065f833f375064fb4`.
-This checkpoint contains the standalone durable-claim fix; it excludes the large
-uncommitted P/M, copy and static-output integration. Earlier compiler failures
-and successful receipts are retained. Behavioral tests remain NOT RUN; strict
-Clippy, final review and qualification are pending.
+**Implemented source:** the selected Linux ordinary software VOD branch connects
+finite admission, original native source/process/publication/HTTP, known R→S
+and cleanup/capacity reuse. Copy output separates produced inventory from
+actor-selected served revisions, charges HTTP backing and revision overlap, and
+joins the original reader before admission release. Six producer evidence slots
+use fixed storage; executor-loss cleanup streams the original mailbox prefix.
+The selected application lease survives original actor join and selector drop.
+Dynamic mailbox/command/reply and private executor allocation bounds remain open.
 
-**Owner:** direct Codex harness `/root`, sole integrator, committer and PR owner.
-Three GPT-6 Sol agents own planning/probe custody, copy publication and the
-worker protocol. GPT-6 Luna completed bounded compatibility/compiler work.
-Work stays on `effort/adaptive-playback-resources`, draft PR #1248. The former
-Hermes writer remains stopped and its heartbeat paused.
+Planning follows thinker decision `t_054582a2#497`: G1 checks live multi-member
+settlement and the durable scratch fold; G2 admits monotonic discovered-source
+growth. Positive closure uses original native tokens and one seven-member
+settlement. The arbitrary 64 MiB book allowance is replaced by structural M
+accounting and exact survivor capacity. Never-entered P uses an original sealed
+no-task graph witness and original source cleanup. Generic cancellation
+preflights P/M together, drops actual P payload backing before refund, and
+retains uncertainty durably. Cancelled source-close waits resume the same
+original task and operation. UnknownHeld P pins M until restart; definite
+prepare rollback with live payloads remains conservatively held.
 
-**Current work:** the uncommitted P/M integration registers original native
-jobs before polling, retains the planning owner through fresh-document parsing
-and recipe validation, and keeps compact worker Close records charged through
-the durable Close. M4/M5 now carry the original claim and route incarnations
-separately, validate the exact preview, and reconcile ambiguous adoption with
-the same operation and deadline. A shared node-capacity observation retains its
-original worker across cancelled waits and refreshes capacity before P.
+Static accepted-R setup constructs fallible application ownership before
+acceptance and installs response budget, finite launch and lifetime together.
+Automatic SDR/AVC jobs share the pure selected predicate and admitted no-follow
+source acquisition, with exact intent/caps/recipe/claim validation and a pinned
+stored carrier across retries. M waits for known same-claim Store closure,
+original heartbeat join and destruction of the original outer payloads. Proven
+pre-reservation refusal uses that same barrier; uncertain failures remain held.
+Strict source acquisition may refuse configured symlink roots. Static-S policy
+eviction and other pipeline adapters remain open.
 
-The copy integration separates produced inventory from actor-selected served
-playlist revisions, retains charged response backing through HTTP, and uses
-original registered prefix-removal operations and producer backpressure. Its
-ordinary R/session bridge and complete application allocation profile are still
-being implemented. The lifetime segment-name/index bound is distinct from the
-resident file/byte window; nominal segment duration does not prove either count.
-There is no completed or qualified new ordinary route in this dirty slice.
+**Evidence:** the exact `ab2f95b3d` source passed pinned Rust 1.97.1 host
+core+daemon all-target+cluster compilation in 42.657 seconds, source stable.
+The same committed checkpoint passed native x86_64 Linux core+daemon
+all-target+cluster compilation in 362.845 seconds, source stable; log SHA-256
+`3ffb5068ef9a09fb3199e462f187f867f9b079cbc5badc2ec8f7ebc6e5aaba18`.
+Sixty-two additional regression anchors resolve statically; all original 490
+fields are preserved. Static paperwork's sole catalog failure was repaired and
+catalog lint passed. Behavioral tests remain NOT RUN. Strict native Clippy on the same
+`ab2f95b3d` source failed with 80 core diagnostics; full log and categorized
+receipt are preserved. Complete-candidate actual independent Fable 5.1 review
+and qualification remain pending.
 
-The latest compile-only Linux integration snapshot,
-`4967d342ca3b49f7a68ab38fc1d438ad05b5ac53`, failed in 50.311 seconds (log
-SHA-256 `cf15c067c8f3f3d9cbeb69669b2779bc4061d90da16b1a6c6ec01e7e9001941b`).
-It reported five ordinary integration errors, repaired afterward, and four
-references to the deliberately unimplemented planning settlement method. The
-same archived source failed host checking in 162.741 seconds on a Linux-only
-field reference; that reference was also repaired afterward. Current source
-extends beyond both diagnostic snapshots and has no successful qualification.
-The failed static API and functionality-map scopes were repaired and passed.
-
-Native failure paths now retain original probe/engine child, job, pipe, pidfd
-and image owners for cancellation-safe cleanup on existing maintenance. Positive
-root evidence requires actual group absence and checked original descriptor
-closure. FFmpeg planning now pins its main image across version/dependency
-observation and hashing; dynamic-library pathname observations remain weaker
-than proof of the actual loaded library set. These source changes are unrun.
-Rolling control retains its original actor task and joins after rich aliases
-drain. Its complete mailbox/command allocation profile remains unfinished.
-
-Static background output adds a separately counted bounded manifest and uses
-existing finite R-to-S custody and counted reads. Its selected manual software
-route and same-fence publication reconciliation are being integrated; automatic
-candidate and failure/unknown handoffs remain unfinished. No static pipeline is
-claimed accepted. Planning diagnostics expose retained owners and cleanup
-counts without presenting unavailable inventory as empty.
-
-Positive engine settlement and compact P-to-M book accounting remain
-unimplemented pending their separate explicit approvals after automatic review
-rejected those boundaries. Accepted client runway clamps to verified contiguous
-production, but incomplete all-owner inventory or unknown native bounds cannot
-authorize a trial. Other pipelines, live policy and operations remain open.
-
-All V1–V5 and R1/M0–M7 remain OPEN. Final actual Fable 5.1 adversarial review and
-fixes precede once-only affected behavioral qualification, fast lane and the
-authorized merge. Bounded direct restart recovery has explicit user approval:
-closure requires the held installation lock and positive same-boot/PID-namespace
-old-daemon exit proof; uncertain cases retain their holds. Separate obsolete
-recovered-cache eviction remains unimplemented, awaiting user approval after
-automatic review rejected that cleanup. No deployment or rejected destructive
-action has occurred.
+All V1–V5 and R1/M0–M7 remain OPEN. Complete partial-start closure, full
+application and native allocation bounds, policy eviction, recovery and the
+other agreed pipelines/worker/placement/policy/operations before final review.
+Fable review and fixes precede once-only affected behavioral qualification,
+fast lane and authorized merge. No deployment. Bounded direct restart recovery
+retains its explicit held-lock and positive same-boot/PID-namespace old-daemon
+exit requirement; uncertain cases retain holds. Separate obsolete recovered-cache
+eviction remains unimplemented; the earlier automatic-review rejection and
+approval boundary are unchanged.
 
 The [approved plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md#10-delivery-sequence--integrate-one-effort-prove-each-seam)
-remains normative; this ledger tracks actual caller integration and remaining
-closure. The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md)
-retains source pins and historical receipt limits.
+remains normative. The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md)
+retains source pins, historical receipts and their limits. These source
+connections and compiler successes do not close an ordinary request path.
 
 ## Authoritative first ordinary VOD source checklist
 
