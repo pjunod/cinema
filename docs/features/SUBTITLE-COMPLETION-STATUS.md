@@ -1,6 +1,6 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** built · runtime qualified, final gate pending
+**Status:** built · runtime qualified; landing tracked on PR #1292
 
 **Date:** 2026-10-25 · **Updated:** 2026-10-26 · **Owner:** Codex /root · **Branch:** `effort/subtitle-completion`
 
@@ -71,7 +71,7 @@ this qualification. The selected static engine SHA256 is
 The full private receipt is retained outside compiler caches with the local
 runtime log and source review. This proves the controlled source, worker and
 readback path; physical Apple TV acceptance follows the user's deployment.
-The current-head main fast lane remains the merge blocker.
+PR #1292 records the current-head main fast lane and landing receipt.
 
 ## Final adversarial review — 2026-10-26
 

@@ -7635,3 +7635,27 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/SharedProgressiv
 source_anchor = "internal class SharedProgressiveCaptions("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/SharedProgressiveCaptionsTest.kt"
 test_anchor = "@Test fun sharedReadsUseOnlyClosedOpaqueGetResourcesAndNeverEnqueue(): Unit = runBlocking {"
+
+[[fixes]]
+id = "apple.subtitle-continuous-traversal"
+commits = ["ec8dc68b3ff24ce680c799127417387fa9b9f3e0"]
+source = "clients/apple/Sources/ProgressiveCaptionSession.swift"
+source_anchor = "func mediaChanged(seek: Bool = false, positionMs: Int? = nil) {"
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "func testAdvancingPlaybackKeepsContinuityAcrossCoreBoundaryPauseRateAndAttachment("
+
+[[fixes]]
+id = "android.subtitle-pending-producer-handoff"
+commits = ["ec8dc68b3ff24ce680c799127417387fa9b9f3e0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/CaptionProducerMutations.kt"
+source_anchor = "internal class CaptionProducerMutations<T>(private val ownership: CaptionProducerOwnership) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/CaptionProducerMutationsTest.kt"
+test_anchor = "fun heldCreateReplacementSettlesExactBodyBeforeSuccessorMutationAndCannotReleaseSuccessor("
+
+[[fixes]]
+id = "web.subtitle-seek-continuity-replay"
+commits = ["ec8dc68b3ff24ce680c799127417387fa9b9f3e0"]
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "function translationRotateContinuity(state){state.continuityId=translationUuid();return state.continuityId;}"
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "test('uncertain old heartbeat replays exact bytes after seek, then renews once without a failure loop',async()=>"
