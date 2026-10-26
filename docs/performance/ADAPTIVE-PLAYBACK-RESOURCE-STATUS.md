@@ -1,54 +1,50 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · resumed 2026-10-25. PR #1248 on
+**Status:** open · implementation active · updated 2026-10-26. PR #1248 on
 `effort/adaptive-playback-resources` remains the sole effort. Published source
-is `0fc539264d5a`; local source checkpoint `f4d3bf800` extends beyond it.
-Direct Codex `/root` integrates isolated helper deliveries. The old Hermes
-implementation card stays parked. Complete-candidate independent Fable 5.1
-review and fixes must precede behavioral qualification; tests remain NOT RUN.
+is `0fc539264d5a`; local committed checkpoint is `db82d7475`; bounded same-request worker
+retry is connected, with worker foreign-fence cleanup under correction. Current main `e02fb1283` is merged locally.
+Direct Codex `/root` integrates isolated helpers; the old Hermes writer stays
+parked. Actual complete-candidate Fable 5.1 review/fixes must precede behavioral
+tests. Behavioral tests remain NOT RUN.
 
-**Connected source:** ordinary selected Linux software VOD has finite admission,
-original source/process/publication/HTTP ownership and R→S accounting. Its
-construction now installs original cleanup before the first post-R await and
-keeps that selector through actual Shared publication. Metadata waits use the
-original deadline; cancellation resumes the same owner. Known partial native
-cleanup exists. Interrupted acquisition acknowledgment and generic prepared
-cancellation with live finite owners are under correction, not accepted.
+Selected Linux software VOD retains original source/process/publication/HTTP
+ownership and R→S cleanup. Interrupted acquisition and live application-owner
+cancellation repairs are implemented. The finalized output bound now reserves
+the authentic operator cache budget before R; the same grant follows original
+production and compact cleanup. Unknown owner loss retains it. Fresh finite
+cache pressure uses typed retirement; raw legacy deletion checks runtime
+protection. Recovered outputs without original producers remain protected.
 
-Planning implements decision `t_054582a2#497`: bound original native closures,
-durable root/task enrichment, original source close and one seven-member P
-settlement. M survives. Structural M replaces the arbitrary 64 MiB allowance;
-exact survivor capacities are checked. Never-entered P uses an original sealed
-no-task witness. Retained journal waits now honor the original deadline without
-replacing pending operations. Authored regressions cover actual mid-enrichment
-API Deadline and one actual native closure while its sibling remains pending.
-UnknownHeld P still pins M until restart; uncertain outcomes retain charges.
+Planning retains its original deadline, native closures, source witness and
+seven-member P settlement; structural M replaces the arbitrary 64 MiB allowance.
+UnknownHeld P still pins M until restart. Static policy withdrawal retains actual
+readers and typed cleanup. Selected copy control preflights payload/final-result
+slots and keeps original app ownership through escaping aliases. Preparation
+services and immutable context now share original allocations. Original controller
+join/Store proof, actual-plan conditional End admission, copy partial-start native
+witnesses and copy global quota remain open. Private task/channel/allocator and
+native aggregate peaks remain Unknown, not a complete finite-memory claim.
 
-Automatic SDR/AVC static jobs retain the same admitted recipe, claim and original
-controller through Store Close, heartbeat join and payload destruction. Static
-policy changes now withdraw the exact original S artifact using a compact
-admitted file/settings binding; live HTTP readers and native/journal closure
-continue to gate release. Store uncertainty remains held. This source work does
-not qualify selective recovery or obsolete recovered-cache eviction.
+Drain admission now follows original probe tasks/pipes and prepared owners;
+missing/busy inventory blocks readiness. Original inference now retains its admission in the same blocking task. The
+full caller audit found further library/subtitle/fragment owner gaps. Worker intent is the exact
+root-scoped borrowed wire digest, rederived before planning. Bounded retry from Fable design `t_9095ec22` is connected; source/storage domain identity
+and a production consumer for unclosed provisional attempts remain missing.
 
-Selected copy control reserves queued, private-plan, retained-state and reply
-payload slots from its existing 16 MiB client partition. Arc projections include
-refcount alignment. HTTP terminal contexts reserve before deep clones. Final
-consumer preflight, preparation continuations and escaping observer lifetimes
-are being completed. Private Tokio/channel/task storage and native aggregate
-peaks remain Unknown; these bounded projections do not prove a finite peak.
-The finite pump explicitly admits UnknownProducerPeak for unbounded private
-storage rather than treating its initial message-block projection as complete.
-
-**Compiler evidence:** pinned Rust 1.97.1 native x86_64 core+daemon all-target+
-cluster check passed on `ab2f95b3d` in 362.845 seconds, source stable; log SHA-256
-`3ffb5068ef9a09fb3199e462f187f867f9b079cbc5badc2ec8f7ebc6e5aaba18`.
-That source's strict Clippy failed with 80 core diagnostics. Subsequent fixes
-passed combined strict Linux-cfg compilation on `5bc54dbc1`; its stubbed C
-objects and absent link do not establish native acceptance. The corresponding
-macOS run found two further issues, now repaired. Combined strict checks and a
-new exact-source native Clippy receipt are in progress. Authored regression
-anchors resolve statically; no behavioral tests, final review or gate ran.
+**Evidence:** original strict Clippy repairs passed native x86_64 core+daemon
+all-target+cluster on `8305720ef` (417.086 seconds, source stable; log SHA-256
+`105a6f5ef0aa0c2e3ccb9ae6dacd46437e332bce3173b97ae96436bbc302b364`).
+After the main merge, Mac strict all-target+fixtures passed immutable-intent
+source `6232e9542` with its integrated pipe/cache safety fixes (185.322 seconds,
+source stable; log SHA-256
+`5496fdb22aa0d50f3aa7bafcf7202544738e73da4586133c21506cff604a0a3f`).
+The matching Linux-cfg check passed; its stubbed C objects link no executable.
+Software-quota and service-sharing deliveries each passed strict checks in their
+isolated clones. Combined Mac and Linux-cfg strict checks passed `b53874a2a` source, including
+real-Store retry regressions (compiled only). Exact committed native x86_64
+checks on `db82d7475` are running. These receipts do not qualify changed source
+or replace final review or behavioral execution.
 
 All V1–V5 and R1/M0–M7 remain OPEN. Remaining implementation includes complete
 copy/application/native bounds, restart drain accounting, nonselected pipeline
@@ -296,7 +292,7 @@ The original proposed contracts are preserved verbatim in [contract history](ADA
 - M2: atomic dimensioned policy, retained physical custody, history and settings migration.
 - M3: connect core custody to every adapter above; positive containment, typed
   nonprocess closure and restart persistence; real background yield/reap, Live/DVR.
-- M4: guarded durable worker preparation/adoption and mixed-version behavior.
+- M4: guarded worker runtime/retry is connected; complete foreign-fence cleanup, provisional inventory recovery and remaining pipeline adapters. Shared source/storage identity remains unresolved.
 - M5: same-quality ranking/budgets, shared NAS/relay domains and maintenance.
 - M6: settings/client/operator docs and accurate drain/placement diagnostics.
 - M7: acceptance implementation, complete-candidate independent review/fixes,
