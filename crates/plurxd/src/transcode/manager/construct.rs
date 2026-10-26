@@ -93,6 +93,8 @@ impl TranscodeManager {
             processed_reconstruction_slots: Arc::new(tokio::sync::Semaphore::new(
                 super::LIVE_RECONSTRUCTION_SLOTS,
             )),
+            #[cfg(target_os = "linux")]
+            fel_requalification_requests: std::sync::Mutex::new(std::collections::HashMap::new()),
             pipeline,
             encoder_override: None,
             admissions: Admissions::new(),

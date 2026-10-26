@@ -220,7 +220,7 @@ pub(crate) async fn publish_title_for_control(
 }
 
 #[cfg(any(unix, test))]
-fn selected_video_index(document: &serde_json::Value) -> Option<u8> {
+pub(super) fn selected_video_index(document: &serde_json::Value) -> Option<u8> {
     let stream = document.get("streams")?.as_array()?.iter().find(|stream| {
         stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
             && stream

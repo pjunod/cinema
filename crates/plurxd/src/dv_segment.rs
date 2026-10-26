@@ -551,9 +551,14 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .count()
         != policies.len()
         || policies.len() > 1
-        || policies
-            .first()
-            .is_some_and(|pair| pair[1] != "19" || codecs[0][1] != "hevc_vaapi")
+        || policies.first().is_some_and(|pair| {
+            // The radeonsi policy (19), or the reconstructed 8.1 route's
+            // own recipe (0, VBAQ off): nothing else.
+            let policy = plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq;
+            ![policy.flags()[1], policy.reconstructed_profile81_flags()[1]]
+                .contains(&pair[1].as_str())
+                || codecs[0][1] != "hevc_vaapi"
+        })
     {
         return Err("unsupported or ambiguous completed VAAPI driver policy".into());
     }
@@ -2263,6 +2268,10 @@ mod tests {
             duplicated.extend([flag.into(), "19".into()]);
             assert!(check_encoder_budget(&duplicated, 3).is_err());
         }
+        // The reconstructed 8.1 route's recipe (VBAQ off) is the one other
+        // qualified value; without it every 8.1 window was refused here.
+        *qualified.last_mut().expect("policy") = "0".into();
+        assert!(check_encoder_budget(&qualified, 3).is_ok());
         *qualified.last_mut().expect("policy") = "20".into();
         assert!(check_encoder_budget(&qualified, 3).is_err());
         let mut wrong_encoder = nvenc.to_vec();

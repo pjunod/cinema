@@ -1744,17 +1744,102 @@ async fn dolby_vision_fel_reencode(
 ) -> DeveloperEnableItem {
     #[cfg(target_os = "linux")]
     {
-        let helper = crate::vodencode::dv_runtime::ToolSet::capture()
-            .await
-            .map(|tools| tools.is_some())
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture().await;
+        let helper = tools
+            .as_ref()
+            .map(Option::is_some)
             .map_err(|error| error.to_string());
         let facts = state.transcode.live_reconstruction_facts().await;
-        dolby_vision_fel_reencode_item(enabled, convert_on, helper, Some(facts))
+        let counts = match &tools {
+            Ok(Some(tools)) => state
+                .store
+                .dv_fel_verdict_counts(&plurx_core::transcode::dv_fel_qualification::identity(
+                    &tools.scanner_digest(),
+                    plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
+                ))
+                .await
+                .map_err(|error| error.to_string()),
+            Ok(None) => Err("no processing helper on this node".into()),
+            Err(error) => Err(error.clone()),
+        };
+        let mut item = dolby_vision_fel_reencode_item(enabled, convert_on, helper, Some(facts));
+        let quality = fel_quality_requirement(&FelQualityFacts {
+            capable: state.transcode.fel_qualification_capable(),
+            counts,
+        });
+        if let Some(row) = item
+            .requirements
+            .iter_mut()
+            .find(|row| row.id == quality.id)
+        {
+            *row = quality;
+        }
+        item
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = state;
         dolby_vision_fel_reencode_item(enabled, convert_on, Ok(false), None)
+    }
+}
+
+/// What this node knows about the per-title FEL qualification.
+#[derive(Debug, Clone)]
+struct FelQualityFacts {
+    /// radeonsi VA-API with its Main10 graph: the only encoder the route's
+    /// recipe and its verdicts are measured on.
+    capable: bool,
+    /// Titles holding a verdict for this node's renderer and the route's
+    /// recipe, and how many of those admit the reconstruction.
+    counts: Result<(u64, u64), String>,
+}
+
+/// The quality row is the per-title verdicts, never a global claim: each
+/// Profile 7 FEL title is served the reconstruction only when its own
+/// measurement says the enhancement layer adds more than re-encoding loses.
+fn fel_quality_requirement(facts: &FelQualityFacts) -> DeveloperRequirement {
+    use plurx_core::transcode::dv_fel_qualification as q;
+    let rule = format!(
+        "Each Profile 7 FEL title is measured once, in its Dolby Vision title scan, on this \
+         server's GPU: {} two-second windows, Delta E ITP against the FEL master on the active \
+         picture. The reconstruction is served only for a title whose reconstructed picture \
+         beats the plain conversion (EL dropped) by at least {:.0}% on the mean and is no worse \
+         at the 99th percentile; every other title plays the plain conversion with that reason.",
+        q::WINDOWS,
+        q::MIN_MEAN_GAIN * 100.0,
+    );
+    let (status, measured) = match (&facts.counts, facts.capable) {
+        (_, false) => (
+            RequirementStatus::Unmet,
+            "This node's encoder has no qualified reconstruction recipe (the route is measured \
+             on radeonsi VA-API only)."
+                .to_owned(),
+        ),
+        (Err(reason), true) => (
+            RequirementStatus::Unavailable,
+            format!("Verdicts unreadable ({reason})."),
+        ),
+        (Ok((0, _)), true) => (
+            RequirementStatus::Unmet,
+            "No title has been measured with this renderer and recipe yet.".to_owned(),
+        ),
+        (Ok((total, admitted)), true) => (
+            if *admitted > 0 {
+                RequirementStatus::Met
+            } else {
+                RequirementStatus::Unmet
+            },
+            format!(
+                "{total} title{} measured with this renderer and recipe; {admitted} admitted.",
+                if *total == 1 { "" } else { "s" }
+            ),
+        ),
+    };
+    DeveloperRequirement {
+        id: "dv_fel_bitrate_quality",
+        title: "Per-title quality qualification",
+        status,
+        evidence: format!("{rule} {measured}"),
     }
 }
 
@@ -3167,6 +3252,41 @@ mod tests {
 
     /// The FEL re-encode rows were a fixed "not yet available" string keyed
     /// only on the saved switch. Each row now follows what this node read.
+    #[test]
+    fn fel_quality_row_reports_per_title_verdicts_for_this_renderer_and_recipe() {
+        let row = |capable, counts| fel_quality_requirement(&FelQualityFacts { capable, counts });
+        let incapable = row(false, Ok((3, 1)));
+        assert_eq!(incapable.status, RequirementStatus::Unmet);
+        assert!(
+            incapable.evidence.contains("radeonsi VA-API only"),
+            "{}",
+            incapable.evidence
+        );
+        assert_eq!(
+            row(true, Err("io".into())).status,
+            RequirementStatus::Unavailable
+        );
+        let none = row(true, Ok((0, 0)));
+        assert_eq!(none.status, RequirementStatus::Unmet);
+        assert!(none.evidence.contains("No title has been measured"));
+        let refused = row(true, Ok((2, 0)));
+        assert_eq!(refused.status, RequirementStatus::Unmet);
+        assert!(
+            refused.evidence.contains("2 titles measured"),
+            "{}",
+            refused.evidence
+        );
+        let admitted = row(true, Ok((2, 1)));
+        assert_eq!(admitted.status, RequirementStatus::Met);
+        assert!(admitted.evidence.contains("1 admitted"));
+        assert!(
+            admitted.evidence.contains("at least 10%"),
+            "{}",
+            admitted.evidence
+        );
+        assert_eq!(admitted.id, "dv_fel_bitrate_quality");
+    }
+
     #[test]
     fn fel_reencode_readiness_is_read_from_this_node_and_never_from_the_switch() {
         let facts =

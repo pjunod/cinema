@@ -3010,3 +3010,61 @@ async fn one_live_fel_reconstruction_per_worker_and_the_next_is_declined_with_it
         .expect("graph admission");
     assert!(slot < admission);
 }
+
+/// The reconstructed 8.1 is served only for a title whose own verdict, for
+/// this renderer and recipe, admits it. Until a verdict exists, or when it
+/// refuses, the play keeps the plain conversion and says why; a node whose
+/// encoder has no qualified recipe never serves it.
+#[cfg(target_os = "linux")]
+#[test]
+fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise_says_why() {
+    use plurx_core::transcode::dv_fel_qualification::{FelVerdict, VerdictState};
+    let verdict = |admitted| FelVerdict {
+        schema: 1,
+        identity: "id".into(),
+        source_size: 1,
+        source_mtime: 2,
+        admitted,
+        served_mean: 2.9,
+        dropped_mean: 1.79,
+        served_p99: 7.78,
+        dropped_p99: 9.6,
+        p99_tolerance: 0.0,
+        measured_at_ms: 3,
+        windows: Vec::new(),
+    };
+    assert_eq!(
+        TranscodeManager::fel_gate(true, VerdictState::Current(verdict(true))),
+        crate::transcode::FelGate::Serve
+    );
+    let crate::transcode::FelGate::Decline(refused) =
+        TranscodeManager::fel_gate(true, VerdictState::Current(verdict(false)))
+    else {
+        panic!("a refusing verdict declines");
+    };
+    assert!(refused.contains("adds less than re-encoding loses for this title"), "{refused}");
+    assert!(refused.contains("2.90 reconstructed vs 1.79 without the EL"), "{refused}");
+    assert_eq!(
+        TranscodeManager::fel_gate(true, VerdictState::Missing),
+        crate::transcode::FelGate::Measure
+    );
+    assert!(TranscodeManager::fel_being_measured().contains("is being measured"));
+    for state in [VerdictState::Missing, VerdictState::Current(verdict(true))] {
+        assert_eq!(
+            TranscodeManager::fel_gate(false, state),
+            crate::transcode::FelGate::Decline(TranscodeManager::fel_recipe_unqualified().into())
+        );
+    }
+    // The gate runs where the ingress offers the route and again where every
+    // start builds its processed graph, before the slot or any render, so a
+    // declined title never takes the reconstruction slot.
+    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/transcode/manager/create.rs"));
+    let gate = "self.reconstruction_qualified(&planning).await?;";
+    assert_eq!(source.matches(gate).count(), 2);
+    let graph = source.rfind(gate).expect("graph gate");
+    let slot = source.find("self.acquire_reconstruction_slot(mode)").expect("slot");
+    assert!(graph < slot);
+    // The route's own rate: min(source average, 60 Mb/s).
+    assert!(source.contains("plurx_core::transcode::reconstructed_p81_video_kbps(file);"));
+    assert!(crate::transcode::FEL_REQUALIFICATION_INTERVAL >= std::time::Duration::from_secs(3600));
+}

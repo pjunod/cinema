@@ -89,6 +89,18 @@ bump may break compatibility and a **patch** bump never does.
   `effective_processing` report (`profile81_reconstructed`) that existing
   clients ignore. Activity names a processed stream's delivered picture, GPU
   work and reason beside its Stop.
+- The reconstructed Profile 8.1 is served only for a title whose enhancement
+  layer adds more to the picture than re-encoding loses. Each Profile 7 FEL
+  title is measured once, in its Dolby Vision title scan, on the server's GPU
+  (eight 2 s windows, Delta E ITP against the FEL master inside the
+  letterbox): the reconstruction must beat the plain conversion by at least
+  10% on the mean and be no worse at the 99th percentile. Until a title is
+  measured, or when it fails, plays get the plain conversion and their FEL row
+  says why. The verdict is kept with the title's Dolby Vision facts and is
+  measured again when the helper or the route's recipe changes. The route
+  encodes at the source's average rate up to 60 Mb/s with VBAQ off on
+  radeonsi, and its HLS peak is advertised from that rate; other encodes keep
+  their policy.
 
 - Display-targeted playback reads mastering metadata carried on decoded frames
   when stream metadata omits it. The bounded probe stays bound to the held source

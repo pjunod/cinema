@@ -1319,6 +1319,89 @@ impl VaapiHdrPolicy {
             Self::MesaRadeonsiVbaq => "mesa-radeonsi-balanced-vbaq-no-preanalysis-v1",
         }
     }
+
+    /// The reconstructed Profile 8.1 route only: VBAQ off. At the route's
+    /// rate it costs nothing measurable, and at low rates it moves bits out of
+    /// the flat and dark areas where Delta E ITP is steepest (p99 13.4 vs 11.7
+    /// on the grainy control title at 18 Mb/s). No `-qmax`: radeonsi obeys
+    /// `-qmax` over `-maxrate`, and `-qmax 14` drove 2 s segments to 151 Mb/s
+    /// against a 90 Mb/s ceiling (docs/streaming/FEL-P81-RECONSTRUCTION.md).
+    pub fn reconstructed_profile81_flags(self) -> [&'static str; 2] {
+        match self {
+            Self::MesaRadeonsiVbaq => ["-compression_level", "0"],
+        }
+    }
+}
+
+/// The reconstructed Profile 8.1's video rate ceiling. The route replaces a
+/// copy of the disc's base layer at full source rate, so it gets a delivery
+/// rate near that, not the 2160p transcode rung (20 Mb/s).
+pub const RECONSTRUCTED_P81_MAX_VIDEO_KBPS: u32 = 60_000;
+
+/// Identity of the route's encode recipe; part of every per-title FEL
+/// qualification verdict, so changing it re-qualifies every title.
+pub const RECONSTRUCTED_P81_RECIPE: &str =
+    "p81-vbr:b=min(source,60000k):maxrate=1.5b:bufsize=2b:bf=0:radeonsi-compression_level=0:v1";
+
+/// The route's VA-API encode of one sample window for the per-title FEL
+/// qualification: the same Main10 contract arguments and route flags as
+/// [`super::vod_completed_reconstructed_pipe_args`] with
+/// [`super::CompletedReconstructedOutputPlan::with_reconstructed_profile81`],
+/// the level of the window's own raster and cadence, and the VOD window GOP.
+/// Input and output arguments are the caller's.
+pub fn reconstructed_p81_window_encode_args(
+    policy: VaapiHdrPolicy,
+    bitrate_kbps: u32,
+    width: u32,
+    height: u32,
+    rate: (u32, u32),
+    frames: u32,
+) -> Option<Vec<String>> {
+    let contract = CompletedReconstructedOutputContract::resolve(Encoder::Vaapi)?;
+    let mut args = contract.encode_args(bitrate_kbps, true, Some(1));
+    args.extend(policy.reconstructed_profile81_flags().map(str::to_owned));
+    let level = hevc_level_for(width, height, rate.0, rate.1)?;
+    let at = args.iter().position(|arg| arg == "-level:v")?;
+    args[at + 1] = level.to_owned();
+    let gop = frames.to_string();
+    args.extend(
+        [
+            "-flags",
+            "+cgop",
+            "-g",
+            &gop,
+            "-keyint_min",
+            &gop,
+            "-sc_threshold",
+            "0",
+        ]
+        .map(str::to_owned),
+    );
+    Some(args)
+}
+
+/// The reconstructed Profile 8.1's target video rate: the source's average
+/// bitrate (the whole file's, so an upper bound on its video's), capped at
+/// [`RECONSTRUCTED_P81_MAX_VIDEO_KBPS`]. VBR at this target with the ordinary
+/// VBV (`-maxrate` 1.5x, `-bufsize` 2x) kept every measured 2 s segment
+/// under the advertised peak (worst 58 Mb/s at a 60 Mb/s target).
+pub fn reconstructed_p81_video_kbps(source: &crate::domain::MediaFile) -> u32 {
+    let measured = source
+        .bitrate
+        .filter(|bps| *bps > 0)
+        .map(|bps| bps / 1000)
+        .or_else(|| {
+            source
+                .duration_ms
+                .filter(|ms| *ms > 0)
+                .map(|ms| source.size.saturating_mul(8) / ms)
+        });
+    measured
+        .and_then(|kbps| u32::try_from(kbps).ok())
+        .map_or(RECONSTRUCTED_P81_MAX_VIDEO_KBPS, |kbps| {
+            kbps.min(RECONSTRUCTED_P81_MAX_VIDEO_KBPS)
+        })
+        .max(1_000)
 }
 
 /// Physical inventory, independent of whether an encoder initialized successfully.

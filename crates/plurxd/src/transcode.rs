@@ -553,6 +553,21 @@ pub use rate_control::*;
 /// measured, so a second play takes its ordinary route with the reason.
 pub(crate) const LIVE_RECONSTRUCTION_SLOTS: usize = 1;
 
+/// What the reconstructed 8.1 route does for one title on one node.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FelGate {
+    Serve,
+    /// The play keeps the plain conversion, with this reason.
+    Decline(String),
+    /// No verdict yet: ask for the title to be measured; the play keeps the
+    /// plain conversion, saying it is being measured.
+    Measure,
+}
+
+/// How often one node may ask for the same title's FEL qualification.
+pub(crate) const FEL_REQUALIFICATION_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(6 * 60 * 60);
+
 /// Node readings behind the Developer tab's FEL re-encode rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveReconstructionFacts {
@@ -635,6 +650,10 @@ pub struct TranscodeManager {
     /// long as the graph that spends the GPU.
     #[cfg(target_os = "linux")]
     pub(crate) processed_reconstruction_slots: Arc<tokio::sync::Semaphore>,
+    /// Titles this node asked to have FEL-qualified, and when.
+    #[cfg(target_os = "linux")]
+    fel_requalification_requests:
+        std::sync::Mutex<std::collections::HashMap<i64, std::time::Instant>>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,

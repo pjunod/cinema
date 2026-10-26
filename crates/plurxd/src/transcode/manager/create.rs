@@ -1466,6 +1466,161 @@ impl TranscodeManager {
             .await
     }
 
+    /// Whether this node can serve and measure the reconstructed 8.1 with the
+    /// route's qualified recipe: radeonsi VA-API with its Main10 graph proved.
+    /// The recipe and the per-title verdicts are measured on that encoder only.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fel_qualification_capable(&self) -> bool {
+        self.caps.vaapi
+            && self.hdr10_passthrough_vaapi
+            && self.caps.vaapi_hdr_policy
+                == Some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq)
+    }
+
+    /// The title's FEL qualification verdict for this renderer and recipe:
+    /// `Ok` admits the reconstruction; every other answer is the reason the
+    /// play keeps the plain conversion. A missing verdict asks for the title
+    /// to be measured.
+    #[cfg(target_os = "linux")]
+    async fn reconstruction_qualified(
+        &self,
+        planning: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> Result<(), String> {
+        use plurx_core::transcode::dv_fel_qualification as q;
+        if !self.fel_qualification_capable() {
+            return Err(Self::fel_recipe_unqualified().into());
+        }
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture()
+            .await?
+            .ok_or("the processing helper is unavailable on this node")?;
+        let scanner = tools.scanner_digest();
+        let identity = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE);
+        let state = q::verdict_state(
+            planning.probe_json.as_deref(),
+            planning.file.size,
+            planning.file.mtime,
+            &identity,
+        );
+        match Self::fel_gate(true, state) {
+            FelGate::Serve => Ok(()),
+            FelGate::Decline(reason) => Err(reason),
+            FelGate::Measure => {
+                self.request_fel_qualification(planning.file.id, &scanner, &identity)
+                    .await;
+                Err(Self::fel_being_measured().into())
+            }
+        }
+    }
+
+    /// The route's decision from this node's capability and the title's
+    /// verdict for this renderer and recipe. Only an admitting verdict serves
+    /// the reconstruction; a missing one is measured and, until then, the play
+    /// keeps the plain conversion.
+    pub(crate) fn fel_gate(
+        capable: bool,
+        state: plurx_core::transcode::dv_fel_qualification::VerdictState,
+    ) -> FelGate {
+        use plurx_core::transcode::dv_fel_qualification::VerdictState;
+        if !capable {
+            return FelGate::Decline(Self::fel_recipe_unqualified().into());
+        }
+        match state {
+            VerdictState::Current(verdict) if verdict.admitted => FelGate::Serve,
+            VerdictState::Current(verdict) => FelGate::Decline(verdict.refusal()),
+            VerdictState::Missing => FelGate::Measure,
+        }
+    }
+
+    pub(crate) const fn fel_recipe_unqualified() -> &'static str {
+        "no reconstruction recipe is qualified for this server's encoder \
+         (the route is measured on radeonsi VA-API only)"
+    }
+
+    pub(crate) const fn fel_being_measured() -> &'static str {
+        "whether this title's enhancement layer adds more than re-encoding loses \
+         is being measured on this server's GPU"
+    }
+
+    /// Rebind the title's scan demand so the title job runs again and
+    /// measures it. At most once per title per six hours on this node: a node
+    /// that cannot measure (no capable GPU) may pick the job up, and a play
+    /// must not turn that into repeated full-title rescans.
+    #[cfg(target_os = "linux")]
+    async fn request_fel_qualification(&self, file_id: i64, scanner: &str, identity: &str) {
+        {
+            let mut requests = self
+                .fel_requalification_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = std::time::Instant::now();
+            requests.retain(|_, at| now.duration_since(*at) < FEL_REQUALIFICATION_INTERVAL);
+            if requests.contains_key(&file_id) {
+                return;
+            }
+            requests.insert(file_id, now);
+        }
+        let binding =
+            plurx_core::transcode::dv_fel_qualification::requalify_binding(scanner, identity);
+        match self
+            .store
+            .request_dv_fel_requalification(file_id, &binding)
+            .await
+        {
+            Ok(true) => {
+                tracing::info!(target: "plurxd::dv", file_id, "FEL qualification requested")
+            }
+            Ok(false) => {
+                tracing::debug!(target: "plurxd::dv", file_id, "FEL qualification has no title demand")
+            }
+            Err(error) => {
+                tracing::warn!(target: "plurxd::dv", file_id, %error, "FEL qualification request failed")
+            }
+        }
+    }
+
+    /// The GPU and CPU a qualification window graph is debited, in the
+    /// background class, plus the node's live reconstruction slot.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn admit_fel_qualification(
+        &self,
+    ) -> Result<
+        (
+            tokio::sync::OwnedSemaphorePermit,
+            crate::admission::TranscodePermit,
+            crate::dv_segment::RendererDecode,
+        ),
+        String,
+    > {
+        let slot = self
+            .acquire_reconstruction_slot(
+                plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
+            )?
+            .ok_or("no reconstruction slot")?;
+        let decode = Self::processed_renderer_decode(
+            std::path::Path::new(&plurx_core::transcode::vaapi_device()).exists(),
+            crate::ffmpeg::has_hevc_main10_vaapi_decode().await,
+        );
+        let resources = crate::admission::TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: crate::dv_segment::streaming_helper_cpu_threads(
+                plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
+                decode,
+            ) + 3,
+            decoder_threads: Some(crate::dv_segment::STREAMING_DECODER_THREADS),
+        };
+        let permit = crate::vodencode::try_admit_frozen_bundle(
+            &self.admissions,
+            self.max_hw_sessions().await,
+            self.software_budget().await,
+            &resources,
+            Some(1),
+            crate::admission::Priority::Background,
+            None,
+        )
+        .map_err(|_| "the GPU slot or CPU the qualification needs is in use".to_owned())?;
+        Ok((slot, permit, decode))
+    }
+
     /// The renderer's decode placement, which sizes its CPU debit. It decodes
     /// on the GPU when it is handed the VA-API render device (whenever the
     /// device exists) and that device proved an HEVC Main10 decode
@@ -1653,6 +1808,11 @@ impl TranscodeManager {
             }
             if request.subtitle_burn.is_some() {
                 return Err("burned-in subtitles are not drawn into processed HDR10 yet".into());
+            }
+            // Reconstruction is the better picture only for a title whose EL
+            // adds more than the re-encode loses: its measured verdict decides.
+            if profile81 {
+                self.reconstruction_qualified(&planning).await?;
             }
             let Some(caps) = original.canonical_caps.as_ref() else {
                 return Err("the client did not report its playback capabilities".into());
@@ -2740,6 +2900,11 @@ impl TranscodeManager {
                     use crate::vodencode::dv_runtime::{RuntimeRecipe, failure_episode_key, episode_failed};
                     use plurx_core::transcode::dv_processing::DvSelection;
                     let (_, destination, _) = req.dv_processing_route()?;
+                    // Every start, not only one the ingress offered: the title's
+                    // FEL verdict decides whether it is reconstructed.
+                    if destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
+                        self.reconstruction_qualified(&planning).await?;
+                    }
                     let preferences = Self::vod_dv_preferences_from_snapshot(&planning);
                     let failure_episode = failure_episode_key(&req.playback_id, &source_object_version,
                         &tools, preferences, destination)?;
@@ -2774,6 +2939,13 @@ impl TranscodeManager {
                         Encoder::Software, file, target_height, 0.0, req.audio_index, None, Some(1),
                         OutputGrade::Hdr10).pipeline;
                     processed_options.software_threads = Some(1);
+                    // The reconstructed 8.1 replaces a copy of the disc's base
+                    // layer at full rate, so it is not held to the 2160p
+                    // transcode rung: min(source average, 60 Mb/s).
+                    if destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
+                        processed_options.video_bitrate_kbps =
+                            plurx_core::transcode::reconstructed_p81_video_kbps(file);
+                    }
                     let held = source.handle.try_clone().map(Arc::new).map_err(|e| e.to_string())?;
                     let processed_plan = self.resolve_vod_movie_plan(file, &processed_options, Encoder::Software, held).await?;
                     let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));

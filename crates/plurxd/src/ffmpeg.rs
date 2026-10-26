@@ -1145,6 +1145,7 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
         document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
         document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
         document.remove(plurx_core::scan::dv_title::PROBE_FIELD);
+        document.remove(plurx_core::transcode::dv_fel_qualification::PROBE_KEY);
     }
     if let Some(format) = value
         .get_mut("format")

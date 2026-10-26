@@ -288,6 +288,40 @@ async fn execute(
     } else {
         match result {
             Ok(stats) => {
+                // A Profile 7 FEL title is qualified for the reconstructed
+                // 8.1 here, once, while this job holds it. Foreground work
+                // preempts only the qualification: the aggregate is still
+                // published, and the verdict stays missing until a later play
+                // asks again.
+                let qualification = cancel.child_token();
+                match super::run_admitted_probe(
+                    &state.transcode,
+                    &admission,
+                    &qualification,
+                    &shutdown,
+                    None,
+                    super::fel_qualification::qualify_if_due(
+                        &state,
+                        &file,
+                        &demand.probe_json,
+                        &tools,
+                        &qualification,
+                    ),
+                )
+                .await
+                {
+                    Ok(super::fel_qualification::Qualification::Stored(verdict)) => {
+                        tracing::debug!(target: "plurxd::dv", file_id = file.id,
+                            admitted = verdict.admitted, "FEL qualification stored");
+                    }
+                    Ok(outcome) => {
+                        tracing::debug!(target: "plurxd::dv", file_id = file.id, ?outcome, "FEL qualification");
+                    }
+                    Err(error) => {
+                        tracing::warn!(target: "plurxd::dv", file_id = file.id, %error,
+                            "FEL qualification did not complete; the title keeps the plain conversion");
+                    }
+                }
                 let output = TitleOutput {
                     file_id: file.id,
                     probe_revision: demand.probe_revision,

@@ -160,7 +160,7 @@ fn renderer_source_identity() -> String {
 /// picture costs more than decoding it in software. The VA-API runtime and
 /// drivers are the media runtime's (the same ones the encoder uses), so its
 /// library directory follows the bundle's own on the search path.
-fn gpu_decode_environment(
+pub(crate) fn gpu_decode_environment(
     environment: &mut Vec<(String, std::ffi::OsString)>,
     device: &str,
     ffmpeg: &str,
@@ -1207,6 +1207,9 @@ impl RuntimeRecipe {
                 .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
             if self.destination == DvDestination::Sdr {
                 output = output.with_sdr_output();
+            }
+            if self.destination == DvDestination::Profile81 {
+                output = output.with_reconstructed_profile81();
             }
             let raster = plan
                 .output_contract()

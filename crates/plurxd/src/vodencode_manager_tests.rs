@@ -87,6 +87,10 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         base.path().join("runtime"),
         EncoderCaps {
             vaapi: true,
+            // The radeonsi worker's detected policy: the one encoder the
+            // reconstructed 8.1's recipe and verdicts are qualified on.
+            vaapi_hdr_policy: profile81
+                .then_some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
             ..Default::default()
         },
         Pipeline::Cpu,
@@ -181,6 +185,58 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         block_budget_secs: Some(10.0),
         ..reopen_request(id, "actual-hdr-probe", "unused", "unused")
     };
+    if profile81 {
+        // No verdict yet: the play keeps the plain conversion while the title
+        // is measured. Then an admitting verdict for this source, renderer and
+        // recipe (what the title job stores) lets the same start reconstruct.
+        let unmeasured = SessionRequest {
+            request_id: Some("actual-processed-hdr-window-unmeasured".into()),
+            ..request.clone()
+        };
+        assert!(
+            manager
+                .prepare_vod_encoding(&unmeasured, &file)
+                .await
+                .expect("plain conversion start")
+                .is_none(),
+            "an unmeasured FEL title is not reconstructed"
+        );
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture()
+            .await
+            .expect("helper")
+            .expect("helper");
+        let verdict = plurx_core::transcode::dv_fel_qualification::FelVerdict {
+            schema: plurx_core::transcode::dv_fel_qualification::SCHEMA,
+            identity: plurx_core::transcode::dv_fel_qualification::identity(
+                &tools.scanner_digest(),
+                plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
+            ),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            admitted: true,
+            served_mean: 1.0,
+            dropped_mean: 2.0,
+            served_p99: 1.0,
+            dropped_p99: 2.0,
+            p99_tolerance: 0.0,
+            measured_at_ms: 0,
+            windows: Vec::new(),
+        };
+        assert!(store
+            .put_dv_fel_verdict(
+                file.id,
+                file.size,
+                file.mtime,
+                &serde_json::to_value(&verdict).expect("verdict"),
+            )
+            .await
+            .expect("verdict stored"));
+    }
+    let file = store
+        .get_file(id)
+        .await
+        .expect("current file")
+        .expect("stored verdict");
     let started = Instant::now();
     let (encoding, prepared_root) = if sdr {
         // Fresh durable admission, canonical catalog restoration and normal

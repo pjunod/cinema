@@ -711,3 +711,125 @@ async fn title_priority_observation_requires_live_higher_priority_same_node_work
     })
     .await;
 }
+
+#[tokio::test]
+async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the_title() {
+    use plurx_core::transcode::dv_fel_qualification::{self as q, FelVerdict};
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let (_, id) = seed_file(&store, "title-fel-verdict").await;
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let mut fel = probe();
+        fel.dolby_vision.el_present = Some(true);
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("path"),
+                file.size,
+                file.mtime,
+                &fel,
+            )
+            .await
+            .expect("FEL probe");
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let (scanned, job) = active(&store, file.id, &scanner, 1_000).await;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&scanned, &job, &scanner, 1_001))
+                .await
+                .expect("publish"),
+            JobPublishOutcome::Published { .. }
+        ));
+        let identity = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE);
+        let verdict = FelVerdict {
+            schema: q::SCHEMA,
+            identity: identity.clone(),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            admitted: false,
+            served_mean: 2.9,
+            dropped_mean: 1.79,
+            served_p99: 7.78,
+            dropped_p99: 9.6,
+            p99_tolerance: 0.0,
+            measured_at_ms: 2_000,
+            windows: Vec::new(),
+        };
+        let value = serde_json::to_value(&verdict).expect("verdict");
+        // Another source generation never receives this verdict.
+        assert!(
+            !store
+                .put_dv_fel_verdict(file.id, file.size + 1, file.mtime, &value)
+                .await
+                .expect("stale"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .put_dv_fel_verdict(file.id, file.size, file.mtime, &value)
+                .await
+                .expect("store"),
+            "{backend}"
+        );
+        let stored = store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        // Beside the title aggregate, which it leaves intact; read back as
+        // this source's current verdict for this renderer and recipe.
+        let document: serde_json::Value = serde_json::from_str(&stored).expect("JSON");
+        assert_eq!(
+            document[PROBE_FIELD],
+            serde_json::to_value(stats()).expect("stats")
+        );
+        assert_eq!(
+            q::verdict_state(Some(&stored), file.size, file.mtime, &identity),
+            q::VerdictState::Current(verdict.clone()),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .dv_fel_verdict_counts(&identity)
+                .await
+                .expect("counts"),
+            (1, 0)
+        );
+        assert_eq!(
+            store
+                .dv_fel_verdict_counts(&"b".repeat(64))
+                .await
+                .expect("counts"),
+            (0, 0)
+        );
+        // The settled title has no demand until a play asks for it again.
+        assert!(store
+            .dv_title_demands(&scanner, 0)
+            .await
+            .expect("settled")
+            .is_empty());
+        assert!(
+            store
+                .request_dv_fel_requalification(file.id, &q::requalify_binding(&scanner, &identity))
+                .await
+                .expect("requalify"),
+            "{backend}"
+        );
+        let rerun = demand(&store, file.id, &scanner).await;
+        assert!(rerun.probe_revision > scanned.probe_revision, "{backend}");
+        // A verdict is never written for a title without an enhancement layer.
+        let plain = seed(&store, "title-fel-verdict-mel").await;
+        assert!(
+            !store
+                .put_dv_fel_verdict(plain.id, plain.size, plain.mtime, &value)
+                .await
+                .expect("not FEL"),
+            "{backend}"
+        );
+        assert!(store
+            .put_dv_fel_verdict(file.id, file.size, file.mtime, &serde_json::json!([]))
+            .await
+            .is_err());
+    })
+    .await;
+}
