@@ -318,6 +318,14 @@ struct SourceViewerState {
     direct_activity: Option<Instant>,
 }
 
+/// Known requested inline actor payload and its identified Arc strong/weak
+/// words. This includes the actual kind/state/custody layout and padding;
+/// strings, allocator internals, Tokio/native and complete peaks are separate.
+#[cfg(target_os = "linux")]
+pub(super) fn source_actor_requested_bytes() -> usize {
+    std::mem::size_of::<SourceViewerInner>() + 2 * std::mem::size_of::<usize>()
+}
+
 impl SourceViewerInner {
     fn direct_file(&self) -> Option<Arc<direct::SourceDirectFile>> {
         self.state

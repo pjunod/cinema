@@ -881,8 +881,9 @@ pub(crate) fn fixed_source_requested_bytes() -> usize {
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<SourceProbeOperation>()
         + std::mem::size_of::<SourceFixedStartFailure>()
-        // Inline factory custody retained independently of the P/M selector.
-        + std::mem::size_of::<Option<super::source_actor::SourceRestartAdmission>>()
+        // The coordinator future borrows an Arc, so its sizeof does not cover
+        // this separately retained actual actor payload and identified header.
+        + super::source_actor::source_actor_requested_bytes()
 }
 
 #[allow(clippy::too_many_arguments)]
