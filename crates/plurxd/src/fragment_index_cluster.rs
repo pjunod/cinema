@@ -389,15 +389,57 @@ pub(crate) async fn open_source_fence(
     file: &MediaFile,
     expected_object_version: Option<&str>,
 ) -> Result<SourceFence, String> {
+    // Observe the existing legacy open/fstat as one original retained job.
+    // Its File AND metadata remain in that job/result carrier if this waiter
+    // disappears. Known results disarm only this private observation.
+    let mut observation = SourceOpenObservation {
+        keeper: plurx_core::process::bounded::original_keeper(),
+        native_result_observed: false,
+    };
+    let path = file.path.clone();
+    #[cfg(test)]
+    let after_open = PLAYBACK_OPEN_AFTER_OPEN
+        .try_with(std::sync::Arc::clone)
+        .ok();
+    #[cfg(test)]
+    let after_metadata = LEGACY_OPEN_AFTER_METADATA
+        .try_with(std::sync::Arc::clone)
+        .ok();
+    let native_result = crate::subtitle_models::admitted_work::spawn_blocking(move || {
+        // Unix legacy reopening intentionally follows links. Playback's
+        // separate no-follow policy must not replace this existing policy.
+        #[cfg(unix)]
+        let source = std::fs::File::open(&path)
+            .map_err(|error| format!("opening {}: {error}", path.display()))?;
+        #[cfg(windows)]
+        let source = plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+            .map_err(|error| format!("opening {}: {error}", path.display()))?;
+        #[cfg(test)]
+        if let Some(after_open) = after_open {
+            after_open(&source);
+        }
+        let metadata = source.metadata().map_err(|error| {
+            #[cfg(unix)]
+            {
+                format!("fstat {}: {error}", path.display())
+            }
+            #[cfg(windows)]
+            {
+                format!("stating {}: {error}", path.display())
+            }
+        })?;
+        #[cfg(test)]
+        if let Some(after_metadata) = after_metadata {
+            after_metadata(&source, &metadata);
+        }
+        Ok::<_, String>((source, metadata))
+    })
+    .await
+    .map_err(|error| format!("opening source task failed: {error}"))?;
+    observation.native_result_observed = true;
+    let (source, metadata) = native_result?;
     #[cfg(unix)]
     {
-        let source = tokio::fs::File::open(&file.path)
-            .await
-            .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
-        let metadata = source
-            .metadata()
-            .await
-            .map_err(|error| format!("fstat {}: {error}", file.path.display()))?;
         let object_version = object_version(&metadata)?;
         if let Some(expected) = expected_object_version {
             scanner_identity_matches(&metadata, file)?;
@@ -406,22 +448,12 @@ pub(crate) async fn open_source_fence(
             }
         }
         Ok(SourceFence {
-            handle: source.into_std().await.into(),
+            handle: source.into(),
             object_version,
         })
     }
     #[cfg(windows)]
     {
-        let path = file.path.clone();
-        let source = tokio::task::spawn_blocking(move || {
-            plurx_core::fs_secure::open_read_nofollow_blocking(&path)
-        })
-        .await
-        .map_err(|error| format!("opening source task failed: {error}"))?
-        .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
-        let metadata = source
-            .metadata()
-            .map_err(|error| format!("stating {}: {error}", file.path.display()))?;
         scanner_identity_matches(&metadata, file)?;
         let object_version = windows_object_version(&source)?;
         if expected_object_version.is_some_and(|expected| expected != object_version) {
@@ -436,11 +468,11 @@ pub(crate) async fn open_source_fence(
 
 // This observes only whether the original opener returned its native result.
 // Its absence is uncertainty, never a no-acquisition or physical-close fact.
-struct PlaybackOpenObservation {
+struct SourceOpenObservation {
     keeper: Option<std::sync::Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper>>,
     native_result_observed: bool,
 }
-impl Drop for PlaybackOpenObservation {
+impl Drop for SourceOpenObservation {
     fn drop(&mut self) {
         if self.native_result_observed {
             return;
@@ -451,19 +483,23 @@ impl Drop for PlaybackOpenObservation {
         keeper.retain_uncertainty(
             plurx_core::process::bounded::OriginalWorkUncertainty::CollectorDropped,
         );
-        tracing::debug!(
-            "original playback source opener result unobserved; cleanup remains unknown"
-        );
+        tracing::debug!("original source opener result unobserved; cleanup remains unknown");
     }
 }
 
 #[cfg(test)]
 type PlaybackOpenAfterOpen = std::sync::Arc<dyn Fn(&std::fs::File) + Send + Sync>;
 #[cfg(test)]
+type LegacyOpenAfterMetadata =
+    std::sync::Arc<dyn Fn(&std::fs::File, &std::fs::Metadata) + Send + Sync>;
+#[cfg(test)]
 tokio::task_local! {
     // Per-call fixture gate AFTER the actual native open, inside the SAME
     // blocking job. No production hook/frame field or replacement opener.
     static PLAYBACK_OPEN_AFTER_OPEN: PlaybackOpenAfterOpen;
+    // Distinct fixture phase after the SAME worker's actual fstat. It can
+    // gate a real returning File/Metadata result, never certify its disposal.
+    static LEGACY_OPEN_AFTER_METADATA: LegacyOpenAfterMetadata;
 }
 
 /// Source playback always checks the scanner facts and refuses link traversal.
@@ -476,7 +512,7 @@ pub(crate) async fn open_source_playback_fence(
     // Install observation BEFORE the existing job starts. A deadline/Stop can
     // discard its JoinHandle but cannot release the same admitted keeper from
     // its actual queued input, worker, or unclaimed File result.
-    let mut observation = PlaybackOpenObservation {
+    let mut observation = SourceOpenObservation {
         keeper: plurx_core::process::bounded::original_keeper(),
         native_result_observed: false,
     };
@@ -1620,6 +1656,8 @@ pub(crate) fn unix_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    mod legacy_opener;
     #[cfg(unix)]
     mod timed_opener;
 
