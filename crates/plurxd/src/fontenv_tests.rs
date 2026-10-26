@@ -654,13 +654,90 @@ async fn a_capture_whose_frozen_rules_diverge_is_refused() {
     assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
 }
 
-/// Finding 1, the face half: corrupt one owned materialisation after its
-/// links exist and before the real producer/Fontconfig probes. A stale live
-/// cache is not portable: some Fontconfig versions rescan rather than reuse
-/// scan-time edits. Keep the live files unchanged and prove the build itself
-/// refuses a frozen entry whose actual faces differ from the live listing.
+/// Changing only the owned frozen selection must make the actual native
+/// Fontconfig face listing diverge and refuse the burn. Byte replacement is
+/// a separate materialization property: some native versions scan metadata
+/// from original paths even when their configuration/cache use the sysroot.
 #[tokio::test]
 async fn a_capture_whose_frozen_faces_diverge_is_refused() {
+    let fixture = fixture();
+    let live_config = std::fs::read(&fixture.config).expect("live configuration");
+    let (reached, resume) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    hooks::install(
+        &fixture.runtime,
+        hooks::Hooks {
+            pause: Some((Arc::clone(&reached), Arc::clone(&resume))),
+            ..Default::default()
+        },
+    );
+    let corrupt = async {
+        reached.notified().await;
+        let environments = std::fs::canonicalize(fixture.runtime.join(FONT_ENVIRONMENT_DIR))
+            .expect("this fixture's environment directory");
+        let entries: Vec<_> = std::fs::read_dir(&environments)
+            .expect("owned environments")
+            .map(|entry| entry.expect("environment entry").path())
+            .collect();
+        assert_eq!(entries.len(), 1, "only this capture's owned environment");
+        let root = std::fs::canonicalize(entries[0].join("root")).expect("owned sysroot");
+        assert!(root.starts_with(&environments), "stay inside this fixture");
+        let config = under(&root, &fixture.config).expect("configuration under owned root");
+        let xml = std::fs::read_to_string(&config).expect("owned configuration copy");
+        assert!(xml.contains("</fontconfig>"));
+        std::fs::write(
+            &config,
+            xml.replacen(
+                "</fontconfig>",
+                "<selectfont><rejectfont><glob>*</glob></rejectfont></selectfont></fontconfig>",
+                1,
+            ),
+        )
+        .expect("change only the owned frozen font selection");
+        let frozen_env = vec![
+            ("FONTCONFIG_SYSROOT", root.into_os_string()),
+            ("FONTCONFIG_FILE", fixture.config.clone().into_os_string()),
+        ];
+        assert!(
+            fc("fc-list", &frozen_env, &[FONT_LISTING_FORMAT])
+                .trim()
+                .is_empty(),
+            "the frozen selection actually rejects every face"
+        );
+        assert!(
+            !fc("fc-list", &live_fc(&fixture.config), &[FONT_LISTING_FORMAT])
+                .trim()
+                .is_empty(),
+            "the live selection retains its fonts"
+        );
+        assert_eq!(
+            std::fs::read(&fixture.config).expect("live configuration survives"),
+            live_config
+        );
+        resume.notify_one();
+    };
+    let (error, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(refused(&fixture), corrupt)
+    })
+    .await
+    .expect("capture and owned selection mutation finish within the test budget");
+    assert!(
+        error.contains("the frozen Fontconfig environment resolves"),
+        "refused by the face parity: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&fixture.config).expect("live configuration survives"),
+        live_config
+    );
+    assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
+}
+
+/// A different font at an owned font-link path cannot become an attested
+/// regular configuration copy, even if native metadata comes from original paths.
+#[tokio::test]
+async fn a_capture_whose_frozen_font_link_is_replaced_is_refused() {
     let fixture = fixture();
     let original = std::fs::canonicalize(&fixture.installed[0]).expect("live font");
     let live_bytes = std::fs::read(&original).expect("live font bytes");
@@ -704,37 +781,6 @@ async fn a_capture_whose_frozen_faces_diverge_is_refused() {
         );
         std::fs::remove_file(&frozen).expect("unlink the frozen entry, not its target");
         std::fs::write(&frozen, &replacement).expect("replace only the owned snapshot entry");
-        // Make this fixture's mutation observable even to directory caches
-        // that compare whole-second mtimes, without sleeping or changing the
-        // live source/cache. Prove the intended face divergence explicitly.
-        let directory = std::fs::File::open(frozen.parent().expect("font directory"))
-            .expect("owned frozen font directory");
-        let modified = directory
-            .metadata()
-            .expect("directory metadata")
-            .modified()
-            .expect("directory mtime")
-            + Duration::from_secs(2);
-        directory
-            .set_modified(modified)
-            .expect("invalidate frozen directory cache");
-        let frozen_env = vec![
-            ("FONTCONFIG_SYSROOT", root.clone().into_os_string()),
-            ("FONTCONFIG_FILE", fixture.config.clone().into_os_string()),
-        ];
-        let faces = |env: &FcEnv| {
-            let mut faces: Vec<_> = fc("fc-list", env, &["--format=%{family}\t%{style}\n"])
-                .lines()
-                .map(str::to_owned)
-                .collect();
-            faces.sort();
-            faces
-        };
-        assert_ne!(
-            faces(&frozen_env),
-            faces(&live_fc(&fixture.config)),
-            "the corrupted frozen entry must actually change Fontconfig's faces"
-        );
         let frozen_hash = Sha256::digest(std::fs::read(&frozen).expect("replacement bytes"));
         assert_eq!(frozen_hash, replacement_hash);
         assert_ne!(frozen_hash, live_hash);
@@ -752,8 +798,8 @@ async fn a_capture_whose_frozen_faces_diverge_is_refused() {
     .await
     .expect("capture and owned snapshot corruption finish within the test budget");
     assert!(
-        error.contains("the frozen Fontconfig environment resolves"),
-        "refused by the face parity: {error}"
+        error.contains("the frozen font link for") && error.contains("was replaced"),
+        "refused by the materialization contract: {error}"
     );
     assert_eq!(
         std::fs::read(&original).expect("live source survives"),
