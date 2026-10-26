@@ -11,7 +11,6 @@ use crate::adaptive_resources::runtime::operations::plans::{
     FixedProbeDiscoverPlan, SourceCopyOwner, SourceCopyPlan, TypedGraphPlan, TypedMemberPlan,
 };
 use crate::adaptive_resources::runtime::operations::source_files::SourceOpenSpec;
-use crate::adaptive_resources::runtime::operations::{OperationError, OwnedPreparation};
 use crate::adaptive_resources::{
     FamilyDemand, FamilyRole, FamilyRoleDemand, MemoryClaim, ResourceVector, WorkloadDemand,
 };
@@ -23,10 +22,9 @@ use std::time::Instant;
 // install. Not an assertion of native peak RSS; P records UnknownPeak.
 const REPORT_STORAGE_ALLOWANCE_BYTES: u64 = 256 * 1024 * 1024;
 
-pub(in crate::adaptive_resources::runtime) struct PlannedProbe {
-    pub(in crate::adaptive_resources::runtime) preparation: OwnedPreparation,
+pub(in crate::adaptive_resources::runtime) struct PlanningTaskPlan {
     pub(in crate::adaptive_resources::runtime) source_member: Uuid,
-    pub(in crate::adaptive_resources::runtime) source_spec: Option<SourceOpenSpec>,
+    pub(in crate::adaptive_resources::runtime) source_spec: SourceOpenSpec,
     pub(in crate::adaptive_resources::runtime) probe_plan: v2::FixedProbeDiscoverTaskV1,
     pub(in crate::adaptive_resources::runtime) engine_plan: v2::FixedPlanningEngineTaskV1,
 }
@@ -63,9 +61,9 @@ fn slot(member_id: v2::Id, owned_by: Option<v2::Id>, depends_on: Vec<v2::Id>) ->
 
 pub(in crate::adaptive_resources::runtime) fn prepare(
     runtime: &Arc<NodeResourceRuntime>,
-    request: &FixedPlanningProbeRequest,
+    request: FixedPlanningProbeRequest,
     deadline: Instant,
-) -> Result<PlannedProbe, OperationError> {
+) -> Result<FixedPlanningProbeOwner, OperationError> {
     if !cfg!(target_os = "linux")
         || Instant::now() >= deadline
         || !request.source.path.is_absolute()
@@ -374,8 +372,21 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
             }],
         },
     ];
+    // Build the ORIGINAL registration exactly once, before reservation. It
+    // owns the existing request/catalog/spec, plans and observation IDs; no
+    // native task, source/program lookup or replacement ID is created here.
+    let application_bytes = request.application_metadata_bytes;
+    let tasks = super::super::operations::planning_tasks::PreparedPlanningTasks::new(
+        PlanningTaskPlan {
+            source_member: source_member.uuid(),
+            source_spec,
+            probe_plan,
+            engine_plan,
+        },
+        request,
+    );
     let family = runtime.new_family()?;
-    let preparation = match runtime.prepare_typed_families_claiming(
+    match runtime.prepare_typed_families_claiming_initialized(
         &[FamilyDemand {
             identity: family,
             roles: &roles,
@@ -386,23 +397,40 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
             MemoryClaim::PlanningMetadata,
         ]),
         deadline,
+        |preparation| {
+            let (release, cleanup_requested, known_closed) = runtime.initialize_private_planning(
+                preparation,
+                application_bytes,
+                book_structural_bytes,
+                metadata_bytes,
+                tasks,
+            );
+            // Complete the existing Drop-armed selector before publication.
+            // Later unwinding signals this SAME original maintenance owner.
+            FixedPlanningProbeOwner {
+                runtime: Arc::clone(runtime),
+                preparation: Some(preparation.clone()),
+                release,
+                cleanup_requested,
+                known_closed,
+            }
+        },
     ) {
-        Ok(preparation) => preparation,
+        Ok((_preparation, owner)) => Ok(owner),
         Err(error) => {
             let _ = runtime.remove_unused_family(family);
-            return Err(error);
+            Err(error)
         }
-    };
-    runtime.register_planning_metadata(
-        &preparation,
-        request.application_metadata_bytes,
-        book_structural_bytes,
-    )?;
-    Ok(PlannedProbe {
-        preparation,
-        source_member: source_member.uuid(),
-        source_spec: Some(source_spec),
-        probe_plan,
-        engine_plan,
-    })
+    }
+}
+
+#[cfg(test)]
+pub(in crate::adaptive_resources::runtime) fn original_preparation_for_test(
+    owner: &FixedPlanningProbeOwner,
+) -> OwnedPreparation {
+    owner
+        .preparation
+        .as_ref()
+        .expect("original constructor selector")
+        .clone()
 }

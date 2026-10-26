@@ -628,18 +628,17 @@ impl NodeResourceRuntime {
         request: FixedPlanningProbeRequest,
         deadline: Instant,
     ) -> Result<FixedPlanningProbeOwner, FixedPlanningProbeError> {
-        let mut planned = plan::prepare(self, &request, deadline)?;
-        let preparation = planned.preparation.clone();
-        self.register_planning_tasks(&preparation, &mut planned, request)?;
-        let (release, cleanup_requested, known_closed) =
-            self.planning_owner_fences(&preparation)?;
-        Ok(FixedPlanningProbeOwner {
-            runtime: Arc::clone(self),
-            preparation: Some(preparation),
-            release,
-            cleanup_requested,
-            known_closed,
-        })
+        let owner = plan::prepare(self, request, deadline)?;
+        #[cfg(test)]
+        self.planning_constructor_checkpoint(
+            owner
+                .preparation
+                .as_ref()
+                .expect("complete private planning owner"),
+        );
+        // All original payload/fences were installed privately. No fallible
+        // registration or book lookup separates publication from this owner.
+        Ok(owner)
     }
 }
 
