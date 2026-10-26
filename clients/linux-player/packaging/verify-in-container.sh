@@ -3,8 +3,9 @@
 # the repository read-only at /repo and the build output read-only at /out):
 # install the .deb the way a user would and check it end to end, then remove
 # it. The checks, in order: checksums; lintian on the .deb and the source
-# package; dpkg -i + apt-get -f install; the private mpv reports and loads
-# the private libplacebo, with DT_RPATH, also under LD_LIBRARY_PATH; the
+# package; dpkg -i + apt-get -f install; the private mpv runs its linked-in
+# libplacebo, exports none of its symbols and loads only the system one
+# (for libavfilter), also under LD_LIBRARY_PATH; the
 # scheme registration and desktop entry; the launcher; the system mpv beside
 # it; both mpvs rendering a 10-bit PQ clip through vo=gpu-next on Vulkan
 # (Mesa's software device under Xvfb); the launcher's own mpv command line
@@ -70,22 +71,28 @@ grep -E '^libplacebo version: v[0-9.]+ \(v[0-9.]+-plurx' /tmp/private-version.tx
   || fail "private mpv does not report the private libplacebo"
 pass "private mpv reports $(sed -n 's/^libplacebo version: //p' /tmp/private-version.txt)"
 
-step "private mpv rpath"
+step "private mpv has libplacebo linked in"
 dynamic=$(readelf -d "$private/bin/mpv") || fail "readelf"
-grep -F '(RPATH)' <<< "$dynamic" | grep -F '[$ORIGIN/../lib]' || fail "mpv has no DT_RPATH \$ORIGIN/../lib"
-! grep -F '(RUNPATH)' <<< "$dynamic" || fail "mpv has a DT_RUNPATH, which LD_LIBRARY_PATH would beat"
-pass "mpv has DT_RPATH \$ORIGIN/../lib and no DT_RUNPATH"
+! grep -F '(NEEDED)' <<< "$dynamic" | grep -F '[libplacebo' || fail "mpv needs a shared libplacebo"
+! grep -E '\((RPATH|RUNPATH)\)' <<< "$dynamic" || fail "mpv has an rpath"
+exported=$(nm -D --defined-only "$private/bin/mpv" | awk '$3 ~ /^(plurx_)?pl_/') || fail "nm"
+[ -z "$exported" ] || fail "mpv exports libplacebo symbols: $(head -n 3 <<< "$exported")"
+imported=$(nm -D --undefined-only "$private/bin/mpv" | awk '$2 ~ /^pl_/') || fail "nm"
+[ -z "$imported" ] || fail "mpv would call the system libplacebo: $(head -n 3 <<< "$imported")"
+! ls "$private"/lib 2> /dev/null || fail "the package installs a private library directory"
+pass "mpv needs no shared libplacebo, has no rpath, and exports and imports no libplacebo symbol"
 
+# The only libplacebo mpv's process loads is the system one, for libavfilter.
 check_private_ldd() {
   local label=$1; shift
   env "$@" ldd "$private/bin/mpv" > /tmp/private-ldd.txt || fail "$label: ldd"
   ! grep 'not found' /tmp/private-ldd.txt || fail "$label: unresolved libraries"
   local lp
-  lp=$(awk '$1 ~ /^libplacebo\.so/ { print $3 }' /tmp/private-ldd.txt)
-  [ -n "$lp" ] || fail "$label: no libplacebo in ldd"
-  lp=$(realpath "$lp")
-  case $lp in "$private"/lib/libplacebo.so.*) ;; *) fail "$label: private mpv loads libplacebo from $lp" ;; esac
-  pass "$label: private mpv loads $lp"
+  for lp in $(awk '$1 ~ /^libplacebo\.so/ { print $3 }' /tmp/private-ldd.txt); do
+    lp=$(realpath "$lp")
+    case $lp in "$system_lib"/libplacebo.so.*) ;; *) fail "$label: private mpv loads libplacebo from $lp" ;; esac
+  done
+  pass "$label: private mpv loads no libplacebo but the system one ($(awk '$1 ~ /^libplacebo\.so/ { print $1 }' /tmp/private-ldd.txt | paste -sd' ' -))"
 }
 step "ldd private mpv"
 check_private_ldd "alone"

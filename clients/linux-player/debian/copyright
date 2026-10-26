@@ -14,7 +14,8 @@ License: Apache-2.0
 Files: libplacebo/*
 Copyright: 2017-2026 Niklas Haas and the libplacebo contributors
 License: LGPL-2.1+
-Comment: The built libplacebo.so.360 also statically embeds glslang and
+Comment: libplacebo is linked statically into /usr/lib/plurx-player/bin/mpv,
+ and it statically embeds glslang and
  SPIRV-Tools from the build environment (the package's Built-Using field
  names their exact versions). glslang is under BSD-3-clause, MIT,
  Apple-MIT-license and, for its Bison-generated parser, GPL-3 with the

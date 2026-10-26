@@ -147,11 +147,38 @@ class PrivateBuild(unittest.TestCase):
         self.assertIn("Recommends: desktop-file-utils, mesa-vulkan-drivers | vulkan-icd", control)
         self.assertIn("Built-Using: ${plurx:Built-Using}", control)
 
+    def test_libplacebo_is_linked_in_renamed_and_hidden(self):
+        # The system FFmpeg's libavfilter loads the system libplacebo into
+        # mpv's process; libplacebo's symbols are unversioned, so the private
+        # copy must neither be a shared object nor share its symbol names.
+        build = read("packaging/build-private.sh")
+        self.assertIn("-Ddefault_library=static", build)
+        self.assertIn('CFLAGS="${CFLAGS:-} -fno-lto"', build)   # objcopy cannot rename LTO bytecode
+        self.assertIn('objcopy --redefine-syms="$out/libplacebo.rename" "$archive"', build)
+        self.assertIn("-Wl,--exclude-libs,ALL", build)
+        self.assertIn("nm -D --undefined-only", build)          # mpv imports no pl_* symbol
+        self.assertIn("mpv exports libplacebo symbols", build)
+        self.assertNotIn("-Wl,-rpath", build)
+        rules = read("debian/rules")
+        self.assertNotIn("libplacebo.so", rules)
+        self.assertNotIn("$(PRIVATE)/lib", rules)
+        verify = read("packaging/verify-in-container.sh")
+        self.assertIn("mpv would call the system libplacebo", verify)
+        self.assertIn("the package installs a private library directory", verify)
+
 
 # The libdovi C API header plurx's processing helper pins
 # (tools/dv_quality/backends/parsed-rpu/fetch_parser.py).
 LIBDOVI_HEADER_SHA256 = "77e130d174a285ec4d141a88245f12b068606174a745f39f7aca54a2c1439f82"
+
 DM_HEADERS = ("dm_closed_form.h", "dv_dm.h")
+
+
+def read_dm(header):
+    tools = os.path.join(ROOT, "..", "..", "tools", "dv_processing")
+    base = tools if os.path.isdir(tools) else os.path.join(ROOT, "dm")
+    with open(os.path.join(base, header), encoding="utf-8") as handle:
+        return handle.read()
 
 
 class ClosedFormMapping(unittest.TestCase):
@@ -209,6 +236,19 @@ class ClosedFormMapping(unittest.TestCase):
                 digest.update(handle.read())
         newest = read("debian/changelog").split("\n -- ", 1)[0]
         self.assertIn(f"dm {digest.hexdigest()[:12]}", newest)
+
+    def test_cm29_evaluates_its_lattice_once_per_frame(self):
+        # One 4K CM v2.9 frame cost 34 ms on an Intel Arc iGPU when the final
+        # pass evaluated eight lattice vertices per pixel inside a shader that
+        # also held CM v4.0; the frame's lattice is now a table, and each
+        # method's passes are their own shaders.
+        dm = read_dm("dv_dm.h")
+        self.assertIn("static const char dv_dm_body_lattice[]", dm)
+        self.assertIn("acc+=c29corner(lat,origin,step,base+b)", dm)
+        self.assertNotIn("acc+=c29vertex(", dm)
+        for body in ("point_cm4", "point_cm29", "final_cm4", "final_cm29"):
+            self.assertIn(f"static const char dv_dm_body_{body}[]", dm)
+        self.assertNotIn("u[18].x<10.0", dm)   # no runtime switch between methods
 
 
 GIT_AM_PATCH = """From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001

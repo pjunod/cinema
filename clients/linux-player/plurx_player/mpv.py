@@ -23,9 +23,9 @@ VIDEO_ARGS = ["--vo=gpu-next", "--gpu-api=vulkan", "--hwdec=auto-safe",
 # The player only opens plurx URLs from a server the user allowed; mpv's
 # ytdl hook would otherwise run yt-dlp on any other URL it is handed.
 SAFETY_ARGS = ["--ytdl=no"]
-# The dynamic loader honours these before the private mpv's own rpath (or
+# The dynamic loader honours these before the system's own library paths (or
 # injects code outright), so a stray value in the desktop session could make
-# the private mpv load the system libplacebo or anything else. mpv gets an
+# the private mpv load other libraries or anything else. mpv gets an
 # environment without them.
 LOADER_OVERRIDES = ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")
 CLOSED = "__closed__"
