@@ -38,6 +38,14 @@ override_dh_auto_install:
 	cp -P $(STAGE)/lib/libplacebo.so.* $(PKG)/$(PRIVATE)/lib/
 	install -D -m 0644 build/private-build.txt $(PKG)/usr/share/doc/plurx-player/private-build.txt
 
+# The launcher's modules live in a private directory. dh_python3 byte-compiles
+# them at install and its prerm removes every .pyc, including any a root run
+# of the launcher wrote, so dpkg -r leaves nothing behind. These generated
+# maintainer scripts are the package's only ones, and they register no MIME
+# handler (dpkg's desktop-database trigger does that).
+override_dh_python3:
+	dh_python3 /$(PRIVATE)
+
 override_dh_shlibdeps:
 	dh_shlibdeps -l$(CURDIR)/$(PKG)/$(PRIVATE)/lib
 

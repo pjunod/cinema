@@ -61,9 +61,12 @@ step "scheme registration and desktop entry"
 grep -x 'x-scheme-handler/plurx-player=plurx-player.desktop;' "$cache" \
   && pass "dpkg's desktop-database trigger registered the scheme" || fail "scheme not in $cache"
 desktop-file-validate /usr/share/applications/plurx-player.desktop && pass "desktop-file-validate"
-ls /var/lib/dpkg/info/plurx-player.* | grep -q -E 'postinst$' && fail "the package has a postinst" || pass "no postinst"
+! grep -s -l xdg-mime /var/lib/dpkg/info/plurx-player.* || fail "a maintainer script calls xdg-mime"
+pass "no maintainer script calls xdg-mime ($(cd /var/lib/dpkg/info && ls plurx-player.*inst plurx-player.*rm 2>/dev/null | tr '\n' ' '))"
 
 step "launcher"
+# As root, deliberately: a root run may write .pyc files, and dpkg -r below
+# must still remove the directory.
 plurx-player --help >/dev/null && pass "plurx-player --help"
 resolved=$(python3 -I -c 'import sys; sys.path.insert(0, "/usr/lib/plurx-player"); from plurx_player import mpv; print(mpv.resolve_binary())')
 [ "$resolved" = "$private/bin/mpv" ] && pass "launcher resolves mpv to $resolved" || fail "launcher resolves mpv to $resolved"

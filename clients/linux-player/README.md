@@ -44,7 +44,7 @@ This builds `plurx-player_<version>_amd64.deb` in a disposable `ubuntu:26.10` co
 **What the package contains, and why.**
 
 - `/usr/bin/plurx-player` and the launcher modules in `/usr/lib/plurx-player/plurx_player/`.
-- `/usr/share/applications/plurx-player.desktop` with `MimeType=x-scheme-handler/plurx-player;`. dpkg's `update-desktop-database` trigger registers the scheme. There is deliberately no `xdg-mime` call in `postinst` (there is no `postinst`): it would run as root and edit root's associations, not the user's.
+- `/usr/share/applications/plurx-player.desktop` with `MimeType=x-scheme-handler/plurx-player;`. dpkg's `update-desktop-database` trigger registers the scheme. There is deliberately no `xdg-mime` call in `postinst`: it would run as root and edit root's associations, not the user's. The only maintainer scripts are the ones `dh_python3` generates to byte-compile the launcher modules and to remove every `.pyc` on removal.
 - A private libplacebo and mpv: `/usr/lib/plurx-player/lib/libplacebo.so.360` and `/usr/lib/plurx-player/bin/mpv`, the launcher's default mpv. mpv carries the RUNPATH `$ORIGIN/../lib`, so it loads the private libplacebo and never the system one. The private directory is not in `ld.so.conf` and the package installs no shlibs file, so the system mpv and everything else linked against the system libplacebo never see the private one. Plan §5 needs this: the closed-form Dolby Vision mapping is a patch to libplacebo/mpv, and patching the distribution's copy would change every program on the machine.
 - `/usr/share/doc/plurx-player/private-build.txt`: the upstream versions, sha256 and the patches applied.
 
