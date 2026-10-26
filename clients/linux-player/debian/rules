@@ -1,10 +1,46 @@
 #!/usr/bin/make -f
+# plurx-player bundles a private libplacebo and mpv under /usr/lib/plurx-player
+# beside the Python launcher. packaging/prepare-sources.sh fetches, checks and
+# patches the pinned sources into upstream/ before this runs, and
+# packaging/build-deb.sh does both in a disposable Ubuntu 26.10 container.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export PYTHONDONTWRITEBYTECODE = 1
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/buildflags.mk
+include /usr/share/dpkg/buildopts.mk
+
+JOBS = $(or $(DEB_BUILD_OPTION_PARALLEL),1)
+PRIVATE = usr/lib/plurx-player
+STAGE = build/stage/$(PRIVATE)
+PKG = debian/plurx-player
+
 %:
 	dh $@
 
+override_dh_auto_configure:
+
 override_dh_auto_build:
-	# M5: build the private mpv and libplacebo (plurx closed-form display
-	# management, docs/clients/LINUX-PLAYER-PLAN.md section 5) into build/.
+	JOBS=$(JOBS) packaging/build-private.sh .
 
 override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	python3 -m unittest discover -s tests -p 'test_*.py'
+	meson test -C build/libplacebo --print-errorlogs --num-processes $(JOBS)
+endif
+
+# Only the runtime pieces of the private build: the mpv binary and the
+# libplacebo shared object it needs (no headers, pkg-config, man pages, or
+# mpv's own .desktop file, which would compete with the system mpv's).
+override_dh_auto_install:
+	install -D -m 0755 $(STAGE)/bin/mpv $(PKG)/$(PRIVATE)/bin/mpv
+	install -d $(PKG)/$(PRIVATE)/lib
+	cp -P $(STAGE)/lib/libplacebo.so.* $(PKG)/$(PRIVATE)/lib/
+	install -D -m 0644 build/private-build.txt $(PKG)/usr/share/doc/plurx-player/private-build.txt
+
+override_dh_shlibdeps:
+	dh_shlibdeps -l$(CURDIR)/$(PKG)/$(PRIVATE)/lib
+
+# The private libplacebo is not a public library: no shlibs file and no
+# ldconfig trigger, so nothing else on the system can link against it.
+override_dh_makeshlibs:

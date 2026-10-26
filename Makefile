@@ -165,6 +165,13 @@ operations-check: ## Verify deploy, CI, container, and client shipping contracts
 linux-player-check: ## Test the plurx Player launcher against a fake server and a fake mpv (LINUX-PLAYER-PLAN M4)
 	@python3 -m unittest discover -s clients/linux-player/tests -p 'test_*.py'
 
+# Not in CI: it pulls ubuntu:26.10, downloads the pinned upstream sources and
+# compiles libplacebo and mpv. Output goes to target/linux-player-deb/, or to
+# PLURX_DEB_OUT; clients/linux-player/README.md explains what is bundled.
+.PHONY: linux-player-deb
+linux-player-deb: ## Build and verify the plurx Player .deb with its private mpv/libplacebo in disposable Ubuntu 26.10 containers (LINUX-PLAYER-PLAN M5)
+	@clients/linux-player/packaging/build-deb.sh
+
 .PHONY: check
 check: validation-lint history-check operations-check linux-player-check benchmark-check rust-check ## History + operations + launcher + catalog + benchmark + Rust baseline
 

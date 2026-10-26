@@ -1,10 +1,42 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: plurx-player
 Comment: The launcher is part of plurx; see LICENSE and NOTICE at the
- repository root. M5 adds the private mpv and libplacebo builds, whose own
- terms (GPL-2.0-or-later / LGPL-2.1-or-later) must be listed here then.
+ repository root. The package also carries private builds of libplacebo
+ and mpv, fetched at build time from the sources pinned in
+ packaging/upstream.lock into upstream/; /usr/share/doc/plurx-player/
+ private-build.txt names the exact versions and patches.
 
 Files: *
 Copyright: plurx contributors
 License: Apache-2.0
+
+Files: upstream/libplacebo/*
+Copyright: Niklas Haas and the libplacebo contributors
+License: LGPL-2.1+
+
+Files: upstream/mpv/*
+Copyright: the MPlayer and mpv contributors
+License: GPL-2+
+Comment: mpv is built with -Dgpl=true, so /usr/lib/plurx-player/bin/mpv as
+ a whole is GPL-2.0-or-later. Some of its source files are also available
+ under LGPL-2.1-or-later; see upstream's Copyright file.
+
+License: Apache-2.0
  On Debian systems the full text is in /usr/share/common-licenses/Apache-2.0.
+
+License: LGPL-2.1+
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 2.1 of the License, or (at
+ your option) any later version.
+ .
+ On Debian systems the full text is in
+ /usr/share/common-licenses/LGPL-2.1.
+
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; either version 2 of the License, or (at your option)
+ any later version.
+ .
+ On Debian systems the full text is in /usr/share/common-licenses/GPL-2.

@@ -1,5 +1,3 @@
 plurx_player/*.py usr/lib/plurx-player/plurx_player/
 plurx-player usr/bin/
 plurx-player.desktop usr/share/applications/
-# M5: build/mpv/bin/mpv usr/lib/plurx-player/bin/
-# M5: build/mpv/lib/* usr/lib/plurx-player/lib/

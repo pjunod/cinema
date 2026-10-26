@@ -1,3 +1,14 @@
+plurx-player (0.1.0+lp7.360.1.mpv0.41.0) stonking; urgency=medium
+
+  * Package the private mpv and libplacebo (milestone M5 packaging):
+    libplacebo 7.360.1 and mpv 0.41.0, the versions Ubuntu 26.10 ships,
+    built in a disposable container and installed under
+    /usr/lib/plurx-player with mpv's RUNPATH set to $ORIGIN/../lib.
+  * The Dolby Vision closed-form patch series (packaging/patches/) is
+    empty until it lands.
+
+ -- plurx maintainers <noreply@plurx.invalid>  Sun, 25 Oct 2026 18:00:00 +0000
+
 plurx-player (0.1.0~m4) unstable; urgency=medium
 
   * Launcher (milestone M4): redeem, decide, play in mpv, heartbeat,
