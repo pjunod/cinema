@@ -395,6 +395,10 @@ pub(super) async fn build_attempt(
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The fixed recipe, immutable plan and original failed-attempt cleanup selector share one admitted construction frame without a new heap request."
+)]
 async fn build_inner(
     shared: &Arc<Shared>,
     key: &str,
@@ -596,7 +600,7 @@ async fn build_inner(
             if let Some(refusal) = error.admission_refusal() {
                 crate::transcode::vod_refusal_error(
                     "vod_family_capacity",
-                    &format!("finite software admission refused: {refusal:?}"),
+                    format!("finite software admission refused: {refusal:?}"),
                 )
             } else {
                 format!("preparing finite software VOD: {error}")

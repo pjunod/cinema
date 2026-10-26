@@ -17,6 +17,13 @@ impl std::fmt::Debug for FinitePublication {
 }
 
 impl FinitePublication {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Selected finite software and retained-output adapters currently enter only on Linux; preserve this portable counted-publication API."
+        )
+    )]
     pub(super) fn new(output: FiniteOutput) -> Self {
         Self {
             output,
@@ -24,6 +31,13 @@ impl FinitePublication {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Selected finite software and retained-output adapters currently enter only on Linux; preserve this portable counted-publication API."
+        )
+    )]
     pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
         // Self and pending's inline ticket are in PendingWrites. Output
         // selectors clone without allocating; count their shared path once.
@@ -173,6 +187,13 @@ impl RenditionDir {
             .publish_metadata(name, bytes)
             .await
     }
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Selected finite software and retained-output adapters currently enter only on Linux; preserve this portable counted-publication API."
+        )
+    )]
     pub(crate) fn from_finite(output: FiniteOutput) -> RenditionDir {
         RenditionDir {
             dir: output.path().to_owned(),

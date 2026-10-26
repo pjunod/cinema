@@ -182,6 +182,10 @@ impl PreparedAttemptRendition {
     /// Attach only this original prepared rendition after the Store's exact
     /// Adopt is known. The request contributes viewer intent; its executable
     /// recipe and source file come from the retained charged Rendition.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The original adopted claim, exact route envelope and serving bindings remain borrowed in one precharged handoff frame without an extra request allocation."
+    )]
     pub(crate) async fn attach_after_store_adopt(
         &mut self,
         vod: &VodServe,
@@ -240,15 +244,11 @@ impl PreparedAttemptRendition {
         .await
     }
 
-    pub(crate) fn key(&self) -> &str {
-        &self.key
-    }
-
     pub(crate) fn planned_duration_ms(&self) -> i64 {
         plan_duration_ms(&self.rendition().plan)
     }
 
-    pub(crate) fn rendition(&self) -> &Arc<Rendition> {
+    pub(super) fn rendition(&self) -> &Arc<Rendition> {
         self.rendition
             .as_ref()
             .expect("prepared attempt owns its rendition")
@@ -782,7 +782,7 @@ impl Shared {
             }
         };
         let prototype = watchdog_future(None);
-        let future_bytes = std::mem::size_of_val(&prototype);
+        let _future_bytes = std::mem::size_of_val(&prototype);
         drop(prototype);
         #[cfg(target_os = "linux")]
         let slot = if let Some(lease) = rendition.finite_client_lease.as_ref() {
@@ -791,7 +791,7 @@ impl Shared {
             // shares this same slot through every waiter and HTTP body.
             let payload = crate::waitpool::FiniteWaitFailure::required_payload_bytes()
                 .and_then(|bytes| bytes.checked_mul(2))
-                .and_then(|bytes| future_bytes.checked_add(bytes))
+                .and_then(|bytes| _future_bytes.checked_add(bytes))
                 .ok_or_else(|| std::io::Error::other("finite watchdog size overflow"))?;
             Some(super::client_state::ClientSlot(lease.reserve(payload)?))
         } else {
@@ -1514,7 +1514,7 @@ impl Shared {
             plan.duration_ticks() as f64 / f64::from(timescale) / plan.len() as f64
         };
         let plan_len = plan.len();
-        let rendition = Arc::new(Rendition {
+        Arc::new(Rendition {
             ephemeral_processing,
             _processed_instance_allowance: processed_instance_allowance,
             key: key.to_string(),
@@ -1580,8 +1580,7 @@ impl Shared {
             finite_metadata_lease: None,
             #[cfg(target_os = "linux")]
             finite_client_lease: None,
-        });
-        rendition
+        })
     }
 
     /// Completion → admission (plan §2.4): reserve, make durable, complete —
@@ -1775,7 +1774,7 @@ impl Shared {
             && self
                 .resource_runtime
                 .as_ref()
-                .is_some_and(|runtime| runtime.protects_output_path(&rendition.dir.path()))
+                .is_some_and(|runtime| runtime.protects_output_path(rendition.dir.path()))
         {
             // Keep the rendition registered until its physical owner clears
             // the protection; legacy purge would bypass native cleanup.
@@ -1938,6 +1937,7 @@ impl Shared {
     /// original owner discoverable before returning its construction error;
     /// the detached cleanup must not await that still-held gate here.
     #[cfg(target_os = "linux")]
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
     pub(super) async fn retain_unattached_finite(
         self: &Arc<Shared>,
         key: &str,
