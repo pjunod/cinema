@@ -10,6 +10,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Optional HTTPS, off by default, serves the existing public router with a
+  persistent generated self-signed identity or supplied PEM certificate/key
+  files. Enable it in Settings → Developer; saved changes apply after restart.
+  Physical trust and playback acceptance remain open.
+
 - Optional display-targeted HDR10-E selects a supported downward bucket from
   the viewer's reported peak, with platform/viewer provenance, complete-title
   L1 eligibility and master elision. The independent Developer preference is
@@ -77,6 +82,10 @@ bump may break compatibility and a **patch** bump never does.
   Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v4`.
 
 ### Fixed
+
+- Shared playback retries closure acknowledgements after concurrent updates to
+  the same owner's custody ledger. Actual driver closure and authority fences
+  remain required.
 
 - Apple TV physical focus updates no longer invalidate the app shell and every
   registered control; focus bookmarks and remote-command freshness remain intact.

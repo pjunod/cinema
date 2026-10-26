@@ -6,7 +6,7 @@ Section 5 of [HTTPS-BUILD.md](HTTPS-BUILD.md), moved here to keep both docs unde
 
 ## 5. Evidence ledger
 
-The [completion integration](HTTPS-BUILD.md#completion-integration--2026-10-25)
+The [completion integration](HTTPS-BUILD.md#completion-integration--2026-10-26)
 records the current refresh and its remaining qualification.
 
 | Date | Step | Result |

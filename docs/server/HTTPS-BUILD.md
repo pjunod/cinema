@@ -7,15 +7,43 @@ This canonical ledger executes [the contract](HTTPS-IMPLEMENTATION.md).
 Work checkpoint by checkpoint; flag trust/lifecycle contract changes before
 implementing them. No live deployment is implied by this build.
 
-## Completion integration — 2026-10-25
+## Completion integration — 2026-10-26
 
-The completion candidate incorporates main `e02fb1283` (DV float32 PQ precision),
+The completion candidate includes main `087e836d3` (current HDR10-E and applied
+enhancement pills), `01a1709bf` (native Apple focus isolation) and `8edca502b`
+(CM29 method v5). The client-fix catalog merge preserves both upstream focus
+records and the reviewed HTTPS qualification repairs. No qualification gate,
+resource allowance or physical-closure requirement is waived.
+
+Complete local Apple units passed on source `1d3764c38`: 1,186 iOS and 1,172
+tvOS cases, with no failures or skips. The 273-file Apple input manifest, including
+17 external resources, stayed unchanged through both runs. The focused native
+153-step guide test also passes after reading each focus/geometry observation
+from one actual accessibility snapshot. These are source-scoped development
+receipts, not complete native navigation or physical-device acceptance.
+
+Source closure now retries a bounded same-owner custody revision race while
+preserving actual driver receipts, authority fences and original unchanged-fault
+errors. Its development proof includes 20 Source-session cases, the forced
+seal/ACK race and negative controls, and three actual non-owner HTTP forwarding
+runs. Temporary diagnostic probes are excluded from the committed repair.
+Exact committed-tree compiler, HTTPS/configuration and closure regressions are
+required before push; promotion evidence remains separate.
+
+Full qualification, the Main promotion gate, their exact-head receipts and the
+merge outcome are tracked on [promotion PR #1134](http://forge.lan:3000/noirr/plurx/pulls/1134).
+Physical trust/playback acceptance remains open. Nothing has been deployed or
+enabled live.
+
+### Earlier source-scoped development evidence
+
+Earlier completion integration incorporated main `e02fb1283` (DV float32 PQ precision),
 retaining `671546d67` (subtitle setup and fair background admission) and the
 earlier `9bcfa9ca1` integration.
-Current main's formal
-smokes, desktop compilation, native dependency setup and full qualification
-commands remain intact. The dedicated bounded unit runner is retained with
-main's 120-minute unit budget and 95-minute Store budget. No gate is waived.
+That integration retained main's formal smokes, desktop compilation, native
+dependency setup and full qualification commands. The dedicated bounded unit
+runner retained main's 120-minute unit budget and 95-minute Store budget.
+No gate was waived.
 
 The failed capture preflight is repaired by restoring the bounded current-boot
 log reader and continuous empty-process interval on the actual capture path;
@@ -23,7 +51,7 @@ the real Jellyfin-listener check remains. Five fixture stability tests, 96
 operation contracts, seven ownership inventory tests, 79 Settings cases and
 seven native-browser lifecycle cases pass locally. The 388 registered route paths are documented.
 
-Current main's metadata policy tests referenced a Linux-only execution module
+At that checkpoint, metadata policy tests referenced a Linux-only execution module
 on other platforms. The pure selected-stream MDCV parsers now live under
 `decode_facts::mastering`; their validation algorithms are unchanged and Linux
 runtime callers keep their existing frame-parser exports. Platform compilation,
@@ -39,9 +67,9 @@ First and intermediate failed runs remain diagnostic evidence. Linux-only
 planning consumers now use the shared parser directly. Source `477eef81b` passed exact-source Linux check and denied-warning Clippy,
 including the affected contract and cluster integration features.
 
-The new main merge is conflict-free and preserves the subtitle response
-purpose, setup UI and FIFO/cancellable model-admission repair. Current-source
-checks pass the combined Settings/subtitle web command (77 Node tests, with
+That main merge was conflict-free and preserved the subtitle response
+purpose, setup UI and FIFO/cancellable model-admission repair. Its source-scoped
+checks passed the combined Settings/subtitle web command (77 Node tests, with
 Settings' 79 custom cases), seven ownership inventory cases, three heavy/FIFO/
 cancellation admission cases, the HTTP setup response and automatic model
 verification. The existing HTTPS controls remain byte-identical.
@@ -55,7 +83,7 @@ completed-output/manifest-contention case also passes. No timeout, priority or
 test assertion was relaxed.
 
 Upstream's physical-admission review, operation-progress pin and explanatory
-source-anchor update are retained alongside the HTTPS source review. Only
+source-anchor update are retained alongside the HTTPS source review. At that checkpoint only
 operation-progress's governed construct/mapping inputs changed; durable-jobs
 and worker-refinement governed bytes remain unchanged. Earlier scoped proof
 is retained only for identical inputs. Source `477eef81b` passed the affected
