@@ -103,8 +103,11 @@ async fn actual_enrichment_waiter_deadline_resumes_same_queued_operation_after_f
         // timeout cancels only the borrow; the original operation survives.
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(31)).await;
-        let error = finish
+        // This outer guard is a FAILURE bound only. Its expiry must panic;
+        // only the inner API's own Deadline result satisfies the regression.
+        let error = tokio::time::timeout(Duration::from_secs(1), finish)
             .await
+            .expect("outer failure guard expired: API must enforce its own journal deadline")
             .expect_err("actual API-internal journal deadline");
         tokio::time::resume();
         assert!(matches!(error.0, OperationError::Deadline));
