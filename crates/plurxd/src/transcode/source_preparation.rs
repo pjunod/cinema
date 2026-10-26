@@ -785,9 +785,14 @@ impl SourceProbeOperation {
             .await
             .map_err(|_| "Source original planning close deadline")?;
         if !work.native_closed {
-            work.owner.finish_native(deadline).await.map_err(|error| {
-                format!("closing Source original planning native owner: {error}")
-            })?;
+            work.owner
+                .as_mut()
+                .ok_or("Source original planning was sealed for cleanup")?
+                .finish_native(deadline)
+                .await
+                .map_err(|error| {
+                    format!("closing Source original planning native owner: {error}")
+                })?;
             work.native_closed = true;
         }
         Ok(())
