@@ -42,6 +42,20 @@ class Packaging(unittest.TestCase):
             control = handle.read()
         self.assertIn("zenity", control)
 
+    def test_private_launcher_bytecode_is_owned_by_dh_python3(self):
+        # A root run of the launcher writes __pycache__ under the private
+        # directory (the -I shebang ignores PYTHONDONTWRITEBYTECODE); only
+        # dh_python3 over that directory makes prerm remove it, so dpkg -r
+        # leaves nothing behind.
+        with open(os.path.join(ROOT, "debian/rules"), encoding="utf-8") as handle:
+            rules = handle.read()
+        self.assertRegex(rules, r"(?m)^override_dh_python3:\n\tdh_python3 /\$\(PRIVATE\)$")
+        self.assertRegex(rules, r"(?m)^PRIVATE = usr/lib/plurx-player$")
+        with open(os.path.join(ROOT, "debian/control"), encoding="utf-8") as handle:
+            control = handle.read()
+        self.assertIn("dh-sequence-python3", control)
+        self.assertIn("${python3:Depends}", control)
+
     def test_launcher_script_is_executable(self):
         self.assertTrue(os.access(os.path.join(ROOT, "plurx-player"), os.X_OK))
 

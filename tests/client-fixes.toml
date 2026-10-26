@@ -7607,3 +7607,11 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = "def apply_policy_defaults(self):"
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_default_audio_is_selected_for_direct_play(self):"
+
+[[fixes]]
+id = "claude.linux-player-package-removes-launcher-bytecode"
+commits = ["9bacd0bcfdb9159252b02de48f07434b7c9f0188"]
+source = "clients/linux-player/debian/rules"
+source_anchor = "override_dh_python3:"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_private_launcher_bytecode_is_owned_by_dh_python3(self):"
