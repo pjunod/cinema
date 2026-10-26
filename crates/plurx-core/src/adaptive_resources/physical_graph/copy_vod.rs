@@ -923,6 +923,18 @@ pub(in crate::adaptive_resources) enum CopyFixtureFault {
 }
 #[cfg(all(test, feature = "fixtures"))]
 impl SealedPhysicalGraph {
+    /// Delay only: hold this SAME original membership mutex until released.
+    /// No native/terminal/proof state is changed or synthesized by the seam.
+    pub(in crate::adaptive_resources) async fn fixture_hold_copy_members(
+        &self,
+        entered: &tokio::sync::Notify,
+        release: &tokio::sync::Notify,
+    ) {
+        let _members = self.custody.members.lock().await;
+        entered.notify_one();
+        release.notified().await;
+    }
+
     pub(in crate::adaptive_resources) async fn fixture_copy_fault(
         &self,
         task: GraphCopyTask,
