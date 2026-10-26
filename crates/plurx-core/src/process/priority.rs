@@ -317,6 +317,13 @@ struct Entry {
     resource_graph: Option<u64>,
     // Changes on any exact-key control request, including a failed signal.
     // A cost window spanning pause, resume or termination cannot be reused.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "The exact-control cost-window epoch is retained on every registration; the selected sampler currently consumes it only on Linux."
+        )
+    )]
     control_epoch: u64,
     #[cfg(target_os = "linux")]
     pidfd: Option<std::os::fd::OwnedFd>,
@@ -367,6 +374,13 @@ impl RegisteredChildControl {
     /// Sample only the observer created for this exact registration. The
     /// registry lock is released before the cached observer reads the OS.
     /// Removal returns None; there is no numeric-PID fallback.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "The selected Linux finite cost-window adapter is the current caller; other platforms retain the same exact-registration API without PID fallback."
+        )
+    )]
     pub(crate) fn snapshot_resources(
         self,
         now: std::time::Instant,
@@ -1221,7 +1235,9 @@ mod tests {
         let stale = first.control();
         assert_ne!(first.key, second.key);
         drop(first);
-        assert!(!stale.signal(super::super::ProcessSignal::Resume).unwrap());
+        assert!(!stale
+            .signal(super::super::ProcessSignal::Resume)
+            .expect("stale registration query"));
         stale.start_kill().expect("a removed key is already gone");
         assert!(registry().entries.contains_key(&second.key));
         drop(second);
@@ -1238,13 +1254,13 @@ mod tests {
         .expect("registration");
         let control = registration.control();
         assert_eq!(
-            control.start_kill().unwrap_err().kind(),
+            control.start_kill().expect_err("no original pidfd").kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             control
                 .signal(super::super::ProcessSignal::Terminate)
-                .unwrap_err()
+                .expect_err("no original pidfd")
                 .kind(),
             io::ErrorKind::Unsupported
         );
@@ -1272,7 +1288,9 @@ mod tests {
             .expect("child wait");
         assert_eq!(status.signal(), Some(libc::SIGKILL));
         drop(job);
-        assert!(!control.signal(super::super::ProcessSignal::Resume).unwrap());
+        assert!(!control
+            .signal(super::super::ProcessSignal::Resume)
+            .expect("retired registration query"));
     }
 
     #[cfg(target_os = "linux")]

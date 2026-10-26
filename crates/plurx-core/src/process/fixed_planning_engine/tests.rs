@@ -19,7 +19,7 @@ pub(crate) fn synthetic_completion(
     fault: SyntheticFault,
 ) -> (FixedEngineNativeCompletion, FixedPlanningEngineTaskV1) {
     assert!((1..=FIXED_PLANNING_ENGINE_MAX_OBJECTS).contains(&used));
-    let id = || v2::Id::new(Uuid::new_v4()).unwrap();
+    let id = || v2::Id::new(Uuid::new_v4()).expect("non-nil fixture identity");
     let mut task = FixedPlanningEngineTaskV1 {
         version: 1,
         member_id: id(),
@@ -104,7 +104,8 @@ pub(crate) fn synthetic_completion(
         .collect::<Vec<_>>();
     let mut native = FixedEngineNativeCompletion {
         unused_slots: FixedEngineUnusedSlots {
-            count: u16::try_from(task.file_slots.len() - used).unwrap(),
+            count: u16::try_from(task.file_slots.len() - used)
+                .expect("fixture slot count fits u16"),
         },
         producer_path: files[0].path.clone(),
         producer_object_version: format!("s1:{}", files[0].object_version),

@@ -62,6 +62,13 @@ const MAX_PROBE_STDOUT_BYTES: usize = 256 * 1024;
 const MAX_PROBE_STDERR_BYTES: usize = 16 * 1024;
 const MAX_PROBE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_VERSION_BYTES: usize = 64 * 1024;
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 pub(crate) struct FixedProbeNativeProfile {
     pub original_roots: u64,
     pub retained_parent_files: u64,
@@ -75,6 +82,13 @@ pub(crate) struct FixedProbeNativeProfile {
     /// Bounded Rust custody allocation apart from the image and output buffers.
     pub retained_custody_bytes: u64,
 }
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 pub(crate) fn fixed_probe_native_profile() -> FixedProbeNativeProfile {
     // The admitted collector pre-registers exactly two original command
     // slots. Count each Arc allocation's two counters and aligned payload;
@@ -557,15 +571,15 @@ enum ProbeLaunchMode {
     ProductionSupervisorDelay,
     #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
     ProductionSupervisorReceiveFailure,
-    #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+    #[cfg(all(test, target_os = "linux"))]
     ProductionBootstrapInterrupted,
-    #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+    #[cfg(all(test, target_os = "linux"))]
     ProductionBootstrapInterruptedUntilDeadline(LinuxBootstrapPhase),
     #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
     ProductionSteadyResponseInterruptedUntilDeadline,
-    #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+    #[cfg(all(test, target_os = "linux"))]
     ProductionSteadyResponseInterruptedUntilStop,
-    #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+    #[cfg(all(test, target_os = "linux"))]
     ProductionFdExport(std::os::fd::RawFd),
 }
 
@@ -609,9 +623,10 @@ impl ProbeLaunchMode {
             | Self::ProductionPidfdReadFailure
             | Self::ProductionSupervisorDelay
             | Self::ProductionSupervisorReceiveFailure
-            | Self::ProductionBootstrapInterrupted
+            | Self::ProductionSteadyResponseInterruptedUntilDeadline => true,
+            #[cfg(all(test, target_os = "linux"))]
+            Self::ProductionBootstrapInterrupted
             | Self::ProductionBootstrapInterruptedUntilDeadline(_)
-            | Self::ProductionSteadyResponseInterruptedUntilDeadline
             | Self::ProductionSteadyResponseInterruptedUntilStop
             | Self::ProductionFdExport(_) => true,
         }
@@ -662,16 +677,18 @@ impl ProbeLaunchMode {
 
     #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
     fn export_socket_fd(self) -> Option<std::os::fd::RawFd> {
-        match self {
-            Self::ProductionFdExport(fd) => Some(fd),
-            _ => None,
+        #[cfg(test)]
+        if let Self::ProductionFdExport(fd) = self {
+            return Some(fd);
         }
+        None
     }
 
     #[cfg(target_os = "linux")]
     fn bootstrap_interrupts(self) -> LinuxBootstrapInterrupts {
         #[cfg(any(test, feature = "fixtures"))]
         match self {
+            #[cfg(test)]
             Self::ProductionBootstrapInterrupted => {
                 return LinuxBootstrapInterrupts {
                     ready_send: 1,
@@ -681,6 +698,7 @@ impl ProbeLaunchMode {
                     ..LinuxBootstrapInterrupts::default()
                 };
             }
+            #[cfg(test)]
             Self::ProductionBootstrapInterruptedUntilDeadline(phase) => {
                 let mut interrupts = LinuxBootstrapInterrupts::default();
                 *match phase {
@@ -717,6 +735,7 @@ impl ProbeLaunchMode {
                     ..LinuxBootstrapInterrupts::default()
                 };
             }
+            #[cfg(test)]
             Self::ProductionSteadyResponseInterruptedUntilStop => {
                 return LinuxBootstrapInterrupts {
                     steady_notification_response: u8::MAX,
@@ -743,12 +762,14 @@ impl ProbeLaunchMode {
             Self::ProductionPidfdReadFailure => Some(&PIDFD_READ_SUPERVISOR_OWNERS),
             Self::ProductionSupervisorDelay => Some(&DELAYED_SUPERVISOR_OWNERS),
             Self::ProductionSupervisorReceiveFailure => Some(&FAILED_SUPERVISOR_OWNERS),
+            #[cfg(test)]
             Self::ProductionBootstrapInterruptedUntilDeadline(_) => {
                 Some(&INTERRUPTED_SUPERVISOR_OWNERS)
             }
             Self::ProductionSteadyResponseInterruptedUntilDeadline => {
                 Some(&STEADY_RESPONSE_SUPERVISOR_OWNERS)
             }
+            #[cfg(test)]
             Self::ProductionSteadyResponseInterruptedUntilStop => {
                 Some(&STEADY_RESPONSE_STOP_SUPERVISOR_OWNERS)
             }
@@ -757,7 +778,7 @@ impl ProbeLaunchMode {
     }
 }
 
-#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+#[cfg(all(test, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinuxBootstrapPhase {
     ReadySend,
@@ -849,7 +870,7 @@ impl DecodeFactSource {
         }
     }
 
-    #[cfg(any(test, feature = "fixtures"))]
+    #[cfg(test)]
     fn isolated(handle: Arc<std::fs::File>) -> Self {
         Self::new(
             handle,
@@ -858,7 +879,7 @@ impl DecodeFactSource {
         )
     }
 
-    #[cfg(any(test, feature = "fixtures"))]
+    #[cfg(test)]
     fn with_identity_delay(mut self, delay: Duration) -> Self {
         self.hooks = Arc::new(IdentityDelays {
             initial: delay,
@@ -949,6 +970,13 @@ pub struct DecodeProbeIdentity {
     /// Content verifications `validate_current` has run (discovery's own
     /// hashes are not counted).
     content_verifications: Arc<AtomicU64>,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Original planning close state remains retained, but only the Linux admitted collector consumes it."
+        )
+    )]
     admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
 }
 
@@ -956,8 +984,29 @@ pub struct DecodeProbeIdentity {
 struct ProbeAdmittedCustody {
     configured_image: Option<Arc<std::fs::File>>,
     sealed_snapshot: Option<Arc<ExecutableSnapshot>>,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Original planning close state remains retained, but only the Linux admitted collector consumes it."
+        )
+    )]
     configured_image_checked_closed: bool,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Original planning close state remains retained, but only the Linux admitted collector consumes it."
+        )
+    )]
     sealed_snapshot_checked_closed: bool,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Original planning close state remains retained, but only the Linux admitted collector consumes it."
+        )
+    )]
     uncertain_image_close: bool,
     #[cfg(target_os = "linux")]
     original: [Option<Arc<std::sync::Mutex<ProbeOriginalOwners>>>; 2],
@@ -974,21 +1023,43 @@ impl std::fmt::Debug for ProbeAdmittedCustody {
 
 /// A failed original P probe keeps its real image and child owners. It has no
 /// public/native close constructor and cannot be converted into a receipt.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 pub(crate) struct AdmittedProbeNativeFailure {
     pub(crate) error: DecodeFactError,
     custody: Arc<std::sync::Mutex<ProbeAdmittedCustody>>,
-    version_root: Option<FixedProbeRootClosed>,
-    document_root: Option<FixedProbeRootClosed>,
+    // Retain original witnesses with the failed owner; they do not grant success.
+    _version_root: Option<FixedProbeRootClosed>,
+    _document_root: Option<FixedProbeRootClosed>,
 }
 impl AdmittedProbeNativeFailure {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+        )
+    )]
     pub(crate) fn before_entry(error: DecodeFactError) -> Self {
         Self {
             error,
             custody: Arc::new(std::sync::Mutex::new(ProbeAdmittedCustody::default())),
-            version_root: None,
-            document_root: None,
+            _version_root: None,
+            _document_root: None,
         }
     }
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+        )
+    )]
     fn with_custody(
         error: DecodeFactError,
         custody: Arc<std::sync::Mutex<ProbeAdmittedCustody>>,
@@ -998,8 +1069,8 @@ impl AdmittedProbeNativeFailure {
         Self {
             error,
             custody,
-            version_root,
-            document_root,
+            _version_root: version_root,
+            _document_root: document_root,
         }
     }
 
@@ -1325,6 +1396,13 @@ impl<T> Drop for CapturedProbeOwner<T> {
 /// Move-only original P image owner. The digest and object identity are read
 /// from the held configured File and sealed snapshot, never from a caller's
 /// proposed path or observed JSON. Its destructor closes both original FDs.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 pub(crate) struct AdmittedProbeImage {
     identity: DecodeProbeIdentity,
     configured_locator: String,
@@ -1335,6 +1413,13 @@ pub(crate) struct AdmittedProbeImage {
 /// original child has exited, its pipes have drained, its session has been
 /// terminated, and the execution supervisor has finished. The process marker
 /// is sampled from that child before waiting, never looked up by a later PID.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 pub(crate) struct FixedProbeRootClosed {
     identity: crate::process::observation::ProcessIdentity,
     inherited_source: bool,
@@ -1364,11 +1449,25 @@ struct ProbePidfdClosed;
 /// The two original admitted image Files have each had one checked close.
 /// It is constructed only after the descriptor aliases from the original P
 /// collector have drained and both Arc owners can be reclaimed uniquely.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 pub(crate) struct FixedProbeImageClosed {
     original_object_version: String,
     snapshot_digest: String,
 }
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 impl FixedProbeImageClosed {
     pub(crate) fn original_object_version(&self) -> &str {
         &self.original_object_version
@@ -1391,6 +1490,13 @@ enum ProbeSessionSignal {
     AlreadyAbsent,
 }
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 impl FixedProbeRootClosed {
     pub(crate) fn identity(&self) -> crate::process::observation::ProcessIdentity {
         self.identity
@@ -1433,6 +1539,13 @@ impl FixedProbeRootClosed {
 /// Opaque positive completion of the selected trusted Linux parser job. Only
 /// successful inline collection, bounded pipe drains, session kill and child
 /// reap can construct this value. It is not a journal settlement by itself.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 pub(crate) struct AdmittedProbeCompletion {
     output: Result<(String, DecodeFacts), DecodeFactError>,
     executable: PathBuf,
@@ -1446,6 +1559,34 @@ pub(crate) struct AdmittedProbeCompletion {
     image_closed: FixedProbeImageClosed,
 }
 
+/// Inline ownership handoff of the original probe completion, without another allocation.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
+pub(crate) type AdmittedProbeParts = (
+    Result<(String, DecodeFacts), DecodeFactError>,
+    PathBuf,
+    String,
+    String,
+    String,
+    String,
+    String,
+    FixedProbeRootClosed,
+    FixedProbeRootClosed,
+    FixedProbeImageClosed,
+);
+
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 impl AdmittedProbeCompletion {
     pub(crate) fn executable(&self) -> &Path {
         &self.executable
@@ -1462,29 +1603,13 @@ impl AdmittedProbeCompletion {
     pub(crate) fn sha256(&self) -> &str {
         &self.sha256
     }
-    pub(crate) fn build_digest(&self) -> &str {
-        &self.build_digest
-    }
     pub(crate) fn roots(&self) -> (&FixedProbeRootClosed, &FixedProbeRootClosed) {
         (&self.version_root, &self.document_root)
     }
     pub(crate) fn image_closed(&self) -> &FixedProbeImageClosed {
         &self.image_closed
     }
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Result<(String, DecodeFacts), DecodeFactError>,
-        PathBuf,
-        String,
-        String,
-        String,
-        String,
-        String,
-        FixedProbeRootClosed,
-        FixedProbeRootClosed,
-        FixedProbeImageClosed,
-    ) {
+    pub(crate) fn into_parts(self) -> AdmittedProbeParts {
         (
             self.output,
             self.executable,
@@ -1500,9 +1625,20 @@ impl AdmittedProbeCompletion {
     }
 }
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+    )
+)]
 impl AdmittedProbeImage {
     /// The original P task retains the image through both fresh document and
     /// decoder refinement. No identity or native File is exported afterward.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The admitted source, expected identity and prearmed close ID must reach the same original collector without a separately allocated request."
+    )]
     pub(crate) async fn collect_source(
         self,
         cache: &DecodeFactCache,
@@ -1727,6 +1863,10 @@ impl DecodeProbeIdentity {
     }
 
     #[cfg(not(target_os = "linux"))]
+    #[expect(
+        dead_code,
+        reason = "Preserve the explicit refusal for the Linux-only original admitted image-close API on other platforms."
+    )]
     fn close_admitted(self) -> Result<FixedProbeImageClosed, DecodeFactError> {
         Err(DecodeFactError::CacheInvariant)
     }
@@ -1740,6 +1880,13 @@ impl DecodeProbeIdentity {
     /// workers hold their singleflight permits through native hash, spawn,
     /// pipe drain and child reap; reacquiring both lanes is a completion fence.
     /// A hung worker therefore keeps P held instead of inventing closure.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+        )
+    )]
     pub(crate) async fn discover_admitted(
         bin: &str,
         version_close_operation_id: uuid::Uuid,
@@ -1968,6 +2115,13 @@ impl DecodeProbeIdentity {
 
     /// Startup-held exact FFprobe object identity for the selected planning
     /// source plan. This reads no path and grants no native acquisition.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+        )
+    )]
     pub(crate) fn source_identity(&self) -> crate::source_identity::SourceIdentity {
         crate::source_identity::SourceIdentity::from_fields(
             self.file.device,
@@ -2070,7 +2224,7 @@ impl DecodeProbeIdentity {
     }
 }
 
-#[cfg(any(test, feature = "fixtures"))]
+#[cfg(test)]
 impl DecodeProbeIdentity {
     fn content_verifications(&self) -> u64 {
         self.content_verifications.load(Ordering::Relaxed)
@@ -2408,7 +2562,10 @@ const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
 #[cfg(target_os = "linux")]
 const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 const SECCOMP_RET_USER_NOTIF: u32 = 0x7fc0_0000;
 #[cfg(target_os = "linux")]
 const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 1 << 3;
@@ -3467,14 +3624,14 @@ static DELAYED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
 #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
 static FAILED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
-#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+#[cfg(all(test, target_os = "linux"))]
 static INTERRUPTED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
 static STEADY_RESPONSE_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+#[cfg(all(test, target_os = "linux"))]
 static STEADY_RESPONSE_STOP_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -3482,7 +3639,7 @@ static STEADY_RESPONSE_STOP_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
 static STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+#[cfg(all(test, target_os = "linux"))]
 static STEADY_RESPONSE_STOP_INTERRUPT_HITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -3492,7 +3649,7 @@ static STEADY_RESPONSE_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
 
 /// Deadline exits of the stop-path proof's response loop, which must stay
 /// zero: the stop signal, not the launch deadline, is what releases it.
-#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+#[cfg(all(test, target_os = "linux"))]
 static STEADY_RESPONSE_STOP_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -3503,7 +3660,7 @@ static STEADY_RESPONSE_STOP_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
 #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
 static STEADY_RESPONSE_REAP_RELEASE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
 
-#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+#[cfg(all(test, target_os = "linux"))]
 static STEADY_RESPONSE_STOP_EXITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -3572,7 +3729,7 @@ impl ProbeExecutionSupervisor {
 const DECODE_FACT_VERSION_PROBE: crate::process::ChildWork =
     crate::process::ChildWork::background("decode-fact probe version check");
 
-#[cfg(any(test, feature = "fixtures"))]
+#[cfg(test)]
 const TEST_FACT_WORK: crate::process::ChildWork =
     crate::process::ChildWork::background("decode-fact test probe");
 
@@ -4121,7 +4278,7 @@ impl ProbeSessionGuard {
         }
     }
 
-    #[cfg(any(test, feature = "fixtures"))]
+    #[cfg(test)]
     fn terminator(&self) -> ProbeSessionTerminator {
         self.terminator.clone()
     }
@@ -4691,7 +4848,7 @@ async fn probe_version_with_deadline_recording(
     .await
 }
 
-#[cfg(unix)]
+#[cfg(all(test, target_os = "linux"))]
 async fn probe_version_with_deadline_on(
     executable: &Arc<ExecutableSnapshot>,
     configured_path: &Path,
@@ -4722,7 +4879,7 @@ async fn probe_version_with_deadline_on_recording(
         Arc<std::sync::Mutex<Option<FixedProbeRootClosed>>>,
         uuid::Uuid,
     )>,
-    admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
+    _admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
 ) -> Result<Vec<u8>, DecodeFactError> {
     let started = std::time::Instant::now();
     let launch_deadline = started + deadline;
@@ -4780,7 +4937,7 @@ async fn probe_version_with_deadline_on_recording(
             DECODE_FACT_VERSION_PROBE.class,
         )?;
         #[cfg(target_os = "linux")]
-        let command_slot = register_probe_command_slot(admitted_custody.as_ref())?;
+        let command_slot = register_probe_command_slot(_admitted_custody.as_ref())?;
         let (child, child_job, supervisor) = spawn_configured_probe(
             command,
             supervisor,
@@ -5073,6 +5230,13 @@ struct CollectedProbe {
     facts: Result<DecodeFacts, DecodeFactError>,
     document: Option<String>,
     key: Option<CacheKey>,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Original planning close state remains retained, but only the Linux admitted collector consumes it."
+        )
+    )]
     original_root: Option<FixedProbeRootClosed>,
 }
 
@@ -5261,6 +5425,13 @@ impl DecodeFactCache {
     /// detached cache task, so joining that original task also joins every
     /// probe child and source-offset owner it acquired. Call only from P's
     /// retained task after its durable acquisition arm.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "The original admitted planning collector is selected only on Linux; retain this shared native-owner contract without pretending other platforms have close authority."
+        )
+    )]
     pub(crate) async fn admitted_source_document_and_refine(
         &self,
         probe: &DecodeProbeIdentity,
@@ -5356,6 +5527,10 @@ impl DecodeFactCache {
         result
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The borrowed cancellation/catalog inputs and original admitted close binding share one collector frame; keep the handoff allocation-free."
+    )]
     async fn get_or_probe_inner(
         &self,
         probe: &DecodeProbeIdentity,
@@ -6182,6 +6357,9 @@ async fn collect_refinement_output(
     }
     #[cfg(target_os = "linux")]
     supervisor_result?;
+    // Other Unix supervisors carry no native worker; retain the existing finish call.
+    #[cfg(not(target_os = "linux"))]
+    let _ = supervisor_result;
     let stdout = stdout?;
     let stderr = stderr?;
     let status = status.map_err(|error| DecodeFactError::Read(error.to_string()))?;
@@ -6252,6 +6430,10 @@ async fn refine_scan_type(
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The original source and admitted close binding stay in the same measured collector frame; do not add an uncharged request allocation."
+)]
 async fn collect(
     probe: &DecodeProbeIdentity,
     source: DecodeFactCollectionSource,

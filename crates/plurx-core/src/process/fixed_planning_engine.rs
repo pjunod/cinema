@@ -778,6 +778,10 @@ async fn observe_original_group_absent(pid: libc::pid_t, deadline: Instant) -> i
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Each root and pipe keeps its distinct prearmed owner/close identity in the original measured command frame without a new heap request."
+)]
 async fn run_original_command(
     executable: &Path,
     args: &[&Path],

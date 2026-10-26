@@ -189,6 +189,13 @@ impl ProcessObserver {
     /// Return the actual sample instant as well as the possibly cached
     /// observation. Cost windows must subtract counter samples taken at their
     /// true instants, not treat a cached value as if it were read now.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Finite native cost windows consume exact sample instants only in the selected Linux adapter; preserve this portable observation API."
+        )
+    )]
     pub(crate) fn snapshot_stamped(&mut self, now: Instant) -> (ProcessObservation, Instant) {
         let observation = self.snapshot(now);
         let sampled_at = self.cached.map_or(now, |(at, _)| at);

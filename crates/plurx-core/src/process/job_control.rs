@@ -26,6 +26,13 @@ impl ChildJob {
     /// Actual active-process count of the ORIGINAL Job. Zero is useful only
     /// after the graph seals every entry and retains this object; this operation
     /// alone grants no physical settlement, restart proof or acquisition right.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "The retained original-Job live-closure adapter is not yet a production settlement route; portable negative proofs still require this fail-closed query."
+        )
+    )]
     pub(crate) fn containment_population(&self) -> io::Result<u32> {
         #[cfg(windows)]
         {
