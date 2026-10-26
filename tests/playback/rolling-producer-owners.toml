@@ -3204,7 +3204,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # probe in `main.rs`, moved off the boot path. The warm-up owns one bounded
 # probe child (`status_job_owned`, kill-on-drop, 5 s deadline), logs, and
 # exits; it holds no session, permit or lock past that.
-expected_occurrences = 999
+# Subtitle completion: +5. subtitle_text_translation/engine.rs keeps admission
+# inside its blocking inference closure; mod.rs cached_engine_identity retains
+# the owned cache mutex and publishes after requester cancellation. Read
+# attestation owns one weak-cache task and its awaited, guarded hash chunk.
+# The remaining test requester is aborted and awaited in the single-flight proof.
+expected_occurrences = 1004
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3439,7 +3444,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # regression creates a second pair. Existing ProducerSlot registrations own
 # encoder retirement/reap; helper futures await their children, killing on
 # cancellation.
-expected_occurrences = 76
+# Subtitle completion: +1 ignored Unix installer::qualification FFmpeg fixture.
+# progressive_case awaits child.wait(), or child.kill().await at its 60s limit.
+# The same child adds one Command, two lifecycle calls and one unwind-only
+# kill_on_drop guard; no production launcher or separate reap owner is added.
+expected_occurrences = 77
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4886,7 +4895,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # its own reason; nothing is spawned); the 50 ms test releaser sleep; and in
 # the qualification fixture tests the 250 ms measurement beats, the 5 s bound
 # on waiting for the fixture to take the slot, and its 10 ms poll.
-expected_occurrences = 1859
+# Subtitle completion: +13. Five inline production observations belong to
+# text progress, accepted-demand recovery and source-read attestation. Eight
+# test timers bound qualification/heartbeats/fixture/observations and the two
+# cached_engine_identity cancellation waits; worker cancellation is awaited.
+expected_occurrences = 1872
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5368,7 +5381,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 301
+expected_occurrences = 302
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6010,7 +6023,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # FR398-1 (0e1e4224d): +1 directly awaited FFprobe .output() in
 # vodencode_manager_tests.rs:614, assert_native_sdr_window. It collects the
 # test-owned child normally; its kill-on-drop backstop is not reap evidence.
-expected_occurrences = 794
+# Subtitle completion: +6. Five are HTTP Response.status() observations:
+# installer::qualification::reply and the shared-caption authority test's four
+# responses. The sixth is the same awaited finite fixture child above.
+expected_occurrences = 800
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6303,7 +6319,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `source_probe/fel_qualification.rs`: the helper's `wait` and the consumer's
 # `wait` in `finish` (normal reaping), and `start_kill` + `wait` in `reap`,
 # which a failed, expired or cancelled stage runs on each of its children.
-expected_occurrences = 351
+expected_occurrences = 353
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6527,7 +6543,7 @@ pattern = "kill_on_drop\\s*\\("
 # `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
 # counts once). Each is also explicitly waited, or killed and waited, by its
 # owner; kill-on-drop is the backstop, not the settlement.
-expected_occurrences = 116
+expected_occurrences = 117
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
