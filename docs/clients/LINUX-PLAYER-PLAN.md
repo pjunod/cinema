@@ -403,13 +403,15 @@ HDR10-E session; their fixes reach the player through
   The helper's `base_dv_renderer.h` sets that on its libplacebo `0d043c7`,
   where its controls pass; moving the helper to a newer libplacebo needs
   that field dropped.
-- On the ROG's Intel Arc iGPU, CM v2.9 cost 34 ms per 4K frame (CM v4.0
-  16 ms), and a 4K CM v2.9 title dropped a quarter of its frames. The final
+- On the ROG's Intel Arc iGPU, CM v2.9 cost 28 ms per 4K frame (CM v4.0
+  14 ms), and a 4K CM v2.9 title dropped a third of its frames (29 of 87;
+  measured with the ROG's CI runners paused). The final
   pass evaluated eight output-lattice vertices per pixel, in one shader that
   also held all of CM v4.0. `dv_dm.h` now evaluates the frame's lattice once
   (vertices outside the table's chroma reach still per pixel) and compiles
-  each method's passes separately: 19 ms, with the same float32 vertex
-  computation. `run_dm_parity.py` passes, and the patched mpv's 16-bit
+  each method's passes separately: 16.5 ms, and the title plays without a
+  dropped frame on the Arc, as FEL and CM v4.0 do. Same float32 vertex
+  computation: `run_dm_parity.py` passes, and the patched mpv's 16-bit
   screenshot of the Dumb Money frame is bit-identical before and after. The
   server's display-targeted renders use the same code.
 
