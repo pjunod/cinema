@@ -9,7 +9,9 @@ implementing them. No live deployment is implied by this build.
 
 ## Completion integration — 2026-10-25
 
-The completion candidate incorporates main `9bcfa9ca1`. Current main's formal
+The completion candidate incorporates main `671546d67` (subtitle setup and
+fair background admission), retaining the earlier `9bcfa9ca1` integration.
+Current main's formal
 smokes, desktop compilation, native dependency setup and full qualification
 commands remain intact. The dedicated bounded unit runner is retained with
 main's 120-minute unit budget and 95-minute Store budget. No gate is waived.
@@ -25,8 +27,9 @@ on other platforms. The pure selected-stream MDCV parsers now live under
 `decode_facts::mastering`; their validation algorithms are unchanged and Linux
 runtime callers keep their existing frame-parser exports. Platform compilation,
 focused Rust execution and exact committed-tree validation remain required.
-The integrated HTTPS filter passes 29 real identity/admin/transport/startup
-cases and the shared metadata policy filter passes five cases. Feature-enabled
+On source `f18c39e66`, the integrated HTTPS filter passed 29 real
+identity/admin/transport/startup cases and the shared metadata policy filter
+passed five cases. Feature-enabled
 core census execution exposed omitted current-main annotation modules, four
 new schema authority reads, four separately bound SQLite annotation queries
 and an ambiguous test-module path. The repaired strict census passes 58 cases;
@@ -34,6 +37,28 @@ its scan roots, rejection rules and unannotated-read ceiling are unchanged.
 First and intermediate failed runs remain diagnostic evidence. Linux-only
 planning consumers now use the shared parser directly. The exact final tree
 still requires a fresh Linux check and denied-warning Clippy run.
+
+The new main merge is conflict-free and preserves the subtitle response
+purpose, setup UI and FIFO/cancellable model-admission repair. Current-source
+checks pass the combined Settings/subtitle web command (77 Node tests, with
+Settings' 79 custom cases), seven ownership inventory cases, three heavy/FIFO/
+cancellation admission cases, the HTTP setup response and automatic model
+verification. The existing HTTPS controls remain byte-identical.
+
+The admission filter also exposed an inherited VOD retirement deadlock: the
+initial optimistic manifest-presence read waited outside the existing
+retirement-aware publication lock. It now uses that same cancellation helper.
+The existing regression changed from RED to GREEN with both owner-lock
+variants, real child reap and admission-release assertions intact; the adjacent
+completed-output/manifest-contention case also passes. No timeout, priority or
+test assertion was relaxed.
+
+Upstream's physical-admission review, operation-progress pin and explanatory
+source-anchor update are retained alongside the HTTPS source review. Only
+operation-progress's governed construct/mapping inputs changed; durable-jobs
+and worker-refinement governed bytes remain unchanged. Earlier scoped proof
+is retained only for identical inputs. The exact new-base source still needs
+its compiler checks, affected operation-progress smoke and fresh CI binding.
 
 Authenticated full qualification, the Main promotion gate and physical
 acceptance are still pending. Nothing has been deployed or enabled live.
