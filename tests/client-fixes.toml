@@ -1,6 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# HTTPS qualification: retain one native accessibility snapshot per guide move.
+[[fixes]]
+id = "https.apple-guide-native-snapshot-poll"
+commits = ["13bb201e8f5672150867522d70ccac7db330593c"]
+source = "clients/apple/UITests/TVLiveNavigationTests.swift"
+source_anchor = 'guard let snapshot = try? target.snapshot() else { return false }'
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive"
+
 # PR #1276 review repairs: the trims label says all, some or none of the served frames.
 [[fixes]]
 id = "android.dv-creative-trims-partial-label"
