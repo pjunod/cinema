@@ -2,7 +2,7 @@
 //! The synchronous fixture gate delays exposure, not native/journal outcomes.
 use super::*;
 use std::collections::BTreeMap;
-use std::sync::{Condvar, Mutex, OnceLock, mpsc};
+use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 struct Checkpoint {
@@ -32,13 +32,11 @@ impl Gate {
             unwind,
         });
         let ledger = runtime.ledger.id;
-        assert!(
-            gates()
-                .lock()
-                .expect("constructor fixture registry")
-                .insert(ledger, Arc::clone(&checkpoint))
-                .is_none()
-        );
+        assert!(gates()
+            .lock()
+            .expect("constructor fixture registry")
+            .insert(ledger, Arc::clone(&checkpoint))
+            .is_none());
         (Self { ledger, checkpoint }, receiver)
     }
     fn release(&self) {
@@ -119,12 +117,10 @@ fn assert_complete_private_payload(bundle: &Bundle) -> (Uuid, [Uuid; 7]) {
             .expect("same actual application fence"),
         &metadata.release.application
     ));
-    assert!(
-        !metadata
-            .release
-            .cleanup_requested
-            .load(std::sync::atomic::Ordering::Acquire)
-    );
+    assert!(!metadata
+        .release
+        .cleanup_requested
+        .load(std::sync::atomic::Ordering::Acquire));
     let ids = [
         tasks.root_observations[0].operation_id,
         tasks.root_observations[1].operation_id,
@@ -146,8 +142,8 @@ fn assert_complete_private_payload(bundle: &Bundle) -> (Uuid, [Uuid; 7]) {
 }
 
 #[tokio::test]
-async fn published_planning_constructor_returns_same_complete_owner_while_original_bundle_is_locked()
- {
+async fn published_planning_constructor_returns_same_complete_owner_while_original_bundle_is_locked(
+) {
     let root = tempfile::tempdir().expect("original constructor fixture");
     let runtime = fixture_runtime(root.path());
     let baseline = runtime.accounting().expect("actual baseline").used;
@@ -193,22 +189,22 @@ async fn published_planning_constructor_returns_same_complete_owner_while_origin
         .await
         .expect("same original no-task graph and M close");
     assert!(cleanup.known_closed());
+    // The completed selector still owns a runtime Arc until it is dropped.
+    drop(cleanup);
     assert_eq!(
         runtime.accounting().expect("known original refund").used,
         baseline
     );
-    assert!(
-        runtime
-            .operations
-            .lock()
-            .expect("actual book")
-            .bundles
-            .is_empty()
-    );
+    assert!(runtime
+        .operations
+        .lock()
+        .expect("actual book")
+        .bundles
+        .is_empty());
     Arc::try_unwrap(runtime)
         .ok()
         .expect("sole runtime owner")
-        .shutdown()
+        .drain()
         .expect("custody shutdown");
 }
 
@@ -260,11 +256,10 @@ async fn constructor_unwind_retains_same_original_cleanup_without_native_lookup_
             .planning_metadata
             .as_ref()
             .expect("same original M");
-        assert!(
-            m.release
-                .cleanup_requested
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
+        assert!(m
+            .release
+            .cleanup_requested
+            .load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(bundle.id, identity.0);
         assert_eq!(
             bundle.roles[0]
@@ -290,18 +285,16 @@ async fn constructor_unwind_retains_same_original_cleanup_without_native_lookup_
         runtime.accounting().expect("original known close").used,
         baseline
     );
-    assert!(
-        runtime
-            .operations
-            .lock()
-            .expect("actual book")
-            .bundles
-            .is_empty()
-    );
+    assert!(runtime
+        .operations
+        .lock()
+        .expect("actual book")
+        .bundles
+        .is_empty());
     Arc::try_unwrap(runtime)
         .ok()
         .expect("sole runtime owner")
-        .shutdown()
+        .drain()
         .expect("custody shutdown");
 }
 
@@ -315,6 +308,7 @@ async fn original_constructor_capacity_refusal_keeps_exact_before_reservation_pr
         .capacity;
     capacity.cpu_ns_per_second = Metric::Known(0);
     runtime
+        .ledger
         .update_capacity(2, capacity)
         .expect("deny actual ledger CPU admission");
     let baseline = runtime.accounting().expect("actual baseline").used;
@@ -329,17 +323,15 @@ async fn original_constructor_capacity_refusal_keeps_exact_before_reservation_pr
     };
     assert!(matches!(error.0, OperationError::BeforeReservation(_)));
     assert_eq!(runtime.accounting().expect("actual refusal").used, baseline);
-    assert!(
-        runtime
-            .operations
-            .lock()
-            .expect("actual book")
-            .bundles
-            .is_empty()
-    );
+    assert!(runtime
+        .operations
+        .lock()
+        .expect("actual book")
+        .bundles
+        .is_empty());
     Arc::try_unwrap(runtime)
         .ok()
         .expect("sole runtime owner")
-        .shutdown()
+        .drain()
         .expect("custody shutdown");
 }
