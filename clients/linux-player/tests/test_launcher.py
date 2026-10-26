@@ -57,6 +57,10 @@ class CallSequence(LauncherCase):
         for flag in ("--vo=gpu-next", "--gpu-api=vulkan", "--hwdec=auto-safe",
                      "--target-colorspace-hint=yes", "--idle=once"):
             self.assertIn(flag, args)
+        self.assertIn("--ytdl=no", args, "the ytdl hook never runs yt-dlp on a URL")
+        self.assertIn(f"--config-dir={os.path.join(self.config, 'mpv')}", args,
+                      "plurx Player's own mpv config, never ~/.config/mpv")
+        self.assertNotIn("--no-config", args, "built-in key bindings and the OSC stay")
         sock = next(a for a in args if a.startswith("--input-ipc-server="))
         self.assertTrue(sock.split("=", 1)[1].startswith(self.runtime))
         self.assertEqual(os.listdir(self.runtime), [], "the private socket directory is removed")
@@ -236,6 +240,8 @@ class Signals(LauncherCase):
         self.assertTrue(self.server.revoked)
         self.assertIn(["quit"], self.mpv.commands())
         self.assertEqual(os.listdir(self.runtime), [])
+        # Run as installed, the mpv config directory follows XDG_CONFIG_HOME.
+        self.assertIn(f"--config-dir={os.path.join(self.config, 'mpv')}", self.mpv.argv())
 
 
 class Trust(LauncherCase):

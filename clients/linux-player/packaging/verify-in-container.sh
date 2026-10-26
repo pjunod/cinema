@@ -109,6 +109,32 @@ render() {
 render "$private/bin/mpv" private
 render /usr/bin/mpv system
 
+step "the launcher's own mpv command line ignores ~/.config/mpv"
+# A hostile general mpv config: if mpv read it, the log would name it and the
+# ytdl hook would load. The launcher's argv comes from the installed module.
+mkdir -p /root/.config/mpv
+printf 'tone-mapping=clip\nytdl=yes\n' > /root/.config/mpv/mpv.conf
+mapfile -t argv < <(python3 -I -c 'import os, sys; sys.path.insert(0, "/usr/lib/plurx-player")
+from plurx_player import mpv, trust
+m = mpv.Mpv(mpv.resolve_binary(), "/tmp/plurx-ipc.sock", config_dir=os.path.join(trust.default_config_dir(), "mpv"))
+print("\n".join(m.args()))')
+printf '%s\n' "${argv[@]}"
+printf '%s\n' "${argv[@]}" | grep -qx -- "--config-dir=/root/.config/plurx-player/mpv" || fail "argv has no plurx-player --config-dir"
+printf '%s\n' "${argv[@]}" | grep -qx -- "--ytdl=no" || fail "argv has no --ytdl=no"
+# Control: without --config-dir the same mpv does read it and names it.
+"$private/bin/mpv" --vo=null --ao=null --frames=1 --log-file=/tmp/control.txt /tmp/pq.mkv >/dev/null 2>&1 || true
+grep -m1 '/root/.config/mpv/mpv.conf' /tmp/control.txt || fail "control: mpv without --config-dir did not name ~/.config/mpv/mpv.conf"
+# --no-terminal (from the launcher) silences stdout, so log to a file.
+xvfb-run -a "${argv[@]}" --vulkan-device="$device" --ao=null --frames=24 \
+  --log-file=/tmp/launcher-argv.txt /tmp/pq.mkv > /tmp/launcher-argv.out 2>&1 \
+  || { cat /tmp/launcher-argv.out; tail -40 /tmp/launcher-argv.txt; fail "the launcher's argv did not play"; }
+grep -m1 -E 'VO: \[gpu-next\]' /tmp/launcher-argv.txt || fail "the launcher's argv did not open vo=gpu-next"
+! grep -m3 '/root/.config/mpv' /tmp/launcher-argv.txt || fail "mpv read ~/.config/mpv"
+! grep -m3 'ytdl_hook' /tmp/launcher-argv.txt || fail "the ytdl hook loaded"
+grep -m1 'plurx-player/mpv' /tmp/launcher-argv.txt || true
+rm -rf /root/.config/mpv
+pass "the launcher's argv plays through gpu-next, reads no ~/.config/mpv and loads no ytdl hook"
+
 step "launcher unit tests ($(python3 --version))"
 python3 -m unittest discover -s /src/tests -p 'test_*.py' && pass "launcher tests"
 
