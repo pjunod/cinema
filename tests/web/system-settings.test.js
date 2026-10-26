@@ -185,3 +185,35 @@ test('Resource ownership keeps unknown task and memory peaks distinct from reser
   assert.doesNotMatch(unavailable,/0 retained metadata owners/);
   assert.equal(h.systemResourceOwnershipCard({}), '');
 });
+
+
+test('Copy cleanup reports actual held charge and preserves unavailable inventory',()=>{
+  const h=harness();
+  const card=copy_cleanup=>h.systemResourceOwnershipCard({resource_ownership:{state:'available',copy_cleanup}});
+  assert.doesNotMatch(card(undefined),/Copy cleanup|No copy cleanup holds/);
+  assert.match(card(null),/Copy cleanup details are unavailable; no empty inventory is implied/);
+  assert.doesNotMatch(card(null),/No copy cleanup holds|Reserved CPU/);
+  assert.match(card([]),/No copy cleanup holds were observed/);
+  const html=card([{preparation_id:'prep<unsafe>',graph_id:'graph"unsafe',reason:'Process launch <unknown>',held_resources:{
+    cpu_ns_per_second:750000001,peak_memory_bytes:4097,handles:7,processes:1,hardware_slots:0,tuner_slots:2,scratch_bytes:8193
+  }}]);
+  assert.match(html,/prep&lt;unsafe&gt;/);
+  assert.match(html,/graph&quot;unsafe/);
+  assert.match(html,/Process launch &lt;unknown&gt;/);
+  for(const [label,value] of [['CPU (ns per second)',750000001],['memory (bytes)',4097],['handles',7],['processes',1],['hardware slots',0],['tuner slots',2],['storage (bytes)',8193]]){
+    assert.ok(html.includes(`Reserved ${label}</dt><dd>${value}</dd>`),label);
+  }
+  assert.match(html,/held for reconciliation/);
+  assert.match(html,/A restart alone does not release this charge/);
+  assert.doesNotMatch(html,/<button|type="checkbox"|onclick|<unsafe>|measured RSS<\/dd>/);
+  const retry=card([{preparation_id:'same',reason:'Child termination is pending another cleanup attempt',held_resources:{handles:3}}]);
+  assert.match(retry,/pending another cleanup attempt/);
+  assert.match(retry,/graph identity unavailable/);
+  assert.match(retry,/Reserved CPU \(ns per second\)<\/dt><dd>Unknown/);
+  assert.match(retry,/Reserved handles<\/dt><dd>3/);
+  assert.doesNotMatch(retry,/NaN|undefined/);
+  const invalid=card([{preparation_id:'invalid',held_resources:{cpu_ns_per_second:Number.MAX_SAFE_INTEGER+1,peak_memory_bytes:-1}}]);
+  assert.match(invalid,/Reserved CPU \(ns per second\)<\/dt><dd>Unknown/);
+  assert.match(invalid,/Reserved memory \(bytes\)<\/dt><dd>Unknown/);
+  assert.match(card([{preparation_id:'missing'}]),/Reserved handles<\/dt><dd>Unknown/);
+});

@@ -1,9 +1,41 @@
-# Adaptive playback contract history — M0 proposals and manager direction
+# Adaptive playback contract history — decisions and original proposals
 
 **Status:** done · historical contract proposals and manager direction, not current implementation or acceptance evidence.
 **Written:** 2026-10-22.
 
 Companion to the [current adaptive playback resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md), which records implementation and evidence. This file preserves the two former M0 contract sections verbatim so their historical constraints and limits remain available without presenting them as current ownership or completed behavior. The approved implementation scope remains in the [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md).
+
+## Copy partial-start decision — 2026-10-26
+
+The user supplied a bounded review attributed to Claude Opus 5.5 against
+implementation `46dc2805b9b6688b5052494605250898a6b105c7` and request
+`8b6331e5634eb315626e60103d58a96b347501a2`. Its design decisions are accepted:
+one cleanup driver selects actual NeverRoot / RootOnly / Joined native
+witnesses; process entry with no retained Child stays Unknown with full R.
+No same-boot restart settlement authority or unbound-root fact is added.
+
+A registered parser is acquired even if its consuming one-shot latch was
+never delivered. Positive internal `NeverEntered` requires that exact receive
+error, natural original-handle join and matching delivery state. It stays
+internal; existing `VodOutputTaskV1` records closed task owners without
+asserting entry, output or success. Only an actually unregistered parser may
+use `VodOutputTaskNeverAcquiredV1`, including when armed but unobserved.
+Captured observations must resolve under their original operation IDs.
+
+The driver retains existing retry custody rather than a parallel staged
+closure state machine. Kill precedes a blocking aborted-task join; natural
+parser failure must signal the original child before awaiting stderr, since a
+post-join kill cannot unblock that wait. Checked closes, actual root wait,
+source/prefix closure, complete DTO validation before one-shot consumption,
+rich-bundle destruction and the last application-owner barrier remain required.
+Permanent holds skip maintenance and expose their actual charge/reason; a
+failed kill remains retryable and restarting alone does not refund charge.
+
+This is bounded design evidence, not completed-candidate review or execution.
+The supplied review SHA-256 is
+`dc9df50930130a30adee9ec91a52e62bf06392509d25e8bff677dc7439505672`.
+Current implementation and remaining evidence belong in the
+[copy review](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) and resource ledger.
 
 ## M4 request intent decision — 2026-10-26
 

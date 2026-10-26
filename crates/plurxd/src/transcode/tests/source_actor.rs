@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+#[path = "source_fixed_native.rs"]
+mod fixed_native;
+
 use super::*;
 
 /// This fixture boots the production one-voter selector. Candidate installation
@@ -145,7 +149,30 @@ async fn source_unknown_local_register_actual_closure_and_exact_ack_clear_pendin
 ) {
     Box::pin(source_copy_preadmission_fixture(55)).await;
 }
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_original_p_open_inputs_cancelled_waiter_replays_same_m_and_cleanup() {
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(0))).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_selected_software_actor_uses_original_p_and_retains_m_through_media_retirement() {
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(1))).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_original_p_native_collector_cancellation_joins_same_cleanup_before_source_release()
+{
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(2))).await;
+}
+
 async fn source_copy_preadmission_fixture(mode: u8) {
+    source_copy_preadmission_fixture_with_fixed(mode, None).await;
+}
+
+async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Option<u8>) {
     use crate::http::hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget};
     use plurx_core::{
         config::Config,
@@ -174,6 +201,22 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual Source startup coordinator"));
+    #[cfg(target_os = "linux")]
+    let fixed_runtime = if fixed_case.is_some() || (12..=20).contains(&mode) {
+        Some(
+            crate::resource_runtime::open_before_cleanup(&mut selected, &config)
+                .await
+                .expect("real Source custody startup")
+                .expect("Linux Source runtime"),
+        )
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    assert!(
+        fixed_case.is_none(),
+        "fixed Source P fixture requires Linux"
+    );
     let client = selected.local_client().expect("actual local client");
     let master = Arc::clone(&selected.credential_key);
     let membership = selected.membership_manager();
@@ -196,6 +239,11 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         config.sharing.clone(),
     ));
     state_mut.node_id = selected.identity.node_id.clone();
+    #[cfg(target_os = "linux")]
+    {
+        state_mut.resource_runtime = fixed_runtime.clone();
+    }
+
     state_mut
         .membership
         .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
@@ -551,6 +599,68 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .await
         .expect("assignment")
         .expect("actual local assignment");
+    #[cfg(target_os = "linux")]
+    if let Some(fixed_case) = fixed_case {
+        let runtime = fixed_runtime.expect("actual started runtime");
+        let dirs = crate::configured_dirs(&config.storage);
+        let manager = Arc::new(
+            TranscodeManager::new(
+                Arc::clone(store),
+                directory.path().join("workers"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_cache_layout(
+                dirs.cache,
+                dirs.runtime_cache,
+                dirs.subs,
+                dirs.renditions,
+                "fixture identity supplied by admitted P".into(),
+                selected.identity.node_id.clone(),
+                Some(membership.clone()),
+                Some(Arc::clone(&runtime)),
+            ),
+        );
+        if fixed_case == 1 {
+            source_actual_actor_boxed(state, manager, prepared, assignment, 12, client.clone())
+                .await;
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if runtime
+                        .planning_ownership_diagnostics()
+                        .is_some_and(|counts| counts.metadata_owners == 0)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("FAILURE watchdog: actual actor's original M aliases did not retire");
+        } else {
+            match fixed_case {
+                0 => super::super::source_preparation::source_fixed_planning_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                2 => super::super::source_preparation::source_native_cancelled_collector_cleanup_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                _ => panic!("unknown fixed Source fixture case"),
+            }
+            store
+                .seal_source_ingress_custody(&assignment)
+                .await
+                .expect("actual no-entry ingress seal");
+            assert_eq!(
+                store
+                    .settle_source_assigned_without_activation(&assignment)
+                    .await
+                    .expect("exact no-activation Source cleanup"),
+                SourceReleaseOutcome::Released
+            );
+        }
+        selected
+            .shutdown()
+            .await
+            .expect("actual voter shutdown after original P cleanup");
+        return;
+    }
     let media = store.get_file(1).await.expect("file read").expect("file");
     if mode < 5 {
         let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(
@@ -580,12 +690,29 @@ async fn source_copy_preadmission_fixture(mode: u8) {
             .expect("actual cold index read")
             .is_none());
     }
-    let manager = Arc::new(TranscodeManager::new(
+    let manager = TranscodeManager::new(
         Arc::clone(store),
         directory.path().join("workers"),
         EncoderCaps::default(),
         Pipeline::Cpu,
-    ));
+    );
+    #[cfg(target_os = "linux")]
+    let manager = if let Some(runtime) = fixed_runtime {
+        let dirs = crate::configured_dirs(&config.storage);
+        manager.with_cache_layout(
+            dirs.cache,
+            dirs.runtime_cache,
+            dirs.subs,
+            dirs.renditions,
+            "fixture cache configuration; recipe uses original P attestation".into(),
+            selected.identity.node_id.clone(),
+            Some(membership.clone()),
+            Some(runtime),
+        )
+    } else {
+        manager
+    };
+    let manager = Arc::new(manager);
     if let Some(mut second_prepared) = second_prepared {
         let now = crate::fragment_index_cluster::unix_ms();
         let SourceIntentRead::Ready(second_intent) = store
@@ -975,7 +1102,11 @@ async fn source_actual_actor(
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
         return;
     }
-    if matches!(mode, 3 | 19 | 28) {
+    #[cfg(target_os = "linux")]
+    if mode == 19 {
+        manager.source_workers.probe_hooks.arm_fixed_cpu_denial();
+    }
+    if matches!(mode, 3 | 28) || (mode == 19 && !cfg!(target_os = "linux")) {
         state
             .store
             .put_setting(keys::SW_POOL_THREADS, "3")
@@ -1116,14 +1247,49 @@ async fn source_actual_actor(
                 .index_hooks
                 .pause_after_wait_failure(),
         ),
-        13 => Some(manager.source_workers.probe_hooks.pause_after_spawn()),
-        14 | 16 | 17 | 18 => Some(manager.source_workers.probe_hooks.pause_before_spawn()),
-        15 => Some(
-            manager
-                .source_workers
-                .probe_hooks
-                .pause_after_wait_failure(),
-        ),
+        13 => {
+            #[cfg(target_os = "linux")]
+            {
+                manager.source_workers.probe_hooks.arm_fixed_native(false);
+                None
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Some(manager.source_workers.probe_hooks.pause_after_spawn())
+            }
+        }
+        17 => {
+            #[cfg(target_os = "linux")]
+            {
+                Some(
+                    manager
+                        .source_workers
+                        .probe_hooks
+                        .pause_before_fixed_inputs(),
+                )
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Some(manager.source_workers.probe_hooks.pause_before_spawn())
+            }
+        }
+        14 | 16 | 18 => Some(manager.source_workers.probe_hooks.pause_before_spawn()),
+        15 => {
+            #[cfg(target_os = "linux")]
+            {
+                manager.source_workers.probe_hooks.arm_fixed_native(true);
+                None
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Some(
+                    manager
+                        .source_workers
+                        .probe_hooks
+                        .pause_after_wait_failure(),
+                )
+            }
+        }
         20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
         22 => Some(manager.source_workers.native_hooks.pause_after_spawn()),
         23 | 25 | 26 | 27 => Some(manager.source_workers.native_hooks.pause_before_spawn()),
@@ -1206,12 +1372,37 @@ async fn source_actual_actor(
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
     assert!(Arc::ptr_eq(&actor.0, &joined.0));
+    #[cfg(target_os = "linux")]
+    if matches!(mode, 13 | 15) {
+        drop(joined);
+        fixed_native::exercise(&state, &manager, &actor, &assignment, mode, ingress_monitor).await;
+        return;
+    }
+
     if let Some(pause) = index_pause {
-        let held = pause.reached().await;
+        let held = tokio::time::timeout(Duration::from_secs(30), pause.reached())
+            .await
+            .expect("FAILURE watchdog: original Source stage was not reached");
+        let fixed = cfg!(target_os = "linux") && (12..=20).contains(&mode);
         assert_eq!(
             manager.admissions.software_in_use(),
-            if mode == 20 { 0 } else { 4 }
+            if fixed || mode == 20 { 0 } else { 4 }
         );
+        #[cfg(target_os = "linux")]
+        if fixed {
+            let counts = manager
+                .resource_runtime
+                .as_ref()
+                .expect("real Source runtime")
+                .planning_ownership_diagnostics()
+                .expect("complete P/M stage inventory");
+            assert_eq!(counts.metadata_owners, 1);
+            assert_eq!(counts.native_roles_held, usize::from(mode != 20));
+            assert_eq!(
+                counts.original_tasks_pending, 0,
+                "the pre-collector/after-close fixture stage is not native entry proof"
+            );
+        }
         assert!(manager.vod.session_ids().await.is_empty());
         assert!(state
             .store
@@ -1226,11 +1417,15 @@ async fn source_actual_actor(
         } else {
             manager.source_workers.index_hooks.spawned_pid()
         };
-        if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
-            assert!(pid > 0, "actual Source index child started");
-        } else {
-            assert_eq!(pid, 0, "refusal point precedes any actual child");
+        if !fixed {
+            if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
+                assert!(pid > 0, "actual legacy Source child started");
+            } else {
+                assert_eq!(pid, 0, "legacy refusal point precedes its child");
+            }
         }
+        // Fixed mode20 already joined its actual native tasks; its legacy
+        // PID slot is unused and cannot stand in for native absence proof.
         assert!(matches!(
             actor.wait_ready(Instant::now()).await,
             Err(SourceWorkerError::Deadline)
@@ -1276,8 +1471,8 @@ async fn source_actual_actor(
         }
         assert_eq!(
             manager.admissions.software_in_use(),
-            if mode == 20 { 0 } else { 4 },
-            "probe capacity matches actual settlement stage"
+            if fixed || mode == 20 { 0 } else { 4 },
+            "actual P/M custody or legacy permit matches its own stage"
         );
         assert_eq!(actor.settlement_status(), None);
         drop(held);
@@ -1330,6 +1525,35 @@ async fn source_actual_actor(
             .expect("owned no-spawn cleanup budget")
             .expect("actual admission failed without a child");
         assert_eq!(manager.admissions.software_in_use(), 0);
+        #[cfg(target_os = "linux")]
+        if mode == 19 {
+            manager
+                .source_workers
+                .probe_hooks
+                .assert_fixed_cpu_refusal();
+            let runtime = manager
+                .resource_runtime
+                .as_ref()
+                .expect("exclusive fresh19runtime");
+            let accounting = runtime
+                .accounting()
+                .expect("actual negative admission accounting");
+            assert!(matches!(
+                accounting.capacity.cpu_ns_per_second,
+                plurx_core::process::observation::Metric::Known(0)
+            ));
+            assert_eq!(
+                accounting.used,
+                plurx_core::adaptive_resources::ResourceVector::default()
+            );
+            let counts = runtime
+                .planning_ownership_diagnostics()
+                .expect("complete postrefusal inventory");
+            assert_eq!(counts.native_roles_held, 0);
+            assert_eq!(counts.metadata_owners, 0);
+            assert_eq!(counts.original_tasks_pending, 0);
+        }
+
         assert!(state
             .store
             .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
@@ -1388,10 +1612,32 @@ async fn source_actual_actor(
             .source_workers
             .index_hooks
             .assert_closed_parent_settlements(),
-        12 => manager
-            .source_workers
-            .probe_hooks
-            .assert_closed_parent_settlements(),
+        12 => {
+            #[cfg(target_os = "linux")]
+            if let Some(runtime) = &manager.resource_runtime {
+                let counts = runtime
+                    .planning_ownership_diagnostics()
+                    .expect("actual selected P/M inventory");
+                assert_eq!(
+                    counts.native_roles_held, 0,
+                    "the actor finished the original P native closer"
+                );
+                assert_eq!(
+                    counts.metadata_owners, 1,
+                    "actual serving Encoding aliases retain M"
+                );
+            } else {
+                manager
+                    .source_workers
+                    .probe_hooks
+                    .assert_closed_parent_settlements();
+            }
+            #[cfg(not(target_os = "linux"))]
+            manager
+                .source_workers
+                .probe_hooks
+                .assert_closed_parent_settlements();
+        }
         21 => manager
             .source_workers
             .native_hooks

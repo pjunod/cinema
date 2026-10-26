@@ -391,8 +391,8 @@ pub(super) fn projected_driver_future_bytes() -> usize {
     ) -> F;
     fn build_frame_bytes<
         F: std::future::Future<
-                Output = Result<(Arc<Rendition>, Option<FiniteApplicationLease>), String>,
-            >,
+            Output = Result<(Arc<Rendition>, Option<FiniteApplicationLease>), String>,
+        >,
     >(
         _: BuildFutureFactory<F>,
     ) -> usize {

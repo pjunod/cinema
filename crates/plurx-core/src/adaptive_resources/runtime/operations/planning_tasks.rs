@@ -206,7 +206,18 @@ async fn original_engine_task(
         .map_err(|_| std::io::Error::other("original engine start dropped"))?;
     #[cfg(test)]
     tests::stages::before_engine_native(plan.member_id.uuid()).await;
-    planning_collector::run_fixed_engine(plan, boot, deadline).await
+    #[cfg(any(test, feature = "fixtures"))]
+    let original_version_close = plan.version_close_operation_id.uuid();
+    let result = planning_collector::run_fixed_engine(plan, boot, deadline).await;
+    // A genuine JoinError/lost result AFTER the actual collector returns.
+    // This does not inject a kernel wait failure or construct any close proof.
+    #[cfg(any(test, feature = "fixtures"))]
+    if result.is_ok() {
+        crate::process::fixed_planning_engine::fixtures::panic_after_native_return(
+            original_version_close,
+        );
+    }
+    result
 }
 
 pub(in crate::adaptive_resources::runtime) fn planning_task_frame_bytes() -> Option<usize> {
@@ -290,22 +301,17 @@ impl NodeResourceRuntime {
         }
         Some(counts)
     }
+}
 
-    pub(in crate::adaptive_resources::runtime) fn register_planning_tasks(
-        &self,
-        owner: &OwnedPreparation,
-        planned: &mut super::super::planning_probe::plan::PlannedProbe,
+/// The same pure original inputs and pre-minted operations, moved into P
+/// before exposure. This is not a task, native receipt or entry permission.
+#[repr(transparent)]
+pub(in crate::adaptive_resources::runtime) struct PreparedPlanningTasks(PlanningTasks);
+impl PreparedPlanningTasks {
+    pub(in crate::adaptive_resources::runtime) fn new(
+        planned: super::super::planning_probe::plan::PlanningTaskPlan,
         request: FixedPlanningProbeRequest,
-    ) -> Result<(), OperationError> {
-        self.validate_preparation(owner)?;
-        let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
-        if bundle.roles.len() != 2 {
-            return Err(OperationError::State);
-        }
-        let role = &mut bundle.roles[0];
-        if role.planning_tasks.is_some() || role.refunded {
-            return Err(OperationError::State);
-        }
+    ) -> Self {
         let probe = &planned.probe_plan;
         let engine = &planned.engine_plan;
         let root_observations = [
@@ -316,17 +322,17 @@ impl NodeResourceRuntime {
         ];
         let probe_task_observation = PlanningObservation::new(probe.member_id.uuid());
         let engine_task_observation = PlanningObservation::new(engine.member_id.uuid());
-        role.planning_tasks = Some(PlanningTasks {
+        Self(PlanningTasks {
             probe_observed: None,
             engine_observed: None,
             root_observations,
             probe_task_observation,
             engine_task_observation,
             settlement_operation_id: Uuid::new_v4(),
-            probe_plan: planned.probe_plan.clone(),
-            engine_plan: planned.engine_plan.clone(),
+            probe_plan: planned.probe_plan,
+            engine_plan: planned.engine_plan,
             source_member: planned.source_member,
-            source_spec: planned.source_spec.take(),
+            source_spec: Some(planned.source_spec),
             inputs: Some(request),
             source: None,
             observed_source: None,
@@ -341,26 +347,24 @@ impl NodeResourceRuntime {
             unknown: false,
             entered: false,
             never_entered: None,
-        });
-        Ok(())
+        })
     }
+    pub(super) fn install(self, role: &mut OwnedRole) {
+        assert!(
+            !role.refunded && role.planning_tasks.is_none(),
+            "fresh private P slot"
+        );
+        role.planning_tasks = Some(self.0);
+    }
+}
 
-    pub(in crate::adaptive_resources::runtime) fn planning_owner_fences(
+impl NodeResourceRuntime {
+    #[cfg(test)]
+    pub(in crate::adaptive_resources::runtime) fn planning_constructor_checkpoint(
         &self,
         owner: &OwnedPreparation,
-    ) -> Result<PlanningOwnerFences, OperationError> {
-        let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
-        let release = Arc::clone(
-            &bundle
-                .roles
-                .get(1)
-                .and_then(|role| role.planning_metadata.as_ref())
-                .ok_or(OperationError::State)?
-                .release,
-        );
-        let cleanup = Arc::clone(&release.cleanup_requested);
-        let known_closed = Arc::clone(&release.known_closed);
-        Ok((release, cleanup, known_closed))
+    ) {
+        tests::construction::after_private_install(owner);
     }
 
     pub(in crate::adaptive_resources::runtime) async fn prepare_planning_inputs(
@@ -395,6 +399,37 @@ impl NodeResourceRuntime {
         }
         self.acquire_prepared_source(owner, 0, member, deadline)
             .await
+    }
+
+    #[cfg(any(test, feature = "fixtures"))]
+    pub(in crate::adaptive_resources::runtime) async fn fixture_planning_native_gate(
+        &self,
+        owner: &OwnedPreparation,
+        panic_after_native_return: bool,
+    ) -> Result<
+        crate::process::fixed_planning_engine::fixtures::FixedPlanningNativeGate,
+        OperationError,
+    > {
+        self.validate_preparation(owner)?;
+        let bundle = owner.state.lock().await;
+        // Registration alone is sufficient for this diagnostic hook. Durable
+        // preparation/source entry still occurs through the original APIs.
+        if bundle.roles.len() != 2 || bundle.roles[0].refunded {
+            return Err(OperationError::State);
+        }
+        let task = bundle.roles[0]
+            .planning_tasks
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        if task.entered || task.unknown || task.never_entered.is_some() {
+            return Err(OperationError::State);
+        }
+        crate::process::fixed_planning_engine::fixtures::FixedPlanningNativeGate::install(
+            task.engine_plan.version_close_operation_id.uuid(),
+            task.engine_plan.member_id.uuid(),
+            panic_after_native_return,
+        )
+        .ok_or(OperationError::State)
     }
 
     pub(in crate::adaptive_resources::runtime) async fn collect_planning_tasks(
