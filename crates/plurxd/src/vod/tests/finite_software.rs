@@ -1063,3 +1063,173 @@ async fn finite_operator_zero_cache_budget_refuses_before_original_r_entry() {
     assert_eq!(after.used, before.used);
     assert_eq!(after.unknown_peak_producers, before.unknown_peak_producers);
 }
+
+#[tokio::test]
+async fn foreign_committed_fence_closes_same_finite_owner_after_stale_cancel_and_coordinator_join()
+{
+    use plurx_core::store::adaptive_resource_attempts::{
+        AttemptClaim, AttemptKey, MutationContext, RequestBinding, RequestKey,
+    };
+    let fixture = finite_cancellation_fixture().await;
+    let store = Arc::clone(&fixture.serve.shared.store);
+    let user = store
+        .create_user(
+            &format!("foreign-fence-{}", uuid::Uuid::new_v4()),
+            "unused-fixture-password-hash",
+            false,
+        )
+        .await
+        .expect("actual local principal");
+    let root = uuid::Uuid::new_v4();
+    let mut request = request("foreign-fence-original", 0.0);
+    request.file_id = fixture.recipe.file.id;
+    request.request_id = Some(root.to_string());
+    request.playback_id = uuid::Uuid::new_v4().to_string();
+    request.kind = SessionKind::Transcode { height: 360 };
+    request.audio_index = fixture.recipe.audio_index;
+    request.audio_delivery = fixture.recipe.audio_delivery.clone();
+    let mut envelope = crate::media_sessions::RemoteStartRequest {
+        retained_output_receiver: None,
+        retained_output: None,
+        candidate_catalog: None,
+        candidate_id: None,
+        presentation_target: None,
+        decoder_caps: None,
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+        incarnation_id: root.to_string(),
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
+        source_size: fixture.recipe.file.size,
+        source_mtime: fixture.recipe.file.mtime,
+        typeless_playlist: false,
+        library_channel: None,
+        request,
+    };
+    assert!(envelope.is_valid(), "actual worker envelope shape");
+    let snapshot = store
+        .playback_planning_snapshot(
+            fixture.recipe.file.id,
+            &crate::transcode::QUALITY_PLANNING_KEYS,
+        )
+        .await
+        .expect("real planning snapshot")
+        .expect("actual source row");
+    let binding = RequestBinding {
+        version: 1,
+        key: RequestKey {
+            request_id: format!("foreign-fence-{root}"),
+            request_incarnation_id: root,
+        },
+        principal: envelope.principal.clone(),
+        request_fingerprint: crate::media_sessions::bounded_adaptive_digest(&envelope)
+            .expect("actual request fingerprint"),
+        playback_id: envelope.request.playback_id.clone(),
+        recovery_epoch: uuid::Uuid::new_v4(),
+        planning_generation: snapshot.generation,
+        planning_source_digest: crate::media_sessions::bounded_adaptive_digest(&(
+            fixture.recipe.file.id,
+            fixture.recipe.file.size,
+            fixture.recipe.file.mtime,
+        ))
+        .expect("actual source row digest"),
+        settings_digest: crate::media_sessions::bounded_adaptive_digest(&snapshot.settings)
+            .expect("actual settings digest"),
+        intent_digest: envelope
+            .adaptive_intent_digest()
+            .expect("root-scoped actual intent"),
+        original_deadline_ms: crate::media_sessions::unix_ms() + 90_000,
+        expected_predecessor_incarnation_id: None,
+        expected_predecessor_owner_epoch: None,
+        expected_desired_revision: None,
+    };
+    let route = uuid::Uuid::new_v4();
+    envelope.incarnation_id = route.to_string();
+    envelope.request.request_id = Some(route.to_string());
+    let selected_recipe_json =
+        serde_json::to_string(&envelope).expect("actual owned worker recipe serializer");
+    let node = fixture._selected_store.identity.node_id.clone();
+    let claim = AttemptClaim {
+        context: MutationContext {
+            operation_id: uuid::Uuid::new_v4(),
+            expected_request_sequence: 0,
+            expected_attempt_sequence: 0,
+            now_ms: crate::media_sessions::unix_ms(),
+        },
+        key: AttemptKey {
+            request: binding.key.clone(),
+            attempt_id: uuid::Uuid::new_v4(),
+            route_incarnation_id: route,
+            session_id: uuid::Uuid::new_v4(),
+            worker_node_id: node.clone(),
+            owner_epoch: 1,
+            ordinal: 1,
+        },
+        binding,
+        worker_instance_id: fixture.runtime.owner().owner_id,
+        serving_generation: 1,
+        domains: vec![node.clone()],
+    };
+    claim.validate().expect("real Store Claim contract");
+    let base = fixture._base.path();
+    let manager = Arc::new(
+        crate::transcode::TranscodeManager::new(
+            Arc::clone(&store),
+            base.join("transcode"),
+            Default::default(),
+            plurx_core::transcode::Pipeline::Cpu,
+        )
+        .with_cache_layout(
+            base.join("cache"),
+            base.join("runtime"),
+            base.join("subs"),
+            fixture.serve.shared.base.clone(),
+            "foreign-fence-test".into(),
+            node,
+            None,
+            Some(Arc::clone(&fixture.runtime)),
+        )
+        .with_copy_test_vod(Arc::clone(&fixture.serve)),
+    );
+    let shared = Arc::clone(&fixture.serve.shared);
+    let recipe = fixture.recipe.clone();
+    let settings = fixture.settings.clone();
+    let duration_ms = plan_duration_ms(&fixture.plan);
+    let identity = recipe
+        .encoding
+        .as_ref()
+        .expect("actual frozen software encoding")
+        .identity(&recipe.file, duration_ms as f64 / 1_000.0);
+    let key = rendition_key(&recipe, &identity);
+    let key_capacity = key.capacity();
+    manager
+        .foreign_fence_cleanup_regression(
+            claim,
+            selected_recipe_json,
+            key_capacity,
+            fixture.settings.clone(),
+            move |application_bytes| async move {
+                let pending = shared
+                    .prepare_adaptive_attempt(
+                        key,
+                        identity,
+                        None,
+                        recipe,
+                        duration_ms,
+                        &settings,
+                        application_bytes,
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("actual original finite pending: {}", error.message)
+                    });
+                let alias = pending
+                    .rendition()
+                    .dir
+                    .finite_output()
+                    .expect("actual same output alias");
+                (pending, alias)
+            },
+        )
+        .await;
+}

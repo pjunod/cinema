@@ -396,7 +396,9 @@ pub(super) struct RichAttempt {
 pub(super) struct ClosingAttempt {
     pub(super) cleanup: PreparedAttemptCleanup,
     pub(super) claim: AttemptClaim,
-    pub(super) fence: Option<plurx_core::store::adaptive_resource_attempts::AttemptFence>,
+    // Original attempted cancellation payload is retained for its charged lifetime;
+    // it cannot veto a different committed cleanup-authorizing operation.
+    pub(super) _fence: Option<plurx_core::store::adaptive_resource_attempts::AttemptFence>,
     pub(super) close: Option<AttemptClose>,
 }
 
@@ -1402,13 +1404,13 @@ impl super::TranscodeManager {
             }
             return Err("adaptive attempt closed by an unrecognized operation".into());
         }
-        if !matches!(attempt.phase, AttemptPhase::Cleanup | AttemptPhase::Losing)
-            || closing
-                .fence
-                .as_ref()
-                .is_some_and(|fence| attempt.last_operation_id != fence.context.operation_id)
-        {
-            return Err("adaptive close is not the exact losing or fenced attempt".into());
+        // A known origin/other worker Fence may supersede the operation
+        // retained by this original Rich owner. Store validates the exact
+        // committed cleanup operation named below. This logical permission
+        // never substitutes for the native/application/planning barriers above,
+        // and an existing Close retains its original operation unchanged.
+        if !matches!(attempt.phase, AttemptPhase::Cleanup | AttemptPhase::Losing) {
+            return Err("adaptive close is not a known losing or fenced attempt".into());
         }
         if closing.close.is_none() {
             closing.close = Some(AttemptClose {
@@ -1707,7 +1709,7 @@ impl super::TranscodeManager {
         *state = AttemptState::Closing(Box::new(ClosingAttempt {
             cleanup,
             claim,
-            fence,
+            _fence: fence,
             close: None,
         }));
         Ok(())
@@ -1867,12 +1869,11 @@ impl super::TranscodeManager {
             drop(state);
             return self.handoff_adaptive_loser(entry).await;
         }
-        let should_close = attempt.phase == AttemptPhase::Losing
-            || attempt.phase == AttemptPhase::Cleanup
-                && rich
-                    .fence
-                    .as_ref()
-                    .is_none_or(|fence| attempt.last_operation_id == fence.context.operation_id);
+        // Retaining a locally attempted Fence does not veto a different
+        // positively committed origin Fence. Keep this SAME native owner and
+        // hand it to existing cleanup; Store Close later names the committed
+        // operation only after all physical/application barriers have drained.
+        let should_close = matches!(attempt.phase, AttemptPhase::Losing | AttemptPhase::Cleanup);
         drop(state);
         if should_close {
             self.handoff_adaptive_loser(entry).await?;
@@ -2222,6 +2223,281 @@ async fn restart_guarded_adoption<T>(
         return Err("adaptive worker is preparing for restart".into());
     };
     adoption.await
+}
+
+/// Runs only from the existing selected-store/native finite fixture. The
+/// factory supplies the SAME original pending owner, never a DTO close proof.
+#[cfg(test)]
+impl super::TranscodeManager {
+    pub(crate) async fn foreign_fence_cleanup_regression<F, Fut>(
+        self: &Arc<Self>,
+        claim: AttemptClaim,
+        selected_recipe_json: String,
+        key_capacity: usize,
+        settings: crate::vodserve::VodSettings,
+        make_pending: F,
+    ) where
+        F: FnOnce(usize) -> Fut + Send + 'static,
+        Fut: Future<
+                Output = (
+                    PreparedAttemptRendition,
+                    plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
+                ),
+            > + Send
+            + 'static,
+    {
+        use plurx_core::store::adaptive_resource_attempts::AttemptFence;
+        let runtime = self
+            .resource_runtime
+            .as_ref()
+            .expect("actual selected runtime");
+        let baseline = runtime.accounting().expect("actual baseline accounting");
+        assert!(matches!(
+            self.store
+                .claim_media_session_request(
+                    &claim.binding.principal,
+                    &claim.binding.key.request_id,
+                    &claim.binding.request_fingerprint,
+                    &claim.binding.playback_id,
+                    &claim.binding.key.request_incarnation_id.to_string(),
+                    claim.context.now_ms,
+                    claim.binding.original_deadline_ms,
+                )
+                .await
+                .expect("real original root request"),
+            plurx_core::domain::MediaSessionRequestClaim::Acquired { .. }
+        ));
+        let initial = match self
+            .store
+            .claim_adaptive_attempt(&claim)
+            .await
+            .expect("real Claim")
+        {
+            AttemptMutation::Applied(status) => status,
+            other => panic!("fresh original Claim: {other:?}"),
+        };
+        let row = initial
+            .attempts
+            .iter()
+            .find(|row| row.key == claim.key)
+            .expect("original row");
+        let stale = AttemptFence {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: initial.sequence,
+                expected_attempt_sequence: row.sequence,
+                now_ms: crate::media_sessions::unix_ms(),
+            },
+            binding: claim.binding.clone(),
+            key: claim.key.clone(),
+            cancel_request: false,
+        };
+        let entry = self
+            .adaptive_attempts
+            .reserve(
+                claim.key.attempt_id,
+                claim.key.request.request_incarnation_id,
+                claim.worker_instance_id,
+                claim.serving_generation,
+            )
+            .expect("original bounded worker slot");
+        let (frame_tx, frame_rx) = tokio::sync::oneshot::channel();
+        let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let manager = Arc::clone(self);
+        let original = Arc::clone(&entry);
+        let original_claim = claim.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        entry
+            .spawn_coordinator(
+                async move {
+                    let actual_frame = frame_rx.await.expect("same registered frame measurement");
+                    let application_bytes = projected_application_owner_bytes(
+                        &original_claim,
+                        &selected_recipe_json,
+                        key_capacity,
+                        actual_frame,
+                        crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES,
+                    )
+                    .expect("actual recipe and coordinator application projection");
+                    let (pending, output_alias) = make_pending(application_bytes).await;
+                    manager
+                        .record_adaptive_prepared(
+                            &original,
+                            original_claim,
+                            selected_recipe_json,
+                            pending,
+                            settings,
+                            deadline,
+                            application_bytes,
+                        )
+                        .await
+                        .expect("same actual pending owner reaches Store Prepared");
+                    assert!(
+                        prepared_tx.send(output_alias).is_ok(),
+                        "real original output alias"
+                    );
+                    release_rx
+                        .await
+                        .expect("release same original coordinator frame");
+                },
+                frame_tx,
+            )
+            .expect("retain original coordinator before entry");
+        let escaped = prepared_rx.await.expect("actual original Prepared");
+        let receiver = self
+            .begin_adaptive_cancel(stale.clone())
+            .expect("original control task");
+        assert!(
+            receiver.await.expect("same cancellation reply").is_err(),
+            "actual Store Prepared made Fence A stale"
+        );
+        {
+            let state = entry.state().await;
+            let AttemptState::Rich(rich) = &*state else {
+                panic!("original Rich owner retained")
+            };
+            assert_eq!(rich.fence.as_ref(), Some(&stale));
+        }
+        let status = self
+            .store
+            .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+            .await
+            .expect("fresh real status")
+            .expect("same request");
+        let row = status
+            .attempts
+            .iter()
+            .find(|row| row.key == claim.key)
+            .expect("same worker row");
+        assert_eq!(row.phase, AttemptPhase::Prepared);
+        let foreign = AttemptFence {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: status.sequence,
+                expected_attempt_sequence: row.sequence,
+                now_ms: crate::media_sessions::unix_ms(),
+            },
+            binding: claim.binding.clone(),
+            key: claim.key.clone(),
+            cancel_request: false,
+        };
+        assert!(matches!(
+            self.store
+                .fence_adaptive_attempt(&foreign)
+                .await
+                .expect("real foreign Fence B"),
+            AttemptMutation::Applied(_)
+        ));
+        self.reconcile_adaptive_loser(&entry)
+            .await
+            .expect("same original Rich enters typed cleanup despite stale A");
+        assert!(matches!(*entry.state().await, AttemptState::Handoff(_)));
+        tokio::time::timeout_at(deadline.into(), async {
+            loop {
+                self.reconcile_adaptive_attempt_tasks().await;
+                if matches!(*entry.state().await, AttemptState::Closing(_)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("original registration task returns compact selector");
+        assert!(entry
+            .coordinator
+            .lock()
+            .expect("coordinator lock")
+            .is_some());
+        assert!(!self
+            .finish_adaptive_close(&entry)
+            .await
+            .expect("still held by original frames"));
+        let held = self
+            .store
+            .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+            .await
+            .expect("held status")
+            .expect("same request");
+        let row = held
+            .attempts
+            .iter()
+            .find(|row| row.key == claim.key)
+            .expect("same worker");
+        assert_eq!(row.phase, AttemptPhase::Cleanup);
+        assert_eq!(row.last_operation_id, foreign.context.operation_id);
+        assert_eq!(
+            runtime
+                .accounting()
+                .expect("real R retained")
+                .unknown_peak_producers,
+            1
+        );
+        release_tx.send(()).expect("release same original frame");
+        tokio::time::timeout_at(deadline.into(), async {
+            loop {
+                self.reconcile_adaptive_attempt_tasks().await;
+                if entry
+                    .coordinator
+                    .lock()
+                    .expect("coordinator lock")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("join actual original coordinator");
+        assert!(!self
+            .finish_adaptive_close(&entry)
+            .await
+            .expect("actual output alias still held"));
+        assert!(
+            runtime
+                .accounting()
+                .expect("alias still charged")
+                .unknown_peak_producers
+                > 0
+        );
+        drop(escaped);
+        tokio::time::timeout_at(deadline.into(), async {
+            loop {
+                // Resume the existing original finite closing book as well
+                // as the worker's logical Store cleanup cadence.
+                self.vod.maintain().await;
+                self.reconcile_adaptive_attempt_tasks().await;
+                let status = self
+                    .store
+                    .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+                    .await
+                    .expect("original cleanup status")
+                    .expect("same request");
+                let row = status
+                    .attempts
+                    .iter()
+                    .find(|row| row.key == claim.key)
+                    .expect("same worker");
+                if row.phase == AttemptPhase::Closed {
+                    assert_ne!(
+                        row.last_operation_id, foreign.context.operation_id,
+                        "only worker's actual retained Close follows native/app completion"
+                    );
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual original native/app close permits Store Close using B");
+        let settled = runtime.accounting().expect("actual original known refund");
+        assert_eq!(settled.used, baseline.used);
+        assert_eq!(
+            settled.unknown_peak_producers,
+            baseline.unknown_peak_producers
+        );
+    }
 }
 
 #[cfg(test)]
