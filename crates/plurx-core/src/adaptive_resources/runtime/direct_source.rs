@@ -64,6 +64,14 @@ fn id() -> Result<v2::Id, DirectSourceError> {
 
 #[derive(Debug)]
 pub struct DirectSourceError(OperationError);
+impl DirectSourceError {
+    /// Only an explicitly tagged refusal at a site before the original R.
+    /// Generic Admission, Draining, State and physical errors may occur after
+    /// reservation; their absence of a returned owner proves no nonentry.
+    pub fn definitely_before_reservation(&self) -> bool {
+        matches!(self.0, OperationError::BeforeReservation(_))
+    }
+}
 impl fmt::Display for DirectSourceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
