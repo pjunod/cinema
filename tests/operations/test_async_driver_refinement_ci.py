@@ -90,6 +90,53 @@ class AsyncDriverRefinementCiTests(unittest.TestCase):
         # run a second copy of either source-generating regression.
         self.assertEqual(self.main.count("cargo test"), 0)
 
+    def test_async_proof_bootstraps_selected_locked_cargo_home_before_offline_cases(self):
+        import os
+        import subprocess
+        import tempfile
+        cache=step_block(self.main,"Restore the main fast Rust cache")
+        bootstrap=step_block(self.main,"Provision locked dependencies for offline async qualification")
+        self.assertIn("id: cargo-cache",cache)
+        self.assertIn("uses: ./.github/actions/cargo-cache",cache)
+        self.assertIn("lane: main-fast-rust",cache)
+        self.assertLess(self.main.index(cache),self.main.index(bootstrap))
+        for name in ("Prepare authenticated same-PR async driver proof resumption",
+            "Provision the pinned TLC toolchain for async driver refinement",
+            "Build deterministic async driver prefix checkpoint",
+            "Build async driver refinement graph and control inputs"):
+            following=step_block(self.main,name)
+            self.assertLess(self.main.index(bootstrap),self.main.index(following))
+            self.assertNotIn("always()",following)
+        self.assertLess(self.main.index("Install the pinned Rust toolchain"),self.main.index(cache))
+        self.assertNotIn("env:",bootstrap)
+        self.assertNotIn("GITHUB_TOKEN",bootstrap)
+        self.assertNotIn("CARGO_HOME",bootstrap)  # inherit the selected cache
+        commands=bootstrap.split("        run: |\n",1)[1].splitlines()
+        self.assertTrue(all(not line or line.startswith("          ") for line in commands))
+        script="\n".join(line[10:] for line in commands if line)
+        self.assertEqual(script,"\n".join(("set -euo pipefail",
+            "cargo +1.97.1 fetch --locked --manifest-path Cargo.toml",
+            "cargo +1.97.1 fetch --locked --offline --manifest-path Cargo.toml",
+            "git diff --exit-code -- Cargo.lock")))
+        # Exercise only shell failure propagation with fake functions: no real
+        # Cargo, dependency fetch, compilation or proof command is invoked.
+        scratch=ROOT/"target/async-refinement-ci-fixtures";scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            trace=Path(directory)/"commands.log"
+            stubs=("cargo() { printf 'cargo %s\\n' \"$*\" >> \"$TRACE\"; "
+                "case \" $* \" in *' --offline '*) return \"$OFFLINE_STATUS\";; "
+                "*) return \"$FETCH_STATUS\";; esac; };\n"
+                "git() { printf 'git %s\\n' \"$*\" >> \"$TRACE\"; return \"$LOCK_STATUS\"; };\n")
+            for fetch,offline,lock,wanted in ((0,0,0,4),(17,0,0,1),(0,18,0,2),(0,0,19,3)):
+                trace.write_text("")
+                result=subprocess.run(["/bin/bash","-c",stubs+script+'\nprintf "proof-start\\n" >> "$TRACE"'],
+                    env={**os.environ,"TRACE":str(trace),"FETCH_STATUS":str(fetch),
+                        "OFFLINE_STATUS":str(offline),"LOCK_STATUS":str(lock)},capture_output=True)
+                calls=trace.read_text().splitlines()
+                self.assertEqual(len(calls),wanted)
+                self.assertEqual(result.returncode,fetch or offline or lock)
+                self.assertEqual("proof-start" in calls,not (fetch or offline or lock))
+
     def test_effort_lane_skips_formal_acceptance_for_compile_only_runs(self) -> None:
         self.assert_qualification_sequence(self.effort, effort=True)
         self.assertEqual(self.effort.count("cargo test"), 0)

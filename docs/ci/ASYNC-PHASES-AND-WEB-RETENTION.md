@@ -13,6 +13,19 @@ async qualification in the dependent `fast async driver refinement gate`. Each
 job has its own 90-minute budget. Both are promotion dependencies; selected
 qualification must succeed. They use the same pinned toolchain, FFmpeg setup,
 one compilation worker and persistent cache lane. No target tree is copied.
+
+Each job selects its own bounded Cargo home; the cache lane does not guarantee
+a registry handoff between containers. Immediately after proof-job cache
+selection, a separate provisioning step runs `cargo +1.97.1 fetch --locked
+--manifest-path Cargo.toml`, repeats the fetch with `--offline`, and checks
+`git diff --exit-code -- Cargo.lock`. It uses that selected Cargo home and
+fetches the workspace lock's full target set. Provisioning failure stops before
+evidence preparation or any proof case. The existing offline case commands
+remain unchanged; there is no online retry after a case failure or copied credential
+handoff. The workflow change genuinely invalidates earlier invocation-bound
+case rows, including run 6034's accepted selector witness; original evidence
+is preserved without granting it acceptance for the changed invocation.
+
 The 20,000 Store identities, 256 MiB wire, 512 MiB artifact, 1800-second case
 limit, TLC 4 GiB heap and one TLC worker remain unchanged.
 

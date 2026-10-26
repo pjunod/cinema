@@ -453,6 +453,12 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: main-fast-rust
+      - name: Provision locked dependencies for offline async qualification
+        run: |
+          set -euo pipefail
+          cargo +1.97.1 fetch --locked --manifest-path Cargo.toml
+          cargo +1.97.1 fetch --locked --offline --manifest-path Cargo.toml
+          git diff --exit-code -- Cargo.lock
       - name: Prepare authenticated same-PR async driver proof resumption
         id: async-driver-resume
         env:
