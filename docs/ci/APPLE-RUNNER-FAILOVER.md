@@ -26,8 +26,8 @@ checkout roots. Path-specific keys would miss those jobs and still upload the
 cache. Existing Forgejo cache blobs, Rust caches and tool caches are unchanged.
 
 Generic iOS and tvOS simulator builds still cover arm64 and x86_64. Toolchain
-pins, concurrency, job budgets and promotion gates are unchanged. This cache
-boundary does not establish the cause of a compiler failure or qualify a new
+pins, concurrency and promotion gates are unchanged by this cache boundary. This
+cache boundary does not establish the cause of a compiler failure or qualify a new
 candidate; the existing build and native test checks remain required.
 The [workflow regression](../../tests/operations/test_apple_tv_navigation_gate.py)
 rejects whole-DerivedData transfer in all three workflows and retains their
@@ -37,7 +37,16 @@ The Effort Apple compile budget is 45 minutes because it also
 builds both macOS tray architectures before generic iOS and tvOS simulators.
 Run 5877 exhausted the old 10-minute budget during the first iOS cold build;
 that failure establishes neither iOS nor tvOS compilation. Full CI and main
-promotion retain their separate 60/120-minute Apple budgets.
+promotion each allow 120 minutes for the Apple job. Full CI runs iPhone,
+iPad and tvOS units before the mandatory 35 native journeys. The native XCTest
+summary for fast run 5967 (internal 5996) alone lasted 53 minutes 12 seconds
+(34 passes and one
+guide timeout); that failed-run timing establishes duration, not acceptance.
+Full run 5985 (internal 6014) had passed seven journeys, including the guide
+in 124.621 seconds, after its unit and build stages. That observation was made
+while the job was active, without a terminal outcome. The former
+60-minute full-job budget left insufficient room for this measured pipeline.
+The per-test 180/240-second limits and all unit/navigation gates remain.
 
 Both carry `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and `xcode-27`.
 The primary also carries `primary`, and the backup carries `backup`.

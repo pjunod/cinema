@@ -1520,7 +1520,8 @@ jobs:
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
-    timeout-minutes: 60
+    # Full mobile units precede the same mandatory native suite as the fast lane.
+    timeout-minutes: 120
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       # The Apple runner is a launch daemon with a deliberately narrow PATH.

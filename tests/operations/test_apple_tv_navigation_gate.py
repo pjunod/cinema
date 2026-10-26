@@ -54,7 +54,7 @@ class AppleTVNavigationGateTests(unittest.TestCase):
         for path, apple, command, budget, serialized in (
             (".github/workflows/main-fast-lane.yml", "apple_compile", "apple-build", 120, True),
             (".github/workflows/effort-ci.yml", "apple_compile", "apple-build", 45, False),
-            (".github/workflows/ci.yml", "apple", "apple-test", 60, True),
+            (".github/workflows/ci.yml", "apple", "apple-test", 120, True),
         ):
             with self.subTest(path=path):
                 apple_job = job(path, apple)
@@ -75,6 +75,20 @@ class AppleTVNavigationGateTests(unittest.TestCase):
             self.assertIn('-destination "generic/platform=' + platform + ' Simulator"', build)
         for override in ("ARCHS=", "EXCLUDED_ARCHS", "ONLY_ACTIVE_ARCH"):
             self.assertNotIn(override, build)
+
+    def test_full_apple_budget_covers_units_and_required_native_journeys(self):
+        full = job(".github/workflows/ci.yml", "apple")
+        fast = job(".github/workflows/main-fast-lane.yml", "apple_compile")
+        def budget(section):
+            return int(re.search(r"(?m)^    timeout-minutes: ([0-9]+)$", section).group(1))
+        self.assertGreaterEqual(budget(full), budget(fast))
+        self.assertIn("run: make apple-test", full)
+        for section in (full, fast):
+            self.assertIn("run: make apple-tv-navigation-test", section)
+        runner = (ROOT / "scripts/apple-tv-navigation-test").read_text()
+        for flag, seconds in (("-default-test-execution-time-allowance", 180),
+                              ("-maximum-test-execution-time-allowance", 240)):
+            self.assertRegex(runner, re.escape('"' + flag + '"') + r'\s*,\s*"' + str(seconds) + '"')
 
     def test_affected_apple_catalog_requires_native_journeys(self):
         catalog = tomllib.loads((ROOT / "validation/points.toml").read_text())
