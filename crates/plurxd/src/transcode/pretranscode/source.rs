@@ -642,8 +642,9 @@ pub struct PretranscodeFence {
 
 pub(crate) struct FragmentAdmission {
     pub(super) threads: usize,
-    pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
+    // Release resources before handing the shared gate to the next waiter.
     pub(super) _permit: crate::admission::TranscodePermit,
+    pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl FragmentAdmission {
@@ -655,9 +656,10 @@ impl FragmentAdmission {
 
 pub(crate) struct PretranscodeAdmission {
     pub(super) encoder: Encoder,
-    pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
     pub(super) threads: usize,
+    // A queued worker must see the released resources when it gets the gate.
     pub(super) _permit: crate::admission::TranscodePermit,
+    pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl PretranscodeFence {

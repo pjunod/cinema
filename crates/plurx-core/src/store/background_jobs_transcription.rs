@@ -195,6 +195,7 @@ impl ModelAction {
 pub enum SubtitlePhase {
     CheckingSource,
     Downloading,
+    WaitingForCapacity,
     Verifying,
     Decoding,
     Transcribing,

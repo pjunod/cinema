@@ -270,6 +270,7 @@ fn job_public(
             matches!(
                 *phase,
                 "downloading"
+                    | "waiting_for_capacity"
                     | "verifying"
                     | "decoding"
                     | "transcribing"
@@ -481,6 +482,11 @@ mod tests {
                 "queued"
             );
         }
+        job.checkpoint = Some(json!({"fence":2,"phase":"waiting_for_capacity"}));
+        assert_eq!(
+            job_public(&job, &payload, &[], 1300).expect("live wait stage")["phase"],
+            "waiting_for_capacity"
+        );
         job.checkpoint = Some(json!({"fence":2,"phase":"transcribing"}));
         job.token
             .as_mut()
