@@ -404,6 +404,7 @@ async fn expired_or_stale_planning_prepare_cannot_generically_refund_p_before_m(
 }
 
 mod joined;
+mod partial;
 mod resumption;
 // Test-only per-original-operation barriers; production has neither registry
 // state nor extra awaits/owner fields.

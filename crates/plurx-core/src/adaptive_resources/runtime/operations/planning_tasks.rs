@@ -204,6 +204,8 @@ async fn original_engine_task(
         .ok_or_else(|| std::io::Error::other("missing original engine start"))?
         .await
         .map_err(|_| std::io::Error::other("original engine start dropped"))?;
+    #[cfg(test)]
+    tests::stages::before_engine_native(plan.member_id.uuid()).await;
     planning_collector::run_fixed_engine(plan, boot, deadline).await
 }
 
@@ -537,6 +539,8 @@ impl NodeResourceRuntime {
             });
             task.probe_report = Some(report);
             task.probe_closed = Some(closure);
+            #[cfg(test)]
+            tests::stages::probe_joined(task.engine_plan.member_id.uuid());
         }
         if let Some(original) = task.engine.as_mut() {
             let joined = tokio::time::timeout_at(deadline.into(), original)

@@ -1,6 +1,8 @@
 //! Deterministic fixture barriers, keyed by the original accepted member/op.
-//! This hook never manufactures native/journal outcomes. Enrichment gating
-//! delays only acknowledgment observation of an already queued real command. Production compiles out the registry,
+//! These hooks never manufacture native/journal outcomes. Engine gating occurs
+//! in the SAME registered task, after its original start latch but before any
+//! native entry. Enrichment gating delays only acknowledgment observation of
+//! an already queued real command. Production compiles out the registry,
 //! notifications and additional awaits. The production deadline wrapper owns
 //! no new heap storage and never removes an original receiver or proof.
 use super::*;
@@ -11,6 +13,7 @@ use tokio::sync::{Notify, Semaphore};
 
 struct Barrier {
     entered: Notify,
+    probe_joined: Notify,
     release: Semaphore,
     visits: AtomicUsize,
 }
@@ -34,6 +37,7 @@ impl Gate {
     pub(super) fn install(id: Uuid) -> Self {
         let barrier = Arc::new(Barrier {
             entered: Notify::new(),
+            probe_joined: Notify::new(),
             release: Semaphore::new(0),
             visits: AtomicUsize::new(0),
         });
@@ -46,6 +50,9 @@ impl Gate {
     }
     pub(super) async fn entered(&self) {
         self.barrier.entered.notified().await;
+    }
+    pub(super) async fn probe_joined(&self) {
+        self.barrier.probe_joined.notified().await;
     }
     pub(super) fn release(&self) {
         self.barrier.release.add_permits(1);
@@ -65,6 +72,23 @@ impl Drop for Gate {
     }
 }
 
+pub(in crate::adaptive_resources::runtime::operations) async fn before_engine_native(id: Uuid) {
+    if let Some(barrier) = lookup(id) {
+        barrier.visits.fetch_add(1, Ordering::SeqCst);
+        barrier.entered.notify_one();
+        barrier
+            .release
+            .acquire()
+            .await
+            .expect("fixture release")
+            .forget();
+    }
+}
+pub(in crate::adaptive_resources::runtime::operations) fn probe_joined(engine_id: Uuid) {
+    if let Some(barrier) = lookup(engine_id) {
+        barrier.probe_joined.notify_one();
+    }
+}
 pub(in crate::adaptive_resources::runtime::operations) async fn before_enrichment_ack(
     operation: Uuid,
 ) {
