@@ -265,6 +265,16 @@ impl ServingAuthority {
         self.current_planned_outage().await == Some(token)
     }
 
+    /// Same read-only placement observation as ServingFence: preserve its two
+    /// original ready/pending loads, original outage, and cleanup uncertainty.
+    /// This does not acquire admission or substitute the generation loop.
+    pub(crate) async fn accepting_new_media(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+            && self.loss_transitions_pending.load(Ordering::Acquire) == 0
+            && self.restart_drain.native_cleanup_unknown().is_none()
+            && self.current_planned_outage().await.is_none()
+    }
+
     pub(crate) fn try_planned_outage_operation_guard(
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, &'static str> {
@@ -642,9 +652,7 @@ impl ServingFence {
     /// not hold an admission open; the eventual start/prime endpoint acquires
     /// that real guard again before allocating anything.
     pub(crate) async fn accepting_new_media(&self) -> bool {
-        self.is_ready()
-            && self.restart_drain.native_cleanup_unknown().is_none()
-            && self.current_planned_outage().await.is_none()
+        self.authority().accepting_new_media().await
     }
 
     /// Admit one direct prepare/cancel handler without queuing request futures.
@@ -1359,18 +1367,22 @@ mod tests {
         assert!(fence.try_restart_admission().await.is_none());
         assert!(fence.authority().try_restart_admission_now().is_none());
         assert!(!fence.accepting_new_media().await);
+        assert!(!fence.authority().accepting_new_media().await);
     }
 
     #[tokio::test]
     async fn shared_authority_observes_and_guards_the_same_original_outage() {
         let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        fence.validation_set_ready(true).await;
         let authority = fence.authority();
+        assert!(authority.accepting_new_media().await);
         let token = fence
             .begin_restart_preparation_until(unix_ms() + 60_000)
             .await
             .expect("original outage");
         assert_eq!(authority.current_planned_outage().await, Some(token));
         assert!(authority.planned_outage_is_current(token).await);
+        assert!(!authority.accepting_new_media().await);
         let original_guard = authority
             .try_planned_outage_operation_guard()
             .expect("original operation mutex");
@@ -1380,6 +1392,7 @@ mod tests {
         fence.cancel_planned_outage_preparation(token, 0).await;
         assert_eq!(authority.current_planned_outage().await, None);
         assert!(!authority.planned_outage_is_current(token).await);
+        assert!(authority.accepting_new_media().await);
     }
 
     #[tokio::test]
