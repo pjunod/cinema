@@ -95,7 +95,7 @@ test('polling interval is finite and expires snapshots before retry, never zero-
 function settings(h){
  h.ctx.location.hash='#/settings/developer/enable-subtitle-translation';const panel=node(),fields={};
  for(const name of ['profile','language','enabled'])fields[`[data-translation-setting-${name}]`]=node();fields['[data-translation-setting-profile]'].value=P;fields['[data-translation-setting-language]'].value='de';fields['[data-translation-setting-enabled]'].checked=true;
- for(const name of ['workers','model-status','save-status'])fields[`[data-translation-${name}]`]=node();panel.fields=fields;
+ for(const name of ['workers','model-status','save-status','install','test'])fields[`[data-translation-${name}]`]=node();panel.fields=fields;
  const worker=node();worker.value='55555555-5555-4555-8555-555555555555';worker.checked=true;panel.querySelectorAll=selector=>selector.includes('translation-worker')?[worker]:[];
  h.nodes['subtitle-translation-form']=panel;
  const setup={capture:h.ctx.translationCapture(),panel,controllers:new Set(),retired:false,rows:[],edit:0,catalog:{profiles:[structuredClone(profile)],models:[],workers:[]},saved:{version:1,revision:'0.'+S,enabled:true,model_id:profile.model_id,profile_id:P,preferred_spoken_language:'de'},clock:{server:100000,at:1000,transit:0}};setup.current=()=>h.ctx.translationSetupCurrent(setup);h.ctx.setupSeed=setup;vm.runInContext('TRANSLATION_SETUP=setupSeed',h.ctx);return {setup,panel,fields,worker};
@@ -138,8 +138,69 @@ test('translation Install uses version2 and preserves partial refusals through s
  const h=harness(),s=settings(h);const refused='66666666-6666-4666-8666-666666666666',job='77777777-7777-4777-8777-777777777777';let verified=false;
  const catalog=()=>({version:1,server_now_ms:100000,profiles:[profile],models:[],workers:[{node_id:s.worker.value,label:'Available worker',current:true,eligible:true,observed_at_ms:99900,expires_at_ms:160000,engine:{adapter_contract:profile.adapter_contract,binary_sha256:E},capabilities:[{model_id:profile.model_id,profile_id:P,status:verified?'verified':'unverified_cache'}]},{node_id:refused,label:'Refused worker'}]});
  s.setup.catalog=catalog();h.ctx.respond=url=>url.endsWith('/install')?response({version:2,purpose:'translation',model_id:profile.model_id,profile_id:P,operations:[{node_id:s.worker.value,job_id:job,outcome:'accepted'},{node_id:refused,outcome:'quota_exceeded'}],server_now_ms:100000}):url.includes('/jobs/')?response({job_id:job,state:'succeeded',phase:'succeeded'}):response(catalog());
- await h.ctx.translationSetupModel('install');await settle();await settle();const body=JSON.parse(h.calls[0].init.body);assert.equal(body.version,2);assert.equal(body.purpose,'translation');assert.equal(body.profile_id,P);assert.equal(body.node_ids[0],s.worker.value);assert.equal(s.setup.rows.length,2);assert.match(s.fields['[data-translation-model-status]'].textContent,/Refused worker: not accepted/);assert.match(s.fields['[data-translation-model-status]'].textContent,/status is updating/);
+ await h.ctx.translationSetupModel('install');await settle();await settle();const body=JSON.parse(h.calls[0].init.body);assert.equal(body.version,2);assert.equal(body.purpose,'translation');assert.equal(body.profile_id,P);assert.equal(body.node_ids[0],s.worker.value);assert.equal(s.setup.rows.length,2);assert.match(s.fields['[data-translation-model-status]'].textContent,/Refused worker: Not accepted/);assert.match(s.fields['[data-translation-model-status]'].textContent,/status is updating/);
  verified=true;h.fire(5000);await settle();await settle();assert.equal(s.setup.rows.length,2);assert.doesNotMatch(s.fields['[data-translation-model-status]'].textContent,/status is updating/);assert.equal(s.fields['[data-translation-setting-enabled]'].checked,true);
+});
+test('model setup shows download failure reasons and explicit package recovery without exposing unknown details',()=>{
+ const h=harness(),s=settings(h);s.setup.rows=[{node_id:s.worker.value,job_id:OP,outcome:'accepted',job:{state:'failed',phase:'failed',reason:'model_download_failed'}},{node_id:'refused',outcome:'engine_unavailable'},{node_id:'unknown',outcome:'PRIVATE /server/path'}];
+ h.ctx.translationSetupModelRows(s.setup);const text=s.fields['[data-translation-model-status]'].textContent;assert.match(text,/Failed.*network access.*retry Download and test/);assert.match(text,/packaged speech engine.*Update or repair/);assert.match(text,/check Activity before retrying/);assert.doesNotMatch(text,/PRIVATE|server\/path/);
+ h.ctx.subtitleReason=()=>"The model download failed. Check this worker’s network access, then retry Install.";s.setup.rows=[{node_id:s.worker.value,outcome:'model_download_failed'}];h.ctx.translationSetupModelRows(s.setup);assert.match(s.fields['[data-translation-model-status]'].textContent,/retry Download and test/);assert.doesNotMatch(s.fields['[data-translation-model-status]'].textContent,/retry Install/);
+});
+test('running model test phases show their work instead of queued status',()=>{
+ const h=harness(),s=settings(h);
+ for(const [phase,label]of [['waiting_for_capacity','Waiting for server capacity'],['decoding','Decoding test audio'],['transcribing','Running speech test'],['validating','Validating'],['publishing','Publishing'],[null,'Running model test'],['unknown-stage','Running model test']]){s.setup.rows=[{node_id:s.worker.value,outcome:'accepted',job:{state:'running',phase}}];h.ctx.translationSetupModelRows(s.setup);assert.match(s.fields['[data-translation-model-status]'].textContent,new RegExp(label));assert.doesNotMatch(s.fields['[data-translation-model-status]'].textContent,/Queued/);}
+});
+test('model speech test failures retain their distinct trusted recovery actions',()=>{
+ const h=harness(),s=settings(h);
+ for(const [reason,expected]of [['output_invalid',/model test could not prepare or validate captions.*server storage and logs/],['inference_failed',/speech test could not run recognition/],['inference_timeout',/speech test exceeded its time limit/],['decode_failed',/speech test could not decode its sample audio/]]){s.setup.rows=[{node_id:s.worker.value,outcome:'accepted',job:{state:'failed',phase:'failed',reason}}];h.ctx.translationSetupModelRows(s.setup);assert.match(s.fields['[data-translation-model-status]'].textContent,expected);}
+});
+test('download and test prevents duplicate submission and reopens actions after an observed failure',async()=>{
+ const h=harness(),s=settings(h);let finish;
+ h.ctx.respond=url=>url.endsWith('/install')?new Promise(resolve=>finish=resolve):url.includes('/jobs/')?response({job_id:OP,state:'failed',phase:'failed',reason:'model_download_failed'}):response({profiles:[profile],models:[],workers:[],server_now_ms:100000});
+ const pending=h.ctx.translationSetupModel('install');await settle();assert.match(s.fields['[data-translation-model-status]'].textContent,/Requesting model download and test/);assert.equal(s.fields['[data-translation-install]'].disabled,true);assert.equal(s.fields['[data-translation-test]'].disabled,true);
+ await h.ctx.translationSetupModel('install');await h.ctx.translationSetupModel('verify');assert.equal(h.calls.length,1);
+ finish(response({version:2,purpose:'translation',model_id:profile.model_id,profile_id:P,operations:[{node_id:s.worker.value,job_id:OP,outcome:'accepted'}],server_now_ms:100000}));await pending;await settle();await settle();
+ assert.equal(s.fields['[data-translation-install]'].disabled,false);assert.equal(s.fields['[data-translation-test]'].disabled,false);assert.equal(s.fields['[data-translation-install]'].textContent,'Download and test');assert.match(s.fields['[data-translation-model-status]'].textContent,/model download failed/);
+});
+test('accepted model work stays busy through a status failure until terminal status is known',async()=>{
+ const h=harness(),s=settings(h);let fail=true;
+ h.ctx.respond=url=>url.endsWith('/install')?response({version:2,purpose:'translation',model_id:profile.model_id,profile_id:P,operations:[{node_id:s.worker.value,job_id:OP,outcome:'accepted'}],server_now_ms:100000}):url.includes('/jobs/')?(fail?Promise.reject(Error('Temporary status failure')):response({job_id:OP,state:'failed',phase:'failed',reason:'model_download_failed'})):response({profiles:[profile],models:[],workers:[],server_now_ms:100000});
+ await h.ctx.translationSetupModel('install');await settle();assert.equal(s.fields['[data-translation-install]'].disabled,true);assert.equal(s.fields['[data-translation-test]'].disabled,true);assert.match(s.fields['[data-translation-model-status]'].textContent,/Retry model status/);
+ await h.ctx.translationSetupModel('install');await h.ctx.translationSetupModel('verify');assert.equal(h.calls.filter(call=>call.init.method==='POST').length,1);
+ fail=false;const retry=s.fields['[data-translation-model-status]'].children.at(-1);retry.listeners.click();await settle();await settle();assert.equal(s.fields['[data-translation-install]'].disabled,false);assert.match(s.fields['[data-translation-model-status]'].textContent,/model download failed/);
+});
+test('stale setup clocks refresh once before a new save or model intent',async()=>{
+ for(const action of ['save','install']){const h=harness(),s=settings(h);h.clock(242000);let finish;
+ h.ctx.respond=url=>url.endsWith('/models')?new Promise(resolve=>finish=resolve):url.endsWith('/install')?response({version:2,purpose:'translation',model_id:profile.model_id,profile_id:P,operations:[],server_now_ms:500000}):response({...s.setup.saved,server_now_ms:500000});
+ const pending=action==='save'?h.ctx.saveTranslationSettings():h.ctx.translationSetupModel('install');await settle();assert.equal(h.calls.length,1);assert.match(h.calls[0].url,/subtitle-translation\/models$/);assert.equal(h.calls[0].init.method,'GET');
+ s.fields['[data-translation-setting-language]'].value='ja';s.fields['[data-translation-setting-enabled]'].checked=false;s.setup.edit++;
+ finish(response({profiles:[profile],models:[],workers:[],server_now_ms:500000}));await pending;await settle();
+ const mutation=h.calls.find(call=>call.init.method==='POST'||call.init.method==='PUT');assert.ok(mutation);assert.equal(JSON.parse(mutation.init.body).intent_expires_at_ms,560000);assert.equal(s.fields['[data-translation-setting-language]'].value,'ja');assert.equal(s.fields['[data-translation-setting-enabled]'].checked,false);
+ }
+});
+test('ambiguous setup retries retain their exact old envelope instead of refreshing the clock',async()=>{
+ for(const action of ['save','install']){const h=harness(),s=settings(h);h.ctx.respond=()=>Promise.reject(Error('Temporary network failure'));if(action==='save')await h.ctx.saveTranslationSettings();else await h.ctx.translationSetupModel('install');const first=h.calls[0].init.body;h.clock(242000);if(action==='save')await h.ctx.saveTranslationSettings();else await h.ctx.translationSetupModel('install');assert.equal(h.calls.length,2);assert.equal(h.calls[1].init.body,first);assert.equal(h.calls.some(call=>call.init.method==='GET'),false);}
+});
+test('legacy setup API errors retain retry guidance without revealing arbitrary server text',async()=>{
+ const h=harness(),s=settings(h);h.ctx.respond=()=>response({error:'PRIVATE /server/secret failure'},503);await h.ctx.translationSetupModel('install');
+ assert.match(s.fields['[data-translation-model-status]'].textContent,/Model setup request failed.*Refresh worker status.*Check Activity/);assert.doesNotMatch(s.fields['[data-translation-model-status]'].textContent,/PRIVATE|secret/);assert.equal(s.fields['[data-translation-install]'].disabled,false);
+});
+test('catalog refresh recovers initial choices and keeps newer unsaved model language and enablement',async()=>{
+ const h=harness(),s=settings(h);s.setup.catalog={profiles:[],models:[],workers:[]};s.setup.saved.profile_id=null;s.setup.saved.model_id=null;s.setup.saved.enabled=false;s.fields['[data-translation-setting-profile]'].value='';s.fields['[data-translation-setting-language]'].value='';s.fields['[data-translation-setting-enabled]'].checked=false;
+ h.ctx.respond=()=>response({profiles:[profile],models:[],workers:[],server_now_ms:100000});await h.ctx.translationRefreshSetup();
+ assert.equal(s.fields['[data-translation-setting-profile]'].value,P);assert.match(s.fields['[data-translation-setting-profile]'].innerHTML,/measured-model-fixture/);assert.match(s.fields['[data-translation-setting-language]'].innerHTML,/value="ja"/);assert.equal(s.setup.saved.profile_id,null);assert.equal(s.fields['[data-translation-setting-enabled]'].checked,false);assert.equal(h.calls.some(call=>call.init.method==='PUT'),false);
+ const other={...profile,profile_id:A,model_id:'Other model',input_languages:['ja']};s.fields['[data-translation-setting-profile]'].value=A;s.fields['[data-translation-setting-language]'].value='fr';s.fields['[data-translation-setting-enabled]'].checked=true;s.setup.edit++;
+ h.ctx.respond=()=>response({profiles:[other],models:[],workers:[],server_now_ms:100000});await h.ctx.translationRefreshSetup();assert.equal(s.fields['[data-translation-setting-profile]'].value,A);assert.equal(s.fields['[data-translation-setting-language]'].value,'fr');assert.match(s.fields['[data-translation-setting-language]'].innerHTML,/value="fr" selected/);assert.equal(s.fields['[data-translation-setting-enabled]'].checked,true);
+ s.fields['[data-translation-setting-profile]'].value='';await h.ctx.translationRefreshSetup();assert.equal(s.fields['[data-translation-setting-profile]'].value,'');
+});
+test('first-use model suggestion requires exactly one active profile and never replaces a saved profile',()=>{
+ const h=harness(),s=settings(h);s.setup.saved.profile_id=null;s.fields['[data-translation-setting-profile]'].value='';s.setup.catalog.profiles=[profile,{...profile,profile_id:A}];h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,'');
+ s.setup.choicesLoaded=false;s.setup.catalog.profiles=[{...profile,activation_state:'pending'}];h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,'');
+ s.setup.choicesLoaded=false;s.setup.saved.profile_id=B;s.fields['[data-translation-setting-profile]'].value=B;s.setup.catalog.profiles=[profile];h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,B);assert.match(s.fields['[data-translation-setting-profile]'].innerHTML,/Saved model/);
+});
+test('disabled translation worker explains missing packaged engine and cached model test state',()=>{
+ const h=harness(),s=settings(h);s.setup.catalog={profiles:[profile],models:[],workers:[{node_id:s.worker.value,label:'Server',current:true,eligible:true,observed_at_ms:99900,expires_at_ms:160000,engine:null,capabilities:[{model_id:profile.model_id,profile_id:P,status:'installed'}]}]};h.ctx.translationSetupEvidence(s.setup);
+ assert.match(s.fields['[data-translation-workers]'].innerHTML,/Downloaded · Test to finish/);assert.match(s.fields['[data-translation-workers]'].innerHTML,/packaged speech engine.*Update or repair/);assert.match(s.fields['[data-translation-workers]'].innerHTML,/ disabled/);
 });
 test('late Settings observations cannot overwrite a new account or newer model operation',async()=>{
  for(const change of [(h,s)=>h.ctx.AUTH_GENERATION++,(h,s)=>s.setup.operation={}]){const h=harness(),s=settings(h);s.fields['[data-translation-workers]'].innerHTML='New evidence';let finish;h.ctx.respond=()=>new Promise(resolve=>finish=resolve);const refresh=h.ctx.translationRefreshSetup();change(h,s);finish(response({version:1,profiles:[],workers:[],server_now_ms:100000}));await refresh;assert.equal(s.fields['[data-translation-workers]'].innerHTML,'New evidence');}
