@@ -181,6 +181,7 @@ pub enum CopyCleanupHoldReason {
     AbandonedTask,
     FailedPipeClose,
     FailedSourceClose,
+    ValidationRejected,
     FailedParserKill,
     UnboundRootIdentity,
     TerminalIdentityMismatch,

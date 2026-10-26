@@ -34,6 +34,9 @@ pub(super) struct CopyLaunch {
     pub(super) root_observed_committed: bool,
     pub(super) task: Option<GraphCopyTask>,
     pub(super) task_observation: Uuid,
+    pub(super) settlement_operation_id: Uuid,
+    #[cfg(test)]
+    pub(super) preflight_omit_owner_once: bool,
     pub(super) task_observed_committed: bool,
     // Successful delivery of the ORIGINAL parser latch, not parser/native
     // entry or cleanup evidence. Used only for same-task release replay.
@@ -266,6 +269,9 @@ impl NodeResourceRuntime {
             root_observed_committed: false,
             task: None,
             task_observation: Uuid::new_v4(),
+            settlement_operation_id: Uuid::new_v4(),
+            #[cfg(test)]
+            preflight_omit_owner_once: false,
             task_observed_committed: false,
             start_released: false,
             fixed_image: None,
@@ -542,6 +548,9 @@ impl NodeResourceRuntime {
                     Effect::SourceRoot(member),
                     deadline,
                 )?;
+                #[cfg(all(test, feature = "fixtures"))]
+                self.fixture_copy_stage(CopyStartFixtureStage::SourceRootObservationQueued)
+                    .await;
                 self.finish_transition(bundle_id, role).await?;
             }
         }
@@ -981,7 +990,9 @@ impl NodeResourceRuntime {
             let _ = source.copy_closed_fact(closure)?;
         }
         copy.terminal = Some(terminal);
-        copy.retryable_hold = None;
+        if copy.retryable_hold == Some(CopyCleanupHoldReason::FailedParserKill) {
+            copy.retryable_hold = None;
+        }
         Ok(terminal)
     }
 
@@ -1022,8 +1033,15 @@ impl NodeResourceRuntime {
 }
 
 pub(super) fn set_copy_hold(copy: &mut CopyLaunch, reason: CopyCleanupHoldReason) {
-    if reason == CopyCleanupHoldReason::FailedParserKill {
-        copy.retryable_hold = Some(reason);
+    if matches!(
+        reason,
+        CopyCleanupHoldReason::FailedParserKill | CopyCleanupHoldReason::ValidationRejected
+    ) {
+        if reason == CopyCleanupHoldReason::ValidationRejected
+            || copy.retryable_hold != Some(CopyCleanupHoldReason::ValidationRejected)
+        {
+            copy.retryable_hold = Some(reason);
+        }
     } else {
         copy.permanent_hold.get_or_insert(reason);
     }

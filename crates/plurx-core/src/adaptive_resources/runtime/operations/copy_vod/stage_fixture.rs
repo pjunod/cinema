@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::adaptive_resources::runtime) enum CopyStartFixtureStage {
     RootRegistered,
+    SourceRootObservationQueued,
     RootArmed,
     CleanupAcquisitionsResolved,
     CleanupNativeClosed,

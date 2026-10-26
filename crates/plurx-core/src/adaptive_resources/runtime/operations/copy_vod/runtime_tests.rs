@@ -1009,3 +1009,143 @@ async fn copy_never_root_witness_is_stored_before_cancellable_contended_bundle_h
     drop(graph);
     retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
 }
+
+// R3/R6 acknowledgment-unknown shape: the real original source observation
+// is queued; its worker may already have committed, but this waiter never
+// observed the reply. Explicit storage-Unknown is a separate unforced case.
+#[tokio::test]
+async fn copy_pending_original_source_observation_replays_before_any_parent_or_root_close() {
+    let root = tempfile::tempdir().expect("actual pending source-root fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(
+        &runtime,
+        &mut owner,
+        CopyStartFixtureStage::SourceRootObservationQueued,
+    )
+    .await;
+    {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        let copy = role.copy_vod.as_ref().expect("same original copy");
+        assert!(copy.entered && copy.task.is_none());
+        let root_member = copy.root_member;
+        let transition = role
+            .transition
+            .as_ref()
+            .expect("original source acquisition pending");
+        let Effect::SourceRoot(member) = transition.effect else {
+            panic!("same source-root command")
+        };
+        let operation = transition.operation.id;
+        let source = role
+            .sources
+            .get_mut(&member)
+            .expect("same original source cell");
+        let inherited = source
+            .inherited_source(root_member)
+            .expect("same still-open acknowledgment inputs");
+        assert_eq!(inherited.observation_id, operation);
+        assert!(!inherited.acknowledged && !source.parent_closed());
+    }
+    retire_with_actual_alias_barriers(runtime, owner, preparation, false).await;
+}
+
+// The FULL validator must reject a malformed local DTO before consuming ANY
+// original one-shot process/prefix witness. Restore only the fixture flag and
+// retry the SAME owner/settlement ID; no native handle or command is replaced.
+#[tokio::test]
+async fn copy_full_preflight_rejection_retains_original_witnesses_and_same_settlement_for_retry() {
+    let root = tempfile::tempdir().expect("actual copy preflight rejection fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::TaskObserved).await;
+    let charge = runtime.accounting().expect("same original R").used;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("original live app allocation");
+    let settlement = {
+        let mut bundle = preparation.state.lock().await;
+        let copy = bundle.roles[0]
+            .copy_vod
+            .as_mut()
+            .expect("same original copy");
+        copy.preflight_omit_owner_once = true;
+        copy.settlement_operation_id
+    };
+    assert!(!settlement.is_nil());
+    assert!(
+        owner.prepare_retirement(true, deadline()).await.is_err(),
+        "malformed constructed DTO bypassed full preflight before witness consumption"
+    );
+    let close = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role
+            .copy_vod
+            .as_ref()
+            .expect("same unconsumed original witnesses");
+        assert_eq!(copy.settlement_operation_id, settlement);
+        assert!(!copy.preflight_omit_owner_once);
+        assert!(copy.permanent_hold.is_none());
+        assert_eq!(
+            copy.retryable_hold,
+            Some(CopyCleanupHoldReason::ValidationRejected)
+        );
+        assert!(role.pending_finite_close.is_none() && role.transition.is_none() && !role.refunded);
+        let member = role
+            .bootstrap
+            .keys()
+            .next()
+            .copied()
+            .expect("same native-closed original prefix");
+        role.bootstrap
+            .get(&member)
+            .expect("original prefix")
+            .producer_close_fact(role.binding, member)
+            .expect("prefix proof still unissued after failed preflight");
+        assert!(role.sources.values().all(|source| source.parent_closed()));
+        copy.process_closure
+            .as_ref()
+            .expect("original process proof was not consumed by rejected DTO")
+            .close_operation_id()
+    };
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("full R after rejected DTO")
+            .used,
+        charge
+    );
+    assert!(
+        runtime.has_failed_copy_admission(),
+        "metadata rejection must keep the same original retry eligible"
+    );
+    assert_eq!(
+        runtime.copy_cleanup_holds().expect("actual metadata hold")[0].reason,
+        CopyCleanupHoldReason::ValidationRejected
+    );
+
+    let ticket = owner
+        .prepare_retirement(true, deadline())
+        .await
+        .expect("same original metadata restored, full validation then one-shot custody");
+    assert_eq!(
+        pending_command(&preparation, true).await,
+        settlement,
+        "preflight retry minted another logical settlement"
+    );
+    {
+        let bundle = preparation.state.lock().await;
+        let Mutation::SettleTyped(closed) = &bundle.roles[0]
+            .pending_finite_close
+            .as_ref()
+            .expect("same pending command")
+            .mutation
+        else {
+            panic!("original typed copy close")
+        };
+        assert!(closed.settlement.members.iter().any(|m|matches!(m,v2::MemberDisposition::Closed{fact:v2::ClosedFact::VodOutputTaskV1{join_operation_id,..},..} if join_operation_id.uuid()==close)),"preflight retry replaced original native close proof");
+    }
+    drop(ticket);
+    retire_with_retained_aliases(runtime, owner, preparation, true, output, application).await;
+}

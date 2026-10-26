@@ -688,6 +688,14 @@ impl NodeResourceRuntime {
         if let Some(budget) = &role.response_budget {
             budget.begin_close_if_empty()?;
         }
+        #[cfg(test)]
+        let omit_owner_once = std::mem::take(
+            &mut role
+                .copy_vod
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .preflight_omit_owner_once,
+        );
         let handle = role.handle.clone().ok_or(OperationError::State)?;
         let graph = role.sealed.as_ref().ok_or(OperationError::State)?;
         let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
@@ -801,7 +809,7 @@ impl NodeResourceRuntime {
                             };
                             v2::ClosedFact::LegacyV1 { fact: crate::resource_custody::ClosedMemberFact {
                                 member_id: planned.member_id, adapter: planned.adapter.clone(), adapter_version: planned.adapter_version,
-                                domain: planned.domain.clone(), object_identity: format!("{}:{}",identity.pid,identity.start_marker),
+                                domain: planned.domain.clone(), object_identity: copy_process_identity_text(identity.pid,identity.start_marker)?,
                                 evidence: "original fixed copy root waited; original pipes, source parents and Child/ChildJob closed".into(),
                             }}
                         }
@@ -887,7 +895,12 @@ impl NodeResourceRuntime {
             };
             facts.push(v2::MemberDisposition::Closed { member_id, fact });
         }
-        let operation_id = v2::Id::new(Uuid::new_v4())?;
+        // Retire the prebuild scratch-plan clone before allocating the five
+        // validation envelopes. The admitted workspace covers the largest
+        // simultaneous pair of plan copies, not a hidden third clone.
+        let has_scratch_close = scratch_close.is_some();
+        drop(scratch_close);
+        let operation_id = v2::Id::new(copy.settlement_operation_id)?;
         let settlement = v2::Settlement {
             version: 2,
             owner_id: v2::Id::new(self.owner.owner_id)?,
@@ -895,6 +908,132 @@ impl NodeResourceRuntime {
             operation_id,
             members: facts,
         };
+        #[cfg(test)]
+        let settlement = {
+            let mut settlement = settlement;
+            if omit_owner_once {
+                // Malform ONLY this locally assembled DTO, after actual native
+                // closure. Original plans, observations and witnesses are intact.
+                let owners = settlement
+                    .members
+                    .iter_mut()
+                    .find_map(|member| match member {
+                        v2::MemberDisposition::Closed {
+                            fact: v2::ClosedFact::VodOutputTaskV1 { owners, .. },
+                            ..
+                        } => Some(owners),
+                        _ => None,
+                    })
+                    .ok_or(OperationError::State)?;
+                owners.pop().ok_or(OperationError::State)?;
+            }
+            settlement
+        };
+        let preflight = (|| -> Result<(), OperationError> {
+            // Snapshot only the SAME retained acknowledged metadata, never a
+            // Manifest reconstruction or native capability. Its exact known
+            // requested workspace was admitted by known_copy_memory before R.
+            let mut envelopes = Vec::with_capacity(planned.len());
+            for plan in planned {
+                let observed = match plan {
+                    v2::MemberPlan::SourceV1 { .. } => role
+                        .sources
+                        .get(&plan.member_id())
+                        .map(|source| source.copy_observed_for_settlement(plan))
+                        .transpose()?
+                        .flatten()
+                        .map(|source| v2::Observed::SourceV1 {
+                            source: source.clone(),
+                        }),
+                    v2::MemberPlan::LegacyV1 { planned } => match evidence.root() {
+                        None => None,
+                        Some(root) if copy.root_observed_committed => {
+                            let Metric::Known(identity) = root.process else {
+                                return Err(OperationError::State);
+                            };
+                            Some(v2::Observed::LegacyV1 {
+                                identity: crate::resource_custody::ObservedIdentity {
+                                    version: 1,
+                                    member_id: planned.member_id,
+                                    adapter: planned.adapter.clone(),
+                                    adapter_version: planned.adapter_version,
+                                    domain: planned.domain.clone(),
+                                    object_identity: copy_process_identity_text(
+                                        identity.pid,
+                                        identity.start_marker,
+                                    )?,
+                                    process: Some(crate::resource_custody::ProcessIdentity {
+                                        version: 1,
+                                        pid: identity.pid,
+                                        creation_marker: Some(identity.start_marker),
+                                        domain: planned.domain.clone(),
+                                    }),
+                                },
+                            })
+                        }
+                        _ => return Err(OperationError::State),
+                    },
+                    v2::MemberPlan::VodOutputTaskV1 { task, .. }
+                        if copy.task_observed_committed =>
+                    {
+                        Some(v2::Observed::VodOutputTaskV1 { task: task.clone() })
+                    }
+                    v2::MemberPlan::VodOutputTaskV1 { .. } => None,
+                    v2::MemberPlan::ScratchAssetsV3 { .. } => role
+                        .bootstrap
+                        .get(&output_member)
+                        .map(|member| {
+                            member.fold().ok_or(OperationError::State).map(|fold| {
+                                v2::Observed::ScratchAssetsV3 {
+                                    state: fold.state().clone(),
+                                }
+                            })
+                        })
+                        .transpose()?,
+                    _ => return Err(OperationError::State),
+                };
+                envelopes.push(v2::Envelope {
+                    version: 2,
+                    planned: plan.clone(),
+                    observed,
+                });
+            }
+            // Length-counting FIRST bounds each serializer Vec, including the
+            // aggregate settlement. The writer allocates no buffer; UUID scalar
+            // conversion storage is separately admitted. Run the UNCHANGED full
+            // validators while every one-shot proof remains retained.
+            for envelope in &envelopes {
+                count_copy_validation_json(envelope)?;
+            }
+            count_copy_validation_json(&settlement)?;
+            for envelope in &envelopes {
+                v2::validate_envelope_members(planned, envelope)?;
+            }
+            v2::validate_settlement_scope(
+                v2::Id::new(self.owner.owner_id)?,
+                v2::Id::new(handle.graph_id())?,
+                planned.len(),
+                &envelopes,
+                &settlement,
+            )?;
+            drop(envelopes);
+            Ok(())
+        })();
+        if let Err(error) = preflight {
+            // These are metadata refusals, not lost native witnesses. Preserve
+            // the SAME proofs, full R and logical operation ID for retry. An
+            // immutable-invalid production DTO can remain held/retried; this
+            // is visible policy, not a new recovery or native-close authority.
+            super::copy_vod::set_copy_hold(
+                role.copy_vod.as_mut().ok_or(OperationError::State)?,
+                CopyCleanupHoldReason::ValidationRejected,
+            );
+            return Err(error);
+        }
+        let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
+        if copy.retryable_hold == Some(CopyCleanupHoldReason::ValidationRejected) {
+            copy.retryable_hold = None;
+        }
         let key = TransitionKey {
             handle,
             operation_id: operation_id.uuid(),
@@ -902,7 +1041,7 @@ impl NodeResourceRuntime {
         };
         // Stable under the same guard: no await/fallible DTO construction after
         // consuming the original one-shot native and prefix witnesses.
-        let output = if scratch_close.is_some() {
+        let output = if has_scratch_close {
             Some(
                 role.bootstrap
                     .get_mut(&output_member)
@@ -951,4 +1090,33 @@ impl NodeResourceRuntime {
         });
         Ok(())
     }
+}
+
+fn copy_process_identity_text(pid: u32, start_marker: u64) -> Result<String, OperationError> {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(31);
+    write!(&mut text, "{pid}:{start_marker}").map_err(|_| OperationError::State)?;
+    Ok(text)
+}
+fn count_copy_validation_json(value: &impl serde::Serialize) -> Result<(), OperationError> {
+    struct CountWriter {
+        bytes: usize,
+    }
+    impl std::io::Write for CountWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let next = self
+                .bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+            if next>crate::adaptive_resources::runtime::copy_vod::cleanup_memory::MAX_VALIDATION_JSON_BYTES {
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+            }
+            self.bytes = next;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(CountWriter { bytes: 0 }, value).map_err(|_| OperationError::State)
 }
