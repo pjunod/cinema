@@ -297,16 +297,18 @@ async fn output_command_environment(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("probe stderr was not piped"))?;
-    let mut stdout = Some(tokio::spawn(drain_capped_owned(
-        stdout,
-        max_output_bytes,
-        original_keeper(),
-    )));
-    let mut stderr = Some(tokio::spawn(drain_capped_owned(
-        stderr,
-        max_output_bytes,
-        original_keeper(),
-    )));
+    // Construct each whole reader/keeper owner synchronously, before spawn.
+    // Even a task aborted before its first poll drops one OriginalPipe value.
+    let stdout = OriginalPipe {
+        reader: stdout,
+        keeper: original_keeper(),
+    };
+    let stderr = OriginalPipe {
+        reader: stderr,
+        keeper: original_keeper(),
+    };
+    let mut stdout = Some(tokio::spawn(drain_capped_owned(stdout, max_output_bytes)));
+    let mut stderr = Some(tokio::spawn(drain_capped_owned(stderr, max_output_bytes)));
 
     let completed = tokio::select! {
         biased;
@@ -353,11 +355,9 @@ struct OriginalPipe<R> {
 }
 
 async fn drain_capped_owned<R: AsyncRead + Unpin>(
-    reader: R,
+    mut original: OriginalPipe<R>,
     cap: usize,
-    keeper: Option<Arc<dyn OriginalWorkKeeper>>,
 ) -> io::Result<Vec<u8>> {
-    let mut original = OriginalPipe { reader, keeper };
     let result = drain_capped(&mut original.reader, cap).await;
     if result.is_err() {
         retain_uncertainty(&original.keeper, OriginalWorkUncertainty::PipeDrainFailed);
@@ -424,6 +424,55 @@ mod tests {
     use super::*;
 
     const TEST_WORK: super::super::ChildWork = super::super::ChildWork::background("bounded test");
+
+    #[test]
+    fn unpolled_pipe_future_drops_reader_before_original_keeper() {
+        struct Reader {
+            drops: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+        impl AsyncRead for Reader {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buffer: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                panic!("the original drain future must never be polled");
+            }
+        }
+        impl Drop for Reader {
+            fn drop(&mut self) {
+                self.drops.lock().expect("reader drop trace").push("reader");
+            }
+        }
+        struct Keeper {
+            drops: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        }
+        impl OriginalWorkKeeper for Keeper {
+            fn retain_uncertainty(&self, _reason: OriginalWorkUncertainty) {
+                panic!("an unentered pipe cannot invent native uncertainty");
+            }
+        }
+        impl Drop for Keeper {
+            fn drop(&mut self) {
+                self.drops.lock().expect("keeper drop trace").push("keeper");
+            }
+        }
+        let drops = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let original = OriginalPipe {
+            reader: Reader {
+                drops: Arc::clone(&drops),
+            },
+            keeper: Some(Arc::new(Keeper {
+                drops: Arc::clone(&drops),
+            })),
+        };
+        let unpolled = drain_capped_owned(original, 8);
+        drop(unpolled);
+        assert_eq!(
+            *drops.lock().expect("actual drop order"),
+            ["reader", "keeper"]
+        );
+    }
 
     #[tokio::test]
     async fn excessive_output_is_drained_and_retained_at_the_cap() {
