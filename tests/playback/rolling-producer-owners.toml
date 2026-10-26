@@ -4868,7 +4868,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # observation deadlines grants reap, publication or admission-release evidence.
 # Frame-MDCV repair: +1 awaited creation-budget timeout around held-source
 # metadata resolution; expiry refuses preparation and creates no recovery owner.
-expected_occurrences = 1863
+# HTTPS font-attestation split: +1 test-only 60-second timeout in
+# fontenv_tests::a_capture_whose_frozen_faces_diverge_is_refused. The original
+# corruption bound remains with the renamed font-link replacement case. The
+# new bound awaits capture and owned selection mutation together; expiry fails
+# the test and drops the capture/directory guard, never proving settlement or
+# introducing a spawned task, production timer, or recovery owner.
+expected_occurrences = 1864
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
