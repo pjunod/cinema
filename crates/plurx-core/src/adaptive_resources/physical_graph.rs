@@ -112,6 +112,8 @@ struct Members {
     finite_process_closed: bool,
     #[cfg(target_os = "linux")]
     copy_process_closed: bool,
+    #[cfg(target_os = "linux")]
+    copy_hold: Option<copy_vod::CopyTaskHoldReason>,
     roots: Vec<Root>,
     writers: Vec<Writer>,
     joined_writers: usize,
@@ -273,6 +275,8 @@ impl ResourceReservation {
                 finite_process_closed: false,
                 #[cfg(target_os = "linux")]
                 copy_process_closed: false,
+                #[cfg(target_os = "linux")]
+                copy_hold: None,
                 roots: Vec::new(),
                 writers: Vec::new(),
                 joined_writers: 0,
