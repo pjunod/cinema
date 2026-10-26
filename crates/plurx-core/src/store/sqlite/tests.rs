@@ -856,9 +856,10 @@ async fn v6_rebuild_preserves_everything() {
     // authority and outer-ingress custody; v106-v110 append Cinema receiver
     // credentials, consent, revision fencing, login rebind and cleanup guards.
     // v111 appends managed subtitles; v112 appends progressive translation;
-    // v113 adds ratings/lists and v114 adds source-revision title acquisition.
+    // v113 adds ratings/lists and v114 adds source-revision title acquisition;
+    // v115 adds one-time playback handoff codes and file-scoped tokens.
     assert_eq!(
-        version, 114,
+        version, 115,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );
