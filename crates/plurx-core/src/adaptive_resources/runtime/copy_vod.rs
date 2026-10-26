@@ -14,8 +14,8 @@ mod sink;
 
 pub use command::CopyPipeCommand;
 pub use owner::{
-    CopyCloseTicket, CopyFile, CopyOutput, CopyProductionResult, CopyServedRevision, CopyVodOwner,
-    COPY_VOD_MAX_SEGMENT_BYTES,
+    CopyCleanupHoldDiagnostic, CopyCleanupHoldReason, CopyCloseTicket, CopyFile, CopyOutput,
+    CopyProductionResult, CopyServedRevision, CopyVodOwner, COPY_VOD_MAX_SEGMENT_BYTES,
 };
 pub(in crate::adaptive_resources) use sink::CopySink;
 

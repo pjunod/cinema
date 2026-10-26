@@ -89,6 +89,7 @@ fn known_copy_memory(
             )
         })
         .and_then(|n| n.checked_add(std::mem::size_of::<CopyWork>()))
+        .and_then(|n| n.checked_add(NodeResourceRuntime::copy_launch_structural_bytes()))
         .and_then(|n| n.checked_add(request.rendition_id.capacity()))
         .and_then(|n| n.checked_add(copy_task_structural_bytes()?))
         .ok_or_else(invalid)?;
@@ -161,12 +162,60 @@ pub struct CopyVodOwner {
     _app_guard: Arc<super::super::finite_lifetime::FiniteAppGuard>,
 }
 
+/// Reason why the same copy R remains held for reconciliation.
+/// These diagnostics grant no close or restart-settlement authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyCleanupHoldReason {
+    UncertainLaunch,
+    PoisonedTerminal,
+    LostTaskTerminal,
+    AbandonedTask,
+    FailedPipeClose,
+    FailedSourceClose,
+    FailedParserKill,
+    UnboundRootIdentity,
+    TerminalIdentityMismatch,
+}
+
+/// Snapshot of an actual original held reservation. Missing/busy diagnostics
+/// are represented by None from the accessor, never an invented zero cost.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CopyCleanupHoldDiagnostic {
+    pub preparation_id: Uuid,
+    pub graph_id: Option<Uuid>,
+    pub reason: CopyCleanupHoldReason,
+    pub held_resources: crate::adaptive_resources::ResourceVector,
+}
+impl NodeResourceRuntime {
+    pub fn copy_cleanup_holds(&self) -> Option<Vec<CopyCleanupHoldDiagnostic>> {
+        self.copy_cleanup_holds_inner()
+    }
+}
+
 /// Original registered parser result for rolling actor classification only.
 /// It does not imply root exit, pipe closure, scratch cleanup or a refund.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CopyProductionResult {
     pub completed: bool,
     pub segments: u64,
+}
+impl CopyProductionResult {
+    fn from_terminal(
+        terminal: crate::adaptive_resources::physical_graph::copy_vod::CopyTaskTerminal,
+    ) -> Self {
+        use crate::adaptive_resources::physical_graph::copy_vod::CopyTaskTerminal;
+        match terminal {
+            CopyTaskTerminal::NeverEntered => Self {
+                completed: false,
+                segments: 0,
+            },
+            CopyTaskTerminal::Entered(summary) => Self {
+                completed: summary.completed,
+                segments: summary.segments,
+            },
+        }
+    }
 }
 
 /// A compact original-operation selector. Native and typed settlement facts
@@ -279,10 +328,7 @@ impl CopyOutput {
             .wait_copy_parser_result(&self.preparation, 0, deadline)
             .await
             .map_err(FiniteVodError::from)?;
-        Ok(CopyProductionResult {
-            completed: summary.completed,
-            segments: summary.segments,
-        })
+        Ok(CopyProductionResult::from_terminal(summary))
     }
     /// A scratch object can exist before the bounded copy sink commits the
     /// playlist that names it. Only a journal-known playlist revision makes
@@ -625,10 +671,7 @@ impl CopyVodOwner {
             .join_copy_producer(&self.preparation, 0, abort)
             .await
             .map_err(FiniteVodError::from)?;
-        Ok(CopyProductionResult {
-            completed: summary.completed,
-            segments: summary.segments,
-        })
+        Ok(CopyProductionResult::from_terminal(summary))
     }
     pub fn output(&self) -> CopyOutput {
         CopyOutput {
@@ -699,10 +742,7 @@ impl CopyVodOwner {
             .wait_copy_parser_result(&self.preparation, 0, deadline)
             .await
             .map_err(FiniteVodError::from)?;
-        Ok(CopyProductionResult {
-            completed: summary.completed,
-            segments: summary.segments,
-        })
+        Ok(CopyProductionResult::from_terminal(summary))
     }
 
     /// Stop the original root if requested, join parser/root/source jobs, and
@@ -1312,6 +1352,21 @@ impl NodeResourceRuntime {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "fixtures"))]
+impl NodeResourceRuntime {
+    pub(in crate::adaptive_resources::runtime) async fn fixture_actual_copy_request(
+        root: &Path,
+        rejected: bool,
+    ) -> (Arc<NodeResourceRuntime>, CopyVodRequest) {
+        cleanup_tests::actual_request(root, rejected).await
+    }
+    pub(in crate::adaptive_resources::runtime) fn fixture_copy_original_preparation(
+        owner: &CopyVodOwner,
+    ) -> OwnedPreparation {
+        owner.preparation.clone()
     }
 }
 
