@@ -232,7 +232,7 @@ impl SourceViewerActor {
         deadline: Instant,
     ) -> Result<(SourceDirectStart, SourceResponseGuard), SourceWorkerError> {
         let start = self.wait_direct_ready(deadline).await?;
-        let direct = self.0.direct_file().ok_or(SourceWorkerError::Unsupported)?;
+        let direct = self.0.direct_file().ok_or(SourceWorkerError::Unavailable)?;
         let guard = self.reserve_direct_body(&start)?;
         #[cfg(not(target_os = "linux"))]
         let mut guard = guard;
@@ -300,7 +300,10 @@ impl SourceViewerActor {
         if Instant::now() >= deadline {
             return Err(SourceWorkerError::Deadline);
         }
-        let direct = self.0.direct_file().ok_or(SourceWorkerError::Unsupported)?;
+        if !self.0.direct {
+            return Err(SourceWorkerError::Unsupported);
+        }
+        let direct = self.0.direct_file().ok_or(SourceWorkerError::Unavailable)?;
         let start = self
             .0
             .state
