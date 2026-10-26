@@ -984,3 +984,6 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
         .await
         .contains_key(&key));
 }
+
+#[path = "finite_software/actor_application.rs"]
+mod actor_application;
