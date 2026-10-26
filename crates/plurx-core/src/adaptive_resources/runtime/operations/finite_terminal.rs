@@ -246,6 +246,11 @@ impl NodeResourceRuntime {
 /// The existing no-root receipt is kept, not inferred from these empty
 /// containers. Its original known-unaccepted preparation is checked separately.
 fn finite_unaccepted_payload_closed(role: &OwnedRole) -> bool {
+    #[cfg(target_os = "linux")]
+    if role.copy_vod.is_some() || role.planning_tasks.is_some() || role.planning_metadata.is_some()
+    {
+        return false;
+    }
     role.phase == Phase::Prepared
         && role.handle.is_none()
         && role.transition.is_none()

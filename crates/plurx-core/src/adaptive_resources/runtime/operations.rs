@@ -933,6 +933,38 @@ impl NodeResourceRuntime {
         }
     }
 
+    /// Copy cleanup preserves its original prepare, without new-admission
+    /// eligibility or generic application refunds. `false` retains the exact
+    /// known-unaccepted result for copy-specific no-entry disposal.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) async fn acknowledge_copy_preparation_for_cleanup(
+        &self,
+        owner: &OwnedPreparation,
+    ) -> Result<bool, OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if bundle.roles.len() != 1
+            || bundle.roles[0].finite_app.is_none()
+            || bundle.roles[0].finite_vod.is_some()
+            || (bundle.roles[0].copy_vod.is_none()
+                && bundle.roles[0].receipt.is_none()
+                && bundle.roles[0].pending_finite_close.is_none()
+                && bundle.roles[0].transition.is_none())
+        {
+            return Err(OperationError::State);
+        }
+        match self.acknowledge_preparation_bundle(&mut bundle).await {
+            Ok(()) => Ok(true),
+            Err(OperationError::Custody(error))
+                if finite_prepare_definitely_unaccepted(&bundle)
+                    && error.certainty != CommitCertainty::Unknown =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Resolve/acknowledge the original accepted prepare for cleanup only.
     /// No eligibility check, generic cancellation or native launch is granted.
     #[cfg(target_os = "linux")]

@@ -173,10 +173,14 @@ impl CopyCloseTicket {
             }
             self.app_state = None;
         }
-        self.runtime
-            .finish_finite_close(&mut self.preparation, 0, deadline)
-            .await
-            .map_err(Into::into)
+        tokio::time::timeout_at(
+            deadline.into(),
+            self.runtime
+                .finish_finite_close(&mut self.preparation, 0, deadline),
+        )
+        .await
+        .map_err(|_| super::super::operations::OperationError::Deadline)?
+        .map_err(Into::into)
     }
 }
 
@@ -686,9 +690,35 @@ impl CopyVodOwner {
         abort: bool,
         deadline: Instant,
     ) -> Result<CopyCloseTicket, FiniteVodError> {
-        self.runtime
-            .prepare_copy_close(&self.preparation, 0, self.scratch_member, abort, deadline)
-            .await?;
+        let accepted = tokio::time::timeout_at(
+            deadline.into(),
+            self.runtime
+                .acknowledge_copy_preparation_for_cleanup(&self.preparation),
+        )
+        .await
+        .map_err(|_| super::super::operations::OperationError::Deadline)??;
+        if accepted {
+            tokio::time::timeout_at(
+                deadline.into(),
+                self.runtime.prepare_copy_close(
+                    &self.preparation,
+                    0,
+                    self.scratch_member,
+                    abort,
+                    deadline,
+                ),
+            )
+            .await
+            .map_err(|_| super::super::operations::OperationError::Deadline)??;
+        } else {
+            tokio::time::timeout_at(
+                deadline.into(),
+                self.runtime
+                    .prepare_unaccepted_copy_close(&self.preparation),
+            )
+            .await
+            .map_err(|_| super::super::operations::OperationError::Deadline)??;
+        }
         Ok(CopyCloseTicket {
             runtime: Arc::clone(&self.runtime),
             preparation: Some(self.preparation.clone()),
@@ -1201,14 +1231,46 @@ impl NodeResourceRuntime {
                 // cancellation or an unknown journal result keeps this SAME
                 // original R available to the existing supervisor cadence.
                 self.mark_copy_admission_failed(&preparation, 0)?;
-                self.resolve_preparation(&preparation, deadline).await?;
-                self.prepare_copy_close(&preparation, 0, scratch_member.uuid(), true, deadline)
-                    .await?;
+                let accepted = tokio::time::timeout_at(
+                    deadline.into(),
+                    self.acknowledge_copy_preparation_for_cleanup(&preparation),
+                )
+                .await
+                .map_err(|_| super::super::operations::OperationError::Deadline)??;
+                if accepted {
+                    tokio::time::timeout_at(
+                        deadline.into(),
+                        self.prepare_copy_close(
+                            &preparation,
+                            0,
+                            scratch_member.uuid(),
+                            true,
+                            deadline,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| super::super::operations::OperationError::Deadline)??;
+                } else {
+                    tokio::time::timeout_at(
+                        deadline.into(),
+                        self.prepare_unaccepted_copy_close(&preparation),
+                    )
+                    .await
+                    .map_err(|_| super::super::operations::OperationError::Deadline)??;
+                }
                 let mut selection = Some(preparation);
-                self.finish_finite_close(&mut selection, 0, deadline)
-                    .await?;
+                tokio::time::timeout_at(
+                    deadline.into(),
+                    self.finish_finite_close(&mut selection, 0, deadline),
+                )
+                .await
+                .map_err(|_| super::super::operations::OperationError::Deadline)??;
                 Err(error)
             }
         }
     }
 }
+
+#[cfg(all(test, feature = "fixtures"))]
+#[path = "tests/cleanup.rs"]
+mod cleanup_tests;

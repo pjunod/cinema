@@ -54,69 +54,224 @@ impl NodeResourceRuntime {
             if Instant::now() >= deadline {
                 break;
             }
-            let selected = {
-                let bundle = preparation.state.lock().await;
-                bundle.roles.len() == 1
-                    && !bundle.roles[0].refunded
-                    && (bundle.roles[0].copy_admission_failed
-                        || bundle.roles[0].copy_vod.as_ref().is_some_and(|copy| {
-                            copy.cleanup_requested
-                                .load(std::sync::atomic::Ordering::Acquire)
-                        }))
-            };
+            let selected =
+                {
+                    let bundle =
+                        match tokio::time::timeout_at(deadline.into(), preparation.state.lock())
+                            .await
+                        {
+                            Ok(bundle) => bundle,
+                            Err(_) => break,
+                        };
+                    bundle.roles.len() == 1
+                        && !bundle.roles[0].refunded
+                        && (bundle.roles[0].copy_admission_failed
+                            || bundle.roles[0].copy_vod.as_ref().is_some_and(|copy| {
+                                copy.cleanup_requested
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                            }))
+                };
             if !selected {
                 continue;
             }
-            if self
-                .resolve_preparation(&preparation, deadline)
-                .await
-                .is_err()
+            let accepted = match tokio::time::timeout_at(
+                deadline.into(),
+                self.acknowledge_copy_preparation_for_cleanup(&preparation),
+            )
+            .await
             {
+                Ok(Ok(accepted)) => accepted,
+                _ => continue,
+            };
+            if !accepted {
+                if !matches!(
+                    tokio::time::timeout_at(
+                        deadline.into(),
+                        self.prepare_unaccepted_copy_close(&preparation)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    continue;
+                }
+                let mut selection = Some(preparation);
+                if matches!(
+                    tokio::time::timeout_at(
+                        deadline.into(),
+                        self.finish_finite_close(&mut selection, 0, deadline)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    completed += 1;
+                }
                 continue;
             }
-            let (pending_close, output_member) = {
-                let bundle = preparation.state.lock().await;
-                let role = &bundle.roles[0];
-                (
-                    role.pending_finite_close.is_some()
-                        || role
-                            .transition
-                            .as_ref()
-                            .is_some_and(|t| t.effect == Effect::Settle),
-                    role.copy_vod.as_ref().and_then(|_| {
-                        role.typed_members.as_ref().and_then(|members| {
-                            members.iter().find_map(|member| match member {
-                                v2::MemberPlan::ScratchAssetsV3 { slot, .. } => {
-                                    Some(slot.member_id.uuid())
-                                }
-                                _ => None,
+            let (pending_close, output_member) =
+                {
+                    let bundle =
+                        match tokio::time::timeout_at(deadline.into(), preparation.state.lock())
+                            .await
+                        {
+                            Ok(bundle) => bundle,
+                            Err(_) => break,
+                        };
+                    let role = &bundle.roles[0];
+                    (
+                        role.pending_finite_close.is_some()
+                            || role
+                                .transition
+                                .as_ref()
+                                .is_some_and(|t| t.effect == Effect::Settle),
+                        role.copy_vod.as_ref().and_then(|_| {
+                            role.typed_members.as_ref().and_then(|members| {
+                                members.iter().find_map(|member| match member {
+                                    v2::MemberPlan::ScratchAssetsV3 { slot, .. } => {
+                                        Some(slot.member_id.uuid())
+                                    }
+                                    _ => None,
+                                })
                             })
-                        })
-                    }),
-                )
-            };
+                        }),
+                    )
+                };
             if !pending_close {
                 let Some(output_member) = output_member else {
                     continue;
                 };
-                if self
-                    .prepare_copy_close(&preparation, 0, output_member, true, deadline)
-                    .await
-                    .is_err()
-                {
+                if !matches!(
+                    tokio::time::timeout_at(
+                        deadline.into(),
+                        self.prepare_copy_close(&preparation, 0, output_member, true, deadline)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
                     continue;
                 }
             }
             let mut selection = Some(preparation);
-            if self
-                .finish_finite_close(&mut selection, 0, deadline)
-                .await
-                .is_ok()
-            {
+            if matches!(
+                tokio::time::timeout_at(
+                    deadline.into(),
+                    self.finish_finite_close(&mut selection, 0, deadline)
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
                 completed += 1;
             }
         }
         Ok(completed)
+    }
+
+    /// Keep a definitely unaccepted original copy prepare behind its own
+    /// graph absence witness and application fence. This uses the existing
+    /// CopyCancellationClosure, never a software FiniteLaunch or writer fact.
+    pub(in crate::adaptive_resources::runtime) async fn prepare_unaccepted_copy_close(
+        &self,
+        owner: &OwnedPreparation,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if !finite_prepare_definitely_unaccepted(&bundle) || bundle.roles.len() != 1 {
+            return Err(OperationError::State);
+        }
+        let role = &mut bundle.roles[0];
+        if role.refunded
+            || role.finite_vod.is_some()
+            || role.handle.is_some()
+            || role.transition.is_some()
+            || role.pending_finite_close.is_some()
+            || !role.armed.is_empty()
+            || !role.invoked.is_empty()
+            || !role.sources.is_empty()
+            || !role.bootstrap.is_empty()
+            || !role.scratch.is_empty()
+            || !role.roots.is_empty()
+            || !role.drains.is_empty()
+            || !role.closed_drains.is_empty()
+            || role.retirement.is_some()
+            || !role.finite_app.as_ref().is_some_and(|state| state.seal())
+        {
+            return Err(OperationError::State);
+        }
+        // Retain maintenance selection even after the original CopyLaunch
+        // drops its cleanup_requested Arc and a borrowed final waiter drops.
+        role.copy_admission_failed = true;
+        if role.receipt.is_some() && role.copy_vod.is_none() {
+            return Ok(());
+        }
+        let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+        if copy.entered
+            || copy.task.is_some()
+            || copy.task_observed_committed
+            || copy.fixed_image.is_some()
+            || copy.process_closure.is_some()
+            || copy.terminal.is_some()
+        {
+            return Err(OperationError::State);
+        }
+        let (root_member, task_member, acquisition_id) =
+            (copy.root_member, copy.task_member, copy.acquisition_id);
+        self.close_retained_entry(role.binding)?;
+        if let Some(graph) = role.graph.take() {
+            role.sealed = Some(graph.seal());
+        }
+        if role
+            .copy_vod
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .never_root_closure
+            .is_none()
+        {
+            let absence = role
+                .sealed
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .try_finite_vod_never_root_closure(root_member, task_member, acquisition_id)
+                .await?;
+            role.copy_vod
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .never_root_closure = Some(absence);
+        }
+        let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
+        let absent = copy
+            .never_root_closure
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        if role.receipt.is_some()
+            || !absent.matches(role.sealed.as_ref().ok_or(OperationError::State)?)
+            || absent.root_member() != copy.root_member
+            || absent.task_member() != copy.task_member
+            || absent.acquisition_id() != copy.acquisition_id
+        {
+            return Err(OperationError::State);
+        }
+        if let Some(budget) = role.response_budget.as_ref() {
+            budget.begin_close_if_empty()?;
+        }
+        let receipt = PhysicalCloseReceipt::from_copy_cancel(CopyCancellationClosure {
+            binding: role.binding,
+            _process: CopyCancelProcess::NeverRoot {
+                _proof: copy
+                    .never_root_closure
+                    .take()
+                    .expect("original validated copy graph absence"),
+            },
+            _output: None,
+        });
+        role.receipt = Some(receipt);
+        // Drop the same parser/sink/back-reference payload while R remains
+        // charged. The actual external application aliases still block final
+        // rich-bundle destruction; no journal phase is manufactured.
+        role.copy_vod = None;
+        role.response_budget = None;
+        role.members.clear();
+        role.typed_members = None;
+        role.sealed = None;
+        Ok(())
     }
 
     /// Positively close a copy role whose admitted constructor failed before
@@ -358,8 +513,11 @@ impl NodeResourceRuntime {
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
         let never_root = {
-            let bundle = owner.state.lock().await;
-            let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+            let mut bundle = owner.state.lock().await;
+            let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+            // Same-role maintenance must survive CopyLaunch removal and lost
+            // direct close tickets while real response/app aliases drain.
+            role.copy_admission_failed = true;
             role.copy_vod.as_ref().is_some_and(|copy| !copy.entered) && role.roots.is_empty()
         };
         if never_root {
