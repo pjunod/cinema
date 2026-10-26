@@ -2283,6 +2283,7 @@ fn rollout_verdict(
         };
         status.media.local_active_sessions == 0
             && status.media.drained
+            && status.media.owned_work.is_empty()
             && known_leader != Some(row.membership.raft_id)
             && status.serving.ready
             && wal_is_healthy(&status.wal)

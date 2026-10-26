@@ -2082,6 +2082,76 @@ fn every_aggregator_selects_the_same_roster_order_candidate() {
 }
 
 #[test]
+fn older_peer_missing_owned_inventory_cannot_be_a_restart_candidate() {
+    let membership = test_membership("node-1", 3);
+    let mut observations = test_observations(&membership);
+    let mut older_wire = serde_json::to_value(observations[1].status.take().expect("peer status"))
+        .expect("older wire fixture");
+    older_wire
+        .get_mut("media")
+        .expect("media")
+        .as_object_mut()
+        .expect("media object")
+        .remove("owned_work");
+    let older: ClusterNodeOperationsStatus = serde_json::from_value(older_wire)
+        .expect("older status remains readable with Unknown inventory");
+    assert!(
+        older.media.drained,
+        "older peer still claims its public maps are drained"
+    );
+    assert_eq!(older.media.owned_work, OwnedWorkInventory::default());
+    observations[1].status = Some(older);
+    let verdict = rollout_verdict(&membership, &observations);
+    assert!(verdict.safe_to_restart_one);
+    assert_eq!(
+        verdict.candidate_node_id.as_deref(),
+        Some("node-3"),
+        "skip the older Unknown inventory rather than trust drained=true"
+    );
+
+    observations[2]
+        .status
+        .as_mut()
+        .expect("second follower")
+        .media
+        .owned_work = OwnedWorkInventory::Unknown {
+        reason: OwnedWorkUnknown::InventoryBusy,
+    };
+    let verdict = rollout_verdict(&membership, &observations);
+    assert!(!verdict.safe_to_restart_one);
+    assert!(verdict.candidate_node_id.is_none());
+
+    observations[1]
+        .status
+        .as_mut()
+        .expect("first follower")
+        .media
+        .owned_work = OwnedWorkInventory::Known {
+        counts: OwnedWorkCounts {
+            planning_metadata_roles: 1,
+            ..OwnedWorkCounts::default()
+        },
+    };
+    assert!(
+        rollout_verdict(&membership, &observations)
+            .candidate_node_id
+            .is_none(),
+        "Known nonempty also contradicts a stale drained=true claim"
+    );
+    observations[1]
+        .status
+        .as_mut()
+        .expect("first follower")
+        .media
+        .owned_work = OwnedWorkInventory::Known {
+        counts: OwnedWorkCounts::default(),
+    };
+    let verdict = rollout_verdict(&membership, &observations);
+    assert!(verdict.safe_to_restart_one);
+    assert_eq!(verdict.candidate_node_id.as_deref(), Some("node-2"));
+}
+
+#[test]
 fn an_active_restart_preparation_blocks_a_second_restart() {
     let membership = test_membership("node-1", 3);
     let mut observations = test_observations(&membership);
