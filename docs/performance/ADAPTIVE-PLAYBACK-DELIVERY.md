@@ -14,9 +14,10 @@ match core's existing48MiB cap; its finalized quota is reserved before R and
 follows the same Session/native close ticket until actual actor/app/native
 retirement. Copy has no R→S transfer. Generic errors retain charge; only exact
 before-R provenance refunds an unentered quota grant. All session initializers
-now compile with that field. Copy native launch and partial-start closure are
-still open; the pinned review identifies the earlier named-arm wiring refusal
-and four acquisition boundaries rather than claiming they already run.
+now compile with that field. A task branch corrects named copy launch and
+same-latch release replay without claiming parser entry. Its in-repository
+review pins that code and the four partial-start closure boundaries, which
+remain open pending the explicit native-witness and schema decisions.
 
 Preparation now retains its real controller handle through positive join and
 same-operation Store proof. Unknown outcomes and response aliases keep the
@@ -31,22 +32,24 @@ settlement with structural M. UnknownHeld P still pins M until restart.
 Root-scoped worker intent, bounded durable-fence retry and foreign-fence cleanup
 are connected. Origin never issues Close or refunds native ownership.
 Shared storage domains and the unclosed-provisional inventory consumer remain
-missing. Original probe/inference/library workers retain their admissions;
-subtitle worker/result lifetime repairs are being compiled in isolation.
-Remaining fragment/native adapters and selective recovery are still open.
+missing. Original probe/inference/library/subtitle workers retain their
+admissions through their original inputs and results. The source-opener task
+now retains the same admission after waiter loss and records persistent
+Unknown before its last keeper can drop; a known result cannot clear prior
+uncertainty. Remaining fragment/native adapters and selective recovery are open.
 
-**Compiler evidence:** Rust1.97.1 native x86_64 core+daemon all-target+cluster
-strict Clippy passed exact `41ad7bebad6c` after current-main and quota integration
-(439.437s, source stable; log SHA-256
-`bd14e391641ca34d13ecebc445572e4ca05f2a9f6ddc397d003293d17a0f0925`).
-The later End delivery passed Mac and Linux-cfg strict checks on its isolated
-source; Linux-cfg stubs link no executable. Combined final-source checks are
-still required. Default-feature Mac strict passed the preceding c420+cfg-fix
-source; Linux default-feature verification remains to run on the joined tree.
-Local compilers run sequentially at j1 after an actual host file-handle failure.
-Static paperwork passed15/15 at `de8f9f4c1`;618 regression anchors resolve,
-including the original490 unchanged fields. These are static/compile facts,
-not behavioral acceptance or completed review.
+**Compiler evidence:** published effort `647e4bb68` includes exact native
+x86_64 core+daemon all-target+cluster strict Clippy PASS at `ec6cee689066`
+plus one static catalog-only commit. Pinned Rust1.97.1, source stable,
+622.959s; log SHA-256
+`43d5ef03106a485d4f5ddb8a45806d0b362b3c75ab398032ae6f90eea5640357`.
+Default-feature Linux-cfg strict also passed that source (check-only stubs,
+no executable). The copy-launch and timed-opener tasks passed separate host
+and Linux-cfg strict checks; their joined native candidate still needs its
+own checks. Local compilers run sequentially at j1 after an actual host
+file-handle failure. Published-source paperwork passed15/15;622 declared
+regression anchors resolve, including the original490 unchanged fields.
+These are static/compile facts, not behavioral execution or completed review.
 
 Bounded direct recovery retains positive old-daemon completion and held-lock
 requirements; uncertainty keeps charges. Obsolete recovered-cache eviction

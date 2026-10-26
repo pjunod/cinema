@@ -7,8 +7,9 @@ and [delivery checklist](ADAPTIVE-PLAYBACK-DELIVERY.md). This asks for bounded
 copy-specific design decisions. No partial-start adapter is implemented or
 qualified by this document. Behavioral tests remain unrun pending review.
 
-Source is committed on `effort/adaptive-playback-resources`, draft PR #1248,
-at `41ad7bebad6c1597ff0bbb0d82849bd13f128278`. The [source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW-SOURCE.json)
+Source is committed on task branch `codex/adaptive-copy-start-and-admission`,
+based on the effort for draft PR #1248, at
+`6619ae94cbc170324f83da17b768e7aaa9d84fab`. The [source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW-SOURCE.json)
 pins the relevant file hashes. Read that commit rather than unrelated main or
 an uncommitted worktree; normal Git fetch/show supplies every cited file.
 This source pin is an ancestor of the continuing effort and remains stable.
@@ -29,7 +30,7 @@ Short `physical_graph…` and `runtime/…` paths are under
 
 ### Existing definitions and proposed names
 
-The following definitions exist in the included commit:
+The following definitions exist in the pinned commit:
 
 | Definition | Source location |
 |---|---|
@@ -43,15 +44,20 @@ terminal are **proposals**, not existing definitions. Their absence is part of
 the decision. The existing no-root token's software-oriented name does not
 permit substituting a software image/launch/writer proof for copy evidence.
 
-### Current launch wiring is blocked before the proposed partial states
+### Named launch now uses the retained copy adapter
 
-`runtime/operations/copy_vod.rs:412–421` passes a named acquisition into
-`launch_root_role`. The named-arm branch at `runtime/operations.rs:1171–1179`
-requires `role.finite_vod`, while copy installation rejects that field and
-installs `role.copy_vod` (`operations/copy_vod.rs:174–190`). The pinned source therefore
-returns `State` at that branch. The entered-root cases below are required
-acquisition boundaries to support when that wiring is repaired; the packet does
-not claim current copy execution reaches them.
+`runtime/operations.rs::launch_root_role` resolves exactly one retained
+finite/copy registration and checks its root member and acquisition before
+queuing Arm. It passes that adapter's entered flag into
+`PhysicalGraph::spawn_selected_durable_root`; copy keeps the registered control
+in its retained GraphRoot/ChildJob rather than a software-only control cell.
+This removes the earlier unconditional finite-adapter refusal. Compilation
+alone does not establish successful native execution.
+
+`runtime/operations/copy_vod.rs::release_copy_task` records successful consuming
+latch delivery synchronously and makes same-task release replay idempotent.
+That private bit proves only delivery; it neither proves parser entry nor
+permits cleanup or refund. The four partial boundaries below remain open.
 
 ## 2. Four partial states with explicit entry and exit boundaries
 
@@ -101,9 +107,9 @@ With no known child there is no handle on which to invent a kill/wait receipt.
 JoinHandle and pipe/work ownership are registered (S3).
 
 Copy start sets its entry flag, then awaits source observations before starting
-the task (`runtime/operations/copy_vod.rs:423–448`); task arming adds another await
-before registration (`:499–520`). Thus this differs from S1. Current runtime
-join requires a task and committed task observation (`:581–591`), and the copy
+the task (`runtime/operations/copy_vod.rs::start_copy_vod`); task arming adds another await
+before registration (`start_copy_task`). Thus this differs from S1. Current runtime
+join requires a task and committed task observation (`join_copy_producer`), and the copy
 process witness requires a joined parser. No copy root-only witness exists.
 
 **Required cleanup:** seal new entry; request kill of the retained root/job;
@@ -142,10 +148,10 @@ join then rejects missing/abandoned terminal state (`:459–471`). A proposed
 notify its waiter and remain distinct internally from entered success/failure.
 The emitted-record question is explicitly open in section 4.
 
-### S4 — latch delivered and parser entered
+### S4 — latch delivered; parser entry permitted
 
-This is the existing full joined path's reference case, not a fifth missing
-partial adapter. The retained parser and root must join, checked pipe closure
+Delivery permits entry but does not prove that the parser ran. This is the
+full joined path's reference case, not a fifth missing partial adapter. The retained parser and root must join, checked pipe closure
 must succeed, and source/prefix owners must close before process settlement.
 A completed/failed parser summary is not interchangeable with S3 nonentry.
 
@@ -157,7 +163,7 @@ checked pipe close → remaining source/prefix closure**. No reader-drop-based
 termination assumption is allowed. Decide how to connect this ordering to the
 existing helpers rather than claiming it is already implemented: current
 `join_copy_vod(abort=true)` requests kill, joins/checks parser pipes, then waits
-the root (`runtime/operations/copy_vod.rs:603–607`).
+the root (`runtime/operations/copy_vod.rs::join_copy_producer`).
 
 Use the retained cleanup selector's deadline for every awaited step. Timeout,
 kill/wait error, uncertain job/pipe close or unresolved journal acknowledgment
@@ -183,8 +189,9 @@ gone. Private native/allocator/executor peaks remain Unknown.
 
 1. **Root-entry coverage and launch wiring.** Specify the S1 no-child witness and
    legitimate emitted root facts, or identify why that outcome must remain
-   Unknown. Include the earlier named-arm copy wiring correction as a prerequisite;
-   do not assert atomic spawn or reuse process-never-entered proof after entry.
+   Unknown. Review the retained finite/copy selection and same-latch replay
+   correction as implemented above; do not assert atomic spawn or reuse a
+   process-never-entered proof after entry.
 2. **Cancellation order and retry.** Choose the concrete retained operations for
    kill → wait → task join → checked pipe close in S2/S3, with deadline cancellation
    retaining those operations/handles. Identify any exact missing primitive.
