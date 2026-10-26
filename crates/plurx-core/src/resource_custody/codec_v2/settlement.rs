@@ -375,11 +375,31 @@ pub(crate) fn validate_settlement(
     envelopes: &[Envelope],
     value: &Settlement,
 ) -> Result<(), CustodyError> {
+    validate_settlement_scope(
+        manifest.owner_id,
+        manifest.graph_id,
+        manifest.members.len(),
+        envelopes,
+        value,
+    )
+}
+
+/// The same audit validator over an already retained manifest scope. This
+/// avoids cloning a Manifest merely to validate original runtime metadata;
+/// callers still validate each envelope against the exact original plan slice.
+/// No data validation here constructs a physical settlement or refund.
+pub(crate) fn validate_settlement_scope(
+    owner_id: Id,
+    graph_id: Id,
+    member_count: usize,
+    envelopes: &[Envelope],
+    value: &Settlement,
+) -> Result<(), CustodyError> {
     if value.version != 2
-        || value.graph_id != manifest.graph_id
-        || value.owner_id != manifest.owner_id
-        || value.members.len() != manifest.members.len()
-        || envelopes.len() != manifest.members.len()
+        || value.graph_id != graph_id
+        || value.owner_id != owner_id
+        || value.members.len() != member_count
+        || envelopes.len() != member_count
     {
         return Err(codec::invalid());
     }
@@ -715,7 +735,7 @@ pub(crate) fn validate_settlement(
                 operation_id,
             } => {
                 if *operation_id != value.operation_id
-                    || *target_graph_id == manifest.graph_id
+                    || *target_graph_id == graph_id
                     || transfer.target_member_id == id
                 {
                     return Err(codec::invalid());

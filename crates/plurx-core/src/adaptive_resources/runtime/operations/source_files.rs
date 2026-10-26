@@ -1815,6 +1815,50 @@ impl SourceCell {
         Ok(true)
     }
 
+    /// Borrow only metadata from the SAME acknowledged source envelope for
+    /// pure settlement preflight. An open result before journal acknowledgment
+    /// is not a durable observation. The File/close worker is never accessed.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn copy_observed_for_settlement(
+        &self,
+        expected: &v2::MemberPlan,
+    ) -> Result<Option<&v2::SourceObserved>, OperationError> {
+        if &self.plan != expected || !matches!(expected, v2::MemberPlan::SourceV1 { .. }) {
+            return Err(OperationError::State);
+        }
+        if !self.observed_committed {
+            if self.root_observed_committed || self.selected_root_member.is_some() {
+                return Err(OperationError::State);
+            }
+            return Ok(None);
+        }
+        if self.root_observed_committed {
+            let root = self.selected_root_member.ok_or(OperationError::State)?;
+            let v2::MemberPlan::SourceV1 { source: plan, .. } = expected else {
+                return Err(OperationError::State);
+            };
+            let acquisition = plan
+                .planned_copies
+                .iter()
+                .find_map(|copy| {
+                    matches!(copy.owner, v2::CopyOwner::OwnedRoot { root_member_id, .. }
+                    if root_member_id.uuid() == root)
+                    .then_some(copy.acquisition_operation_id.uuid())
+                })
+                .ok_or(OperationError::State)?;
+            if !self.copy_root_observation_committed(root, acquisition)? {
+                return Err(OperationError::State);
+            }
+        } else if self.selected_root_member.is_some() {
+            return Err(OperationError::State);
+        }
+        self.result
+            .as_ref()
+            .and_then(|result| result.observed.as_ref())
+            .map(Some)
+            .ok_or(OperationError::State)
+    }
+
     /// The SAME copy root's native closure, with no registered parser, closes
     /// only the inventoried inherited copy after this cell's checked parent
     /// close. Unobserved root-copy enrichment still must match its exact slot.

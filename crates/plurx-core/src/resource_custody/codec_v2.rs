@@ -1069,7 +1069,16 @@ pub(crate) fn validate_envelope(
     manifest: &Manifest,
     envelope: &Envelope,
 ) -> Result<(), CustodyError> {
-    if envelope.version != 2 || !manifest.members.contains(&envelope.planned) {
+    validate_envelope_members(&manifest.members, envelope)
+}
+
+/// Preserve the complete envelope checks and serialized bound while borrowing
+/// the SAME retained plan slice; no duplicate Manifest or new authority.
+pub(crate) fn validate_envelope_members(
+    members: &[MemberPlan],
+    envelope: &Envelope,
+) -> Result<(), CustodyError> {
+    if envelope.version != 2 || !members.contains(&envelope.planned) {
         return Err(codec::invalid());
     }
     match (&envelope.planned, &envelope.observed) {
