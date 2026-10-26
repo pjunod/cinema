@@ -12553,6 +12553,85 @@ async fn drop_baseline_sharing_schema(client: &Client) {
         source_objects[0].value, 0,
         "Source activation cannot be rewound"
     );
+    // Ordinary Local migration does not install optional Sharing lineage.
+    // Derive the complete owned object set from the published schemas before
+    // querying any of their tables; a missing first table is not proof of absence.
+    let witness = rusqlite::Connection::open_in_memory().expect("sharing fixture shape witness");
+    witness
+        .execute_batch(include_str!("../src/store/sharing_schema.sql"))
+        .expect("published Sharing shape");
+    witness
+        .execute_batch(include_str!(
+            "../src/store/sharing_ingress_custody_schema.sql"
+        ))
+        .expect("published Sharing custody shape");
+    witness
+        .execute_batch(hiqlite::Error::SOURCE_LAYOUT_GUARD_DDL)
+        .expect("published Local dispatch assertion shape");
+    let expected = witness
+        .prepare(
+            "SELECT name,json_array(type,name,tbl_name,sql) FROM sqlite_master \
+         WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY type,name",
+        )
+        .expect("published Sharing object inventory")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("published Sharing objects")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete published Sharing inventory");
+    assert!(
+        !expected.is_empty(),
+        "published Sharing object set must be closed"
+    );
+    let names = serde_json::to_string(&expected.iter().map(|(name, _)| name).collect::<Vec<_>>())
+        .expect("encode canonical Sharing object names");
+    let actual: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT json_array(type,name,tbl_name,sql) AS value FROM sqlite_master \
+         WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' \
+           AND (name GLOB 'sharing_*' OR tbl_name GLOB 'sharing_*' \
+                OR name IN (SELECT value FROM json_each($1)) \
+                OR tbl_name IN (SELECT value FROM json_each($1))) ORDER BY type,name",
+            hiqlite::params!(names),
+        )
+        .await
+        .expect("read complete Sharing fixture namespace");
+    // The additive dispatch assertion belongs to ordinary Local compatibility,
+    // not installed Sharing lineage. Retain its exact published empty shape;
+    // never drop or exempt an object merely because its name matches.
+    let guard_only = expected
+        .iter()
+        .filter(|(name, _)| name == "sharing_source_dispatch_guard")
+        .map(|(_, shape)| shape.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        guard_only.len(),
+        1,
+        "published Local dispatch assertion is one exact table"
+    );
+    let actual = actual.into_iter().map(|row| row.value).collect::<Vec<_>>();
+    let sharing_absent = actual == guard_only;
+    let complete = expected
+        .into_iter()
+        .map(|(_, shape)| shape)
+        .collect::<Vec<_>>();
+    assert!(sharing_absent || actual == complete,
+        "only the complete published Sharing layout or its exact Local-only guard may be rewound; partial or unknown layouts remain untouched");
+    let guard_rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM sharing_source_dispatch_guard",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read the validated Local dispatch assertion");
+    assert!(
+        matches!(guard_rows.as_slice(), [row] if row.value == 0),
+        "Local dispatch assertion must retain no successful or malformed row"
+    );
+    if sharing_absent {
+        return;
+    }
     let tables = [
         include_str!("../src/store/sharing_schema.sql"),
         include_str!("../src/store/sharing_ingress_custody_schema.sql"),
@@ -12575,6 +12654,11 @@ async fn drop_baseline_sharing_schema(client: &Client) {
             )
             .await
             .expect("read disposable sharing fixture rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "sharing fixture COUNT must return one row for {table}"
+        );
         assert_eq!(
             rows[0].value, 0,
             "populated sharing table {table} cannot be rewound"
@@ -12753,6 +12837,51 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_unactivated_contract_baseline(client).await;
+    // These independently recognized current extensions must be validated
+    // before the queue teardown. Their drops join the one transaction below.
+    async fn extension_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
+        client
+            .query_consistent(sql.to_owned(), hiqlite::params!())
+            .await
+            .expect("extension shape inventory")
+            .iter_mut()
+            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+            .collect()
+    }
+    let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
+    let title_marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("current title fixture marker");
+    assert_eq!(title_marker.len(), 1);
+    let title_data: Vec<I64Value> = client.query_consistent_map(
+        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL) AS value", hiqlite::params!(),
+    ).await.expect("complete title fixture data inventory");
+    assert_eq!(title_data.len(), 1);
+    let title_drops = queue_fixture::validated_empty_title_rewind(
+        &title_shape,
+        title_marker[0].value,
+        title_data[0].value,
+    );
+    let annotations_shape =
+        extension_shape(client, queue_fixture::ANNOTATIONS_FIXTURE_SHAPE_SQL).await;
+    let mut annotations_counts = Vec::new();
+    for table in queue_fixture::ANNOTATIONS_FIXTURE_DATA_TABLES {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                format!("SELECT count(*) AS value FROM {table}"),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("annotation fixture data inventory");
+        assert_eq!(rows.len(), 1);
+        annotations_counts.push((table.to_owned(), rows[0].value));
+    }
+    let annotations_drops =
+        queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
         "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=1) AS value",
         hiqlite::params!(),
@@ -12826,8 +12955,10 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
                 .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
         })
         .expect("published predecessor resource view");
-    let mut statements: Vec<_> = translation_drops
+    let mut statements: Vec<_> = title_drops
         .into_iter()
+        .chain(annotations_drops)
+        .chain(translation_drops)
         .map(|sql| (sql, hiqlite::params!()))
         .collect();
     statements.extend(
@@ -17549,10 +17680,13 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             .any(|(table, rows)| *table == "background_jobs" && !rows.is_empty()),
         "forced handoff has an actual common job"
     );
-    assert!(store
+    // The successful handoff consumed this running claim. A retained receipt
+    // cannot authorize it again after the request became submitted and its
+    // owner was cleared, even though the immutable worker result remains ready.
+    assert!(!store
         .submit_fragment_index_analysis(&force_claim, &forced_job, 41)
         .await
-        .expect("return the previously accepted forced handoff receipt"));
+        .expect("reject the consumed forced analysis claim before receipt reuse"));
     assert_eq!(
         receipt_snapshot().await,
         before_replay,
@@ -29574,6 +29708,84 @@ async fn scan_identity_repair_contract() {
             (show, season, episode, file)
         }
 
+        // No list membership is also a real first repair, not a replay.
+        // The optional set-copy affects zero rows while every fence still applies.
+        let empty_first = tree(
+            store.as_ref(),
+            library.id,
+            "Empty-list original",
+            "No List Show",
+            "",
+        )
+        .await;
+        let empty_second = tree(
+            store.as_ref(),
+            library.id,
+            "Empty-list duplicate",
+            "No List Show",
+            ".2160p",
+        )
+        .await;
+        let empty_snapshot = store
+            .identity_repair_snapshot(library.id, &[empty_first.0, empty_second.0])
+            .await
+            .expect("empty-list repair snapshot");
+        let empty_plan = plurx_core::store::plan_identity_repair(empty_snapshot.clone())
+            .expect("empty-list repair plan");
+        assert!(
+            empty_plan.ready(),
+            "{backend}: empty-list plan {:?}",
+            empty_plan.blockers
+        );
+        let empty_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let empty_lease = acquired(
+            store
+                .acquire_lease(
+                    &format!("scan:library:{}", library.id),
+                    "empty-list-owner",
+                    empty_now,
+                    empty_now + 90_000,
+                )
+                .await
+                .expect("empty-list repair lease"),
+            backend,
+        );
+        let empty_successor = publication_successor(&empty_lease);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(
+                    &empty_snapshot,
+                    &empty_plan,
+                    &empty_lease,
+                    &empty_successor
+                )
+                .await
+                .expect("first empty-list repair"),
+            IdentityRepairOutcome::Applied,
+            "{backend}: zero-row annotation copy is a first application"
+        );
+        let empty_retry = publication_successor(&empty_successor);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(
+                    &empty_snapshot,
+                    &empty_plan,
+                    &empty_successor,
+                    &empty_retry
+                )
+                .await
+                .expect("empty-list repair replay"),
+            IdentityRepairOutcome::AlreadyApplied
+        );
+        assert!(store
+            .release_lease(&empty_retry, empty_now)
+            .await
+            .expect("release empty-list repair lease"));
+
         let first = tree(
             store.as_ref(),
             library.id,
@@ -29659,7 +29871,8 @@ async fn scan_identity_repair_contract() {
                 .apply_identity_repair_fenced(&snapshot, &plan, &lease, &replacement)
                 .await
                 .expect("apply repair"),
-            IdentityRepairOutcome::Applied
+            IdentityRepairOutcome::Applied,
+            "{backend}: the first fenced repair must apply"
         );
         assert_eq!(
             store
