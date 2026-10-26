@@ -17,6 +17,8 @@ FEL, handoff lifecycle, identity repair, historical migrations and public TLS
 remain outside these guarantees. This is source correspondence, not new
 execution, physical acceptance or qualification. Other historical explanatory
 anchors in `source-anchors.json` retain their recorded historical identity.
+Row 41 also follows the Linux-only guard on `extend_fragment_admission`;
+the selected `admit_fragment` body and try-only admission order are unchanged.
 
 ## Completion identity-result correspondence — 2026-10-25
 

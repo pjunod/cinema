@@ -14,8 +14,11 @@ FEL qualification), retaining `7c155f3df` (Auto names the selected encoder),
 `087e836d3` (HDR10-E and applied enhancement pills),
 `01a1709bf` (native Apple focus isolation) and `8edca502b`
 (CM29 method v5). The client-fix catalog merge preserves both upstream focus
-records and the reviewed HTTPS qualification repairs. No qualification gate,
-resource allowance or physical-closure requirement is waived.
+records and the reviewed HTTPS repairs. For this completion, the owner
+authorized retaining actual passing tests across later head/base changes and
+checking genuinely new integration changes. Receipts retain their original
+source bindings; no current-tree full-qualification result is implied. Validators,
+resource allowances and physical-closure requirements remain unchanged.
 
 Complete local Apple units passed on source `1d3764c38`: 1,186 iOS and 1,172
 tvOS cases, with no failures or skips. The 273-file Apple input manifest, including
