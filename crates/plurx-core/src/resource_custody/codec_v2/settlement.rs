@@ -260,6 +260,10 @@ pub(crate) enum ClosedFact {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded frozen inventory stays inline in MemberTransfer and its charged owner layout; do not introduce a new allocation during conserving transfer."
+)]
 pub(crate) enum TransferIdentity {
     SourceV1 {
         source: SourceObserved,
@@ -283,6 +287,10 @@ pub(crate) struct MemberTransfer {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "disposition", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Settlement vector capacity includes the complete inline disposition layout; boxing a transferred proof would add a new allocation during original settlement handoff."
+)]
 pub(crate) enum MemberDisposition {
     Closed {
         member_id: Id,

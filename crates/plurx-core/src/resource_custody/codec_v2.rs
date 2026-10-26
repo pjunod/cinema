@@ -547,6 +547,10 @@ pub(crate) struct Manifest {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Envelope-vector capacity includes this complete inline observation layout; boxing the frozen scratch state adds a separate allocation to the existing owner model."
+)]
 pub(crate) enum Observed {
     LegacyV1 {
         identity: super::ObservedIdentity,

@@ -659,6 +659,10 @@ fn scratch_v3_old_decoder_rejects_new_results_without_sql_schema_change() {
     #[derive(serde::Deserialize)]
     #[allow(dead_code)] // Frozen previous result decoder, not an execution API.
     #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+    #[expect(
+        clippy::large_enum_variant,
+        reason = "This inline frozen old decoder is the compatibility fixture under test; boxing would change its historical Rust layout and add an allocation to the fixture."
+    )]
     enum OldResult {
         Prepared {
             sequence: i64,

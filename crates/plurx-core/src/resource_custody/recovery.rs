@@ -1066,7 +1066,7 @@ mod namespace_tests {
             root_creation_marker: 456,
         };
         assert!(exact_latest_r_holder(
-            &[first.clone()],
+            std::slice::from_ref(&first),
             obligation_id,
             &first
         ));

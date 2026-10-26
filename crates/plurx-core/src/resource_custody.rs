@@ -3,6 +3,16 @@
 //! Only the core runtime may mutate custody. Public snapshots/codecs are data,
 //! never receipt or launch authority. Initialize under the existing daemon lock
 //! before startup cleanup. No journal operation touches the accounting mutex.
+// Test fixtures use unwrap/unwrap_err as assertions; the production build
+// retains the workspace lint and is checked separately by strict Clippy.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        reason = "custody fixture setup and expected-refusal assertions deliberately fail the test on the opposite result"
+    )
+)]
+
 mod codec;
 pub(crate) mod codec_v2;
 #[cfg(target_os = "linux")]
@@ -199,6 +209,15 @@ pub(crate) struct TypedMemberRecord {
 pub(crate) enum ObligationInventory {
     LegacyV1 {
         manifest: Manifest,
+        // Preserve the validated historical per-member observations in the
+        // snapshot. They remain audit state, never a physical close proof.
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "legacy member observations stay in the reconstructed journal inventory; current production recovery only consumes its manifest"
+            )
+        )]
         members: Vec<MemberRecord>,
     },
     TypedV2 {
@@ -406,6 +425,10 @@ pub(crate) struct FamilyHandle {
 }
 /// Each role names either a new index in this atomic bundle or retained custody.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Retained handles stay inline in each bounded family role; boxing adds a separate allocation to its existing structural layout."
+)]
 pub(crate) enum RoleTarget {
     New(usize),
     Retained(ObligationHandle),
@@ -449,6 +472,9 @@ pub(crate) struct TypedPrepareBatch {
 pub(crate) struct PreparedBatch {
     pub obligations: Vec<ObligationHandle>,
     pub sequence: i64,
+    // Production has already checked queued trial == committed trial before
+    // returning this acknowledgment. Durable obligation trial state remains.
+    #[cfg(test)]
     pub trial_group_id: Option<Uuid>,
 }
 #[derive(Clone, Debug)]
@@ -506,6 +532,10 @@ pub(crate) struct PhysicalAssetRetirement {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Original mutation payloads stay inline in the retained operation; owned_operation_requested_bytes includes their structural layout, and boxing adds a new allocation during handoff."
+)]
 pub(crate) enum Mutation {
     Arm {
         members: Vec<Uuid>,
@@ -516,6 +546,13 @@ pub(crate) enum Mutation {
     RecordTypedAcquired {
         envelope: codec_v2::Envelope,
     },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retain the V2 journal transition protocol; its generic scratch entry adapter currently has fixture callers while selected production output uses V3"
+        )
+    )]
     AssetChangeV2 {
         change: codec_v2::scratch::AssetChangeV2,
     },
@@ -527,6 +564,13 @@ pub(crate) enum Mutation {
         reason: String,
     },
     CancelPrepared,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retain the legacy settlement command and original physical receipt; current production finite paths use typed settlement and the generic adapter has fixture callers"
+        )
+    )]
     Settle(PhysicalSettlement),
     SettleTyped(Box<PhysicalTypedSettlement>),
     RetireWithAssets(Box<PhysicalAssetRetirement>),
@@ -566,6 +610,10 @@ struct QueuedOperation {
     deadline: Instant,
     command: Command,
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded owner-book operation includes this inline command in owned_operation_requested_bytes; boxing changes that allocation model during proof transfer."
+)]
 enum Command {
     #[cfg(target_os = "linux")]
     ClosePreviousDirect {
@@ -597,6 +645,10 @@ enum Command {
     },
 }
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded owner-book result includes its inline target handle in owned_operation_requested_bytes; keep acknowledgment delivery free of a new box allocation."
+)]
 pub(crate) enum OperationResult {
     #[cfg(target_os = "linux")]
     RecoveredSAdoption(RecoveryAdoptionAck),

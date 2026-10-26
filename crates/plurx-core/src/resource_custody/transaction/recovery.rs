@@ -422,134 +422,6 @@ fn load_tracked_s(connection: &Connection, id: Uuid) -> Result<TrackedS, Custody
     })
 }
 
-#[cfg(test)]
-mod streaming_tests {
-    use super::*;
-
-    fn replay_adoptions(
-        connection: &Connection,
-        id: Uuid,
-        target: &TrackedS,
-    ) -> Result<(), CustodyError> {
-        let mut replay = ReplayS::new(4);
-        replay.in_flight.insert(
-            id,
-            SReplayState {
-                target: target.clone(),
-                last_sequence: 1,
-                head: target.baseline_head.clone(),
-            },
-        );
-        let mut statement =
-            connection.prepare("SELECT operation_id,result_json FROM operations ORDER BY rowid")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let operation = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
-            let result: DiskResult = codec::decode(&row.get::<_, String>(1)?)?;
-            if matches!(result, DiskResult::RecoveredSAdoption(_)) {
-                replay.observe(connection, operation, &result)?;
-            }
-        }
-        replay.finish()
-    }
-
-    #[test]
-    fn historical_s_replay_validates_more_than_1024_holders_and_the_oldest_identity() {
-        let connection = Connection::open_in_memory().expect("fixture database");
-        connection
-            .execute_batch(
-                "CREATE TABLE operations(operation_id BLOB PRIMARY KEY, result_json TEXT NOT NULL);
-                 CREATE TABLE recovered_s_holders(
-                    obligation_id BLOB NOT NULL,
-                    adoption_sequence INTEGER NOT NULL,
-                    operation_id BLOB NOT NULL UNIQUE,
-                    previous_owner_id BLOB NOT NULL,
-                    current_owner_id BLOB NOT NULL,
-                    original_s_sequence INTEGER NOT NULL,
-                    head_operation_id BLOB NOT NULL,
-                    head_revision INTEGER NOT NULL,
-                    frozen_digest TEXT NOT NULL,
-                    PRIMARY KEY(obligation_id,adoption_sequence));",
-            )
-            .expect("fixture tables");
-        let obligation = Uuid::new_v4();
-        let asset = v2::Id::new(Uuid::new_v4()).unwrap();
-        let transfer = Uuid::new_v4();
-        let head = AssetEventRefV1 {
-            operation_id: v2::Id::new(Uuid::new_v4()).unwrap(),
-            revision: 1,
-        };
-        let retirement = DiskResult::RetiredWithAssets(RetirementAck {
-            version: 2,
-            operation_id: v2::Id::new(transfer).unwrap(),
-            sequence: 1,
-            source_obligation_id: v2::Id::new(Uuid::new_v4()).unwrap(),
-            source_graph_id: v2::Id::new(Uuid::new_v4()).unwrap(),
-            target_obligation_id: v2::Id::new(obligation).unwrap(),
-            target_graph_id: v2::Id::new(Uuid::new_v4()).unwrap(),
-            asset_id: asset,
-        });
-        connection
-            .execute(
-                "INSERT INTO operations VALUES(?1,?2)",
-                params![transfer.as_bytes(), codec::encode(&retirement).unwrap()],
-            )
-            .unwrap();
-        let mut prior_owner = Uuid::new_v4();
-        for sequence in 2..=1026_i64 {
-            let operation = Uuid::new_v4();
-            let current_owner = Uuid::new_v4();
-            let ack = RecoveryAdoptionAck {
-                operation_id: operation,
-                obligation_id: obligation,
-                previous_owner_id: prior_owner,
-                current_owner_id: current_owner,
-                sequence,
-            };
-            connection
-                .execute(
-                    "INSERT INTO operations VALUES(?1,?2)",
-                    params![
-                        operation.as_bytes(),
-                        codec::encode(&DiskResult::RecoveredSAdoption(ack)).unwrap()
-                    ],
-                )
-                .unwrap();
-            connection
-                .execute(
-                    "INSERT INTO recovered_s_holders VALUES(?1,?2,?3,?4,?5,1,?6,1,?7)",
-                    params![
-                        obligation.as_bytes(),
-                        sequence,
-                        operation.as_bytes(),
-                        prior_owner.as_bytes(),
-                        current_owner.as_bytes(),
-                        head.operation_id.uuid().as_bytes(),
-                        "0".repeat(64)
-                    ],
-                )
-                .unwrap();
-            prior_owner = current_owner;
-        }
-        let target = TrackedS {
-            transfer_operation_id: transfer,
-            asset_id: asset,
-            baseline_head: head.clone(),
-            current_head: head,
-            current_sequence: 1,
-            current_phase: Phase::Sealed,
-        };
-        replay_adoptions(&connection, obligation, &target).unwrap();
-        connection
-            .execute(
-                "UPDATE recovered_s_holders SET previous_owner_id=?1 WHERE obligation_id=?2 AND adoption_sequence=2",
-                params![Uuid::new_v4().as_bytes(), obligation.as_bytes()],
-            )
-            .unwrap();
-        assert!(replay_adoptions(&connection, obligation, &target).is_err());
-    }
-}
-
 #[cfg(target_os = "linux")]
 pub(super) fn adopt(
     tx: &Transaction<'_>,
@@ -704,5 +576,133 @@ pub(super) fn change(
             retained_settlement::change(tx, original_owner, key, prior, &manifest, proof)
         }
         _ => Err(codec::invalid()),
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    fn replay_adoptions(
+        connection: &Connection,
+        id: Uuid,
+        target: &TrackedS,
+    ) -> Result<(), CustodyError> {
+        let mut replay = ReplayS::new(4);
+        replay.in_flight.insert(
+            id,
+            SReplayState {
+                target: target.clone(),
+                last_sequence: 1,
+                head: target.baseline_head.clone(),
+            },
+        );
+        let mut statement =
+            connection.prepare("SELECT operation_id,result_json FROM operations ORDER BY rowid")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let operation = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
+            let result: DiskResult = codec::decode(&row.get::<_, String>(1)?)?;
+            if matches!(result, DiskResult::RecoveredSAdoption(_)) {
+                replay.observe(connection, operation, &result)?;
+            }
+        }
+        replay.finish()
+    }
+
+    #[test]
+    fn historical_s_replay_validates_more_than_1024_holders_and_the_oldest_identity() {
+        let connection = Connection::open_in_memory().expect("fixture database");
+        connection
+            .execute_batch(
+                "CREATE TABLE operations(operation_id BLOB PRIMARY KEY, result_json TEXT NOT NULL);
+                 CREATE TABLE recovered_s_holders(
+                    obligation_id BLOB NOT NULL,
+                    adoption_sequence INTEGER NOT NULL,
+                    operation_id BLOB NOT NULL UNIQUE,
+                    previous_owner_id BLOB NOT NULL,
+                    current_owner_id BLOB NOT NULL,
+                    original_s_sequence INTEGER NOT NULL,
+                    head_operation_id BLOB NOT NULL,
+                    head_revision INTEGER NOT NULL,
+                    frozen_digest TEXT NOT NULL,
+                    PRIMARY KEY(obligation_id,adoption_sequence));",
+            )
+            .expect("fixture tables");
+        let obligation = Uuid::new_v4();
+        let asset = v2::Id::new(Uuid::new_v4()).unwrap();
+        let transfer = Uuid::new_v4();
+        let head = AssetEventRefV1 {
+            operation_id: v2::Id::new(Uuid::new_v4()).unwrap(),
+            revision: 1,
+        };
+        let retirement = DiskResult::RetiredWithAssets(RetirementAck {
+            version: 2,
+            operation_id: v2::Id::new(transfer).unwrap(),
+            sequence: 1,
+            source_obligation_id: v2::Id::new(Uuid::new_v4()).unwrap(),
+            source_graph_id: v2::Id::new(Uuid::new_v4()).unwrap(),
+            target_obligation_id: v2::Id::new(obligation).unwrap(),
+            target_graph_id: v2::Id::new(Uuid::new_v4()).unwrap(),
+            asset_id: asset,
+        });
+        connection
+            .execute(
+                "INSERT INTO operations VALUES(?1,?2)",
+                params![transfer.as_bytes(), codec::encode(&retirement).unwrap()],
+            )
+            .unwrap();
+        let mut prior_owner = Uuid::new_v4();
+        for sequence in 2..=1026_i64 {
+            let operation = Uuid::new_v4();
+            let current_owner = Uuid::new_v4();
+            let ack = RecoveryAdoptionAck {
+                operation_id: operation,
+                obligation_id: obligation,
+                previous_owner_id: prior_owner,
+                current_owner_id: current_owner,
+                sequence,
+            };
+            connection
+                .execute(
+                    "INSERT INTO operations VALUES(?1,?2)",
+                    params![
+                        operation.as_bytes(),
+                        codec::encode(&DiskResult::RecoveredSAdoption(ack)).unwrap()
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO recovered_s_holders VALUES(?1,?2,?3,?4,?5,1,?6,1,?7)",
+                    params![
+                        obligation.as_bytes(),
+                        sequence,
+                        operation.as_bytes(),
+                        prior_owner.as_bytes(),
+                        current_owner.as_bytes(),
+                        head.operation_id.uuid().as_bytes(),
+                        "0".repeat(64)
+                    ],
+                )
+                .unwrap();
+            prior_owner = current_owner;
+        }
+        let target = TrackedS {
+            transfer_operation_id: transfer,
+            asset_id: asset,
+            baseline_head: head.clone(),
+            current_head: head,
+            current_sequence: 1,
+            current_phase: Phase::Sealed,
+        };
+        replay_adoptions(&connection, obligation, &target).unwrap();
+        connection
+            .execute(
+                "UPDATE recovered_s_holders SET previous_owner_id=?1 WHERE obligation_id=?2 AND adoption_sequence=2",
+                params![Uuid::new_v4().as_bytes(), obligation.as_bytes()],
+            )
+            .unwrap();
+        assert!(replay_adoptions(&connection, obligation, &target).is_err());
     }
 }

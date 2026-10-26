@@ -13,7 +13,7 @@ struct RetirementFixture {
 }
 
 fn make_fixture(corrupt_snapshot: bool) -> RetirementFixture {
-    let mut source = frozen_source_fixture();
+    let source = frozen_source_fixture();
     let target_obligation_id = Uuid::new_v4();
     let target_graph_id = Uuid::new_v4();
     let target_member_id = v2::Id::new(Uuid::new_v4()).unwrap();

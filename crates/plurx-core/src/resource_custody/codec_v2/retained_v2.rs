@@ -26,6 +26,10 @@ pub(crate) struct RetainedAssetsV2 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep each versioned retained document inline in its snapshot-owner structural layout; boxing introduces a separate allocation during reconstruction or recovery handoff."
+)]
 pub(crate) enum RetainedAssetsDocument {
     V1(RetainedAssets),
     V2(RetainedAssetsV2),

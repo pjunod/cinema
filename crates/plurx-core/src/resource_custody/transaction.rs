@@ -784,6 +784,10 @@ fn validate_facts(
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the bounded persisted result inline in its decoding owner; boxing the V3 frozen inventory adds a separate allocation to the existing structural result layout."
+)]
 enum DiskResult {
     Prepared {
         sequence: i64,
@@ -1212,6 +1216,7 @@ pub(super) fn execute(
             Ok(OperationResult::Prepared(PreparedBatch {
                 obligations: handles.clone(),
                 sequence,
+                #[cfg(test)]
                 trial_group_id: *trial,
             }))
         }

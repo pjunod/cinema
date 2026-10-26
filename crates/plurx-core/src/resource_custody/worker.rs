@@ -69,6 +69,7 @@ impl PendingOperation {
     pub fn operation_id(&self) -> Uuid {
         self.id
     }
+    #[cfg(test)]
     pub(crate) async fn wait(mut self) -> Result<OperationResult, CustodyError> {
         self.wait_retained().await
     }
@@ -467,6 +468,10 @@ impl CustodyJournal {
         })
         .map_err(|(error, _unaccepted_prepare)| error)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return the original key and move-only receipt mutation on rejection; boxing would allocate on the refused handoff and alter the structurally charged owner payload."
+    )]
     pub(crate) fn change(
         &self,
         key: TransitionKey,
@@ -541,6 +546,10 @@ impl CustodyJournal {
         }
     }
     #[cfg(target_os = "linux")]
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal must return both original recovery proofs directly to their existing owner without a new allocation or discarded proof."
+    )]
     pub(crate) fn recover_retained_s(
         &self,
         operation_id: Uuid,
@@ -607,6 +616,10 @@ impl CustodyJournal {
             _ => unreachable!("R recovery constructs only an adoption"),
         })
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "An unaccepted command and its original proof stay inline on return; owned_operation_requested_bytes covers the command layout, and boxing refusal adds an unprojected allocation."
+    )]
     fn enqueue(
         &self,
         operation: QueuedOperation,
@@ -764,6 +777,13 @@ impl CustodyJournal {
     /// Recover the exact mutation (including actual proof) after a definitive
     /// failed transition so the cleanup owner can correct invalid facts/sequence.
     /// Unknown COMMIT can only use retry; it cannot abandon operation custody.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retain the original rejected proof-return seam for the legacy settlement adapter, whose current callers are fixtures; unknown commits still cannot abandon custody"
+        )
+    )]
     pub(crate) fn take_failed_transition(
         &self,
         id: Uuid,
