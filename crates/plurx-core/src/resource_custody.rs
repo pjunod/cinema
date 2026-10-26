@@ -39,6 +39,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
+#[cfg(target_os = "linux")]
 pub(crate) use worker::owned_operation_requested_bytes;
 pub use worker::{CustodyJournal, PendingOperation};
 
@@ -425,9 +426,12 @@ pub(crate) struct FamilyHandle {
 }
 /// Each role names either a new index in this atomic bundle or retained custody.
 #[derive(Clone, Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Retained handles stay inline in each bounded family role; boxing adds a separate allocation to its existing structural layout."
+#[cfg_attr(
+    target_os = "linux",
+    expect(
+        clippy::large_enum_variant,
+        reason = "Retained handles stay inline in each bounded family role; boxing adds a separate allocation to its existing structural layout."
+    )
 )]
 pub(crate) enum RoleTarget {
     New(usize),
@@ -645,9 +649,12 @@ enum Command {
     },
 }
 #[derive(Clone, Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "The bounded owner-book result includes its inline target handle in owned_operation_requested_bytes; keep acknowledgment delivery free of a new box allocation."
+#[cfg_attr(
+    target_os = "linux",
+    expect(
+        clippy::large_enum_variant,
+        reason = "The bounded owner-book result includes its inline target handle in owned_operation_requested_bytes; keep acknowledgment delivery free of a new box allocation."
+    )
 )]
 pub(crate) enum OperationResult {
     #[cfg(target_os = "linux")]

@@ -14,6 +14,7 @@ const MAX_OWNED_OPERATIONS: usize = 2048;
 /// owner book: one sparse BTree leaf/internal node pair for its key plus the
 /// shared operation allocation. Variable command payloads are charged by
 /// their callers. Allocator headers and RSS are out of scope.
+#[cfg(target_os = "linux")]
 pub(crate) fn owned_operation_requested_bytes() -> Option<usize> {
     let entry = std::mem::size_of::<Uuid>()
         .checked_add(std::mem::size_of::<Arc<Mutex<OwnedOperation>>>())?;

@@ -896,7 +896,9 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
                     }
                 }),
             };
-            let mut value = serde_json::json!({"id":key.handle.obligation_id,"graph":key.handle.graph_id,"owner":key.handle.owner_id,"sequence":key.expected_sequence,"action":action});
+            let value = serde_json::json!({"id":key.handle.obligation_id,"graph":key.handle.graph_id,"owner":key.handle.owner_id,"sequence":key.expected_sequence,"action":action});
+            #[cfg(target_os = "linux")]
+            let mut value = value;
             #[cfg(target_os = "linux")]
             if let Some(authority) = &key.handle.recovery {
                 let (name, holder) = match authority {
