@@ -47,7 +47,9 @@ class CM29BlackBehavior(unittest.TestCase):
         compiler = shutil.which("cc")
         if not compiler:
             raise RuntimeError("C compiler required for the closed-form display-management regression")
+        (ROOT / "target").mkdir(parents=True, exist_ok=True)
         cls.tmp = tempfile.TemporaryDirectory(dir=ROOT / "target", prefix="dv-dm-")
+        cls.addClassCleanup(cls.tmp.cleanup)
         cls.build_dir = Path(cls.tmp.name)
         src = cls.build_dir / "harness.c"; lib = cls.build_dir / "libdm.so"
         src.write_text(HARNESS)
@@ -59,10 +61,6 @@ class CM29BlackBehavior(unittest.TestCase):
         cls.lib.cm29_out.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_int, dp, dp]
         cls.lib.cm29_blackplane.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_int,
                                             ctypes.c_double, dp, dp]
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tmp.cleanup()
 
     def chroma(self, peak, black, prim, rgb):
         a = (ctypes.c_double * 3)(*rgb); o = (ctypes.c_double * 4)()
@@ -99,8 +97,7 @@ class CM29BlackBehavior(unittest.TestCase):
                                   (1000, 0.005, BT2020), (100, 0.005, BT709)):
             source = (0.50, 0.30, 0.25)
             out = self.out(peak, black, prim, source)
-            cin, _, _, _ = self.chroma(peak, black, prim, source)
-            _, cout, _, _ = self.chroma(peak, black, prim, out)
+            _, cout, _, _ = self.chroma(peak, black, prim, source)
             self.assertTrue(all(math.isfinite(v) and 0 <= v <= self.pq_oetf(peak) for v in out), (peak, prim, out))
             self.assertGreater(cout, 0, (peak, prim, out))
 

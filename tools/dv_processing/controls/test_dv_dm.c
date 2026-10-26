@@ -148,8 +148,11 @@ static void black_plane_is_neutral(const rpu *c29) {
   };
   const double probes[][3] = {{0.018, 0, 0}, {0, 0.018, 0}, {0, 0, 0.018}, {0.015, 0.008, 0}};
   for (unsigned k = 0; k < sizeof(t) / sizeof(*t); k++) {
-    dv_dm_frame f = prep(c29, t[k].nits, t[k].prim);
-    const double io = dm_pq_oetf(t[k].grid_nits), expected = dm_pq_oetf(t[k].decoded_nits);
+    dv_dm_frame f;
+    const double black = t[k].prim == DM_BT709 ? t[k].decoded_nits : 0.005;
+    require(dv_dm_prepare(&c29->dm, t[k].nits, black, t[k].prim, 4000, true, true, &f) == NULL,
+            "black-plane target prepares");
+    const double io = t[k].grid_nits > 0 ? dm_pq_oetf(t[k].grid_nits) : 0, expected = dm_pq_oetf(t[k].decoded_nits);
     double reference[3] = {0, 0, 0};
     for (unsigned i = 0; i < sizeof(probes) / sizeof(*probes); i++) {
       dm_cm29_pix p; double out[3];
