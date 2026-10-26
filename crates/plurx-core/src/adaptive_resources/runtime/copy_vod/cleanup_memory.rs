@@ -7,8 +7,8 @@ use std::future::Future;
 use std::mem::size_of;
 use std::time::Instant;
 
-/// A copy-specific pre-serialization limit. The allocation-free counting
-/// writer must reject EVERY envelope and aggregate settlement above this cap
+/// A copy-specific pre-serialization limit. The length-counting writer must
+/// reject EVERY envelope and aggregate settlement above this cap
 /// before invoking the existing full validators. Codec validation remains
 /// authoritative; this cap does not make a DTO a native capability.
 pub(in crate::adaptive_resources::runtime) const MAX_VALIDATION_JSON_BYTES: usize = 64 * 1024;
@@ -185,6 +185,16 @@ pub(in crate::adaptive_resources::runtime) fn requested_bytes(
     // next, so serialize peak is one buffer, not six summed buffers. Allocator
     // metadata, temporary internal realloc storage and RSS remain Unknown.
     let serializer_requested = times(MAX_VALIDATION_JSON_BYTES, 3)?.max(128);
+    // v2::Id derives serde(into = "String"): From<Id> calls Uuid::to_string.
+    // This scalar lives DURING both the counting pass and Vec encoding, so it
+    // is additional to the JSON buffer. uuid1.24 Display emits one 36-byte
+    // hyphenated slice; Rust1.97.1 ToString starts an empty String, whose one
+    // write requests exactly that payload. Include its inline String and
+    // formatting byte array. Direct Uuid serde uses only encode_buffer on the
+    // stack. Scalar visits are sequential: no ID-vector-wide String copies.
+    let uuid_text = uuid::fmt::Hyphenated::LENGTH;
+    let scalar_requested = sum([uuid_text, size_of::<String>(), uuid_text])?
+        .max(std::mem::size_of_val(&uuid::Uuid::encode_buffer()));
     // Existing full settlement validation retains <=five member IDs plus
     // the task's expected/actual three owner IDs each. Source validation has
     // only three two-copy ID sets; scratch projection has <=sixteen borrowed
@@ -202,6 +212,7 @@ pub(in crate::adaptive_resources::runtime) fn requested_bytes(
         observation_heap,
         settlement_heap,
         serializer_requested,
+        scalar_requested,
         validator_keys,
     ])
 }
