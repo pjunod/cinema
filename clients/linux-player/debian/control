@@ -43,8 +43,10 @@ Build-Depends: debhelper-compat (= 13),
                python3 (>= 3.10),
                python3-glad (>= 2),
                python3-jinja2,
+               patch,
                python3-setuptools,
                spirv-tools,
+               spirv-tools-dev,
                wayland-protocols,
                zlib1g-dev
 Standards-Version: 4.7.0
@@ -53,6 +55,8 @@ Rules-Requires-Root: no
 Package: plurx-player
 Architecture: amd64
 Depends: ${misc:Depends}, ${python3:Depends}, ${shlibs:Depends}, python3 (>= 3.10), zenity
+Recommends: desktop-file-utils, mesa-vulkan-drivers | vulkan-icd
+Built-Using: ${plurx:Built-Using}
 Description: Dolby Vision playback of plurx titles on Linux
  plurx Player plays titles handed over from the plurx web app ("Open titles
  in: plurx Player") in mpv, keeping the original Dolby Vision stream for

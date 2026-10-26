@@ -1,27 +1,24 @@
-plurx-player (0.1.1+lp7.360.1.mpv0.41.0) stonking; urgency=medium
-
-  * Run mpv with plurx Player's own --config-dir
-    ($XDG_CONFIG_HOME/plurx-player/mpv), never the general ~/.config/mpv,
-    and with --ytdl=no.
-  * Add the plurx-player(1) manual page and copyright years.
-
- -- plurx maintainers <noreply@plurx.invalid>  Sun, 25 Oct 2026 20:00:00 +0000
-
-plurx-player (0.1.0+lp7.360.1.mpv0.41.0) stonking; urgency=medium
-
-  * Package the private mpv and libplacebo (milestone M5 packaging):
-    libplacebo 7.360.1 and mpv 0.41.0, the versions Ubuntu 26.10 ships,
-    built in a disposable container and installed under
-    /usr/lib/plurx-player with mpv's RUNPATH set to $ORIGIN/../lib.
-  * The Dolby Vision closed-form patch series (packaging/patches/) is
-    empty until it lands.
-
- -- plurx maintainers <noreply@plurx.invalid>  Sun, 25 Oct 2026 18:00:00 +0000
-
-plurx-player (0.1.0~m4) unstable; urgency=medium
+plurx-player (0.1.1+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
 
   * Launcher (milestone M4): redeem, decide, play in mpv, heartbeat,
-    progress, seek re-creation, teardown. The private mpv/libplacebo
-    build arrives with M5.
+    progress, seek re-creation, teardown.
+  * Package a private libplacebo 7.360.1 and mpv 0.41.0, the versions
+    Ubuntu 26.10 ships, under /usr/lib/plurx-player (milestone M5
+    packaging). mpv is linked with DT_RPATH $ORIGIN/../lib and leaves no
+    build path behind.
+  * Build from a Debian source package (3.0 (quilt)): the launcher is the
+    main orig tarball and the pinned libplacebo and mpv tarballs are its
+    component orig tarballs, so the corresponding source of the GPL mpv and
+    LGPL libplacebo binaries is published beside the .deb.
+  * Apply the patch series from packaging/patches/<name>/series, exactly.
+    It is empty until the Dolby Vision closed-form patches land.
+  * Run mpv with plurx Player's own --config-dir
+    ($XDG_CONFIG_HOME/plurx-player/mpv), never the general ~/.config/mpv,
+    with --ytdl=no, and without LD_LIBRARY_PATH, LD_PRELOAD or LD_AUDIT.
+  * Byte-compile the launcher with dh_python3, whose prerm removes every
+    .pyc, so removal leaves nothing behind.
+  * Add the plurx-player(1) manual page. Recommend desktop-file-utils and a
+    Vulkan driver; record the statically linked glslang and SPIRV-Tools in
+    Built-Using and debian/copyright.
 
- -- plurx maintainers <noreply@plurx.invalid>  Sun, 25 Oct 2026 12:00:00 +0000
+ -- plurx maintainers <noreply@plurx.invalid>  Mon, 26 Oct 2026 03:00:00 +0000

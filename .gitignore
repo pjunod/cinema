@@ -27,8 +27,9 @@ clients/apple/build/
 
 # The plurx Player package build fetches upstream sources and builds into
 # these when run in a checkout instead of its container.
-clients/linux-player/upstream/
 clients/linux-player/build/
+clients/linux-player/libplacebo/
+clients/linux-player/mpv/
 
 # perf-report writes its output into the working directory, and the server
 # checkouts are reset to the remote — an untracked report is the one thing in

@@ -1,0 +1,4 @@
+# The libplacebo patch series, applied in this order by packaging/apply-series.sh.
+# One file name per line. Every *.patch in this directory must be listed
+# here, and each must apply exactly. Empty until the closed-form display
+# management from the rog_hdr_dv work lands.
