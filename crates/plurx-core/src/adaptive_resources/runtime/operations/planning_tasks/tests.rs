@@ -467,5 +467,5 @@ async fn never_entered_book_conflict_holds_ledger_and_journal_without_refund() {
         .unwrap();
 }
 
-mod native_custody;
 pub(super) mod construction;
+mod native_custody;
