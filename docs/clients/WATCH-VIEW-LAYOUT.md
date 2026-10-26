@@ -64,6 +64,27 @@ Episodes keep the episode browser (`#watch-lower`, cards or rows, season
 picker) under everything; the rail is hidden for them because episode files
 rarely carry chapters worth a strip.
 
+## Processing badges follow current execution evidence
+
+The compact title, wide title band, open title-info dialog and fullscreen
+info panel share the current dynamic-range and enhancement facts. A late
+processing report refreshes their badge mounts without replacing track
+controls, subtitle forms or dialog buttons.
+
+HDR10 output displays **HDR10-E** only while a processing report matches the
+active control generation and delivery. Processed-route pills use that same
+report: **FEL** means enhancement-layer detail contributed; **RPU** means
+reshaping or RPU colour conversion was applied; **DYN** means a typed per-shot
+display-mapping operation was applied for the reported target brightness.
+DYN in HDR10 describes metadata applied by the server to its pixels. It does
+not claim Dolby Vision metadata travels in the HDR10 stream. The detail line
+distinguishes all, some or no creative trims. Native Dolby Vision delivery
+continues to use the server's carried-metadata description.
+
+A seek, replacement, fallback or stale generation removes processed claims
+until current evidence returns. The regression is
+[`tests/web/dv-processing-badge.test.js`](../../tests/web/dv-processing-badge.test.js).
+
 ## The picture under the page; the menus and the readout over it
 
 The slot player is the ordinary modal player's `#modal` element, made

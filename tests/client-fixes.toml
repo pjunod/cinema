@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1286: native input authority must not invalidate the shell and all controls.
+[[fixes]]
+id = "apple.tv-focus-observation-isolation"
+commits = ["649545c707dd46eceac5ea123291fcdeca99fe9e"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "activity.focusRevision += 1"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testPhysicalFocusKeepsShellQuietAndRetiresStaleSelect()"
+
+[[fixes]]
+id = "apple.tv-focus-observer-boundary"
+commits = []
+supplements = "apple.tv-focus-observation-isolation"
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "content.onChange(of: activity.focusRevision) { _, _ in changed() }"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testPhysicalFocusObserversSeeSettledStateWithoutRebuildingParent() async"
+
 # PR #1276 review repairs: the trims label says all, some or none of the served frames.
 [[fixes]]
 id = "android.dv-creative-trims-partial-label"
