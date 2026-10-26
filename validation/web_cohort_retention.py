@@ -447,7 +447,8 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
             write_receipt(output,receipt)
             for i,command in enumerate(COMMANDS):
                 marker(f'WEB-COHORT-COMMAND {i} START')
-                env = child_environment(); env['PR_BASE_SHA'] = base
+                env = child_environment(); env.pop('PR_BASE_SHA',None)
+                if i == 1: env['PR_BASE_SHA'] = base
                 if i == 2: env['TMPDIR'] = '/tmp'
                 completed = subprocess.run(['bash','-euo','pipefail','-c',command],cwd=workspace,env=env,stdout=stream,stderr=subprocess.STDOUT)
                 require(completed.returncode == 0,'Fresh whole web cohort failed; no retention/fallback')

@@ -20,13 +20,13 @@ COMMIT, BASE = 'b'*40, 'c'*40
 SCOPE = {'repository':1,'pr':1263,'branch':'topic','base':'main','workflow':'main-fast-lane.yml'}
 
 
-def packed(receipt,log,extra=()):
+def packed(receipt,log,extra=(),*,log_name='web-cohort.log',log_mode=stat.S_IFREG|0o644):
     output = io.BytesIO()
     with warnings.catch_warnings():
         warnings.simplefilter('ignore',UserWarning)
         with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_STORED) as archive:
             for name,raw,mode in [('receipt.json',json.dumps(receipt).encode(),stat.S_IFREG|0o644),
-                ('web-cohort.log',log,stat.S_IFREG|0o644),*extra]:
+                (log_name,log,log_mode),*extra]:
                 info = zipfile.ZipInfo(name); info.external_attr = mode << 16
                 archive.writestr(info,raw)
     return output.getvalue()
@@ -157,11 +157,15 @@ class WebCohortRetentionTests(unittest.TestCase):
 
     def test_archive_and_command_log_refuse_traversal_symlink_duplicate_and_incomplete(self):
         log=b'WEB-COHORT-START key\n'
-        for extra in ([('../escape',b'x',stat.S_IFREG|0o644)],
-                      [('alias',b'x',stat.S_IFLNK|0o777)],
-                      [('receipt.json',b'{}',stat.S_IFREG|0o644)]):
-            with self.subTest(path=extra[0][0]),self.assertRaisesRegex(receipts.ReceiptError,'member set'):
-                web.unpack(packed({},log,extra))
+        for name,mode in (('../escape',stat.S_IFREG|0o644),
+                          ('web-cohort.log',stat.S_IFLNK|0o777),
+                          ('receipt.json',stat.S_IFREG|0o644)):
+            # Exactly two members: each refusal must reach the path/mode/
+            # duplicate guard rather than an unrelated member-count check.
+            data=packed({},log,log_name=name,log_mode=mode)
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:self.assertEqual(len(archive.infolist()),2)
+            with self.subTest(name=name,mode=mode),self.assertRaisesRegex(receipts.ReceiptError,'Unsafe/duplicate'):
+                web.unpack(data)
         with mock.patch.object(web,'MAX_LOG',2):
             with self.assertRaisesRegex(receipts.ReceiptError,'size/ratio'):web.unpack(packed({},log))
         complete=['WEB-COHORT-START key']
@@ -193,6 +197,9 @@ class WebCohortRetentionTests(unittest.TestCase):
             for call in launch.call_args_list:
                 env=call.kwargs['env'];self.assertEqual(env['PATH'],'/tools')
                 self.assertFalse({'GITHUB_TOKEN','GH_TOKEN','ACTIONS_RUNTIME_TOKEN'} & set(env))
+            self.assertNotIn('PR_BASE_SHA',launch.call_args_list[0].kwargs['env'])
+            self.assertEqual(launch.call_args_list[1].kwargs['env']['PR_BASE_SHA'],BASE)
+            self.assertNotIn('PR_BASE_SHA',launch.call_args_list[2].kwargs['env'])
             self.assertEqual(launch.call_args_list[-1].kwargs['env']['TMPDIR'],'/tmp')
             launch.reset_mock();launch.return_value=mock.Mock(returncode=1)
             out=Path(directory)/'failed';out.mkdir()
