@@ -496,7 +496,6 @@ struct FixedSourceState {
 /// selector. Missing owner is uncertainty, never never-acquired evidence.
 #[cfg(target_os = "linux")]
 struct UncertainSourcePlanning {
-    snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
     reason: String,
     // If an owner was returned before application retention failed, preserve
     // that SAME selector. Drop requests cleanup only after rich fields above.
@@ -532,7 +531,6 @@ impl SourceFixedStartFailure {
     fn held(
         reason: String,
         assignment: SourceDispatchAssignment,
-        snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
         original: Option<
             plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner,
         >,
@@ -541,7 +539,6 @@ impl SourceFixedStartFailure {
             assignment,
             cancel: tokio_util::sync::CancellationToken::new(),
             state: SourceProbeState::PlanningUncertain(UncertainSourcePlanning {
-                snapshot,
                 reason: reason.clone(),
                 _original: original,
             }),
@@ -661,7 +658,9 @@ impl SourceProbeOperation {
     ) -> Result<&Arc<plurx_core::store::PlaybackPlanningSnapshot>, String> {
         match &self.state {
             SourceProbeState::Fixed(state) => Ok(&state.snapshot),
-            SourceProbeState::PlanningUncertain(held) => Ok(&held.snapshot),
+            SourceProbeState::PlanningUncertain(_) => {
+                Err("Source original planning construction is uncertain".into())
+            }
             SourceProbeState::Legacy(_) => {
                 Err("Source original fixed planning owner is absent".into())
             }
@@ -775,22 +774,25 @@ pub(crate) fn start_source_fixed_probe(
         Err(error) => {
             let definite = error.definitely_before_reservation();
             let reason = format!("admitting Source original planning: {error}");
+            // Uncertainty retains only the compact original selector/binding;
+            // no snapshot can resume or reconstruct this failed constructor.
+            drop(snapshot);
             return Err(if definite {
                 SourceFixedStartFailure { reason, held: None }
             } else {
-                SourceFixedStartFailure::held(reason, assignment, snapshot, None)
+                SourceFixedStartFailure::held(reason, assignment, None)
             });
         }
     };
     let application = match owner.take_application_lease(requested_bytes) {
         Ok(application) => application,
         Err(error) => {
+            drop(snapshot);
             return Err(SourceFixedStartFailure::held(
                 format!("retaining Source original planning application: {error}"),
                 assignment,
-                snapshot,
                 Some(owner),
-            ))
+            ));
         }
     };
     Ok(SourceProbeOperation {
