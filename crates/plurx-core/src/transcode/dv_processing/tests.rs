@@ -2118,3 +2118,53 @@ fn completed_general_fel_factory_and_receipt_keep_conditional_operations() {
         "P8.1 authoring remains narrow"
     );
 }
+
+/// A reconstructed Profile 8.1 report travels only with a Dolby Vision
+/// carrier, is never HDR10-E or SDR, is never display targeted, and claims
+/// FEL only with the NLQ residual it would have applied.
+#[test]
+fn reconstructed_profile81_owner_report_requires_its_dolby_vision_carrier() {
+    let generation = "00000000-0000-4000-8000-000000000001";
+    let base = serde_json::json!({"generation":generation,"hdr10_enhanced":false,
+        "profile81_reconstructed":true,"fel_contributed":true,
+        "applied_operations":["RpuColorConversion","TargetMapping","LinearNlqResidual"]});
+    let accept = |value: &serde_json::Value, delivered| {
+        DvEffectiveProcessingReport::from_owner_wire(
+            &serde_json::to_vec(value).expect("wire"),
+            generation,
+            delivered,
+        )
+    };
+    let report = accept(&base, Some("dolby_vision")).expect("reconstructed 8.1 report");
+    assert!(report.profile81_reconstructed() && report.fel_contributed());
+    assert!(!report.sdr_processed());
+    let wire = serde_json::to_value(&report).expect("wire");
+    assert_eq!(wire["profile81_reconstructed"], true);
+    assert_eq!(wire["hdr10_enhanced"], false);
+    for delivered in [Some("hdr10"), Some("sdr"), None] {
+        assert!(accept(&base, delivered).is_none(), "{delivered:?}");
+    }
+    // A Dolby Vision carrier without the reconstructed flag is not processed.
+    let mut plain = base.clone();
+    plain["profile81_reconstructed"] = false.into();
+    assert!(accept(&plain, Some("dolby_vision")).is_none());
+    // HDR10-E cannot also be the reconstructed 8.1.
+    let mut both = base.clone();
+    both["hdr10_enhanced"] = true.into();
+    assert!(accept(&both, Some("dolby_vision")).is_none());
+    // FEL needs the residual.
+    let mut no_nlq = base.clone();
+    no_nlq["applied_operations"] = serde_json::json!(["RpuColorConversion", "TargetMapping"]);
+    assert!(accept(&no_nlq, Some("dolby_vision")).is_none());
+    no_nlq["fel_contributed"] = false.into();
+    assert!(!accept(&no_nlq, Some("dolby_vision"))
+        .expect("base-only window")
+        .fel_contributed());
+    // The display maps the 8.1 RPU itself; the server never targets it.
+    let mut targeted = base.clone();
+    targeted["applied_operations"]
+        .as_array_mut()
+        .expect("array")
+        .push(serde_json::json!({"DisplayTargetMapping":{"nits":1000}}));
+    assert!(accept(&targeted, Some("dolby_vision")).is_none());
+}

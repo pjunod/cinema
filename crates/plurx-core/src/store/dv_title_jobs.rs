@@ -243,3 +243,110 @@ AND json_extract(probe_json,'$.plurx_dv_title_v1.schema')=json_extract($1,'$.sch
     }
     Ok(result)
 }
+
+/// Store a title's FEL qualification verdict beside its Dolby Vision facts in
+/// its probe document, only while the measured source is still the row's.
+/// A reprobe or source change rewrites the document and drops it.
+pub(super) async fn put_fel_verdict<T: QueueSql>(
+    store: &T,
+    file_id: i64,
+    source_size: i64,
+    source_mtime: i64,
+    verdict: &serde_json::Value,
+) -> Result<bool, StoreError> {
+    if file_id <= 0 || source_size < 0 || source_mtime < 0 || !verdict.is_object() {
+        return Err(StoreError::Task("invalid FEL verdict".into()));
+    }
+    let body = serde_json::json!({"file_id":file_id,"size":source_size,"mtime":source_mtime,"verdict":verdict});
+    if encode(&body)?.len() > 64 * 1024 {
+        return Err(StoreError::Task("FEL verdict exceeds its bound".into()));
+    }
+    let rows = store
+        .queue_sql(
+            format!(
+                "UPDATE files SET probe_json=json_set(probe_json,'$.{}',json(json_extract($1,'$.verdict')))
+WHERE id=json_extract($1,'$.file_id') AND size=json_extract($1,'$.size')
+ AND mtime=json_extract($1,'$.mtime') AND json_valid(probe_json)
+ AND dv_profile=7 AND dv_el_present=1
+RETURNING 'true' AS result_json",
+                crate::transcode::dv_fel_qualification::PROBE_KEY
+            ),
+            encode(&body)?,
+            true,
+            true,
+        )
+        .await?;
+    Ok(!rows.is_empty())
+}
+
+/// Ask for one title to be rescanned and re-qualified: rebind its title
+/// demand to `binding`, which no scanner digest equals, so the title worker
+/// rebinds it to its scanner and runs the title job again. `false` when the
+/// title has no demand (not a Dolby Vision title the scanner covers), or when
+/// a title job for it is already queued, running or cancelling: rotating the
+/// demand would cancel that attempt, and the attempt qualifies the title
+/// anyway if it is due.
+pub(super) async fn request_requalification<T: QueueSql>(
+    store: &T,
+    file_id: i64,
+    binding: &str,
+) -> Result<bool, StoreError> {
+    if file_id <= 0 || !digest(binding) {
+        return Err(StoreError::Task("invalid FEL re-qualification".into()));
+    }
+    #[derive(Deserialize)]
+    struct Revision {
+        revision: i64,
+    }
+    let rows = store
+        .queue_sql(
+            "SELECT json_object('revision',d.revision) AS result_json FROM dv_title_jobs_demand d
+WHERE d.file_id=json_extract($1,'$.file_id')
+ AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+  AND job.state IN ('queued','running','cancelling')
+  AND json_extract(job.payload_json,'$.file_id')=d.file_id)"
+                .into(),
+            encode(&serde_json::json!({"file_id": file_id}))?,
+            false,
+            true,
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    let revision = decode::<Revision>(row)?.revision;
+    Ok(bind(store, revision, binding).await?.is_some())
+}
+
+/// How many titles hold a FEL verdict for `identity`, and how many of those
+/// admit reconstruction. Advisory (Developer tab) only. Walks the Dolby
+/// Vision title demand (one row per DV title) and reads each title's row by
+/// its key, so it never scans the whole catalogue.
+pub(super) async fn fel_verdict_counts<T: QueueSql>(
+    store: &T,
+    identity: &str,
+) -> Result<(u64, u64), StoreError> {
+    let rows = store
+        .queue_sql(
+            format!(
+                "SELECT json_extract(f.probe_json,'$.{key}') AS result_json
+FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+WHERE f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+ AND json_type(f.probe_json,'$.{key}')='object'
+ AND json_extract(f.probe_json,'$.{key}.identity')=json_extract($1,'$.identity')",
+                key = crate::transcode::dv_fel_qualification::PROBE_KEY
+            ),
+            encode(&serde_json::json!({"identity": identity}))?,
+            false,
+            false,
+        )
+        .await?;
+    let mut counts = (0, 0);
+    for row in rows {
+        if let Ok(verdict) = decode::<crate::transcode::dv_fel_qualification::FelVerdict>(&row) {
+            counts.0 += 1;
+            counts.1 += u64::from(verdict.admitted);
+        }
+    }
+    Ok(counts)
+}

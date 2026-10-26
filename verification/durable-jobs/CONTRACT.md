@@ -12,6 +12,49 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+## FEL qualification review fixes — scoped refresh on 2026-10-26 (2)
+
+The PR #1290 review delta changes two mapped files. In
+[dv_title_jobs.rs](../../crates/plurx-core/src/store/dv_title_jobs.rs) the
+re-qualification request now selects the title demand only when no
+`dv_title_scan` job for that file is queued, running or cancelling, so it can
+no longer rotate the demand under (and cancel) an in-flight attempt; it still
+calls the existing reviewed `bind` command otherwise. The verdict counts walk
+`dv_title_jobs_demand` (one row per DV title, `file_id` UNIQUE) and read each
+`files` row by key instead of scanning the catalogue; a read. The store
+contract gains one assertion block in the FEL example (the no-op while a job
+runs). No queue, waiter, fence, lease, reservation or publication transition
+changed and every anchor string is unchanged. **Model decision:** unchanged;
+`DurableJobs.tla` still describes the selected library-worker scope, which
+these title-extension reads and the guarded `bind` call do not enter. Hashes
+rebound; no new qualification is claimed.
+
+## FEL qualification inside the DV title job — scoped refresh on 2026-10-26
+
+The `claude/lp-fel-p81` delta against `origin/effort/linux-player` (b75b81fa5)
+adds three `BackgroundJobStore` methods and their delegations
+(`put_dv_fel_verdict`, `request_dv_fel_requalification`,
+`dv_fel_verdict_counts`), their bodies in
+[dv_title_jobs.rs](../../crates/plurx-core/src/store/dv_title_jobs.rs), and one
+title contract example. Reviewed against the model: the verdict write is a
+guarded `json_set` of one application key in `files.probe_json` (same file id,
+size, mtime, Profile 7 with an EL); it touches no queue, waiter, reservation,
+fence or binding row and writes no `scanned_at`, so it rotates no title
+demand. Re-qualification calls the existing `bind` command (the reviewed title
+demand rotation) with a binding no scanner equals; the scan worker's existing
+discovery then rebinds and enqueues as before. The counts are a read. The
+qualification itself runs inside the `dv_title_scan` attempt between its scan
+and its existing `publish_dv_title`, under the same lease, fence and
+settlement paths; preempting it cancels only its own children. The selected
+library workers' bind-before-work path, claim CAS/replay, renewal and
+cancellation guards, counters, reservations and `insert_item_fenced` are
+untouched. All thirteen anchor strings are unchanged; the only change inside
+an anchored item is the three methods appended to the queue protocol trait and
+its shared adapter. The DV title extension stays excluded from this model. **Model
+decision:** `DurableJobs.tla`, its configurations and properties still
+describe the selected scope; nothing in them changes. Only the whole-file
+hashes are rebound; no new qualification is claimed.
+
 ## Advisory title readiness — scoped refresh on 2026-10-23
 
 The source delta from A2923b2c to be610d647 adds only the
