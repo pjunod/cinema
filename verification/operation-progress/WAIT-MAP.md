@@ -4,6 +4,19 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Completion identity-result correspondence — 2026-10-25
+
+Source `5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9` changes identity-repair result classification
+inside the shared publication file. Only its existing guarded annotation
+set-copy permits zero-to-many rows; full-vector and all other exact-one checks
+remain. Identity repair is outside the selected library-worker progress model
+and **is not proved here**. `atomic_publication` renewal, authority binding,
+wait/lock order, selected publication SQL/anchors and worker cancellation and
+settlement are unchanged. Two whole-file pins track this reviewed correspondence.
+No model, configuration, source-anchor, validator or scope changes are made;
+this adds no liveness, runtime, theorem, physical or qualification guarantee.
+Affected smoke receipts remain separate source-bound evidence.
+
 ## HTTPS integration — scoped refresh on 2026-10-25
 
 Codex reviewed source `f18c39e66954b71fcedcf8f463914f112498a518` against

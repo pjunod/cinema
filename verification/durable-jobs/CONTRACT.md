@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`f18c39e66954b71fcedcf8f463914f112498a518` · **Scope:** bound `library_scan` and
+`5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,26 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Completion identity and fixture correspondence — 2026-10-25
+
+Source `5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9` changes only the identity-repair result
+classifier in the mapped publication file: the existing guarded annotation
+set-copy may affect zero-to-many rows; the full result vector and every other
+exact-one guard/mutation/postcondition/ack check remain required. Identity repair
+is outside this selected model and **is not proved by it**. The shared
+`atomic_publication` renewal, authority binding, wait/lock order and selected
+`insert_item_fenced` SQL/anchors are unchanged.
+
+The Store parent adds title-method inventory, strict historical empty-extension
+fixtures and rejection through an already consumed fragment-analysis claim.
+Its `formal_publication` registration and selected conformance examples are
+unchanged. General fragment admission, historical migrations and title jobs
+remain excluded; valid installed schema and selected payloads remain premises.
+The fourteen publication pins and one parent-module pin track whole-file
+correspondence only. Models, configurations, anchors, validators and scope are
+unchanged. This review supplies no new theorem, runtime, physical-acceptance or
+qualification claim; affected smoke receipts are separate source-bound evidence.
 
 ## HTTPS integration — scoped refresh on 2026-10-25
 
