@@ -13540,6 +13540,25 @@ impl RollingControlActor {
 }
 
 impl RollingControlHandle {
+    pub(crate) fn reserve_context_payload(
+        &self,
+        bytes: Option<usize>,
+    ) -> Result<(Option<ActorPayloadAllocation>, ActorPayloadLifetime), ControlStateError> {
+        #[cfg(target_os = "linux")]
+        let allocation = self
+            .reply_budget
+            .as_ref()
+            .map(|budget| budget.reserve(bytes.ok_or(())?))
+            .transpose()
+            .map_err(|_| ControlStateError::Unavailable)?;
+        #[cfg(not(target_os = "linux"))]
+        let allocation = {
+            let _ = bytes;
+            None
+        };
+        Ok((allocation, self.payload_lifetime()))
+    }
+
     pub(crate) fn payload_lifetime(&self) -> ActorPayloadLifetime {
         ActorPayloadLifetime::from_original(&self.original_actor)
     }

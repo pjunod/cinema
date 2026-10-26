@@ -456,3 +456,87 @@ pub(super) fn committer(v: &DurableTerminalCommitter) -> Option<usize> {
     // and each owned DTO field above are separately inventoried.
     committer_parts(route, start, recipe, request)
 }
+
+pub(super) fn preparation_services(node_id: &String) -> Option<usize> {
+    add(
+        crate::playback_control::arc_requested_layout(std::alloc::Layout::new::<
+            PreparationSettlementServices,
+        >())?,
+        node_id.capacity(),
+    )
+}
+
+pub(super) fn preparation_services_value(value: &PreparationSettlementServices) -> Option<usize> {
+    let PreparationSettlementServices {
+        store: _,
+        transcode: _,
+        media_sessions: _,
+        media_pool: _,
+        membership: _,
+        link_receipts: _,
+        hls_route_hooks: _,
+        serving: _,
+        node_id,
+        _allocation: _,
+        _lifetime: _,
+    } = value;
+    add(
+        crate::playback_control::arc_requested_layout(std::alloc::Layout::new::<
+            PreparationSettlementServices,
+        >())?,
+        node_id.capacity(),
+    )
+}
+
+fn preparation_status_bytes(status: Option<&crate::transcode::HlsSessionInfo>) -> Option<usize> {
+    match status {
+        None => Some(0),
+        Some(crate::transcode::HlsSessionInfo::Live(status)) => add(
+            std::mem::size_of::<crate::transcode::SessionInfo>(),
+            status.requested_heap_bytes()?,
+        ),
+        Some(crate::transcode::HlsSessionInfo::Vod(status)) => add(
+            std::mem::size_of::<crate::vodserve::VodSessionInfo>(),
+            status.requested_heap_bytes()?,
+        ),
+    }
+}
+
+pub(super) fn preparation_context_parts(
+    route_value: &MediaSessionRoute,
+    start: &StartResponse,
+    recipe_value: &RemoteStartRequest,
+    request_value: &crate::playback_control::ControlRequestV1,
+    status: Option<&crate::transcode::HlsSessionInfo>,
+) -> Option<usize> {
+    let mut bytes = crate::playback_control::arc_requested_layout(std::alloc::Layout::new::<
+        PreparationSettlementContext,
+    >())?;
+    bytes = add(
+        bytes,
+        crate::playback_control::arc_requested_layout(std::alloc::Layout::new::<
+            DurablePreparationSettlementAdmission,
+        >())?,
+    )?;
+    bytes = add(bytes, route(route_value)?)?;
+    bytes = add(bytes, start_response(start)?)?;
+    bytes = add(bytes, recipe(recipe_value)?)?;
+    bytes = add(bytes, request(request_value)?)?;
+    // One status moves into the shared context; the commit path makes exactly
+    // one independent acknowledgement status copy while this context lives.
+    add(bytes, preparation_status_bytes(status)?.checked_mul(2)?)
+}
+
+pub(super) fn preparation_context_value(value: &PreparationSettlementContext) -> Option<usize> {
+    let PreparationSettlementContext {
+        gate: _,
+        route,
+        start,
+        recipe,
+        request,
+        status,
+        _allocation: _,
+        state: _,
+    } = value;
+    preparation_context_parts(route, start, recipe, request, status.as_ref())
+}

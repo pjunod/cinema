@@ -1555,23 +1555,26 @@
         // but reaches settlement after the first owner completed. It must
         // join the retained receipt instead of manufacturing new timestamps.
         let retry = DurablePreparationSettlementAdmission {
-            state: fixture.state.clone(),
-            gate: fixture
-                .state
-                .transcode
-                .session_preparation_gate(&route.session_id)
-                .await
-                .expect("active preparation gate"),
-            route: route.clone(),
-            start: control_start_response(&route).expect("control start"),
-            recipe: serde_json::from_str(&route.recipe_json).expect("control recipe"),
-            request: request.clone(),
-            status: fixture
-                .state
-                .transcode
-                .hls_session_status_publication(&route.session_id)
-                .await
-                .and_then(|publication| publication.result.ok()),
+            context: Arc::new(PreparationSettlementContext {
+                gate: fixture
+                    .state
+                    .transcode
+                    .session_preparation_gate(&route.session_id)
+                    .await
+                    .expect("active preparation gate"),
+                route: route.clone(),
+                start: control_start_response(&route).expect("control start"),
+                recipe: serde_json::from_str(&route.recipe_json).expect("control recipe"),
+                request: request.clone(),
+                status: fixture
+                    .state
+                    .transcode
+                    .hls_session_status_publication(&route.session_id)
+                    .await
+                    .and_then(|publication| publication.result.ok()),
+                _allocation: None,
+                state: PreparationSettlementServices::fixture(&fixture.state),
+            }),
             reservation: std::sync::Mutex::new(
                 reserve_preparation_settlement(
                     &fixture.state,
@@ -1646,18 +1649,21 @@
             .staged_incarnation_id;
         let request = control_request(route.incarnation_id.clone());
         let admission = DurablePreparationSettlementAdmission {
-            state: fixture.state.clone(),
-            gate: fixture
-                .state
-                .transcode
-                .session_preparation_gate(&route.session_id)
-                .await
-                .expect("the gate was captured before retirement"),
-            route: route.clone(),
-            start: control_start_response(&route).expect("control start"),
-            recipe: serde_json::from_str(&route.recipe_json).expect("control recipe"),
-            request: request.clone(),
-            status: None,
+            context: Arc::new(PreparationSettlementContext {
+                gate: fixture
+                    .state
+                    .transcode
+                    .session_preparation_gate(&route.session_id)
+                    .await
+                    .expect("the gate was captured before retirement"),
+                route: route.clone(),
+                start: control_start_response(&route).expect("control start"),
+                recipe: serde_json::from_str(&route.recipe_json).expect("control recipe"),
+                request: request.clone(),
+                status: None,
+                _allocation: None,
+                state: PreparationSettlementServices::fixture(&fixture.state),
+            }),
             reservation: std::sync::Mutex::new(
                 reserve_preparation_settlement(
                     &fixture.state,
@@ -2672,4 +2678,55 @@ quality_catalog: None,
             bootstrap.start_seconds,
             bootstrap.media_origin_ms.unwrap_or_default(),
         )
+    }
+
+    // Allocation identity only: this fixture does not establish a finite
+    // controller/task peak or supply any native closure authority.
+    #[tokio::test]
+    async fn preparation_context_shares_service_and_request_allocations() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        let services = PreparationSettlementServices::fixture(&fixture.state);
+        assert!(services.fixture_shares_original_handles(&fixture.state));
+        assert_eq!(services.node_id(), fixture.state.node_id);
+        assert!(!services.node_id().is_empty());
+        assert_ne!(services.node_id().as_ptr(), fixture.state.node_id.as_ptr());
+        let node_id_allocation = services.node_id().as_ptr();
+        let gate = fixture
+            .state
+            .transcode
+            .session_preparation_gate(&session_id)
+            .await
+            .expect("original preparation gate");
+        let context = Arc::new(PreparationSettlementContext {
+            gate,
+            start: control_start_response(&route).expect("control start"),
+            recipe: serde_json::from_str(&route.recipe_json).expect("control recipe"),
+            request: control_request(route.incarnation_id.clone()),
+            route,
+            status: None,
+            _allocation: None,
+            state: services,
+        });
+        let request_allocation = context.request.client_instance_id.as_ptr();
+        let route_allocation = context.route.recipe_json.as_ptr();
+        let continuation = Arc::clone(&context);
+        assert!(Arc::ptr_eq(&context, &continuation));
+        assert!(Arc::ptr_eq(&context.state, &continuation.state));
+        assert_eq!(continuation.state.node_id().as_ptr(), node_id_allocation);
+        assert_eq!(
+            continuation.request.client_instance_id.as_ptr(),
+            request_allocation
+        );
+        assert_eq!(continuation.route.recipe_json.as_ptr(), route_allocation);
+        drop(context);
+        assert!(continuation
+            .state
+            .fixture_shares_original_handles(&fixture.state));
+        assert_eq!(
+            continuation.request.client_instance_id.as_ptr(),
+            request_allocation
+        );
+        assert_eq!(continuation.route.recipe_json.as_ptr(), route_allocation);
+        assert_eq!(continuation.state.node_id().as_ptr(), node_id_allocation);
     }

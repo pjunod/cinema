@@ -213,6 +213,50 @@ impl AdaptiveWorkerQuote {
     }
 }
 
+/// Borrow existing catalog services without retaining a deep AppState copy.
+/// Concrete views preserve the same membership, readiness and source checks.
+pub(crate) trait QualityCatalogServices: Send + Sync {
+    fn quality_store(&self) -> &Arc<dyn plurx_core::store::Store>;
+    fn quality_transcode(&self) -> &Arc<crate::transcode::TranscodeManager>;
+    fn quality_node_id(&self) -> &str;
+    fn quality_membership(&self) -> &plurx_core::cluster::membership::MembershipManager;
+    fn quality_serving(&self) -> crate::serving_fence::ServingAuthority;
+}
+impl QualityCatalogServices for AppState {
+    fn quality_store(&self) -> &Arc<dyn plurx_core::store::Store> {
+        &self.store
+    }
+    fn quality_transcode(&self) -> &Arc<crate::transcode::TranscodeManager> {
+        &self.transcode
+    }
+    fn quality_node_id(&self) -> &str {
+        &self.node_id
+    }
+    fn quality_membership(&self) -> &plurx_core::cluster::membership::MembershipManager {
+        &self.membership
+    }
+    fn quality_serving(&self) -> crate::serving_fence::ServingAuthority {
+        self.serving.authority()
+    }
+}
+impl<T: QualityCatalogServices + ?Sized> QualityCatalogServices for Arc<T> {
+    fn quality_store(&self) -> &Arc<dyn plurx_core::store::Store> {
+        self.as_ref().quality_store()
+    }
+    fn quality_transcode(&self) -> &Arc<crate::transcode::TranscodeManager> {
+        self.as_ref().quality_transcode()
+    }
+    fn quality_node_id(&self) -> &str {
+        self.as_ref().quality_node_id()
+    }
+    fn quality_membership(&self) -> &plurx_core::cluster::membership::MembershipManager {
+        self.as_ref().quality_membership()
+    }
+    fn quality_serving(&self) -> crate::serving_fence::ServingAuthority {
+        self.as_ref().quality_serving()
+    }
+}
+
 /// Separate additive protocol: old workers return 404 rather than parsing a
 /// changed legacy placement envelope. Catalog inspection never starts media.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1348,7 +1392,7 @@ impl MediaPool {
     /// to its exact recipe so placement cannot spend another worker's proof.
     pub(crate) async fn quality_candidates(
         &self,
-        state: &AppState,
+        state: &impl QualityCatalogServices,
         request: QualityCatalogRequest,
     ) -> Vec<WorkerQualityCandidate> {
         self.quality_catalog(state, request).await.candidates
@@ -1356,7 +1400,7 @@ impl MediaPool {
 
     pub(crate) async fn quality_catalog(
         &self,
-        state: &AppState,
+        state: &impl QualityCatalogServices,
         request: QualityCatalogRequest,
     ) -> QualityCatalogResult {
         let started = tokio::time::Instant::now();
@@ -1408,7 +1452,7 @@ impl MediaPool {
                 peers
                     .into_iter()
                     .filter(|peer| {
-                        peer.reachable && peer.http_base.is_some() && peer.node_id != state.node_id
+                        peer.reachable && peer.http_base.is_some() && peer.node_id != state.quality_node_id()
                     })
                     .take(MAX_PEERS)
                     .map(|peer| {
@@ -1910,7 +1954,7 @@ impl QualityCatalogResult {
 }
 
 pub(crate) async fn local_quality_catalog(
-    state: &AppState,
+    state: &impl QualityCatalogServices,
     request: &QualityCatalogRequest,
     deadline: tokio::time::Instant,
     expected_binding: Option<&PlanningBinding>,
@@ -1921,18 +1965,18 @@ pub(crate) async fn local_quality_catalog(
     if let Err(error) = request.validate() {
         return QualityCatalogResult::unavailable(CatalogCause::RequestInvalid(error));
     }
-    if state.membership.local_maintenance_active() {
+    if state.quality_membership().local_maintenance_active() {
         return QualityCatalogResult::unavailable(CatalogCause::Maintenance);
     }
     let progress = std::sync::Mutex::new(Vec::new());
     let complete_descriptions = std::sync::Mutex::new(Vec::new());
     let binding = std::sync::Mutex::new(None);
     let work = async {
-        if !state.serving.accepting_new_media().await {
+        if !state.quality_serving().accepting_new_media().await {
             return Err(CatalogCause::AuthorityRefused);
         }
         let snapshot = state
-            .store
+            .quality_store()
             .playback_planning_snapshot(request.file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
             .await
             .map_err(|_| CatalogCause::SnapshotUnavailable)?
@@ -1954,7 +1998,7 @@ pub(crate) async fn local_quality_catalog(
         // An unrelated ordinary planner timeout cannot erase an explicit ID
         // before its subsequent admitted qualification can start.
         let described = state
-            .transcode
+            .quality_transcode()
             .processed_quality_descriptions(&snapshot, request);
         *complete_descriptions
             .lock()
@@ -1964,9 +2008,12 @@ pub(crate) async fn local_quality_catalog(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .extend(described);
-        state.transcode.before_quality_catalog_ordinary().await;
         state
-            .transcode
+            .quality_transcode()
+            .before_quality_catalog_ordinary()
+            .await;
+        state
+            .quality_transcode()
             .quality_catalog_from_snapshot_progress(
                 &snapshot,
                 &request.caps,
@@ -2002,7 +2049,7 @@ pub(crate) async fn local_quality_catalog(
         .map(|candidate| {
             let partial = !complete && !complete_descriptions.contains(&candidate.id);
             WorkerQualityCandidate {
-                node_id: state.node_id.clone(),
+                node_id: state.quality_node_id().to_owned(),
                 candidate,
                 binding: binding.clone(),
                 partial,

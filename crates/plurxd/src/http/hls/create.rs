@@ -6204,7 +6204,7 @@ pub(super) async fn settle_activation_predecessor(
 }
 
 pub(super) async fn settle_armed_activation_handoff(
-    state: &AppState,
+    state: &impl ActivationServices,
     predecessor_incarnation: String,
     successor: MediaSessionRoute,
     authority: crate::serving_fence::ServingAuthority,
@@ -6275,7 +6275,7 @@ pub(super) enum ActivationHandoffVerdict {
 }
 
 pub(super) async fn complete_activation_handoff_until(
-    state: &AppState,
+    state: &impl ActivationServices,
     successor: &MediaSessionRoute,
     proof: MediaSessionProjectionCompletion,
     authority: &crate::serving_fence::ServingAuthority,
@@ -6296,7 +6296,7 @@ pub(super) async fn complete_activation_handoff_until(
         };
         match tokio::time::timeout_at(
             attempt_deadline,
-            state.store.complete_media_session_handoff(
+            state.store().complete_media_session_handoff(
                 &successor.incarnation_id,
                 &successor.owner_node_id,
                 successor.owner_epoch,
@@ -6308,7 +6308,7 @@ pub(super) async fn complete_activation_handoff_until(
         {
             Ok(Ok(Some(route))) => {
                 drop(serving_transition);
-                state.media_sessions.cache_route(route).await;
+                state.media_sessions().cache_route(route).await;
                 return ActivationHandoffVerdict::Ready;
             }
             Ok(Ok(None)) => {
@@ -6318,7 +6318,7 @@ pub(super) async fn complete_activation_handoff_until(
                 if let Ok(Ok(Some(route))) = tokio::time::timeout_at(
                     attempt_deadline,
                     state
-                        .store
+                        .store()
                         .media_session_route_by_incarnation(&successor.incarnation_id),
                 )
                 .await
@@ -6351,7 +6351,7 @@ pub(super) async fn complete_activation_handoff_until(
 }
 
 pub(super) async fn project_activation_predecessor_until(
-    state: &AppState,
+    state: &impl ActivationServices,
     predecessor_incarnation: &str,
     deadline: tokio::time::Instant,
 ) -> bool {
@@ -6374,7 +6374,7 @@ enum PredecessorProjection {
 }
 
 async fn project_activation_predecessor_while_current(
-    state: &AppState,
+    state: &impl ActivationServices,
     predecessor_incarnation: &str,
     deadline: tokio::time::Instant,
     successor: Option<&MediaSessionRoute>,
@@ -6389,7 +6389,7 @@ async fn project_activation_predecessor_while_current(
             if let Ok(Ok(Some(current))) = tokio::time::timeout_at(
                 read_deadline,
                 state
-                    .store
+                    .store()
                     .media_session_route_by_incarnation(&successor.incarnation_id),
             )
             .await
@@ -6407,7 +6407,7 @@ async fn project_activation_predecessor_while_current(
         let route = tokio::time::timeout_at(
             read_deadline,
             state
-                .store
+                .store()
                 .media_session_route_by_incarnation(predecessor_incarnation),
         )
         .await;
@@ -6446,7 +6446,7 @@ async fn project_activation_predecessor_while_current(
                     Ok(Ok(()))
                 ) {
                     if let Some(proof) = state
-                        .media_sessions
+                        .media_sessions()
                         .complete_terminal_projection(
                             &route,
                             MediaSessionProjectionCompletion::PredecessorAcknowledged,
@@ -6454,7 +6454,7 @@ async fn project_activation_predecessor_while_current(
                         .await
                         .filter(|proof| proof.terminal_projection_complete())
                     {
-                        state.transcode.complete_session_release_durable(&proof);
+                        state.transcode().complete_session_release_durable(&proof);
                         return PredecessorProjection::Acknowledged;
                     }
                 }
@@ -6471,21 +6471,21 @@ async fn project_activation_predecessor_while_current(
 /// Same teardown with an honest reason: a client DELETE is a release, not a
 /// supersession, and the VOD tombstone cause keys off this string.
 pub(super) async fn stop_owned_session_because(
-    state: &AppState,
+    state: &impl ActivationServices,
     route: &MediaSessionRoute,
     terminal: crate::vodserve::Terminal,
     reason: &'static str,
 ) -> Result<(), PeerTransportError> {
-    if route.owner_node_id == state.node_id {
+    if route.owner_node_id == state.node_id() {
         state
-            .transcode
+            .transcode()
             .begin_session_terminal(&route.session_id, terminal, reason)
             .await;
-        state.transcode.complete_session_release(&route.session_id);
+        state.transcode().complete_session_release(&route.session_id);
         Ok(())
     } else {
         state
-            .media_sessions
+            .media_sessions()
             .abort_remote(
                 &route.owner_node_id,
                 &RemoteAbortRequest {

@@ -2869,22 +2869,22 @@ pub(super) async fn stage_prepared_successor_with_prime(
 }
 
 pub(super) async fn retire_prepared_worker(
-    state: &AppState,
+    state: &impl ActivationServices,
     owner_node_id: &str,
     incarnation_id: &str,
     session_id: &str,
     reason: &'static str,
 ) -> bool {
-    if owner_node_id == state.node_id {
+    if owner_node_id == state.node_id() {
         state
-            .transcode
+            .transcode()
             .begin_session_terminal(session_id, crate::vodserve::Terminal::Replaced, reason)
             .await;
-        state.transcode.complete_session_release(session_id);
+        state.transcode().complete_session_release(session_id);
         true
     } else {
         match state
-            .media_sessions
+            .media_sessions()
             .abort_remote(
                 owner_node_id,
                 &RemoteAbortRequest {

@@ -604,6 +604,7 @@ pub(super) struct ActivePreparationSettlement {
     /// `None` while the owner is running; completed canonical responses stay
     /// joinable through the same durable replay window as their Store row.
     replay_until: Option<std::time::Instant>,
+    _context: Arc<PreparationSettlementContext>,
 }
 
 pub(super) fn preparation_settlements(
@@ -622,16 +623,146 @@ pub(super) fn preparation_settlement_slots() -> Arc<tokio::sync::Semaphore> {
     )
 }
 
-pub(super) struct DurablePreparationSettlementAdmission {
-    pub(super) state: AppState,
+/// Borrowed services shared by activation/stop helpers. This exposes no fresh
+/// admission or native closure operation; every method returns existing state.
+pub(super) trait ActivationServices: Send + Sync {
+    fn store(&self) -> &Arc<dyn plurx_core::store::Store>;
+    fn transcode(&self) -> &Arc<crate::transcode::TranscodeManager>;
+    fn media_sessions(&self) -> &Arc<crate::media_sessions::MediaSessionCoordinator>;
+    fn node_id(&self) -> &str;
+}
+impl ActivationServices for AppState {
+    fn store(&self) -> &Arc<dyn plurx_core::store::Store> {
+        &self.store
+    }
+    fn transcode(&self) -> &Arc<crate::transcode::TranscodeManager> {
+        &self.transcode
+    }
+    fn media_sessions(&self) -> &Arc<crate::media_sessions::MediaSessionCoordinator> {
+        &self.media_sessions
+    }
+    fn node_id(&self) -> &str {
+        &self.node_id
+    }
+}
+impl<T: ActivationServices + ?Sized> ActivationServices for Arc<T> {
+    fn store(&self) -> &Arc<dyn plurx_core::store::Store> {
+        self.as_ref().store()
+    }
+    fn transcode(&self) -> &Arc<crate::transcode::TranscodeManager> {
+        self.as_ref().transcode()
+    }
+    fn media_sessions(&self) -> &Arc<crate::media_sessions::MediaSessionCoordinator> {
+        self.as_ref().media_sessions()
+    }
+    fn node_id(&self) -> &str {
+        self.as_ref().node_id()
+    }
+}
+
+/// One immutable service view. ServingAuthority contains only existing shared
+/// Arcs; cloning ServingFence would also copy metrics path/name allocations.
+pub(super) struct PreparationSettlementServices {
+    store: Arc<dyn plurx_core::store::Store>,
+    transcode: Arc<crate::transcode::TranscodeManager>,
+    media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
+    media_pool: Arc<crate::media_pool::MediaPool>,
+    membership: plurx_core::cluster::membership::MembershipManager,
+    link_receipts: Arc<crate::http::hls::link_receipts::LinkReceipts>,
+    hls_route_hooks: Arc<crate::seam_hooks::HookSlot<dyn crate::http::hls::HlsRouteHooks>>,
+    serving: crate::serving_fence::ServingAuthority,
+    node_id: String,
+    _allocation: Option<crate::playback_control::ActorPayloadAllocation>,
+    _lifetime: crate::playback_control::ActorPayloadLifetime,
+}
+impl ActivationServices for PreparationSettlementServices {
+    fn store(&self) -> &Arc<dyn plurx_core::store::Store> {
+        &self.store
+    }
+    fn transcode(&self) -> &Arc<crate::transcode::TranscodeManager> {
+        &self.transcode
+    }
+    fn media_sessions(&self) -> &Arc<crate::media_sessions::MediaSessionCoordinator> {
+        &self.media_sessions
+    }
+    fn node_id(&self) -> &str {
+        &self.node_id
+    }
+}
+impl crate::media_pool::QualityCatalogServices for PreparationSettlementServices {
+    fn quality_store(&self) -> &Arc<dyn plurx_core::store::Store> {
+        &self.store
+    }
+    fn quality_transcode(&self) -> &Arc<crate::transcode::TranscodeManager> {
+        &self.transcode
+    }
+    fn quality_node_id(&self) -> &str {
+        &self.node_id
+    }
+    fn quality_membership(&self) -> &plurx_core::cluster::membership::MembershipManager {
+        &self.membership
+    }
+    fn quality_serving(&self) -> crate::serving_fence::ServingAuthority {
+        self.serving.clone()
+    }
+}
+
+impl PreparationSettlementServices {
+    fn capture(
+        state: &AppState,
+        allocation: Option<crate::playback_control::ActorPayloadAllocation>,
+        lifetime: crate::playback_control::ActorPayloadLifetime,
+    ) -> Self {
+        Self {
+            store: Arc::clone(&state.store),
+            transcode: Arc::clone(&state.transcode),
+            media_sessions: Arc::clone(&state.media_sessions),
+            media_pool: Arc::clone(&state.media_pool),
+            membership: state.membership.clone(),
+            link_receipts: Arc::clone(&state.link_receipts),
+            hls_route_hooks: Arc::clone(&state.hls_route_hooks),
+            serving: state.serving.authority(),
+            node_id: state.node_id.clone(),
+            _allocation: allocation,
+            _lifetime: lifetime,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture(state: &AppState) -> Arc<Self> {
+        Arc::new(Self::capture(state, None, Default::default()))
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_shares_original_handles(&self, state: &AppState) -> bool {
+        Arc::ptr_eq(&self.store, &state.store)
+            && Arc::ptr_eq(&self.transcode, &state.transcode)
+            && Arc::ptr_eq(&self.media_sessions, &state.media_sessions)
+            && Arc::ptr_eq(&self.media_pool, &state.media_pool)
+            && Arc::ptr_eq(&self.link_receipts, &state.link_receipts)
+            && Arc::ptr_eq(&self.hls_route_hooks, &state.hls_route_hooks)
+    }
+}
+
+/// Shared physical request/status payload; accepted settlement and replay
+/// retain this same allocation instead of deep-cloning another AppState/DTO.
+pub(super) struct PreparationSettlementContext {
     pub(super) gate: Arc<dyn crate::playback_control::PreparationGate>,
     pub(super) route: MediaSessionRoute,
     pub(super) start: StartResponse,
     pub(super) recipe: RemoteStartRequest,
     pub(super) request: crate::playback_control::ControlRequestV1,
     pub(super) status: Option<crate::transcode::HlsSessionInfo>,
+    pub(super) _allocation: Option<crate::playback_control::ActorPayloadAllocation>,
+    // Last: every owned DTO drops before original application custody.
+    pub(super) state: Arc<PreparationSettlementServices>,
+}
+
+pub(super) struct DurablePreparationSettlementAdmission {
     pub(super) reservation: std::sync::Mutex<Option<PreparationSettlementReservation>>,
     pub(super) receipt: std::sync::Mutex<Option<PreparationSettlementReceipt>>,
+    // Last: no context lifetime is released ahead of the receipt/controller.
+    pub(super) context: Arc<PreparationSettlementContext>,
 }
 
 pub(super) struct PreparationSettlementReservation {
@@ -696,17 +827,17 @@ impl crate::playback_control::PreparationSettlementAdmission
             | crate::playback_control::PreparationDirective::Abort {
                 staged_incarnation_id,
                 ..
-            } => staged_incarnation_id.clone(),
+            } => staged_incarnation_id.as_str(),
         };
-        let Some(request_fingerprint) = self.request.fingerprint() else {
+        let Some(request_fingerprint) = self.context.request.fingerprint() else {
             return;
         };
         let key = preparation_settlement_key(
-            &self.route.incarnation_id,
-            self.route.owner_epoch,
-            &self.request.client_instance_id,
-            self.request.sequence,
-            &staged_incarnation_id,
+            &self.context.route.incarnation_id,
+            self.context.route.owner_epoch,
+            &self.context.request.client_instance_id,
+            self.context.request.sequence,
+            staged_incarnation_id,
         );
         let mut operations = preparation_settlements()
             .lock()
@@ -753,6 +884,7 @@ impl crate::playback_control::PreparationSettlementAdmission
                 request_fingerprint,
                 receipt: receipt.clone(),
                 replay_until: None,
+                _context: Arc::clone(&self.context),
             },
         );
         *self
@@ -761,26 +893,9 @@ impl crate::playback_control::PreparationSettlementAdmission
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(receipt);
         drop(operations);
 
-        let state = self.state.clone();
-        let gate = Arc::clone(&self.gate);
-        let route = self.route.clone();
-        let start = self.start.clone();
-        let recipe = self.recipe.clone();
-        let request = self.request.clone();
-        let status = self.status.clone();
+        let context = Arc::clone(&self.context);
         tokio::spawn(async move {
-            let result = settle_preparation_control(
-                &state,
-                gate,
-                &route,
-                &start,
-                &recipe,
-                &request,
-                status,
-                reservation,
-                outcome,
-            )
-            .await;
+            let result = settle_preparation_control(context, reservation, outcome).await;
             let retain = !matches!(result, PreparationSettlement::Unavailable);
             sender.send_replace(Some(result));
             let mut operations = preparation_settlements()
@@ -802,18 +917,21 @@ impl crate::playback_control::PreparationSettlementAdmission
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn settle_preparation_control(
-    state: &AppState,
-    gate: Arc<dyn crate::playback_control::PreparationGate>,
-    route: &MediaSessionRoute,
-    start: &StartResponse,
-    recipe: &RemoteStartRequest,
-    request: &crate::playback_control::ControlRequestV1,
-    status: Option<crate::transcode::HlsSessionInfo>,
+    context: Arc<PreparationSettlementContext>,
     _reservation: PreparationSettlementReservation,
     outcome: crate::playback_control::PreparationControlOutcome,
 ) -> PreparationSettlement {
+    let context = context;
+    let state = &context.state;
+    let gate = Arc::clone(&context.gate);
+    let route = &context.route;
+    let start = &context.start;
+    let recipe = &context.recipe;
+    let request = &context.request;
+    // The one acknowledgement status copy was reserved before actor mutation.
+    // Arc-sharing removes all other repeated request/service DTO copies.
+    let status = context.status.as_ref();
     let executor = crate::playback_control::PreparationExecutor::new(
         Arc::clone(&state.store),
         gate,
@@ -853,7 +971,7 @@ async fn settle_preparation_control(
         &outcome.preparation_directive,
         crate::playback_control::PreparationDirective::Commit { .. }
     ) {
-        status.and_then(|status| {
+        status.cloned().and_then(|status| {
             let response_time = unix_ms();
             let result = crate::playback_control::LocalControlResult {
                 disposition: outcome.disposition,
@@ -1158,7 +1276,10 @@ async fn settle_preparation_control(
     PreparationSettlement::Unavailable
 }
 
-async fn planned_preparation_still_current(state: &AppState, incarnation_id: &str) -> bool {
+async fn planned_preparation_still_current(
+    state: &Arc<PreparationSettlementServices>,
+    incarnation_id: &str,
+) -> bool {
     let Ok(Some(route)) = state
         .store
         .media_session_route_by_incarnation(incarnation_id)
@@ -1183,7 +1304,7 @@ async fn planned_preparation_still_current(state: &AppState, incarnation_id: &st
 }
 
 async fn retire_prepared_incarnation(
-    state: &AppState,
+    state: &Arc<PreparationSettlementServices>,
     staged_incarnation_id: &str,
     reason: &'static str,
 ) {
@@ -1216,7 +1337,7 @@ async fn retire_prepared_incarnation(
 /// boundary; the lease reconciler also resumes that durable state after a
 /// crash.
 async fn settle_committed_preparation(
-    state: &AppState,
+    state: &Arc<PreparationSettlementServices>,
     commit: &plurx_core::domain::MediaSessionPreparationCommit,
 ) {
     let successor = commit.route.clone();
@@ -1236,7 +1357,7 @@ async fn settle_committed_preparation(
     if successor.publication_ready_at_ms == 0 {
         return;
     }
-    let authority = state.serving.authority();
+    let authority = state.serving.clone();
     let Some(admitted_generation) = authority.admit() else {
         return;
     };
@@ -1244,7 +1365,7 @@ async fn settle_committed_preparation(
         .predecessor
         .as_ref()
         .map(|route| route.incarnation_id.clone());
-    let state = state.clone();
+    let state = Arc::clone(state);
     tokio::spawn(async move {
         publish_committed_preparation(
             state,
@@ -1263,7 +1384,7 @@ async fn settle_committed_preparation(
 /// remains authorized by its durable response marker and current pointer while
 /// this task proves the control-plane publication boundary.
 async fn publish_committed_preparation(
-    state: AppState,
+    state: Arc<PreparationSettlementServices>,
     successor: MediaSessionRoute,
     predecessor: Option<String>,
     authority: crate::serving_fence::ServingAuthority,
@@ -2232,7 +2353,7 @@ pub(super) fn control_start_response(route: &MediaSessionRoute) -> Option<StartR
 /// matching preparation slot once more when it accepts the exchange; this
 /// read therefore proposes an action but cannot create a second authority.
 async fn candidate_snapshot_current(
-    state: &AppState,
+    state: &Arc<PreparationSettlementServices>,
     staged_incarnation: &str,
     latest: Option<&crate::playback_control::DynamicCapabilities>,
 ) -> bool {
@@ -2854,13 +2975,21 @@ async fn control_local_with_observation(
         let Some(bytes) = terminal_memory::committer_parts(route, &start, &recipe, &request) else {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
-        match state
-            .transcode
-            .reserve_rolling_control_payload(&route.session_id, bytes)
-            .await
+        let Some(wait_budget) =
+            crate::playback_control::inherited_exchange_budget(deadline_unix_ms, unix_ms())
+        else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        match tokio::time::timeout(
+            wait_budget,
+            state
+                .transcode
+                .reserve_rolling_control_payload(&route.session_id, bytes),
+        )
+        .await
         {
-            Ok(allocation) => allocation,
-            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            Ok(Ok(allocation)) => allocation,
+            _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     } else {
         None
@@ -2909,6 +3038,38 @@ async fn control_local_with_observation(
             None,
         );
     };
+    #[cfg(target_os = "linux")]
+    let service_bytes = terminal_memory::preparation_services(&state.node_id);
+    #[cfg(not(target_os = "linux"))]
+    let service_bytes = None;
+    let Some(service_wait_budget) =
+        crate::playback_control::inherited_exchange_budget(deadline_unix_ms, unix_ms())
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let (service_allocation, service_lifetime) = match tokio::time::timeout(
+        service_wait_budget,
+        state
+            .transcode
+            .reserve_rolling_control_context(&route.session_id, service_bytes),
+    )
+    .await
+    {
+        Ok(Ok(custody)) => custody,
+        _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let services =
+        PreparationSettlementServices::capture(state, service_allocation, service_lifetime);
+    #[cfg(target_os = "linux")]
+    if let Some(allocation) = services._allocation.as_ref() {
+        allocation
+            .validate_actual(
+                terminal_memory::preparation_services_value(&services)
+                    .expect("same service view projection"),
+            )
+            .expect("service node ID clone exceeded original source capacity");
+    }
+    let services = Arc::new(services);
     let preparation_status = state
         .transcode
         .hls_session_status_publication(&route.session_id)
@@ -2941,16 +3102,49 @@ async fn control_local_with_observation(
     } else {
         None
     };
-    let preparation_admission = Some(Arc::new(DurablePreparationSettlementAdmission {
-        state: state.clone(),
+    #[cfg(target_os = "linux")]
+    let context_allocation = if let Some(source) = services._allocation.as_ref() {
+        let Some(bytes) = terminal_memory::preparation_context_parts(
+            route,
+            &start,
+            &recipe,
+            &request,
+            preparation_status.as_ref(),
+        ) else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        match source.reserve_related(bytes) {
+            Ok(allocation) => Some(allocation),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let context_allocation = None;
+    let context = Arc::new(PreparationSettlementContext {
         gate: preparation_gate,
         route: route.clone(),
         start: start.clone(),
         recipe: recipe.clone(),
         request: request.clone(),
         status: preparation_status,
+        _allocation: context_allocation,
+        state: services,
+    });
+    #[cfg(target_os = "linux")]
+    if let Some(allocation) = context._allocation.as_ref() {
+        allocation
+            .validate_actual(
+                terminal_memory::preparation_context_value(&context)
+                    .expect("same immutable preparation context projection"),
+            )
+            .expect("preparation DTO clones exceeded original source capacities");
+    }
+    let preparation_admission = Some(Arc::new(DurablePreparationSettlementAdmission {
         reservation: std::sync::Mutex::new(preparation_reservation),
         receipt: std::sync::Mutex::new(None),
+        context,
     }));
     let preparation_admission_trait = preparation_admission.as_ref().map(|admission| {
         Arc::clone(admission) as Arc<dyn crate::playback_control::PreparationSettlementAdmission>

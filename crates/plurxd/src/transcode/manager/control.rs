@@ -6,6 +6,23 @@ use super::*;
 pub(crate) use crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
 
 impl TranscodeManager {
+    pub(crate) async fn reserve_rolling_control_context(
+        &self,
+        session_id: &str,
+        bytes: Option<usize>,
+    ) -> Result<
+        (
+            Option<crate::playback_control::ActorPayloadAllocation>,
+            crate::playback_control::ActorPayloadLifetime,
+        ),
+        crate::playback_control::ControlStateError,
+    > {
+        match self.sessions.lock().await.get(session_id).cloned() {
+            Some(session) => session.control.reserve_context_payload(bytes),
+            None => Ok((None, Default::default())),
+        }
+    }
+
     /// No new admission: borrow the current selected rolling session's own
     /// role partition before HTTP creates a retained context copy.
     #[cfg(target_os = "linux")]
