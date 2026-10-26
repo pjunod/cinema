@@ -73,6 +73,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Web playback title badges refresh when Dolby Vision processing evidence arrives
+  or clears; HDR10-E and the FEL, RPU and DYN pills reflect the current applied
+  operations, including per-shot metadata mapped into HDR10 by the server.
+
 - Display-targeted playback reads mastering metadata carried on decoded frames
   when stream metadata omits it. The bounded probe stays bound to the held source
   and selected stream; HDR primaries and unknown-title SDR black levels resolve
