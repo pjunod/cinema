@@ -8677,13 +8677,6 @@ pub(crate) struct RollingControlHandle {
     /// final handle must close the actor rather than leave a self-owned task.
     #[allow(dead_code)]
     decision_transport: Arc<RollingDecisionTransport>,
-    #[cfg_attr(
-        all(not(target_os = "linux"), not(test)),
-        expect(
-            dead_code,
-            reason = "the original actor task remains owned on every platform; production native retirement selectors are Linux-only"
-        )
-    )]
     original_actor: Arc<rolling_lifetime::OriginalRollingActorTask>,
     #[cfg(target_os = "linux")]
     reply_budget: Option<Arc<rolling_lifetime::ActorReplyBudget>>,
