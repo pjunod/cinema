@@ -396,7 +396,7 @@ async fn actual_publication_sink_panic_loses_task_result_and_holds_original_r() 
 
 /// Real single ELF child: malformed stdout causes parser failure, SIGPIPE is
 /// ignored and stderr stays open. Post-join kill would deadlock this case.
-fn epipe_ignoring_executable(root: &Path) -> std::path::PathBuf {
+pub(super) fn epipe_ignoring_executable(root: &Path) -> std::path::PathBuf {
     let source = root.join("ignores_epipe.c");
     let binary = root.join("ignores_epipe");
     std::fs::write(
@@ -542,8 +542,8 @@ async fn actual_entered_sink_can_publish_while_join_holds_only_graph_members() {
     finish_positive(owner, runtime).await;
 }
 
-#[tokio::test]
-async fn physical_requested_layout_includes_current_original_future_and_result_payload() {
+#[test]
+fn physical_requested_layout_includes_current_original_future_and_result_payload() {
     // Requested Rust storage only. Tokio/allocator/native frame peaks remain
     // separately Unknown; a sizeof projection is never their hard bound.
     let bytes = crate::adaptive_resources::physical_graph::copy_vod::copy_task_structural_bytes()
