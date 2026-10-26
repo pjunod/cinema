@@ -1,0 +1,54 @@
+{
+  "format_version": 1,
+  "source_commit": "41ad7bebad6c1597ff0bbb0d82849bd13f128278",
+  "source_branch": "effort/adaptive-playback-resources",
+  "source_sha256": {
+    "Cargo.toml": "72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f",
+    "Cargo.lock": "d69f413b6b5552860c3e377227ec220fd2f2a247ce811f397c5798e4bd5e6ae6",
+    "crates/plurx-core/Cargo.toml": "e5be28538ca8e132bd31d2433c1d8dd41470f124d9de1aca22328dd10143910a",
+    "crates/plurx-core/src/adaptive_resources/physical_graph.rs": "19bed2eac09099709fc611147e1cc21eeb6f29e4d5523073ed6b95cc41edfeb0",
+    "crates/plurx-core/src/adaptive_resources/physical_graph/copy_vod.rs": "4ef2f24e0e4fdece1c56b4d2831a9b1d2d08919637d3691242b97114d52ecb1e",
+    "crates/plurx-core/src/adaptive_resources/physical_graph/finite_vod.rs": "6059b00a2476b2164e821230419f312df1c60c19d1406f28726d4f27cb75350e",
+    "crates/plurx-core/src/adaptive_resources/physical_graph/finite_pipes.rs": "e9772ce00c5bd1da04338ad82aac37ca8523cba3de6d52066008de2987197a91",
+    "crates/plurx-core/src/adaptive_resources/physical_graph/source_files.rs": "d5aeebb7ac3045323143f4d3866ab084dfc30377f1162ad67e5e4d0dcf03162b",
+    "crates/plurx-core/src/adaptive_resources/runtime/operations.rs": "e0644b66ad4d86cd9bded6c887b371a01408bf7938a79ecbeeab32d527ac6841",
+    "crates/plurx-core/src/adaptive_resources/runtime/copy_vod.rs": "4c3ae9da06c4eed9ff73748b798b6f12e231d91a40b2e60ad7acdd9d8981b9b8",
+    "crates/plurx-core/src/adaptive_resources/runtime/copy_vod/owner.rs": "620f67a87160adb756cb371b415e9db79192bee348ee841cce794056d6d90b87",
+    "crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs": "053fc4de6614b1664b798a41ecce23b6a179c11c5a5f2f31cba227c779eceb1c",
+    "crates/plurx-core/src/adaptive_resources/runtime/operations/copy_close.rs": "0ca130c12c9e1000f3d1f385f77ea4d09e15ade80641e81ffbc1ef20598b6517",
+    "crates/plurx-core/src/adaptive_resources/runtime/operations/copy_vod.rs": "a6117abb326dab20824f66c6147a1258ad62355a7cd97b88c3a2d869c0455e30",
+    "crates/plurx-core/src/adaptive_resources/runtime/operations/source_files.rs": "3738ad80d0c2f45580ca7d5bba654f773066fa1924b4cf6b5ccffd8d28c43393",
+    "crates/plurx-core/src/adaptive_resources/runtime/operations/finite_terminal.rs": "69e2f7eb33ac7ddd4a9a329cbab1f5eb6394de254c0ec46b529a8c7c68164f90",
+    "crates/plurx-core/src/adaptive_resources/runtime/operations/finite_cancel.rs": "72f6f9bf8ca0394b7613698c732569aa3501d4484f5c3b9f63bc6fcffc13a53d",
+    "crates/plurx-core/src/adaptive_resources/runtime/operations/bootstrap.rs": "3e2ef6a6aac35458da61d07f2237392b06c706efebdf203638d4c726f30ad372",
+    "crates/plurx-core/src/adaptive_resources/runtime/operations/bootstrap/retirement.rs": "c99ce3bdbcd09eaed6dd5dc62babbea050adde962ddba9a38d568cca09246a57",
+    "crates/plurx-core/src/adaptive_resources/runtime/operations/bootstrap/native.rs": "baf866a899daac0d59e4806a302370ad64fb290638ae077df944d3ad35e409b4",
+    "crates/plurx-core/src/process/mod.rs": "84e6ea735a4802e0ef78003485546fce11cbfb2cfaf341596a81b0ae21b4f0fa",
+    "crates/plurx-core/src/process/job_control.rs": "16d4f76d6e08df29adcf3c4a059bed5abac589092b1313989f80b05e4bdbfbd9",
+    "crates/plurx-core/src/resource_custody/codec_v2.rs": "45ac28d028d223761dceaf26c361649a76cd1ffa3c679886bf5cb67d1f4ce6f5",
+    "crates/plurx-core/src/resource_custody/codec_v2/settlement.rs": "b4751d8224d62dadb1c514b2052af9d66c84f4f3c4980074e605118379f686e9",
+    "crates/plurx-core/src/resource_custody/transaction/typed.rs": "a30447d4c3d42057cb5604d757607ca5b60f585f6c6d962aca361bb7b8e63c02"
+  },
+  "symbols": {
+    "CopyCancellationClosure": {
+      "status": "existing",
+      "path": "crates/plurx-core/src/adaptive_resources/runtime/operations/copy_close.rs",
+      "line": 10
+    },
+    "CopyFixedImage": {
+      "status": "existing",
+      "path": "crates/plurx-core/src/adaptive_resources/physical_graph/copy_vod.rs",
+      "line": 24
+    },
+    "FiniteVodNeverRootClosure": {
+      "status": "existing",
+      "path": "crates/plurx-core/src/adaptive_resources/physical_graph/finite_vod.rs",
+      "line": 188
+    },
+    "CopyRootOnlyClosure": {
+      "status": "proposed",
+      "definition_present": false
+    }
+  },
+  "scope": "Bounded copy-start design review; four partial acquisition boundaries. No implementation, compiler execution, behavioral test or acceptance is implied by this manifest."
+}
