@@ -10,6 +10,121 @@ pub(super) struct FiniteClosingOwner {
     claimed_bytes: AtomicU64,
     known_closed: AtomicBool,
     running: AtomicBool,
+    // False while a build/publication arm still owns the dormant output.
+    cleanup_ready: AtomicBool,
+}
+
+/// The map owns the original producer/output before the first post-R await.
+/// The directory owns this non-clone arm until exact Shared publication. The
+/// weak Shared link avoids a cycle through a published rendition; the map's
+/// producer/output have no PendingWrites, arm or strong Shared backreference.
+#[cfg(target_os = "linux")]
+pub(crate) struct FiniteBuildCleanup {
+    shared: std::sync::Weak<Shared>,
+    key: String,
+    closing: Arc<FiniteClosingOwner>,
+    armed: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl FiniteBuildCleanup {
+    pub(crate) fn selector(&self) -> PreparedAttemptCleanup {
+        PreparedAttemptCleanup::from_closing(Arc::clone(&self.closing))
+    }
+
+    fn validate_publication(
+        &self,
+        shared: &Arc<Shared>,
+        key: &str,
+        closings: &std::collections::BTreeMap<String, Arc<FiniteClosingOwner>>,
+    ) -> Result<(), String> {
+        if self.key != key
+            || !std::sync::Weak::ptr_eq(&self.shared, &Arc::downgrade(shared))
+            || self.closing.cleanup_ready.load(Acquire)
+            || !closings
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.closing))
+        {
+            return Err("original finite build cleanup no longer matches publication".into());
+        }
+        Ok(())
+    }
+
+    /// Only after the exact rendition was inserted, under both map locks.
+    /// No await separates that insertion, disarming and exact slot removal.
+    fn published(
+        mut self,
+        closings: &mut std::collections::BTreeMap<String, Arc<FiniteClosingOwner>>,
+    ) {
+        self.armed = false;
+        closings.remove(&self.key);
+        if closings.is_empty() {
+            closings.clear();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for FiniteBuildCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.closing.cleanup_ready.store(true, Release);
+        if let (Ok(_runtime), Some(shared)) =
+            (tokio::runtime::Handle::try_current(), self.shared.upgrade())
+        {
+            let _original_cleanup = shared
+                .spawn_finite_closing(std::mem::take(&mut self.key), Arc::clone(&self.closing));
+        }
+        // The original selectors were already installed in the map. Executor
+        // loss or a failed cleanup keeps that same map owner and full charge.
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) struct FiniteBuildSlot<'a> {
+    shared: &'a Arc<Shared>,
+    key: String,
+    closings:
+        tokio::sync::MutexGuard<'a, std::collections::BTreeMap<String, Arc<FiniteClosingOwner>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl FiniteBuildSlot<'_> {
+    pub(super) fn install(
+        mut self,
+        owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
+    ) -> RenditionDir {
+        let mut dir = RenditionDir::from_finite_producer(owner);
+        let output = dir.finite_output().expect("fresh finite output");
+        let producer = dir
+            .finite_producer()
+            .expect("fresh original finite producer");
+        let closing = Arc::new(FiniteClosingOwner {
+            rich: Mutex::new(None),
+            output: Mutex::new(Some(output)),
+            producer: Mutex::new(Some(producer)),
+            ticket: Mutex::new(None),
+            claimed_bytes: AtomicU64::new(0),
+            known_closed: AtomicBool::new(false),
+            running: AtomicBool::new(false),
+            cleanup_ready: AtomicBool::new(false),
+        });
+        assert!(
+            self.closings
+                .insert(self.key.clone(), Arc::clone(&closing))
+                .is_none(),
+            "finite build slot is exclusive before accepted R"
+        );
+        dir.install_finite_build_cleanup(FiniteBuildCleanup {
+            shared: Arc::downgrade(self.shared),
+            key: self.key,
+            closing,
+            armed: true,
+        });
+        dir
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -119,6 +234,19 @@ impl PreparedAttemptCleanup {
 
     pub(crate) fn known_closed(&self) -> bool {
         self.closing.known_closed.load(Acquire)
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) async fn original_output_for_test(
+        &self,
+    ) -> plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput {
+        self.closing
+            .output
+            .lock()
+            .await
+            .as_ref()
+            .expect("dormant original cleanup still retains its output")
+            .clone()
     }
 }
 
@@ -299,21 +427,18 @@ impl PreparedAttemptRendition {
             return Ok(());
         }
         let rendition = Arc::clone(self.rendition());
-        if self
-            .shared
-            .finite_closing
-            .lock()
-            .await
-            .contains_key(&self.key)
         {
-            return Err("finite rendition cleanup remains in progress".into());
-        }
-        {
+            let mut closings = self.shared.finite_closing.lock().await;
             let mut renditions = self.shared.renditions.lock().await;
             if renditions.contains_key(&self.key) {
                 return Err("adaptive rendition key already has an owner".into());
             }
+            let cleanup = self
+                .shared
+                .take_finite_build_for_publication(&self.key, &rendition, &closings)?
+                .ok_or("adaptive finite publication lost its original build arm")?;
             renditions.insert(self.key.clone(), Arc::clone(&rendition));
+            cleanup.published(&mut closings);
         }
         self.installed = true;
         let _driver = spawn_driver(Arc::clone(&self.shared), rendition);
@@ -1099,6 +1224,8 @@ impl Shared {
             "rendition attachment phase completed");
         let adopted_bytes = rendition.manifest.lock().await.materialized_bytes();
         let (rendition, installed) = {
+            #[cfg(target_os = "linux")]
+            let mut closings = self.finite_closing.lock().await;
             let mut renditions = self.renditions.lock().await;
             if let Some(winner) = renditions
                 .get(key)
@@ -1107,7 +1234,13 @@ impl Shared {
             {
                 (winner, false)
             } else {
+                #[cfg(target_os = "linux")]
+                let cleanup = self.take_finite_build_for_publication(key, &rendition, &closings)?;
                 renditions.insert(key.to_string(), Arc::clone(&rendition));
+                #[cfg(target_os = "linux")]
+                if let Some(cleanup) = cleanup {
+                    cleanup.published(&mut closings);
+                }
                 (rendition, true)
             }
         };
@@ -1739,6 +1872,7 @@ impl Shared {
                 claimed_bytes: AtomicU64::new(0),
                 known_closed: AtomicBool::new(false),
                 running: AtomicBool::new(false),
+                cleanup_ready: AtomicBool::new(true),
             });
             let removed = {
                 let mut closings = self.finite_closing.lock().await;
@@ -1904,12 +2038,47 @@ impl Shared {
     }
 
     #[cfg(target_os = "linux")]
+    pub(super) async fn reserve_finite_build_slot(
+        self: &Arc<Self>,
+        key: &str,
+    ) -> Result<FiniteBuildSlot<'_>, String> {
+        if key.is_empty() || key.len() > 255 {
+            return Err("finite build key exceeds its original role bound".into());
+        }
+        let closings = self.finite_closing.lock().await;
+        if closings.contains_key(key) {
+            return Err("finite rendition cleanup remains in progress".into());
+        }
+        Ok(FiniteBuildSlot {
+            shared: self,
+            key: key.to_owned(),
+            closings,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn take_finite_build_for_publication(
+        self: &Arc<Self>,
+        key: &str,
+        rendition: &Rendition,
+        closings: &std::collections::BTreeMap<String, Arc<FiniteClosingOwner>>,
+    ) -> Result<Option<FiniteBuildCleanup>, String> {
+        let cleanup = rendition.dir.take_finite_build_cleanup();
+        if let Some(cleanup) = cleanup.as_ref() {
+            cleanup.validate_publication(self, key, closings)?;
+        } else if closings.contains_key(key) {
+            return Err("finite rendition cleanup remains in progress".into());
+        }
+        Ok(cleanup)
+    }
+
+    #[cfg(target_os = "linux")]
     fn spawn_finite_closing(
         self: &Arc<Shared>,
         key: String,
         closing: Arc<FiniteClosingOwner>,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        if closing.running.swap(true, AcqRel) {
+        if !closing.cleanup_ready.load(Acquire) || closing.running.swap(true, AcqRel) {
             return None;
         }
         let shared = Arc::clone(self);
@@ -1958,6 +2127,19 @@ impl Shared {
         output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
         producer: Arc<super::finite_software::FiniteSoftwareProducer>,
     ) -> Arc<FiniteClosingOwner> {
+        let build_cleanup = rich
+            .as_ref()
+            .and_then(|rendition| rendition.dir.take_finite_build_cleanup());
+        if let Some(cleanup) = build_cleanup {
+            let closing = Arc::clone(&cleanup.closing);
+            // Remove the arm from PendingWrites before retaining rich, so
+            // map -> rendition can never lead back to this closing owner.
+            *closing.rich.lock().await = rich;
+            drop(output);
+            drop(producer);
+            drop(cleanup); // Arms the existing original map slot synchronously.
+            return closing;
+        }
         let closing = Arc::new(FiniteClosingOwner {
             rich: Mutex::new(rich),
             output: Mutex::new(Some(output)),
@@ -1966,6 +2148,7 @@ impl Shared {
             claimed_bytes: AtomicU64::new(0),
             known_closed: AtomicBool::new(false),
             running: AtomicBool::new(false),
+            cleanup_ready: AtomicBool::new(true),
         });
         {
             let mut closings = self.finite_closing.lock().await;

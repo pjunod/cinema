@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 pub(super) struct FinitePublication {
     output: FiniteOutput,
     pending: tokio::sync::Mutex<Option<PublicationTicket>>,
+    #[cfg(target_os = "linux")]
+    build_cleanup: std::sync::Mutex<Option<crate::vodserve::finite_software::FiniteBuildCleanup>>,
 }
 
 impl std::fmt::Debug for FinitePublication {
@@ -28,6 +30,8 @@ impl FinitePublication {
         Self {
             output,
             pending: tokio::sync::Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            build_cleanup: std::sync::Mutex::new(None),
         }
     }
 
@@ -41,6 +45,8 @@ impl FinitePublication {
     pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
         // Self and pending's inline ticket are in PendingWrites. Output
         // selectors clone without allocating; count their shared path once.
+        // The build arm is inline in PendingWrites; its moved key uses one of
+        // closing_owner_heap_bytes' three already charged key buffers.
         self.output.requested_heap_bytes()
     }
 
@@ -141,6 +147,43 @@ impl FinitePublication {
 }
 
 impl RenditionDir {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn install_finite_build_cleanup(
+        &mut self,
+        cleanup: crate::vodserve::finite_software::FiniteBuildCleanup,
+    ) {
+        let writes = std::sync::Arc::get_mut(&mut self.writes)
+            .expect("new finite directory has one PendingWrites owner");
+        let finite = writes.finite.as_mut().expect("new finite publication");
+        *finite.build_cleanup.get_mut().expect("new build arm lock") = Some(cleanup);
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_finite_build_cleanup(
+        &self,
+    ) -> Option<crate::vodserve::finite_software::FiniteBuildCleanup> {
+        self.writes
+            .finite
+            .as_ref()?
+            .build_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn finite_build_cleanup_selector(
+        &self,
+    ) -> Option<crate::vodserve::PreparedAttemptCleanup> {
+        self.writes
+            .finite
+            .as_ref()?
+            .build_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(crate::vodserve::finite_software::FiniteBuildCleanup::selector)
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn finite_producer(
         &self,

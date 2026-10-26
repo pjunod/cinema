@@ -1234,6 +1234,10 @@ struct Shared {
 /// is the struct and the set of await points, not scheduling. `Any` is a
 /// supertrait only so a test can reach the test hooks behind the registry.
 pub(crate) trait VodSharedHooks: std::any::Any + Send + Sync {
+    #[cfg(target_os = "linux")]
+    fn before_finite_metadata_reservation(&self, _key: &str) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
     fn private_cleanup_failure(&self, _phase: &str) -> bool {
         false
     }

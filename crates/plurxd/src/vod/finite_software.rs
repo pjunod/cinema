@@ -1,9 +1,10 @@
 //! Ordinary software VOD owns one concrete finite producer through retirement.
 //! Native resources remain inside core; events follow durable publication and
 //! the daemon manifest is only a serving index, never settlement authority.
+pub(crate) use super::shared::FiniteBuildCleanup;
 use super::*;
 use plurx_core::adaptive_resources::runtime::finite_vod::{
-    FiniteApplicationLease, FiniteClientStateLease, FiniteFile, FiniteMetadataLease,
+    FiniteApplicationLease, FiniteClientStateLease, FiniteFile, FiniteMetadataLease, FiniteOutput,
     FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent, SoftwareVodOwner,
 };
 use plurx_core::transcode::{DecodeBackend, Encoder};
@@ -338,7 +339,41 @@ pub(super) fn projected_driver_future_bytes() -> usize {
     ) -> usize {
         std::mem::size_of::<F>()
     }
+    fn metadata_frame_bytes<
+        F: std::future::Future<Output = Result<(FiniteMetadataLease, FiniteClientStateLease), String>>,
+    >(
+        _: fn(&'static Shared, &'static str, &'static FiniteOutput, usize, usize, Instant) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+    // Include the concrete construction-hook, original borrowed cell wait and
+    // timeout frame. Private executor/timer/allocator storage remains Unknown.
     frame_bytes(run)
+        .checked_add(metadata_frame_bytes(reserve_metadata_until))
+        .expect("compiler-projected finite frames fit usize")
+}
+
+async fn reserve_metadata_until(
+    shared: &Shared,
+    key: &str,
+    output: &FiniteOutput,
+    metadata_bytes: usize,
+    client_bytes: usize,
+    deadline: Instant,
+) -> Result<(FiniteMetadataLease, FiniteClientStateLease), String> {
+    tokio::time::timeout_at(deadline.into(), async {
+        shared
+            .hooks
+            .get()
+            .before_finite_metadata_reservation(key)
+            .await;
+        output
+            .reserve_metadata_partitions(metadata_bytes, client_bytes)
+            .await
+    })
+    .await
+    .map_err(|_| "finite metadata reservation deadline elapsed".to_owned())?
+    .map_err(|error| format!("reserving finite rendition metadata: {error}"))
 }
 
 pub(super) async fn build(
@@ -594,6 +629,15 @@ async fn build_inner(
     }
     // No selected source/root/marker has been opened. Core synchronously
     // reserves the complete role and retains its prepare operation before return.
+    // Acquire the original cleanup slot before R acceptance. The synchronous
+    // owner-to-directory install below cannot be cancelled between acceptance
+    // and publication of that same owner in the existing closing registry.
+    let build_slot = tokio::time::timeout_at(
+        admission_deadline.into(),
+        shared.reserve_finite_build_slot(key),
+    )
+    .await
+    .map_err(|_| "finite build cleanup slot deadline elapsed".to_owned())??;
     let owner = runtime
         .prepare_software_vod(request, admission_deadline)
         .map_err(|error| {
@@ -632,83 +676,61 @@ async fn build_inner(
             FiniteObservedService::Unknown => {}
         }
     }
-    let application_lease = if let Some(bytes) = application_owner_bytes {
-        match owner.take_application_lease(bytes) {
-            Ok(lease) => Some(lease),
-            Err(error) => {
-                let output = owner.output();
-                let closing = shared
-                    .retain_unattached_finite_with_handle(
-                        key,
-                        None,
-                        output,
-                        Arc::new(FiniteSoftwareProducer::new(owner)),
-                    )
-                    .await;
-                if application_owner_bytes.is_some() {
-                    *failed_attempt_cleanup =
-                        Some(super::shared::PreparedAttemptCleanup::from_closing(closing));
-                }
-                return Err(format!("taking adaptive attempt owner lease: {error}"));
-            }
+    let application_lease = application_owner_bytes
+        .map(|bytes| owner.take_application_lease(bytes))
+        .transpose();
+    let dir = build_slot.install(owner);
+    let output = dir
+        .finite_output()
+        .expect("installed original finite output");
+    let producer = dir
+        .finite_producer()
+        .expect("installed original finite producer");
+    let record_cleanup = |failed: &mut Option<super::shared::PreparedAttemptCleanup>| {
+        if application_owner_bytes.is_some() {
+            *failed = Some(
+                dir.finite_build_cleanup_selector()
+                    .expect("unpublished finite directory retains its original cleanup arm"),
+            );
         }
-    } else {
-        None
     };
-    let output = owner.output();
-    // The original producer reservation is already charged. Measure its
-    // retained application allocations before reserving metadata or building
-    // any daemon owner; the actual post-build fit uses these same objects.
+    let application_lease = match application_lease {
+        Ok(lease) => lease,
+        Err(error) => {
+            record_cleanup(failed_attempt_cleanup);
+            return Err(format!("taking adaptive attempt owner lease: {error}"));
+        }
+    };
+    // These are the same allocations already projected before complete R
+    // admission. Both the original owner and dormant close arm now survive a
+    // cancelled metadata waiter in the map, without an async registration gap.
     let projection = (|| {
         projected_metadata
             .checked_add(output.requested_heap_bytes()?)?
-            .checked_add(FiniteSoftwareProducer::projected_heap_bytes(
-                owner.requested_heap_bytes()?,
-            )?)?
+            .checked_add(producer.requested_heap_bytes()?)?
             .checked_add(finite_metadata::closing_owner_heap_bytes(key.len())?)
     })();
     let Some(projected_metadata) = projection else {
-        // Preparation already owns a charged journal operation. Even a
-        // metadata-fit refusal must retain that exact owner for cleanup.
-        let closing = shared
-            .retain_unattached_finite_with_handle(
-                key,
-                None,
-                output,
-                Arc::new(FiniteSoftwareProducer::new(owner)),
-            )
-            .await;
-        if application_owner_bytes.is_some() {
-            *failed_attempt_cleanup =
-                Some(super::shared::PreparedAttemptCleanup::from_closing(closing));
-        }
+        record_cleanup(failed_attempt_cleanup);
         return Err("finite owner metadata projection overflowed".into());
     };
-    let (metadata_lease, client_lease) = match output
-        .reserve_metadata_partitions(
-            projected_metadata,
-            finite_profile::CLIENT_STATE_BYTES as usize,
-        )
-        .await
+    let (metadata_lease, client_lease) = match reserve_metadata_until(
+        shared,
+        key,
+        &output,
+        projected_metadata,
+        finite_profile::CLIENT_STATE_BYTES as usize,
+        admission_deadline,
+    )
+    .await
     {
         Ok(leases) => leases,
         Err(error) => {
-            let closing = shared
-                .retain_unattached_finite_with_handle(
-                    key,
-                    None,
-                    output,
-                    Arc::new(FiniteSoftwareProducer::new(owner)),
-                )
-                .await;
-            if application_owner_bytes.is_some() {
-                *failed_attempt_cleanup =
-                    Some(super::shared::PreparedAttemptCleanup::from_closing(closing));
-            }
-            return Err(format!("reserving finite rendition metadata: {error}"));
+            record_cleanup(failed_attempt_cleanup);
+            return Err(error);
         }
     };
-    let dir = RenditionDir::from_finite_producer(owner);
+
     let manifest = Manifest::new(plan.clone());
     let rendition = Shared::construct_rendition(
         key,
@@ -727,17 +749,15 @@ async fn build_inner(
     match attach_metadata_partitions(rendition, metadata_lease, client_lease) {
         Ok(rendition) => Ok((rendition, application_lease)),
         Err((error, rendition)) => {
-            let producer = rendition
-                .dir
-                .finite_producer()
-                .expect("fresh finite directory retains its original producer");
-            let closing = shared
-                .retain_unattached_finite_with_handle(key, Some(rendition), output, producer)
-                .await;
             if application_owner_bytes.is_some() {
-                *failed_attempt_cleanup =
-                    Some(super::shared::PreparedAttemptCleanup::from_closing(closing));
+                *failed_attempt_cleanup = Some(
+                    rendition
+                        .dir
+                        .finite_build_cleanup_selector()
+                        .expect("failed unpublished finite rendition retains its cleanup arm"),
+                );
             }
+            // Final directory Drop arms the already installed original owner.
             Err(error)
         }
     }
