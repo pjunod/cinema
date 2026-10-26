@@ -99,7 +99,9 @@ pub(crate) fn parse(input: &[u8]) -> Result<Vec<TextCue>, String> {
         } else {
             first.to_owned()
         };
-        if id.len() > 256 || id.chars().any(char::is_control) {
+        if id.len() > plurx_core::store::subtitle_text_translation::MAX_TEXT_CUE_ID_BYTES
+            || id.chars().any(char::is_control)
+        {
             return Err("subtitle_identifier_invalid".into());
         }
         let timing = if first.contains("-->") {
@@ -193,6 +195,20 @@ mod tests {
         let decoded = parse(&bytes).expect("parse rendered captions");
         assert_eq!((decoded[0].start_ms, decoded[0].end_ms), (1250, 3750));
         assert_eq!(decoded[0].text, cues[0].text);
+    }
+    #[test]
+    fn caption_identifiers_share_the_durable_slice_byte_limit() {
+        let limit = plurx_core::store::subtitle_text_translation::MAX_TEXT_CUE_ID_BYTES;
+        let id = "é".repeat(limit / 2);
+        let source = format!("WEBVTT\n\n{id}\n00:00.000 --> 00:01.000\nBonjour\n");
+        let cues = parse(source.as_bytes()).expect("full durable identifier accepted");
+        assert_eq!(cues[0].id, id);
+        assert_eq!(
+            parse(&render(&cues).expect("render identifier")).expect("reopen identifier"),
+            cues
+        );
+        let too_long = source.replacen(&id, &(id.clone() + "x"), 1);
+        assert!(parse(too_long.as_bytes()).is_err());
     }
     #[test]
     fn malformed_or_transport_relative_cues_never_publish() {

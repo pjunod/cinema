@@ -6,6 +6,9 @@ use crate::error::StoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+/// Shared parser/publication byte limit; identifiers are preserved without truncation.
+pub const MAX_TEXT_CUE_ID_BYTES: usize = 256;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TextTranslationCue {
@@ -35,7 +38,7 @@ fn valid_source(source: &JobPayload) -> Result<String, StoreError> {
 fn cue_body(cue: &TextTranslationCue) -> Result<String, StoreError> {
     if cue.cue_index >= 20000
         || !super::background_jobs::digest(&cue.input_sha256)
-        || cue.id.len() > 128
+        || cue.id.len() > MAX_TEXT_CUE_ID_BYTES
         || cue.start_ms < 0
         || cue.end_ms <= cue.start_ms
         || cue.end_ms > 86_400_000
@@ -218,6 +221,35 @@ mod tests {
             now_ms: 1200,
         };
         (dir, store, conn, input)
+    }
+    #[tokio::test]
+    async fn text_slices_preserve_full_caption_identifier_byte_limit() {
+        let (_dir, store, _conn, mut input) = fixture().await;
+        input.cues[0].id = "é".repeat(MAX_TEXT_CUE_ID_BYTES / 2);
+        assert_eq!(input.cues[0].id.len(), MAX_TEXT_CUE_ID_BYTES);
+        assert!(store
+            .publish_text_translation_slice(input.clone())
+            .await
+            .expect("publish full identifier"));
+        let saved = store
+            .read_text_translation_cues(input.source.clone())
+            .await
+            .expect("read durable slice");
+        assert_eq!(saved, input.cues);
+        let mut too_long = input.clone();
+        too_long.cues[0].cue_index = 1;
+        too_long.cues[0].id.push('x');
+        assert!(store
+            .publish_text_translation_slice(too_long)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .read_text_translation_cues(input.source.clone())
+                .await
+                .expect("inventory after refusal"),
+            saved
+        );
     }
     #[tokio::test]
     async fn text_slices_are_immutable_and_old_claims_cannot_publish_after_replacement() {
