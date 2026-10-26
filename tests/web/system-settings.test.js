@@ -212,4 +212,8 @@ test('Copy cleanup reports actual held charge and preserves unavailable inventor
   assert.match(retry,/Reserved CPU \(ns per second\)<\/dt><dd>Unknown/);
   assert.match(retry,/Reserved handles<\/dt><dd>3/);
   assert.doesNotMatch(retry,/NaN|undefined/);
+  const invalid=card([{preparation_id:'invalid',held_resources:{cpu_ns_per_second:Number.MAX_SAFE_INTEGER+1,peak_memory_bytes:-1}}]);
+  assert.match(invalid,/Reserved CPU \(ns per second\)<\/dt><dd>Unknown/);
+  assert.match(invalid,/Reserved memory \(bytes\)<\/dt><dd>Unknown/);
+  assert.match(card([{preparation_id:'missing'}]),/Reserved handles<\/dt><dd>Unknown/);
 });
