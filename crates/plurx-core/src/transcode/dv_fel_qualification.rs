@@ -34,6 +34,11 @@ pub const SCHEMA: u32 = 1;
 /// at K = 8 (5.3%) about one in thirty-four. A title is measured once, in
 /// the background, in about two minutes.
 pub const WINDOWS: usize = 8;
+/// A title is admitted only on at least this many lit windows. A window whose
+/// reference is dark (a fade or a title card) is replaced by its alternate
+/// half a spacing later; a title with fewer lit windows than this gets a
+/// stored refusal instead of being measured again on every play.
+pub const MIN_WINDOWS: usize = 6;
 /// Pictures per sample window (the VOD window: 2 s at 24 fps).
 pub const WINDOW_FRAMES: u32 = 48;
 /// One sample every 32 pixels in each direction (8 100 per 4K frame, about
@@ -142,8 +147,36 @@ impl Lattice {
     }
 }
 
-/// The lattice rectangle inside any letterbox or pillarbox of the reference's
-/// first frame: rows and columns holding a sample above `ACTIVE_THRESHOLD`.
+/// Where the `WINDOWS` sample windows start, in milliseconds: slot `i` at
+/// (i+1)/(K+1) of the title, and its alternate half a spacing later, used
+/// when the primary's reference is dark.
+pub fn sample_positions(duration_ms: i64, count: usize) -> Vec<[i64; 2]> {
+    if duration_ms <= 0 || count == 0 {
+        return Vec::new();
+    }
+    let slots = count as i128 + 1;
+    (0..count as i128)
+        .map(|i| {
+            let at = |twice: i128| (i128::from(duration_ms) * twice / (2 * slots)) as i64;
+            [at(2 * (i + 1)), at(2 * (i + 1) + 1)]
+        })
+        .collect()
+}
+
+/// The window's brightest reference picture (largest sum of samples), whose
+/// letterbox is the window's: a fade-in's first frame says nothing about it.
+pub fn brightest(frames: &[Lattice]) -> Option<&Lattice> {
+    frames.iter().max_by_key(|frame| {
+        frame
+            .samples
+            .iter()
+            .map(|rgb| u64::from(*rgb.iter().max().unwrap_or(&0)))
+            .sum::<u64>()
+    })
+}
+
+/// The lattice rectangle inside any letterbox or pillarbox of a reference
+/// frame: rows and columns holding a sample above `ACTIVE_THRESHOLD`.
 /// `None` for an all-dark frame.
 pub fn active_region(reference: &Lattice) -> Option<(usize, usize, usize, usize)> {
     let lit = |x: usize, y: usize| {
@@ -257,7 +290,8 @@ impl FelVerdict {
             identity,
             source_size,
             source_mtime,
-            admitted: admits(served_mean, dropped_mean, served_p99, dropped_p99),
+            admitted: windows.len() >= MIN_WINDOWS
+                && admits(served_mean, dropped_mean, served_p99, dropped_p99),
             served_mean: round(served_mean),
             dropped_mean: round(dropped_mean),
             served_p99: round(served_p99),
@@ -268,8 +302,42 @@ impl FelVerdict {
         })
     }
 
+    /// A title with no lit sample window at all: a stored refusal, so it is
+    /// not measured again until its source, renderer, recipe or encoder
+    /// changes.
+    pub fn unmeasurable(
+        identity: String,
+        source_size: i64,
+        source_mtime: i64,
+        measured_at_ms: i64,
+    ) -> Self {
+        Self {
+            schema: SCHEMA,
+            identity,
+            source_size,
+            source_mtime,
+            admitted: false,
+            served_mean: 0.0,
+            dropped_mean: 0.0,
+            served_p99: 0.0,
+            dropped_p99: 0.0,
+            p99_tolerance: P99_NOISE_TOLERANCE,
+            measured_at_ms,
+            windows: Vec::new(),
+        }
+    }
+
     /// Why a refused title plays the plain conversion, for its FEL row.
     pub fn refusal(&self) -> String {
+        if self.windows.len() < MIN_WINDOWS {
+            return format!(
+                "too little of this title is lit to measure whether its enhancement layer \
+                 survives re-encoding ({} of {} sample windows had picture; {} needed)",
+                self.windows.len(),
+                WINDOWS,
+                MIN_WINDOWS
+            );
+        }
         format!(
             "the enhancement layer adds less than re-encoding loses for this title \
              (measured ΔE ITP mean {:.2} reconstructed vs {:.2} without the EL, p99 {:.2} vs {:.2})",
@@ -278,11 +346,28 @@ impl FelVerdict {
     }
 }
 
-/// The renderer and the route recipe a verdict holds for. A changed renderer
-/// (bundle identity) or recipe re-qualifies every title.
-pub fn identity(renderer_identity: &str, recipe: &str) -> String {
+/// The renderer, the route recipe and the encoder a verdict holds for. A
+/// changed renderer (bundle identity), recipe, or encoder (FFmpeg build, VA
+/// driver and its version, GPU device) re-qualifies every title: a verdict
+/// measured on one GPU or driver never serves on another.
+pub fn identity(renderer_identity: &str, recipe: &str, encoder_identity: &str) -> String {
     hex::encode(Sha256::digest(
-        serde_json::to_vec(&("plurx-dv-fel-qualification-v1", renderer_identity, recipe))
+        serde_json::to_vec(&(
+            "plurx-dv-fel-qualification-v2",
+            renderer_identity,
+            recipe,
+            encoder_identity,
+        ))
+        .expect("bounded identity"),
+    ))
+}
+
+/// The encoder half of [`identity`]: the FFmpeg executable's digest, the VA
+/// driver's own description (vendor, Mesa version, GPU), and the render
+/// device with its PCI identity.
+pub fn encoder_identity(ffmpeg_digest: &str, va_driver: &str, device: &str) -> String {
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(&("plurx-dv-fel-encoder-v1", ffmpeg_digest, va_driver, device))
             .expect("bounded identity"),
     ))
 }
@@ -405,9 +490,34 @@ mod tests {
 
     #[test]
     fn a_verdict_is_keyed_to_its_source_renderer_and_recipe() {
-        let id = identity("renderer-a", "recipe-1");
-        assert_ne!(id, identity("renderer-b", "recipe-1"));
-        assert_ne!(id, identity("renderer-a", "recipe-2"));
+        let encoder = encoder_identity(
+            "ffmpeg-sha",
+            "Mesa 26.0.8 (radeonsi)",
+            "/dev/dri/renderD128",
+        );
+        let id = identity("renderer-a", "recipe-1", &encoder);
+        assert_ne!(id, identity("renderer-b", "recipe-1", &encoder));
+        assert_ne!(id, identity("renderer-a", "recipe-2", &encoder));
+        // Another FFmpeg build, VA driver version or GPU re-qualifies.
+        for other in [
+            encoder_identity(
+                "ffmpeg-sha2",
+                "Mesa 26.0.8 (radeonsi)",
+                "/dev/dri/renderD128",
+            ),
+            encoder_identity(
+                "ffmpeg-sha",
+                "Mesa 26.1.0 (radeonsi)",
+                "/dev/dri/renderD128",
+            ),
+            encoder_identity(
+                "ffmpeg-sha",
+                "Mesa 26.0.8 (radeonsi)",
+                "/dev/dri/renderD129",
+            ),
+        ] {
+            assert_ne!(id, identity("renderer-a", "recipe-1", &other));
+        }
         assert_ne!(requalify_binding("scanner", &id), "scanner");
         let window = WindowScore {
             start_ms: 1000,
@@ -422,7 +532,7 @@ mod tests {
             10,
             20,
             30,
-            vec![window],
+            vec![window; MIN_WINDOWS],
             &mut [1.0, 1.0, 1.0],
             &mut [2.0, 2.0, 2.0],
         )
@@ -443,7 +553,12 @@ mod tests {
             VerdictState::Missing
         );
         assert_eq!(
-            verdict_state(Some(&document), 10, 20, &identity("renderer-b", "recipe-1")),
+            verdict_state(
+                Some(&document),
+                10,
+                20,
+                &identity("renderer-b", "recipe-1", &encoder)
+            ),
             VerdictState::Missing
         );
         assert_eq!(verdict_state(None, 10, 20, &id), VerdictState::Missing);
@@ -465,6 +580,79 @@ mod tests {
             no.refusal().contains("adds less than re-encoding loses"),
             "{}",
             no.refusal()
+        );
+    }
+
+    #[test]
+    fn dark_windows_fall_back_to_their_alternates_and_too_few_lit_ones_refuse() {
+        // Primary at (i+1)/(K+1), alternate half a spacing later.
+        assert_eq!(
+            sample_positions(9_000, 2),
+            vec![[3_000, 4_500], [6_000, 7_500]]
+        );
+        assert_eq!(sample_positions(7_200_000, WINDOWS).len(), WINDOWS);
+        assert!(sample_positions(0, WINDOWS).is_empty());
+        // The brightest picture of a fade-in sets the window's letterbox.
+        let (width, height) = (128, 128);
+        let dark =
+            Lattice::from_rgb48(&vec![0u8; width * height * 6], width, height).expect("dark");
+        let mut frame = vec![0u8; width * height * 6];
+        for y in 32..96 {
+            for x in 0..width {
+                let at = (y * width + x) * 6;
+                frame[at..at + 2].copy_from_slice(&30000u16.to_le_bytes());
+            }
+        }
+        let lit = Lattice::from_rgb48(&frame, width, height).expect("lit");
+        let fade = [dark.clone(), dark.clone(), lit];
+        assert_eq!(brightest(&fade).and_then(active_region), Some((0, 1, 4, 3)));
+        assert_eq!(
+            brightest(&[dark.clone(), dark]).and_then(active_region),
+            None
+        );
+        // Fewer than MIN_WINDOWS lit windows never admit, however good.
+        let window = WindowScore {
+            start_ms: 0,
+            served_mean: 0.5,
+            served_p99: 1.0,
+            dropped_mean: 3.0,
+            dropped_p99: 9.0,
+            samples: 3,
+        };
+        let few = FelVerdict::from_windows(
+            "id".into(),
+            1,
+            2,
+            3,
+            vec![window.clone(); MIN_WINDOWS - 1],
+            &mut [0.5; 3],
+            &mut [3.0; 3],
+        )
+        .expect("verdict");
+        assert!(!few.admitted);
+        assert!(
+            few.refusal().contains("too little of this title is lit"),
+            "{}",
+            few.refusal()
+        );
+        let enough = FelVerdict::from_windows(
+            "id".into(),
+            1,
+            2,
+            3,
+            vec![window; MIN_WINDOWS],
+            &mut [0.5; 3],
+            &mut [3.0; 3],
+        )
+        .expect("verdict");
+        assert!(enough.admitted);
+        // No lit window at all is still a stored answer.
+        let none = FelVerdict::unmeasurable("id".into(), 1, 2, 3);
+        assert!(!none.admitted && none.windows.is_empty());
+        assert!(
+            none.refusal().contains("0 of 8 sample windows"),
+            "{}",
+            none.refusal()
         );
     }
 }

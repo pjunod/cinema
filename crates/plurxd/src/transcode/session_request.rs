@@ -1344,6 +1344,10 @@ pub struct StartInfo {
     /// not be consumed, and this session serves the ordinary request it
     /// enhanced instead; the reason, for the create's plan notes.
     pub(crate) degraded_processing: Option<String>,
+    /// Why this start's own processing (a reconstructed 8.1 or HDR10-E the
+    /// ordinary request was eligible for) was declined: the verdict, a busy
+    /// reconstruction slot, a refused window. For the enhancement detail.
+    pub(crate) processing_note: Option<String>,
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,

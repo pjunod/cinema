@@ -13,6 +13,20 @@ whole-file mapping hash is refreshed; exact anchors, executable source-anchor
 records, model/configurations and worker correspondence are unchanged. The
 readiness API's completion and latency acquire no liveness or qualification claim.
 
+## FEL qualification review fixes — scoped refresh on 2026-10-26 (2)
+
+`construct.rs` now lets a background job extend its own `FragmentAdmission`
+with a second bundle (`extend_fragment_admission`), and
+`fragment_worker_idle` compares the node's hardware and software use with
+what the admission claims, extension included. The selected library worker
+never extends its admission, so for it `claimed()` is `(0, threads)` and the
+predicate is exactly the old one (`in_use() <= 0` is `in_use() == 0`);
+`admit_fragment` (Table 41) is byte-identical. `main.rs` warms the VA-API
+HEVC Main10 probe in a spawned task instead of awaiting it during
+`probe_system`; the Table 44 spawn line is byte-identical and the worker
+loops start as before. Hashes refreshed; anchors, model, configurations and
+worker correspondence unchanged.
+
 ## FEL qualification additions — scoped refresh on 2026-10-26
 
 The `claude/lp-fel-p81` delta against `origin/effort/linux-player` adds three

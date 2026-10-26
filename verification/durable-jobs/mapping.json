@@ -595,7 +595,7 @@
       },
       {
         "anchor": " job.state='running' AND job.kind='dv_title_scan' AND job.payload_version=1",
-        "sha256": "c00d488f758f30b5704984150b7f54072e9cc6b76d1b4d14ed9a79792cba03dd",
+        "sha256": "91020a0695986d46b622b6428955b57d3d1c1e05808306a218d364b77c6527ce",
         "source": "crates/plurx-core/src/store/dv_title_jobs.rs",
         "table": "DV extension exclusion: publication remains kind-specific"
       },
@@ -613,13 +613,13 @@
       },
       {
         "anchor": "async fn title_publication_is_atomic_idempotent_and_never_self_enqueues() {",
-        "sha256": "5279c6a07d4e033ce2a883fe70709e02206c375de1621aa8f232ae705c97f189",
+        "sha256": "61df9834fa69fc36c9e6eb03a28e6d6741b69b4c462534a6f919f3675de054f2",
         "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
         "table": "DV excluded runtime example: atomic idempotent publication"
       },
       {
         "anchor": "async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yield() {",
-        "sha256": "5279c6a07d4e033ce2a883fe70709e02206c375de1621aa8f232ae705c97f189",
+        "sha256": "61df9834fa69fc36c9e6eb03a28e6d6741b69b4c462534a6f919f3675de054f2",
         "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
         "table": "DV excluded runtime example: cancellation rejects stale publication"
       }

@@ -269,15 +269,36 @@ metadata there, like the title aggregate).
   job type, thread or schedule.
 - **When.** For a Profile 7 FEL title, with HDR processing and FEL re-encode
   on, on a node whose encoder is radeonsi VA-API with its Main10 graph
-  proved, when the title has no verdict for this renderer and recipe.
-- **Admission.** The node's one live reconstruction slot, then a background
-  GPU bundle (`try_admit_frozen_bundle(…, Priority::Background)`, the
-  renderer's debit + 3 encoder threads). Either busy: the qualification is
-  skipped, the aggregate still publishes, and the next play asks again.
-  Foreground work preempts it (`run_admitted_probe`): its children are
-  killed and reaped, the aggregate still publishes.
+  proved and whose renderer decodes on the GPU, when the title has no
+  verdict for this renderer, recipe and encoder.
+- **Admission.** The title job's own admission is extended
+  (`extend_fragment_admission`) with a background GPU bundle: the renderer's
+  debit plus `CONSUMER_THREADS` (3). It is a claim on that admission, so
+  `fragment_worker_idle` counts it as the job's own capacity; without that
+  the job's idle check read its own GPU step as foreground pressure and
+  `run_admitted_probe` cancelled the qualification within 250 ms, so no
+  verdict was ever stored (review B1). Foreground work still preempts it:
+  its children are killed and reaped and the aggregate still publishes.
+- **The slot, preemptibly.** The qualification takes the node's
+  reconstruction slot registered as preemptible. A live reconstructed 8.1
+  that finds it taken cancels the qualification and waits up to 5 s
+  (`QUALIFICATION_SLOT_YIELD`) for it; one that does not let go in time
+  gives the play "this worker's reconstruction slot is held by a FEL
+  qualification measurement that did not yield within 5 s", distinct from
+  the live-play reason. The slot is for the Profile 8.1 destination only;
+  FEL HDR10-E and SDR processing keep their ordinary admission, as before
+  this route existed.
+- **CPU.** Every stage child is capped to what it is charged: `-threads 1`
+  before its input and `-filter_threads 1` (one main, one decoder, one
+  filter thread). A window whose helper reports a software decode under the
+  GPU admission is refused, as the streaming route refuses it.
 - **What.** K = 8 windows of 48 pictures at (i+1)/9 of the title, snapped to
-  the picture grid with the held source origin. Each is rendered by the
+  the picture grid with the held source origin. A window whose reference
+  has no lit picture (a fade, a title card) is replaced by its alternate,
+  half a spacing later; the letterbox is taken from the window's brightest
+  picture, not its first. A title is admitted only on at least 6 lit
+  windows; one with fewer gets a stored refusal ("too little of this title
+  is lit to measure …"), so it is not measured again on every play. Each is rendered by the
   deployed helper (the streaming protocol: source fd 3, evidence fd 4, NUT
   fd 5) three ways: `fel` 16-bit R'G'B' (the reference), `base-rpu` 16-bit
   R'G'B' (what the plain conversion shows), and `fel` 10-bit 4:2:0 piped
@@ -303,11 +324,20 @@ metadata there, like the title aggregate).
 - **Stored** in the title's probe document beside its Dolby Vision facts
   (`files.probe_json.plurx_dv_fel_v1`, a guarded `json_set`: same file id,
   size and mtime, P7 with an EL), keyed by the source size/mtime and an
-  identity hash of the renderer bundle identity (the scanner digest) and the
-  recipe string. A changed source, helper or recipe reads as no verdict; a
-  reprobe rewrites the document. Re-measuring rotates the title's scan
-  demand to a binding no scanner equals, so the scan worker rebinds and
-  reruns the title job.
+  identity hash of the renderer bundle identity (the scanner digest), the
+  recipe string and the encoder: the FFmpeg executable's digest, the VA
+  driver's own description from the startup probe (vendor, Mesa version,
+  GPU) and the render device with its PCI identity. A changed source,
+  helper, recipe, FFmpeg build, driver or GPU reads as no verdict. The held
+  source probe comparison treats the key as application metadata.
+- **Re-measuring** rotates the title's scan demand to a binding no scanner
+  equals, so the scan worker rebinds and reruns the title job; at most once
+  per title per node every 6 h, and never while a title job for it is
+  queued, running or cancelling (rotating the demand would cancel that
+  attempt, which qualifies the title anyway if it is due). A separate
+  qualification-only demand would avoid rescanning the title, but the title
+  demand, its triggers and the job kind are a shape-verified extension; the
+  rescan runs once per title per renderer, recipe and encoder.
 - **Gated** where the ingress offers the route (`prepare_processed_hdr10`)
   and again where every start builds its processed graph
   (`prepare_vod_encoding`), before the slot or any render. Until a verdict
@@ -316,25 +346,47 @@ metadata there, like the title aggregate).
   measured on this server's GPU"; a refused title's reads "the enhancement
   layer adds less than re-encoding loses for this title (measured ΔE ITP
   mean … reconstructed vs … without the EL, p99 … vs …)"; a node without a
-  qualified encoder says so.
+  qualified encoder says so. A start whose own processing is declined inside
+  the worker (verdict, busy slot, refused window) carries that reason to the
+  session's enhancement detail (`StartInfo::processing_note`), not a generic
+  backend failure.
+- **VA-API Main10 decode proof.** Measured off the boot path at startup by
+  decoding a shipped two-picture clip (no libx265 needed), 5 s bound. A
+  success is kept for the process; a failure is retried on later need after
+  30 s, doubling to at most an hour. Until proved, the renderer is debited
+  its software shape and the qualification does not run.
 - **Developer tab.** The "Per-title quality qualification" row
   (`dv_fel_bitrate_quality`) is computed: the rule, whether this node's
-  encoder is qualified, and how many titles hold a verdict for this renderer
-  and recipe and how many are admitted. Advisory; never read on Save.
+  encoder is qualified, and how many titles hold a verdict for this renderer,
+  recipe and encoder and how many are admitted, counted over the DV title
+  demand (one row per DV title), not the whole catalogue. Advisory; never
+  read on Save.
 
 ### Results (lab6, the production measurement)
 
-`physical_fel_qualification_of_one_title`, the code the title job runs,
-without a store, on the whole files (60 Mb/s target, GPU decode):
+`physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict` with
+`PLURX_FEL_QUALIFY_WITHOUT_SCAN=1`: the title job's qualification step
+(`qualify_if_due` under `run_admitted_probe`, holding the job's own
+admission), on the whole files, with a helper bundle built from this tree;
+each verdict was stored in the title's probe document and read back as
+current for this renderer, recipe and encoder (60 Mb/s target, GPU decode):
 
 | | Title A | Title B |
 |---|---|---|
-| Served (reconstructed, encoded) ΔE mean / p99 | 3.08 / 10.14 | 3.02 / 9.68 |
-| EL dropped (plain conversion) ΔE mean / p99 | 1.75 / 8.98 | 2.94 / 6.61 |
-| Mean gain (needs ≥ +10%) | −76% | −2.8% |
-| Windows the reconstruction wins on the mean | 1 of 8 | 3 of 8 |
-| Verdict | not admitted | not admitted |
-| Time | 104 s | 112 s |
+| Served (reconstructed, encoded) ΔE mean / p99 | 3.10 / 10.17 | 3.02 / 9.68 |
+| EL dropped (plain conversion) ΔE mean / p99 | 1.69 / 7.45 | 2.94 / 6.61 |
+| Mean gain (needs ≥ +10%) | −84% | −2.8% |
+| Windows the reconstruction wins on the mean | 0 of 8 | 3 of 8 |
+| Verdict (stored) | not admitted | not admitted |
+| Time | 127 s | 162 s |
+
+Before the review fix the same step was cancelled by its own GPU admission
+within 250 ms and stored nothing. Title B's numbers are identical to the
+store-less run (the encode is deterministic); three of Title A's windows
+moved because their letterbox now comes from the window's brightest picture.
+The full job (complete-title scan first) cannot run on a 60 s excerpt: the
+scanner refuses a cut that starts inside a GOP ("contiguous decoded title
+coverage"), and on a whole feature it decodes every picture, hours on lab6.
 
 Title B's earlier single-window win (§3: one 12 s excerpt at `-qmax 14`)
 does not hold across the title: without the QP cap the VBV-honest encode
@@ -343,9 +395,11 @@ title is reconstructed on lab6; both play the plain conversion with the
 measured reason.
 
 Reproduce (inside the `plurxd` container, scratch directory deleted
-afterwards):
+afterwards; `PLURX_DV_PROCESSING_DIR` names a bundle built from the tree
+under test):
 
 ```bash
-PLURX_FEL_QUALIFY_SOURCE="<P7 FEL title>.mkv" PLURX_FEL_QUALIFY_SCRATCH=$PWD/scratch \
-  ./plurxd-test physical_fel_qualification_of_one_title --ignored --nocapture
+PLURX_FEL_QUALIFY_WITHOUT_SCAN=1 PLURX_FEL_QUALIFY_SOURCE="<P7 FEL title>.mkv" \
+  PLURX_FEL_QUALIFY_SCRATCH=$PWD/scratch \
+  ./plurxd-test physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict --ignored --nocapture
 ```

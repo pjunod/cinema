@@ -740,7 +740,11 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
                 .expect("publish"),
             JobPublishOutcome::Published { .. }
         ));
-        let identity = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE);
+        let identity = q::identity(
+            &scanner,
+            plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
+            &q::encoder_identity("ffmpeg", "Mesa (radeonsi)", "/dev/dri/renderD128"),
+        );
         let verdict = FelVerdict {
             schema: q::SCHEMA,
             identity: identity.clone(),
@@ -817,6 +821,30 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
         );
         let rerun = demand(&store, file.id, &scanner).await;
         assert!(rerun.probe_revision > scanned.probe_revision, "{backend}");
+        // While a title job for it is queued or running, a request is a
+        // no-op: rotating the demand would cancel that attempt.
+        let (attempt, attempt_job) = active(&store, file.id, &scanner, 3_000).await;
+        assert!(
+            !store
+                .request_dv_fel_requalification(file.id, &q::requalify_binding(&scanner, &identity))
+                .await
+                .expect("requalify during a scan"),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .background_job(&attempt_job.id)
+                .await
+                .expect("job")
+                .expect("job")
+                .state,
+            JobState::Running,
+            "{backend}: the in-flight scan keeps running"
+        );
+        assert_eq!(
+            demand(&store, file.id, &scanner).await.probe_revision,
+            attempt.probe_revision
+        );
         // A verdict is never written for a title without an enhancement layer.
         let plain = seed(&store, "title-fel-verdict-mel").await;
         assert!(

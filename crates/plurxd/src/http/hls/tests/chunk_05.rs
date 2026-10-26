@@ -3409,6 +3409,7 @@ async fn negotiated_relay_uses_owner_local_acquisition_and_preserves_cached_mani
 /// M2 truthfulness: the reconstructed 8.1 claims "FEL used" only from the
 /// served-window receipt or the selected plan, never from the source's tags;
 /// the plain conversion it falls back to says FEL is unused and why.
+#[cfg(target_os = "linux")]
 #[test]
 fn reconstructed_p81_claims_fel_only_from_processing_truth_and_its_fallback_says_why() {
     use plurx_core::playback::enhancement::EnhancementBadge;
@@ -3460,7 +3461,31 @@ fn reconstructed_p81_claims_fel_only_from_processing_truth_and_its_fallback_says
         aac: false,
         preserve_dolby_vision: true,
     };
-    let busy = crate::transcode::TranscodeManager::reconstruction_slot_busy();
+    // The reason a real second reconstruction gets from the worker's slot.
+    let busy = {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let base = crate::test_tempdir().expect("runtime dir");
+        let manager = crate::transcode::TranscodeManager::new(
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store")),
+            base.path().join("runtime"),
+            plurx_core::transcode::EncoderCaps::default(),
+            plurx_core::transcode::Pipeline::Cpu,
+        );
+        rt.block_on(async {
+            let _held = manager
+                .acquire_reconstruction_slot(DvDestination::Profile81)
+                .await
+                .expect("first");
+            manager
+                .acquire_reconstruction_slot(DvDestination::Profile81)
+                .await
+                .expect_err("second live reconstruction")
+        })
+    };
     let fallback = session_enhancement(Some(&file), &converted, OutputGrade::Hdr10, None, None,
         None, None, Some(&busy)).expect("DV source");
     let row = fel_row(&fallback);

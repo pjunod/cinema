@@ -91,6 +91,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             // reconstructed 8.1's recipe and verdicts are qualified on.
             vaapi_hdr_policy: profile81
                 .then_some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
+            vaapi_driver: profile81.then(|| "lab radeonsi VA driver".to_owned()),
             ..Default::default()
         },
         Pipeline::Cpu,
@@ -207,10 +208,10 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             .expect("helper");
         let verdict = plurx_core::transcode::dv_fel_qualification::FelVerdict {
             schema: plurx_core::transcode::dv_fel_qualification::SCHEMA,
-            identity: plurx_core::transcode::dv_fel_qualification::identity(
-                &tools.scanner_digest(),
-                plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
-            ),
+            identity: manager
+                .fel_identity(&tools.scanner_digest())
+                .await
+                .expect("this node's FEL verdict identity"),
             source_size: file.size,
             source_mtime: file.mtime,
             admitted: true,

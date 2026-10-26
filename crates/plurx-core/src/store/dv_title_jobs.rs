@@ -282,7 +282,10 @@ RETURNING 'true' AS result_json",
 /// Ask for one title to be rescanned and re-qualified: rebind its title
 /// demand to `binding`, which no scanner digest equals, so the title worker
 /// rebinds it to its scanner and runs the title job again. `false` when the
-/// title has no demand (not a Dolby Vision title the scanner covers).
+/// title has no demand (not a Dolby Vision title the scanner covers), or when
+/// a title job for it is already queued, running or cancelling: rotating the
+/// demand would cancel that attempt, and the attempt qualifies the title
+/// anyway if it is due.
 pub(super) async fn request_requalification<T: QueueSql>(
     store: &T,
     file_id: i64,
@@ -297,8 +300,11 @@ pub(super) async fn request_requalification<T: QueueSql>(
     }
     let rows = store
         .queue_sql(
-            "SELECT json_object('revision',revision) AS result_json FROM dv_title_jobs_demand
-WHERE file_id=json_extract($1,'$.file_id')"
+            "SELECT json_object('revision',d.revision) AS result_json FROM dv_title_jobs_demand d
+WHERE d.file_id=json_extract($1,'$.file_id')
+ AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+  AND job.state IN ('queued','running','cancelling')
+  AND json_extract(job.payload_json,'$.file_id')=d.file_id)"
                 .into(),
             encode(&serde_json::json!({"file_id": file_id}))?,
             false,
@@ -313,7 +319,9 @@ WHERE file_id=json_extract($1,'$.file_id')"
 }
 
 /// How many titles hold a FEL verdict for `identity`, and how many of those
-/// admit reconstruction. Advisory (Developer tab) only.
+/// admit reconstruction. Advisory (Developer tab) only. Walks the Dolby
+/// Vision title demand (one row per DV title) and reads each title's row by
+/// its key, so it never scans the whole catalogue.
 pub(super) async fn fel_verdict_counts<T: QueueSql>(
     store: &T,
     identity: &str,
@@ -321,9 +329,11 @@ pub(super) async fn fel_verdict_counts<T: QueueSql>(
     let rows = store
         .queue_sql(
             format!(
-                "SELECT json_extract(probe_json,'$.{key}') AS result_json FROM files
-WHERE json_valid(probe_json) AND json_type(probe_json,'$.{key}')='object'
- AND json_extract(probe_json,'$.{key}.identity')=json_extract($1,'$.identity')",
+                "SELECT json_extract(f.probe_json,'$.{key}') AS result_json
+FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+WHERE f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+ AND json_type(f.probe_json,'$.{key}')='object'
+ AND json_extract(f.probe_json,'$.{key}.identity')=json_extract($1,'$.identity')",
                 key = crate::transcode::dv_fel_qualification::PROBE_KEY
             ),
             encode(&serde_json::json!({"identity": identity}))?,

@@ -1825,7 +1825,7 @@ pub(crate) struct ObservedWindow {
 /// no HEVC Main10 decode, surfaces the Vulkan device could not import) is
 /// still a valid window; the reason is logged so the fallback is visible.
 #[cfg(target_os = "linux")]
-fn helper_decoder(
+pub(crate) fn helper_decoder(
     value: &serde_json::Value,
 ) -> Result<(plurx_core::transcode::DecodeBackend, bool), String> {
     use plurx_core::transcode::DecodeBackend;

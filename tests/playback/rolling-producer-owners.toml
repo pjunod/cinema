@@ -631,7 +631,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
 # raised this count independently; the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
-expected_occurrences = 118
+# +1 with the FEL qualification review fixes (claude/lp-fel-p81): the test-only
+# releaser in `a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_one`
+# stands in for a qualification that lets go of the slot when told; the test
+# awaits its JoinHandle before asserting.
+expected_occurrences = 119
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -772,7 +776,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # branch polls every 50 ms, inside a 30 s `tokio::time::timeout`, for the
 # session's first served snapshot before its playlist request. Test-only; it
 # owns no producer and decides nothing.
-expected_occurrences = 80
+# +1 in the same releaser: a 50 ms stand-in for the qualification's kill and
+# reap before it drops the slot. Test-only, joined.
+expected_occurrences = 81
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -3193,7 +3199,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # The task owns its Arc manager and physical admission while awaiting the
 # cancellable bounded child. The test cancels it and consumes its JoinHandle
 # before asserting released credit; timeout is failure, never reap evidence.
-expected_occurrences = 997
+# +2 with the FEL qualification review fixes (claude/lp-fel-p81): the joined
+# test releaser above, and the boot warm-up of the VA-API HEVC Main10 decode
+# probe in `main.rs`, moved off the boot path. The warm-up owns one bounded
+# probe child (`status_job_owned`, kill-on-drop, 5 s deadline), logs, and
+# exits; it holds no session, permit or lock past that.
+expected_occurrences = 999
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4869,7 +4880,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadline drops and kills it), and `STAGE_DEADLINE` in
 # `source_probe/fel_qualification.rs::supervised`, which bounds one window
 # stage; on expiry or cancel the stage kills and reaps its children.
-expected_occurrences = 1854
+# +5 with the FEL qualification review fixes (claude/lp-fel-p81): the bounded
+# wait (`QUALIFICATION_SLOT_YIELD`, 5 s) a live reconstructed 8.1 gives a FEL
+# qualification it asked to yield the slot (on expiry the play declines with
+# its own reason; nothing is spawned); the 50 ms test releaser sleep; and in
+# the qualification fixture tests the 250 ms measurement beats, the 5 s bound
+# on waiting for the fixture to take the slot, and its 10 ms poll.
+expected_occurrences = 1859
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5347,7 +5364,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # makes the stage `start_kill` and `wait` each one before returning, and
 # kill-on-drop backs that up. One test-only ffprobe in the ignored physical
 # qualification test, run through `output_job_owned`.
-expected_occurrences = 303
+# -2 with the FEL qualification review fixes (claude/lp-fel-p81): the VA-API
+# Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
+# is gone; the store-less physical qualification test and its ffprobe child
+# are replaced by the real title-job physical test.
+expected_occurrences = 301
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

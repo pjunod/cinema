@@ -4067,7 +4067,8 @@ async fn create_with_purpose_inner(
                     replacement,
                     created,
                 } = started;
-                let degraded_processing = info.degraded_processing.take();
+                let degraded_processing =
+                    (info.degraded_processing.take(), info.processing_note.take());
                 let session_id = info.session_id.clone();
                 let response = RemoteStartResponse::from(info);
                 let guard = Some(if created {
@@ -4172,7 +4173,7 @@ async fn create_with_purpose_inner(
                             "media worker {candidate} did not return an activation generation"
                         )));
                     };
-                    Ok((started.info, guard, Some(target_generation), None))
+                    Ok((started.info, guard, Some(target_generation), (None, None)))
                 }
                 Err(error) => Err(ApiError::ServiceUnavailable(format!(
                     "media worker {candidate} could not start the session: {error:?}"
@@ -4206,7 +4207,13 @@ async fn create_with_purpose_inner(
         }
     }
     crate::media_pool::mark_create_phase("dispatch");
-    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) = started
+    let Some((
+        owner_node_id,
+        info,
+        guard,
+        local_serving_generation,
+        (degraded_processing, processing_note),
+    )) = started
     else {
         return Err(last_error.unwrap_or_else(|| {
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
@@ -4250,6 +4257,13 @@ async fn create_with_purpose_inner(
         let mut worker_request = request.clone();
         worker_request.request_id = Some(incarnation_id.clone());
         remote_request.request = worker_request;
+    }
+    if let Some(reason) = processing_note {
+        // This start's own processing was declined inside the worker (its
+        // FEL verdict, a busy reconstruction slot, a refused window): the
+        // enhancement detail names that reason, not a generic fallback.
+        processing_decline.get_or_insert_with(|| reason.clone());
+        plan_notes.push(processing_declined_note(&reason));
     }
     if !ingress_serving_authority.is_current(ingress_serving_generation) {
         return Err(ApiError::ServiceUnavailable(

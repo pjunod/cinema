@@ -1751,14 +1751,14 @@ async fn dolby_vision_fel_reencode(
             .map_err(|error| error.to_string());
         let facts = state.transcode.live_reconstruction_facts().await;
         let counts = match &tools {
-            Ok(Some(tools)) => state
-                .store
-                .dv_fel_verdict_counts(&plurx_core::transcode::dv_fel_qualification::identity(
-                    &tools.scanner_digest(),
-                    plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
-                ))
-                .await
-                .map_err(|error| error.to_string()),
+            Ok(Some(tools)) => match state.transcode.fel_identity(&tools.scanner_digest()).await {
+                Ok(identity) => state
+                    .store
+                    .dv_fel_verdict_counts(&identity)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(reason) => Err(reason),
+            },
             Ok(None) => Err("no processing helper on this node".into()),
             Err(error) => Err(error.clone()),
         };
@@ -1902,12 +1902,18 @@ fn dolby_vision_fel_reencode_item(
                             RequirementStatus::Unmet
                         },
                         evidence: format!(
-                            "{} of {} live FEL reconstruction slot{} in use on this node. A play \
+                            "{} of {} live FEL reconstruction slot{} in use on this node{}. A play \
                          beyond it gets the plain conversion with that reason until concurrent \
-                         reconstruction is measured.",
+                         reconstruction is measured; a FEL qualification holding it yields to a \
+                         play.",
                             facts.slots_in_use,
                             facts.slots,
                             if facts.slots == 1 { "" } else { "s" },
+                            if facts.held_by_qualification {
+                                " (by a FEL qualification)"
+                            } else {
+                                ""
+                            },
                         ),
                     },
                 )
@@ -3291,6 +3297,7 @@ mod tests {
     fn fel_reencode_readiness_is_read_from_this_node_and_never_from_the_switch() {
         let facts =
             |gpu_decode: bool, slots_in_use: usize| crate::transcode::LiveReconstructionFacts {
+                held_by_qualification: false,
                 device_present: gpu_decode,
                 main10_vaapi_decode: gpu_decode,
                 gpu_decode,

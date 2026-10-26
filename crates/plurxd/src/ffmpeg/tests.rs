@@ -2722,3 +2722,18 @@ async fn nightly_runner_has_ffmpeg_readrate() {
         "nightly arbitration coverage requires ffmpeg 5.1+ (-readrate)"
     );
 }
+
+/// A failed VA-API Main10 decode probe (a device still settling at boot) is
+/// not remembered forever: it is retried on later need after a bounded
+/// backoff. The probe decodes a shipped clip, so it needs no encoder.
+#[test]
+fn a_failed_main10_decode_probe_is_retried_after_a_bounded_backoff() {
+    use std::time::Duration;
+    assert_eq!(super::main10_probe_backoff(1), Duration::from_secs(30));
+    assert_eq!(super::main10_probe_backoff(2), Duration::from_secs(60));
+    assert_eq!(super::main10_probe_backoff(5), Duration::from_secs(480));
+    assert_eq!(super::main10_probe_backoff(40), Duration::from_secs(3600));
+    // Matroska (EBML magic) carrying the two-picture Main10 clip.
+    assert!(super::HEVC_MAIN10_PROBE_CLIP.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
+    assert!(super::HEVC_MAIN10_PROBE_CLIP.len() < 16 * 1024);
+}

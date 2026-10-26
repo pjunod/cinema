@@ -2953,77 +2953,293 @@ fn a_gpu_decoded_fel_graph_fits_a_twelve_thread_worker() {
     let fel = |decode| streaming_helper_cpu_threads(DvProcessingMode::Fel, decode) + audio_encoder;
     assert!(fel(RendererDecode::Gpu) <= budget, "{}", fel(RendererDecode::Gpu));
     assert!(fel(RendererDecode::Software) > budget, "software decode keeps its full debit");
-    // The preparation sizes the graph from the same decision.
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/transcode/manager/create.rs"));
-    assert!(source.contains(
-        "let helper_threads = crate::dv_segment::streaming_helper_cpu_threads(mode, renderer_decode);"
-    ));
-    assert!(source.contains("decode: renderer_decode, reconstruction_slot,"));
-    assert!(source.contains("crate::ffmpeg::has_hevc_main10_vaapi_decode().await,"));
+    // What the node reports (and the preparation debits) follows the same
+    // decision from the same inputs.
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("rt");
+    let base = crate::test_tempdir().expect("runtime");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"));
+    let manager =
+        TranscodeManager::new(store, base.path().join("runtime"), EncoderCaps::default(), Pipeline::Cpu);
+    let facts = rt.block_on(manager.live_reconstruction_facts());
+    let decode = TranscodeManager::processed_renderer_decode(facts.device_present, facts.main10_vaapi_decode);
+    assert_eq!(facts.gpu_decode, decode == RendererDecode::Gpu);
+    assert_eq!(facts.renderer_threads, streaming_helper_cpu_threads(DvProcessingMode::Fel, decode));
 }
 
-/// One live FEL reconstruction per worker: the slot is held by the graph's
-/// runtime, a second FEL graph is declined with a reason the play reports,
-/// base-layer processing never takes it, and it frees with the graph.
+/// A runtime recipe (the processed graph's lifetime: the encoding and its
+/// producer share it) holding `slot`.
+#[cfg(target_os = "linux")]
+async fn graph_holding(
+    store: &Arc<dyn Store>,
+    dir: &std::path::Path,
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> crate::vodencode::dv_runtime::RuntimeRecipe {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::transcode::dv_processing::{
+        DvBackendIdentity, DvDestination, DvDigest, DvProcessingMode, DvSourceOrigin, DvTimestamp,
+    };
+    use sha2::Digest as _;
+    let digest =
+        |bytes: &[u8]| DvDigest::new(hex::encode(sha2::Sha256::digest(bytes))).expect("digest");
+    let path = dir.join("graph-source.mkv");
+    std::fs::write(&path, b"held source").expect("source");
+    let metadata = std::fs::metadata(&path).expect("metadata");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "graph".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "graph".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let mtime = metadata
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs() as i64;
+    let id = store
+        .upsert_file(item, path.to_str().expect("path"), metadata.len() as i64, mtime, &ProbeResult::default())
+        .await
+        .expect("file");
+    let file = store.get_file(id).await.expect("file").expect("file");
+    let source = Arc::new(
+        crate::fragment_index_cluster::open_source_fence(&file, None)
+            .await
+            .expect("held source"),
+    );
+    let backend = DvBackendIdentity::new(
+        digest(b"renderer"),
+        digest(b"libraries"),
+        digest(b"parser"),
+        digest(b"graph"),
+        1,
+        digest(b"environment"),
+    )
+    .expect("backend");
+    crate::vodencode::dv_runtime::RuntimeRecipe {
+        tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(backend)),
+        source,
+        source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
+        display_target: None,
+        display: None,
+        display_target_note: None,
+        source_tick: (1, 1000),
+        source_origin: DvSourceOrigin::observed_common(
+            DvTimestamp::new(0, 1_000_000).expect("origin"),
+            plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("origin"),
+        native_bl: (64, 64),
+        source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
+        source_mastering: Ok(None),
+        source_mastering_minimum: Ok(None),
+        source_frame_probe: None,
+        preferences: Default::default(),
+        destination: DvDestination::Profile81,
+        mode: DvProcessingMode::Fel,
+        decode: crate::dv_segment::RendererDecode::Gpu,
+        reconstruction_slot: slot,
+        encoder: plurx_core::transcode::Encoder::Vaapi,
+        vaapi_hdr_policy: None,
+        runtime_cache: dir.join("runtime"),
+        shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
+        prepared: std::sync::Mutex::new(None),
+        failure_episode: digest(b"episode"),
+        preparation_budget: std::time::Duration::from_secs(5),
+        report_revision: std::sync::atomic::AtomicU64::new(0),
+        published_receipt: std::sync::Mutex::new(None),
+    }
+}
+
+/// One live reconstructed 8.1 per worker: its graph holds the slot for its
+/// whole life (shared by the encoding and its producer), a second play is
+/// declined with the reason it reports, other destinations (HDR10-E, SDR)
+/// never take it, and it frees when the last owner of the graph drops it.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn one_live_fel_reconstruction_per_worker_and_the_next_is_declined_with_its_reason() {
-    use plurx_core::transcode::dv_processing::DvProcessingMode;
+async fn one_live_reconstruction_per_worker_frees_with_the_graph_and_is_profile81_only() {
+    use plurx_core::transcode::dv_processing::DvDestination;
     let base = crate::test_tempdir().expect("runtime");
-    let store: Arc<dyn Store> = Arc::new(
-        plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"),
-    );
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"));
     let manager = TranscodeManager::new(
-        store,
+        Arc::clone(&store),
         base.path().join("runtime"),
         EncoderCaps::default(),
         Pipeline::Cpu,
     );
+    for other in [DvDestination::Hdr10, DvDestination::Sdr] {
+        assert!(manager
+            .acquire_reconstruction_slot(other)
+            .await
+            .expect("not a reconstruction slot")
+            .is_none());
+    }
     let first = manager
-        .acquire_reconstruction_slot(DvProcessingMode::Fel)
-        .expect("free slot")
-        .expect("FEL holds the slot");
-    assert!(manager
-        .acquire_reconstruction_slot(DvProcessingMode::BaseRpu)
-        .expect("base-layer processing is not a reconstruction")
-        .is_none());
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
+        .expect("free slot");
+    assert!(first.is_some());
+    let graph = Arc::new(graph_holding(&store, base.path(), first).await);
+    let producer = Arc::clone(&graph);
     let refused = manager
-        .acquire_reconstruction_slot(DvProcessingMode::Fel)
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
         .expect_err("second live reconstruction");
     assert_eq!(refused, TranscodeManager::reconstruction_slot_busy());
-    assert!(refused.contains("live FEL reconstruction"), "{refused}");
+    assert!(manager
+        .acquire_reconstruction_slot(DvDestination::Hdr10)
+        .await
+        .expect("HDR10-E is not limited by the slot")
+        .is_none());
     let facts = manager.live_reconstruction_facts().await;
     assert_eq!((facts.slots_in_use, facts.slots), (1, 1));
-    drop(first);
+    assert!(!facts.held_by_qualification);
+    drop(graph);
+    assert!(
+        manager
+            .acquire_reconstruction_slot(DvDestination::Profile81)
+            .await
+            .is_err(),
+        "the producer still owns the graph"
+    );
+    drop(producer);
     assert!(manager
-        .acquire_reconstruction_slot(DvProcessingMode::Fel)
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
         .expect("freed with the graph")
         .is_some());
-    // The slot is taken before the graph's CPU/GPU admission, and the runtime
-    // recipe (the graph's lifetime) holds it.
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/transcode/manager/create.rs"));
-    let slot = source
-        .find("let reconstruction_slot = self.acquire_reconstruction_slot(mode)?;")
-        .expect("slot acquisition");
-    let admission = source
-        .find("let bundle = crate::vodencode::admit_frozen_preparation(&self.admissions,")
-        .expect("graph admission");
-    assert!(slot < admission);
+}
+
+/// A FEL qualification holds the slot preemptibly: a live play cancels it,
+/// takes the slot once it lets go, and a qualification that does not let go
+/// in time gives the play its own reason, not the live-play one.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_one() {
+    use plurx_core::transcode::dv_processing::DvDestination;
+    let base = crate::test_tempdir().expect("runtime");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"));
+    let manager = Arc::new(TranscodeManager::new(
+        store,
+        base.path().join("runtime"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let preempt = tokio_util::sync::CancellationToken::new();
+    let slot = manager
+        .try_qualification_slot(preempt.clone())
+        .expect("free slot");
+    assert!(manager.try_qualification_slot(tokio_util::sync::CancellationToken::new()).is_none());
+    assert!(manager.live_reconstruction_facts().await.held_by_qualification);
+    // The qualification lets go when told (its stages kill and reap).
+    let releaser = tokio::spawn({
+        let preempt = preempt.clone();
+        async move {
+            preempt.cancelled().await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            drop(slot);
+        }
+    });
+    let live = manager
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
+        .expect("taken from the qualification");
+    assert!(live.is_some() && preempt.is_cancelled());
+    releaser.await.expect("releaser");
+    assert!(!manager.live_reconstruction_facts().await.held_by_qualification);
+    drop(live);
+    // One that ignores the signal: the play waits the bounded yield, then
+    // says the slot was held by a qualification.
+    tokio::time::pause();
+    let stubborn = manager
+        .try_qualification_slot(tokio_util::sync::CancellationToken::new())
+        .expect("free slot");
+    let refused = manager
+        .acquire_reconstruction_slot(DvDestination::Profile81)
+        .await
+        .expect_err("held past the yield");
+    assert_eq!(refused, TranscodeManager::reconstruction_slot_held_by_qualification());
+    assert_ne!(refused, TranscodeManager::reconstruction_slot_busy());
+    drop(stubborn);
 }
 
 /// The reconstructed 8.1 is served only for a title whose own verdict, for
-/// this renderer and recipe, admits it. Until a verdict exists, or when it
-/// refuses, the play keeps the plain conversion and says why; a node whose
-/// encoder has no qualified recipe never serves it.
+/// this renderer, recipe and encoder, admits it. Until a verdict exists, or
+/// when it refuses, the play keeps the plain conversion and says why; a
+/// missing verdict asks for the title to be measured, once per throttle
+/// window; a node whose encoder has no qualified recipe never serves it.
 #[cfg(target_os = "linux")]
-#[test]
-fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise_says_why() {
-    use plurx_core::transcode::dv_fel_qualification::{FelVerdict, VerdictState};
+#[tokio::test]
+async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise_says_why() {
+    use plurx_core::domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::transcode::dv_fel_qualification::{self as q, FelVerdict, VerdictState};
+    let base = crate::test_tempdir().expect("runtime");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"));
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        base.path().join("runtime"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let library = store
+        .create_library(&NewLibrary {
+            name: "fel".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "fel".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let probe = ProbeResult {
+        video_codec: Some("hevc".into()),
+        dolby_vision: DolbyVisionFacts {
+            profile: Some(7),
+            el_present: Some(true),
+            rpu_present: Some(true),
+            ..Default::default()
+        },
+        raw_json: Some(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#.into()),
+        ..Default::default()
+    };
+    let id = store.upsert_file(item, "/fel.mkv", 10, 20, &probe).await.expect("file");
+    let file = store.get_file(id).await.expect("file").expect("file");
+    let scanner = "a".repeat(64);
+    let identity = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE, "encoder");
     let verdict = |admitted| FelVerdict {
-        schema: 1,
-        identity: "id".into(),
-        source_size: 1,
-        source_mtime: 2,
+        schema: q::SCHEMA,
+        identity: identity.clone(),
+        source_size: file.size,
+        source_mtime: file.mtime,
         admitted,
         served_mean: 2.9,
         dropped_mean: 1.79,
@@ -3031,40 +3247,71 @@ fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise_says_
         dropped_p99: 9.6,
         p99_tolerance: 0.0,
         measured_at_ms: 3,
-        windows: Vec::new(),
+        windows: vec![
+            q::WindowScore {
+                start_ms: 0,
+                served_mean: 2.9,
+                served_p99: 7.78,
+                dropped_mean: 1.79,
+                dropped_p99: 9.6,
+                samples: 1,
+            };
+            q::MIN_WINDOWS
+        ],
     };
-    assert_eq!(
-        TranscodeManager::fel_gate(true, VerdictState::Current(verdict(true))),
-        crate::transcode::FelGate::Serve
-    );
-    let crate::transcode::FelGate::Decline(refused) =
-        TranscodeManager::fel_gate(true, VerdictState::Current(verdict(false)))
-    else {
-        panic!("a refusing verdict declines");
-    };
+    let document = |verdict: &FelVerdict| serde_json::json!({ q::PROBE_KEY: verdict }).to_string();
+    // Admitting verdict: served.
+    manager
+        .fel_route_decision(&file, Some(&document(&verdict(true))), &scanner, &identity)
+        .await
+        .expect("served");
+    // Refusing verdict: the measured reason.
+    let refused = manager
+        .fel_route_decision(&file, Some(&document(&verdict(false))), &scanner, &identity)
+        .await
+        .expect_err("refused");
     assert!(refused.contains("adds less than re-encoding loses for this title"), "{refused}");
     assert!(refused.contains("2.90 reconstructed vs 1.79 without the EL"), "{refused}");
+    // A verdict for another encoder is no verdict: measure, and say so. The
+    // request rotates the title's scan demand (here already bound to the
+    // scanner, as after a scan); a second play inside the throttle window
+    // does not rotate it again.
+    let revision = |demands: Vec<plurx_core::store::dv_title_jobs::TitleDemand>| {
+        demands.into_iter().find(|d| d.file_id == id).map(|d| d.probe_revision).expect("demand")
+    };
+    let unbound = revision(store.dv_title_demands(&scanner, 0).await.expect("demand"));
+    let bound = store
+        .bind_dv_title_demand(unbound, &scanner)
+        .await
+        .expect("bind")
+        .expect("bound");
+    let other = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE, "another GPU");
+    let measure = || async {
+        manager
+            .fel_route_decision(&file, Some(&document(&verdict(true))), &scanner, &other)
+            .await
+            .expect_err("measured first")
+    };
+    assert_eq!(measure().await, TranscodeManager::fel_being_measured());
+    let requested = revision(store.dv_title_demands(&scanner, 0).await.expect("demand"));
+    assert!(requested > bound, "{bound} -> {requested}");
+    let rebound = store
+        .bind_dv_title_demand(requested, &scanner)
+        .await
+        .expect("bind")
+        .expect("bound");
+    assert_eq!(measure().await, TranscodeManager::fel_being_measured());
     assert_eq!(
-        TranscodeManager::fel_gate(true, VerdictState::Missing),
-        crate::transcode::FelGate::Measure
+        revision(store.dv_title_demands(&scanner, 0).await.expect("demand")),
+        rebound,
+        "throttled"
     );
-    assert!(TranscodeManager::fel_being_measured().contains("is being measured"));
+    // Capability decides before any verdict.
     for state in [VerdictState::Missing, VerdictState::Current(verdict(true))] {
         assert_eq!(
             TranscodeManager::fel_gate(false, state),
             crate::transcode::FelGate::Decline(TranscodeManager::fel_recipe_unqualified().into())
         );
     }
-    // The gate runs where the ingress offers the route and again where every
-    // start builds its processed graph, before the slot or any render, so a
-    // declined title never takes the reconstruction slot.
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/transcode/manager/create.rs"));
-    let gate = "self.reconstruction_qualified(&planning).await?;";
-    assert_eq!(source.matches(gate).count(), 2);
-    let graph = source.rfind(gate).expect("graph gate");
-    let slot = source.find("self.acquire_reconstruction_slot(mode)").expect("slot");
-    assert!(graph < slot);
-    // The route's own rate: min(source average, 60 Mb/s).
-    assert!(source.contains("plurx_core::transcode::reconstructed_p81_video_kbps(file);"));
     assert!(crate::transcode::FEL_REQUALIFICATION_INTERVAL >= std::time::Duration::from_secs(3600));
 }

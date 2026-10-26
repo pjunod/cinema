@@ -1486,30 +1486,90 @@ impl TranscodeManager {
         &self,
         planning: &plurx_core::store::PlaybackPlanningSnapshot,
     ) -> Result<(), String> {
-        use plurx_core::transcode::dv_fel_qualification as q;
         if !self.fel_qualification_capable() {
             return Err(Self::fel_recipe_unqualified().into());
         }
         let tools = crate::vodencode::dv_runtime::ToolSet::capture()
             .await?
             .ok_or("the processing helper is unavailable on this node")?;
-        let scanner = tools.scanner_digest();
-        let identity = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE);
-        let state = q::verdict_state(
+        let identity = self.fel_identity(&tools.scanner_digest()).await?;
+        self.fel_route_decision(
+            &planning.file,
             planning.probe_json.as_deref(),
-            planning.file.size,
-            planning.file.mtime,
+            &tools.scanner_digest(),
             &identity,
-        );
+        )
+        .await
+    }
+
+    /// The route's answer for one title from its stored verdict for
+    /// `identity`: served, declined with the verdict's reason, or (no
+    /// verdict) measured: the title's qualification is requested and the play
+    /// keeps the plain conversion meanwhile.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn fel_route_decision(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        probe_json: Option<&str>,
+        scanner: &str,
+        identity: &str,
+    ) -> Result<(), String> {
+        use plurx_core::transcode::dv_fel_qualification as q;
+        let state = q::verdict_state(probe_json, file.size, file.mtime, identity);
         match Self::fel_gate(true, state) {
             FelGate::Serve => Ok(()),
             FelGate::Decline(reason) => Err(reason),
             FelGate::Measure => {
-                self.request_fel_qualification(planning.file.id, &scanner, &identity)
+                self.request_fel_qualification(file.id, scanner, identity)
                     .await;
                 Err(Self::fel_being_measured().into())
             }
         }
+    }
+
+    /// The encoder a FEL verdict is measured on: the FFmpeg executable's
+    /// digest, the VA driver's description from the startup probe (vendor,
+    /// driver version, GPU) and the render device with its PCI identity.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn fel_encoder_identity(&self) -> Result<String, String> {
+        let driver = self
+            .caps
+            .vaapi_driver
+            .as_deref()
+            .ok_or("this node's VA driver was not identified by its startup probe")?;
+        let ffmpeg = crate::ffmpeg::EncodedExecutable::capture().await?;
+        let path = plurx_core::transcode::vaapi_device();
+        let device = self
+            .caps
+            .graphics_devices
+            .iter()
+            .find(|device| device.render_node.as_deref() == Some(path.as_str()))
+            .map_or_else(
+                || path.clone(),
+                |device| {
+                    format!(
+                        "{path} {} {}:{}",
+                        device.id, device.vendor_id, device.device_id
+                    )
+                },
+            );
+        Ok(
+            plurx_core::transcode::dv_fel_qualification::encoder_identity(
+                &ffmpeg.digest,
+                driver,
+                &device,
+            ),
+        )
+    }
+
+    /// The full key of this node's FEL verdicts: renderer, recipe, encoder.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn fel_identity(&self, scanner: &str) -> Result<String, String> {
+        Ok(plurx_core::transcode::dv_fel_qualification::identity(
+            scanner,
+            plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
+            &self.fel_encoder_identity().await?,
+        ))
     }
 
     /// The route's decision from this node's capability and the title's
@@ -1578,47 +1638,66 @@ impl TranscodeManager {
         }
     }
 
-    /// The GPU and CPU a qualification window graph is debited, in the
-    /// background class, plus the node's live reconstruction slot.
+    /// The node's reconstruction slot, preemptibly, and the GPU and CPU a
+    /// qualification window graph is debited, as a claim on the title job's
+    /// own admission (`extend_fragment_admission`). `preempt` is the
+    /// qualification's cancellation: a live reconstructed 8.1 triggers it to
+    /// take the slot.
     #[cfg(target_os = "linux")]
     pub(crate) async fn admit_fel_qualification(
         &self,
+        admission: &crate::transcode::FragmentAdmission,
+        preempt: tokio_util::sync::CancellationToken,
+        decode: crate::dv_segment::RendererDecode,
     ) -> Result<
         (
-            tokio::sync::OwnedSemaphorePermit,
-            crate::admission::TranscodePermit,
+            crate::transcode::QualificationSlot,
             crate::dv_segment::RendererDecode,
         ),
         String,
     > {
-        let slot = self
-            .acquire_reconstruction_slot(
-                plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
-            )?
-            .ok_or("no reconstruction slot")?;
-        let decode = Self::processed_renderer_decode(
-            std::path::Path::new(&plurx_core::transcode::vaapi_device()).exists(),
-            crate::ffmpeg::has_hevc_main10_vaapi_decode().await,
-        );
+        if decode != crate::dv_segment::RendererDecode::Gpu {
+            return Err(
+                "this node has not proved a VA-API HEVC Main10 decode; the qualification \
+                 measures the GPU-decoded route only"
+                    .into(),
+            );
+        }
         let resources = crate::admission::TranscodeResourceEstimate {
             hardware_slot: true,
             cpu_threads: crate::dv_segment::streaming_helper_cpu_threads(
                 plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
                 decode,
-            ) + 3,
+            ) + crate::source_probe::fel_qualification::CONSUMER_THREADS,
             decoder_threads: Some(crate::dv_segment::STREAMING_DECODER_THREADS),
         };
-        let permit = crate::vodencode::try_admit_frozen_bundle(
-            &self.admissions,
-            self.max_hw_sessions().await,
-            self.software_budget().await,
-            &resources,
-            Some(1),
-            crate::admission::Priority::Background,
-            None,
-        )
-        .map_err(|_| "the GPU slot or CPU the qualification needs is in use".to_owned())?;
-        Ok((slot, permit, decode))
+        let slot = self
+            .try_qualification_slot(preempt)
+            .ok_or_else(Self::reconstruction_slot_busy)?;
+        self.extend_fragment_admission(admission, &resources, Some(1))
+            .await?;
+        Ok((slot, decode))
+    }
+
+    /// The reconstruction slot for a FEL qualification, registered as
+    /// preemptible; `None` when anything holds it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn try_qualification_slot(
+        &self,
+        preempt: tokio_util::sync::CancellationToken,
+    ) -> Option<crate::transcode::QualificationSlot> {
+        let mut holder = self
+            .reconstruction_qualification
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let permit = Arc::clone(&self.processed_reconstruction_slots)
+            .try_acquire_owned()
+            .ok()?;
+        *holder = Some(preempt);
+        Some(crate::transcode::QualificationSlot {
+            permit: Some(permit),
+            holder: Arc::clone(&self.reconstruction_qualification),
+        })
     }
 
     /// The renderer's decode placement, which sizes its CPU debit. It decodes
@@ -1658,27 +1737,65 @@ impl TranscodeManager {
             // The encoder's share with a soundtrack, as preparation debits it.
             encoder_threads: 5,
             software_budget: self.software_budget().await,
+            held_by_qualification: self
+                .reconstruction_qualification
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some(),
             slots: LIVE_RECONSTRUCTION_SLOTS,
             slots_in_use: LIVE_RECONSTRUCTION_SLOTS
                 .saturating_sub(self.processed_reconstruction_slots.available_permits()),
         }
     }
 
-    /// The worker's live FEL reconstruction slot for a graph that composes
-    /// the enhancement layer; `None` for base-layer processing. A busy slot
-    /// is the play's decline reason, and it falls back to its ordinary route.
+    /// The worker's live reconstruction slot for a reconstructed Profile 8.1
+    /// graph; `None` for any other destination (HDR10-E and SDR processing
+    /// keep their own admission, unchanged). A slot held by a FEL
+    /// qualification is taken from it: the qualification is told to stop and
+    /// the play waits up to [`QUALIFICATION_SLOT_YIELD`] for the permit. A
+    /// slot held by another live play is the decline reason, and the play
+    /// falls back to its ordinary route.
     #[cfg(target_os = "linux")]
-    pub(crate) fn acquire_reconstruction_slot(
+    pub(crate) async fn acquire_reconstruction_slot(
         &self,
-        mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+        destination: plurx_core::transcode::dv_processing::DvDestination,
     ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, String> {
-        if mode != plurx_core::transcode::dv_processing::DvProcessingMode::Fel {
+        if destination != plurx_core::transcode::dv_processing::DvDestination::Profile81 {
             return Ok(None);
         }
-        Arc::clone(&self.processed_reconstruction_slots)
-            .try_acquire_owned()
-            .map(Some)
-            .map_err(|_| Self::reconstruction_slot_busy())
+        let qualification = {
+            let holder = self
+                .reconstruction_qualification
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Ok(permit) = Arc::clone(&self.processed_reconstruction_slots).try_acquire_owned()
+            {
+                return Ok(Some(permit));
+            }
+            holder.clone()
+        };
+        let Some(qualification) = qualification else {
+            return Err(Self::reconstruction_slot_busy());
+        };
+        qualification.cancel();
+        match tokio::time::timeout(
+            QUALIFICATION_SLOT_YIELD,
+            Arc::clone(&self.processed_reconstruction_slots).acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => Ok(Some(permit)),
+            _ => Err(Self::reconstruction_slot_held_by_qualification()),
+        }
+    }
+
+    /// Why a play could not take the slot from a FEL qualification.
+    pub(crate) fn reconstruction_slot_held_by_qualification() -> String {
+        format!(
+            "this worker's reconstruction slot is held by a FEL qualification measurement \
+             that did not yield within {} s",
+            QUALIFICATION_SLOT_YIELD.as_secs()
+        )
     }
 
     /// Why a second live FEL reconstruction on this worker was declined.
@@ -1939,6 +2056,7 @@ impl TranscodeManager {
                             None,
                             Some(super::planning_hwaccel_preference(&planning)),
                             Some((&mut credit, deadline)),
+                            None,
                         )
                         .await?
                     else {
@@ -2081,8 +2199,24 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         hwaccel: Option<&str>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        let encoding =
-            Box::pin(self.prepare_vod_encoding_with_source(req, file, None, hwaccel, None)).await?;
+        self.prepare_vod_encoding_noting(req, file, hwaccel, None)
+            .await
+    }
+
+    /// [`Self::prepare_vod_encoding_with_preference`] that also reports why an
+    /// ordinary start's processing was declined (`decline`), so the session's
+    /// enhancement detail names the real reason instead of a generic one.
+    pub(super) async fn prepare_vod_encoding_noting(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        hwaccel: Option<&str>,
+        decline: Option<&mut Option<String>>,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        let encoding = Box::pin(
+            self.prepare_vod_encoding_with_source(req, file, None, hwaccel, None, decline),
+        )
+        .await?;
         if let Some(encoding) = encoding.as_ref() {
             self.refuse_unadmittable_encoding(encoding).await?;
         }
@@ -2134,6 +2268,7 @@ impl TranscodeManager {
             Some((evidence, proof)),
             None,
             None,
+            None,
         ))
         .await?
         .ok_or_else(|| "Source encoding recipe missing".to_owned())?;
@@ -2154,6 +2289,7 @@ impl TranscodeManager {
             &mut Option<crate::vodencode::EncodePermit>,
             tokio::time::Instant,
         )>,
+        mut decline: Option<&mut Option<String>>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         let processed_trial = prepared_admission.is_some();
         req.dv_processing_route()?;
@@ -2217,6 +2353,9 @@ impl TranscodeManager {
                 }
                 Err(reason) => {
                     tracing::warn!(target: "plurxd::transcode", %reason, "DV backend unavailable; retaining ordinary delivery");
+                    if let Some(decline) = decline.as_deref_mut() {
+                        decline.get_or_insert(reason);
+                    }
                     None
                 }
             }
@@ -2931,7 +3070,7 @@ impl TranscodeManager {
                     } else { plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu };
                     // One live FEL reconstruction per worker. A second play falls
                     // back to its ordinary route with this reason.
-                    let reconstruction_slot = self.acquire_reconstruction_slot(mode)?;
+                    let reconstruction_slot = self.acquire_reconstruction_slot(destination).await?;
                     let preparation_budget = self.vod_settings(req).await?
                         .ok_or("DV processing requires the VOD preparation budget")?.block_budget;
                     let mut processed_options = retained.1.clone();
@@ -3064,6 +3203,11 @@ impl TranscodeManager {
                             plurx_core::transcode::dv_processing::DvFallbackReason::BackendFailure);
                         tracing::warn!(target: "plurxd::transcode", %reason,
                             "DV window refused; retaining ordinary delivery");
+                        // The reason, not the generic fallback class, is what
+                        // the session's enhancement detail shows.
+                        if let Some(decline) = decline.as_deref_mut() {
+                            decline.get_or_insert(reason);
+                        }
                     }
                 }
             }
@@ -3804,13 +3948,15 @@ impl TranscodeManager {
             },
             None => (req, None),
         };
+        let mut processing_note = None;
         let encoding = match root_admission.as_ref() {
             Some(prepared) => Some(Arc::clone(&prepared.encoding)),
             None => {
-                self.prepare_vod_encoding_with_preference(
+                self.prepare_vod_encoding_noting(
                     req,
                     &file,
                     revalidated.map(super::planning_hwaccel_preference),
+                    Some(&mut processing_note),
                 )
                 .await?
             }
@@ -3989,6 +4135,7 @@ impl TranscodeManager {
             processed_dv_profile,
             processed_fel,
             degraded_processing,
+            processing_note,
             retained_output: response_facts
                 .as_ref()
                 .and_then(|facts| facts.response_owner.retained_output_facts()),

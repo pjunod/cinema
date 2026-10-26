@@ -29,6 +29,15 @@ const YUV420P10_EXPORT: &str = "pq-bilinear-yuv420p10-v1";
 const STAGE_DEADLINE: Duration = Duration::from_secs(240);
 /// The helper's bounded seek preroll, as in the streaming route.
 const MAX_PREROLL: u16 = 512;
+/// CPU threads one window stage's FFmpeg child runs, debited with the
+/// renderer's: the main/demux-mux thread, one decoder thread (`-threads 1`)
+/// and one filter thread (`-filter_threads 1`), which every consumer argv
+/// pins. Stages run one at a time, so this is the qualification's whole
+/// FFmpeg share.
+pub(crate) const CONSUMER_THREADS: usize = 3;
+/// The helper's trace (decoder report and per-picture rows) is a few
+/// kilobytes per window; read at most this much of it.
+const TRACE_LIMIT: u64 = 1 << 20;
 
 /// An exact source timestamp `numerator / denominator` seconds.
 pub(crate) type Instant = (i64, u32);
@@ -111,20 +120,14 @@ impl Clock {
         })
     }
 
-    /// The `index`th of `count` windows, at (index+1)/(count+1) of the title,
-    /// snapped to the picture grid: its first and end source timestamps.
-    pub(crate) fn window(
-        &self,
-        duration_ms: i64,
-        index: usize,
-        count: usize,
-    ) -> Result<(Instant, Instant), String> {
-        if duration_ms <= 0 || index >= count {
-            return Err("title duration is unknown".into());
+    /// The window starting at `at_ms` into the title, snapped to the picture
+    /// grid: its first and end source timestamps.
+    pub(crate) fn window_at(&self, at_ms: i64) -> Result<(Instant, Instant), String> {
+        if at_ms < 0 {
+            return Err("window position is negative".into());
         }
         let (num, den) = (i128::from(self.rate.0), i128::from(self.rate.1));
-        let at_ms = i128::from(duration_ms) * (index as i128 + 1) / (count as i128 + 1);
-        let first = at_ms * num / (den * 1000);
+        let first = i128::from(at_ms) * num / (den * 1000);
         let point = |frame: i128| {
             let (on, od) = (i128::from(self.origin.0), i128::from(self.origin.1));
             reduced(on * num + frame * den * od, od * num)
@@ -183,12 +186,16 @@ pub(crate) fn encode_args(
         .map(str::to_owned)
         .into();
     args.extend(plurx_core::transcode::Encoder::Vaapi.init_args());
+    // `CONSUMER_THREADS`: one decoder thread, one filter thread.
+    args.extend(["-filter_threads".to_owned(), "1".to_owned()]);
     args.extend([
         "-r".to_owned(),
         format!("{}/{}", clock.rate.0, clock.rate.1),
     ]);
     args.extend(
         [
+            "-threads",
+            "1",
             "-f",
             "nut",
             "-i",
@@ -227,26 +234,13 @@ pub(crate) struct Sample<'a> {
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) ffmpeg: String,
     pub(crate) runtime_cache: &'a Path,
+    /// Where the renderer was admitted to decode; a window whose helper
+    /// decoded in software under a GPU admission is refused (it ran threads
+    /// nobody was debited), as in the streaming route.
+    pub(crate) decode: RendererDecode,
     /// Foreground work, a job cancel or shutdown: every stage kills and reaps
     /// its children and returns.
     pub(crate) cancel: tokio_util::sync::CancellationToken,
-}
-
-impl Sample<'_> {
-    pub(crate) fn environment(
-        tools: &crate::vodencode::dv_runtime::ToolSet,
-        decode: RendererDecode,
-    ) -> Vec<(String, std::ffi::OsString)> {
-        let mut environment = tools.renderer_env.clone();
-        if decode == RendererDecode::Gpu {
-            crate::vodencode::dv_runtime::gpu_decode_environment(
-                &mut environment,
-                &plurx_core::transcode::vaapi_device(),
-                &crate::ffmpeg::ffmpeg_bin(),
-            );
-        }
-        environment
-    }
 }
 
 /// The pooled active-picture deltas of every window, and each window's score.
@@ -256,67 +250,92 @@ pub(crate) struct Measurement {
     pub(crate) dropped: Vec<f64>,
 }
 
+/// Measure up to `count` lit windows: each slot's primary position, or its
+/// alternate when the primary's reference is dark (a fade, a title card).
+/// Fewer than `count` windows come back when both are dark.
 pub(crate) async fn measure(sample: &Sample<'_>, count: usize) -> Result<Measurement, String> {
     let mut measurement = Measurement {
         windows: Vec::with_capacity(count),
         served: Vec::new(),
         dropped: Vec::new(),
     };
-    for index in 0..count {
-        let window = sample.clock.window(sample.duration_ms, index, count)?;
-        let scratch = tempfile::Builder::new()
-            .prefix("dv-fel-qualify-")
-            .tempdir_in(sample.runtime_cache)
-            .map_err(|e| e.to_string())?;
-        let reference = render(sample, window, "fel", RGB48_EXPORT, scratch.path(), None).await?;
-        let dropped = render(
-            sample,
-            window,
-            "base-rpu",
-            RGB48_EXPORT,
-            scratch.path(),
-            None,
-        )
-        .await?;
-        let encoded = scratch.path().join("served.mp4");
-        render(
-            sample,
-            window,
-            "fel",
-            YUV420P10_EXPORT,
-            scratch.path(),
-            Some(&encoded),
-        )
-        .await?;
-        let served = decode(sample, &encoded).await?;
-        drop(scratch);
-        let region = q::active_region(&reference[0]).ok_or("the window's reference is all dark")?;
-        let (mut window_served, mut window_dropped) = (Vec::new(), Vec::new());
-        for ((reference, served), dropped) in reference.iter().zip(&served).zip(&dropped) {
-            if !q::active_deltas(reference, served, region, &mut window_served)
-                || !q::active_deltas(reference, dropped, region, &mut window_dropped)
-            {
-                return Err("window pictures differ in shape".into());
+    for positions in q::sample_positions(sample.duration_ms, count) {
+        for at_ms in positions {
+            if let Some((score, served, dropped)) = measure_window(sample, at_ms).await? {
+                measurement.served.extend_from_slice(&served);
+                measurement.dropped.extend_from_slice(&dropped);
+                measurement.windows.push(score);
+                break;
             }
         }
-        measurement.served.extend_from_slice(&window_served);
-        measurement.dropped.extend_from_slice(&window_dropped);
-        let samples = window_served.len() as u64;
-        let (served_mean, served_p99) =
-            q::mean_p99(&mut window_served).ok_or("no served samples")?;
-        let (dropped_mean, dropped_p99) =
-            q::mean_p99(&mut window_dropped).ok_or("no EL-dropped samples")?;
-        let round = |v: f64| (v * 10_000.0).round() / 10_000.0;
-        measurement.windows.push(WindowScore {
+    }
+    Ok(measurement)
+}
+
+/// One window's score and active-picture deltas; `None` when its reference
+/// has no lit picture to measure.
+async fn measure_window(
+    sample: &Sample<'_>,
+    at_ms: i64,
+) -> Result<Option<(WindowScore, Vec<f64>, Vec<f64>)>, String> {
+    let window = sample.clock.window_at(at_ms)?;
+    let scratch = tempfile::Builder::new()
+        .prefix("dv-fel-qualify-")
+        .tempdir_in(sample.runtime_cache)
+        .map_err(|e| e.to_string())?;
+    let reference = render(sample, window, "fel", RGB48_EXPORT, scratch.path(), None).await?;
+    // The letterbox of the window's brightest picture: a fade-in's first
+    // frame says nothing about it.
+    let Some(region) = q::brightest(&reference).and_then(q::active_region) else {
+        return Ok(None);
+    };
+    let dropped = render(
+        sample,
+        window,
+        "base-rpu",
+        RGB48_EXPORT,
+        scratch.path(),
+        None,
+    )
+    .await?;
+    let encoded = scratch.path().join("served.mp4");
+    render(
+        sample,
+        window,
+        "fel",
+        YUV420P10_EXPORT,
+        scratch.path(),
+        Some(&encoded),
+    )
+    .await?;
+    let served = decode(sample, &encoded).await?;
+    drop(scratch);
+    let (mut window_served, mut window_dropped) = (Vec::new(), Vec::new());
+    for ((reference, served), dropped) in reference.iter().zip(&served).zip(&dropped) {
+        if !q::active_deltas(reference, served, region, &mut window_served)
+            || !q::active_deltas(reference, dropped, region, &mut window_dropped)
+        {
+            return Err("window pictures differ in shape".into());
+        }
+    }
+    let (served, dropped) = (window_served.clone(), window_dropped.clone());
+    let samples = window_served.len() as u64;
+    let (served_mean, served_p99) = q::mean_p99(&mut window_served).ok_or("no served samples")?;
+    let (dropped_mean, dropped_p99) =
+        q::mean_p99(&mut window_dropped).ok_or("no EL-dropped samples")?;
+    let round = |v: f64| (v * 10_000.0).round() / 10_000.0;
+    Ok(Some((
+        WindowScore {
             start_ms: window.0 .0 * 1000 / i64::from(window.0 .1),
             served_mean: round(served_mean),
             served_p99: round(served_p99),
             dropped_mean: round(dropped_mean),
             dropped_p99: round(dropped_p99),
             samples,
-        });
-    }
-    Ok(measurement)
+        },
+        served,
+        dropped,
+    )))
 }
 
 fn read_end_file(pipe: std::io::PipeReader) -> std::fs::File {
@@ -356,7 +375,7 @@ async fn render(
         .env("MESA_SHADER_CACHE_DIR", scratch)
         .env("MESA_SHADER_CACHE_MAX_SIZE", "64M")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::from(diagnostics))
         .kill_on_drop(true);
     crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
@@ -397,11 +416,16 @@ async fn render(
     let (mut consumer, _consumer_job) =
         plurx_core::process::spawn_job_owned(&mut consumer, ChildWork::background(work))
             .map_err(|e| e.to_string())?;
+    let trace = helper.stdout.take().ok_or("the renderer has no trace")?;
     let outcome = supervised(&sample.cancel, async {
-        let lattices = match consumer.stdout.take() {
-            Some(stdout) => lattices(stdout, sample.clock.raster).await?,
-            None => Vec::new(),
+        let consume = async {
+            match consumer.stdout.take() {
+                Some(stdout) => lattices(stdout, sample.clock.raster).await,
+                None => Ok(Vec::new()),
+            }
         };
+        let (lattices, trace) = tokio::join!(consume, read_trace(trace));
+        let lattices = lattices?;
         let consumed = finish(&mut consumer, "the window's consumer").await;
         let rendered = helper.wait().await.map_err(|e| e.to_string())?;
         if !rendered.success() {
@@ -418,6 +442,13 @@ async fn render(
             ));
         }
         consumed?;
+        if sample.decode == RendererDecode::Gpu && decoded_in_software(&trace?)? {
+            return Err(
+                "the renderer decoded in software, but the qualification was admitted for \
+                 GPU decode and holds no CPU for software decoders"
+                    .into(),
+            );
+        }
         Ok(lattices)
     })
     .await;
@@ -426,6 +457,27 @@ async fn render(
         reap(&mut consumer).await;
     }
     outcome
+}
+
+async fn read_trace(stdout: tokio::process::ChildStdout) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    stdout
+        .take(TRACE_LIMIT)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Whether the helper's decoder report says it opened its decoders without a
+/// VA-API device (four software frame workers per layer).
+fn decoded_in_software(trace: &str) -> Result<bool, String> {
+    let report = trace
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|row| row.get("kind").and_then(serde_json::Value::as_str) == Some("decoder"))
+        .ok_or("the renderer reported no decoder")?;
+    Ok(crate::vodencode::dv_runtime::helper_decoder(&report)?.1)
 }
 
 /// Run one stage under the stage deadline and the qualification's cancel.
@@ -480,6 +532,9 @@ fn rgb48_args(input: &str, nut: bool) -> Vec<String> {
     let mut args: Vec<String> = ["-hide_banner", "-nostdin", "-v", "error"]
         .map(str::to_owned)
         .into();
+    // `CONSUMER_THREADS`: one decoder thread, one filter thread.
+    args.extend(["-filter_threads".to_owned(), "1".to_owned()]);
+    args.extend(["-threads".to_owned(), "1".to_owned()]);
     if nut {
         args.extend(["-f".to_owned(), "nut".to_owned()]);
     }
@@ -543,7 +598,7 @@ async fn finish(child: &mut tokio::process::Child, what: &str) -> Result<(), Str
 
 /// What the title job did about the FEL qualification.
 #[derive(Debug)]
-pub(super) enum Qualification {
+pub(crate) enum Qualification {
     /// Not a Profile 7 FEL title, the route is off, this node cannot measure
     /// it, or its verdict is current.
     NotDue,
@@ -553,13 +608,80 @@ pub(super) enum Qualification {
     Stored(q::FelVerdict),
 }
 
+/// The deployed renderer a qualification runs, and whether it is still the
+/// one it started with (`None` skips that check, for fixtures).
+pub(crate) struct Renderer<'a> {
+    pub(crate) scanner: String,
+    pub(crate) path: &'a Path,
+    pub(crate) tools: Option<&'a crate::vodencode::dv_runtime::ToolSet>,
+    pub(crate) env: Vec<(String, std::ffi::OsString)>,
+    /// Where this node's renderer decodes (`processed_renderer_decode`).
+    pub(crate) decode: RendererDecode,
+}
+
+/// The measurement a qualification runs over its sample: [`measure_title`] in
+/// production.
+pub(crate) type Measurer = for<'a> fn(
+    &'a Sample<'a>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Measurement, String>> + Send + 'a>,
+>;
+
+pub(crate) fn measure_title<'a>(
+    sample: &'a Sample<'a>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Measurement, String>> + Send + 'a>> {
+    Box::pin(measure(sample, q::WINDOWS))
+}
+
 /// Measure and store the title's verdict when it is due on this node.
 pub(super) async fn qualify_if_due(
     state: &crate::state::AppState,
     file: &plurx_core::domain::MediaFile,
     document: &str,
     tools: &crate::vodencode::dv_runtime::ToolSet,
+    admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Qualification, String> {
+    let renderer = Renderer {
+        scanner: tools.scanner_digest(),
+        path: &tools.renderer,
+        tools: Some(tools),
+        env: tools.renderer_env.clone(),
+        decode: crate::transcode::TranscodeManager::processed_renderer_decode(
+            Path::new(&plurx_core::transcode::vaapi_device()).exists(),
+            crate::ffmpeg::has_hevc_main10_vaapi_decode().await,
+        ),
+    };
+    qualify_with(
+        state,
+        file,
+        document,
+        &renderer,
+        admission,
+        cancel,
+        measure_title,
+    )
+    .await
+}
+
+/// Releases the title job's admission extension when the qualification ends.
+struct Extension<'a>(&'a crate::transcode::FragmentAdmission);
+
+impl Drop for Extension<'_> {
+    fn drop(&mut self) {
+        self.0.release_extension();
+    }
+}
+
+/// [`qualify_if_due`] with its renderer and measurement given.
+pub(crate) async fn qualify_with(
+    state: &crate::state::AppState,
+    file: &plurx_core::domain::MediaFile,
+    document: &str,
+    renderer: &Renderer<'_>,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &tokio_util::sync::CancellationToken,
+    measurer: Measurer,
 ) -> Result<Qualification, String> {
     let dv = file.dolby_vision;
     if dv.profile != Some(7)
@@ -583,47 +705,82 @@ pub(super) async fn qualify_if_due(
     {
         return Ok(Qualification::NotDue);
     }
-    let identity = q::identity(
-        &tools.scanner_digest(),
-        plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
-    );
+    let identity = match state.transcode.fel_identity(&renderer.scanner).await {
+        Ok(identity) => identity,
+        Err(reason) => {
+            tracing::info!(target: "plurxd::dv", file_id = file.id, %reason,
+                "FEL qualification skipped: no encoder identity");
+            return Ok(Qualification::NotDue);
+        }
+    };
     if matches!(
         q::verdict_state(Some(document), file.size, file.mtime, &identity),
         q::VerdictState::Current(_)
     ) {
         return Ok(Qualification::NotDue);
     }
-    let Ok((_slot, _permit, decode)) = state.transcode.admit_fel_qualification().await else {
-        return Ok(Qualification::Busy);
+    // The slot is preemptible by a live reconstructed 8.1 (it cancels
+    // `cancel`); the GPU graph is a claim on this job's own admission, so the
+    // job's idle check does not read its own step as foreground pressure.
+    let (_slot, decode) = match state
+        .transcode
+        .admit_fel_qualification(admission, cancel.clone(), renderer.decode)
+        .await
+    {
+        Ok(admitted) => admitted,
+        Err(reason) => {
+            tracing::debug!(target: "plurxd::dv", file_id = file.id, %reason,
+                "FEL qualification deferred");
+            return Ok(Qualification::Busy);
+        }
     };
+    let _extension = Extension(admission);
     let document: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
+    let mut environment = renderer.env.clone();
+    if decode == RendererDecode::Gpu {
+        crate::vodencode::dv_runtime::gpu_decode_environment(
+            &mut environment,
+            &plurx_core::transcode::vaapi_device(),
+            &crate::ffmpeg::ffmpeg_bin(),
+        );
+    }
     let sample = Sample {
         source: &source.handle,
         clock: Clock::from_document(&document)?,
         duration_ms: file.duration_ms.ok_or("title duration is unknown")?,
         video_kbps: plurx_core::transcode::reconstructed_p81_video_kbps(file),
-        renderer: &tools.renderer,
-        renderer_env: Sample::environment(tools, decode),
+        renderer: renderer.path,
+        renderer_env: environment,
         ffmpeg: crate::ffmpeg::ffmpeg_bin(),
         runtime_cache: &state.runtime_cache_dir,
+        decode,
         cancel: cancel.clone(),
     };
     let started = std::time::Instant::now();
-    let mut measured = measure(&sample, q::WINDOWS).await?;
-    if !tools.is_current().await || !source.unchanged() || source.reopen(file).await.is_err() {
+    let mut measured = measurer(&sample).await?;
+    let renderer_current = match renderer.tools {
+        Some(tools) => tools.is_current().await,
+        None => true,
+    };
+    if !renderer_current || !source.unchanged() || source.reopen(file).await.is_err() {
         return Err("the renderer or source changed during FEL qualification".into());
     }
-    let verdict = q::FelVerdict::from_windows(
-        identity,
-        file.size,
-        file.mtime,
-        super::now_ms(),
-        measured.windows,
-        &mut measured.served,
-        &mut measured.dropped,
-    )
-    .ok_or("FEL qualification produced no samples")?;
+    let now = super::now_ms();
+    let verdict = if measured.windows.is_empty() {
+        q::FelVerdict::unmeasurable(identity, file.size, file.mtime, now)
+    } else {
+        q::FelVerdict::from_windows(
+            identity,
+            file.size,
+            file.mtime,
+            now,
+            measured.windows,
+            &mut measured.served,
+            &mut measured.dropped,
+        )
+        .ok_or("FEL qualification produced no samples")?
+    };
     let stored = state
         .store
         .put_dv_fel_verdict(
@@ -641,6 +798,7 @@ pub(super) async fn qualify_if_due(
         target: "plurxd::dv",
         file_id = file.id,
         admitted = verdict.admitted,
+        windows = verdict.windows.len(),
         served_mean = verdict.served_mean,
         dropped_mean = verdict.dropped_mean,
         served_p99 = verdict.served_p99,
@@ -666,14 +824,16 @@ mod tests {
         let clock = Clock::from_document(&document()).expect("clock");
         assert_eq!(clock.rate, (24000, 1001));
         let duration_ms = 7_200_000;
-        let (start, end) = clock.window(duration_ms, 0, 8).expect("window");
+        let positions = q::sample_positions(duration_ms, q::WINDOWS);
+        assert_eq!(positions[0], [800_000, 1_200_000]);
+        let (start, end) = clock.window_at(positions[0][0]).expect("window");
         // 800 s in: picture 19180 of a 23.976 fps title.
         let exact = |(n, d): Instant, frame: i64| {
             i128::from(n) * 24000 == i128::from(frame * 1001) * i128::from(d)
         };
         assert!(exact(start, 19180), "{start:?}");
         assert!(exact(end, 19180 + 48), "{end:?}");
-        let last = clock.window(duration_ms, 7, 8).expect("last");
+        let last = clock.window_at(positions[7][1]).expect("last alternate");
         assert!(last.1 .0 as f64 / f64::from(last.1 .1) < duration_ms as f64 / 1000.0);
     }
 
@@ -684,7 +844,7 @@ mod tests {
         document["streams"][0]["start_pts"] = 4500.into();
         let clock = Clock::from_document(&document).expect("clock");
         assert_eq!(clock.origin, (1, 20));
-        let (start, _) = clock.window(48_000, 0, 1).expect("window");
+        let (start, _) = clock.window_at(24_000).expect("window");
         // 0.05 s + 575 pictures of 1001/24000 s.
         let exact = 0.05 + 575.0 * 1001.0 / 24000.0;
         assert!((start.0 as f64 / f64::from(start.1) - exact).abs() < 1e-12);
@@ -739,94 +899,6 @@ mod tests {
         );
     }
 
-    /// The production measurement on one real title, without a store:
-    /// `PLURX_FEL_QUALIFY_SOURCE=<P7 FEL file>` (optionally
-    /// `PLURX_FEL_QUALIFY_WINDOWS`, `PLURX_FEL_QUALIFY_SCRATCH`). Prints the
-    /// verdict the title job would store.
-    #[tokio::test]
-    #[ignore = "physical: the deployed processing helper, a radeonsi VA-API device and a P7 FEL title"]
-    async fn physical_fel_qualification_of_one_title() {
-        let path = std::env::var("PLURX_FEL_QUALIFY_SOURCE").expect("PLURX_FEL_QUALIFY_SOURCE");
-        let tools = crate::vodencode::dv_runtime::ToolSet::capture()
-            .await
-            .expect("helper identity")
-            .expect("deployed helper");
-        let probe = plurx_core::process::output_job_owned(
-            tokio::process::Command::new(crate::ffmpeg::ffprobe_bin()).args([
-                "-v",
-                "error",
-                "-show_streams",
-                "-show_format",
-                "-of",
-                "json",
-                &path,
-            ]),
-            ChildWork::background("FEL qualification control probe"),
-        )
-        .await
-        .expect("ffprobe");
-        let document: serde_json::Value =
-            serde_json::from_slice(&probe.stdout).expect("probe JSON");
-        let format = &document["format"];
-        let number = |key: &str| format[key].as_str().and_then(|v| v.parse::<f64>().ok());
-        let source = std::fs::File::open(&path).expect("source");
-        let metadata = source.metadata().expect("metadata");
-        let video_kbps = number("bit_rate").map_or(
-            plurx_core::transcode::RECONSTRUCTED_P81_MAX_VIDEO_KBPS,
-            |bps| {
-                ((bps / 1000.0) as u32).clamp(
-                    1_000,
-                    plurx_core::transcode::RECONSTRUCTED_P81_MAX_VIDEO_KBPS,
-                )
-            },
-        );
-        let decode = if crate::ffmpeg::has_hevc_main10_vaapi_decode().await {
-            RendererDecode::Gpu
-        } else {
-            RendererDecode::Software
-        };
-        let scratch = std::env::var("PLURX_FEL_QUALIFY_SCRATCH")
-            .map_or_else(|_| std::env::temp_dir(), std::path::PathBuf::from);
-        let sample = Sample {
-            source: &source,
-            clock: Clock::from_document(&document).expect("clock"),
-            duration_ms: (number("duration").expect("duration") * 1000.0) as i64,
-            video_kbps,
-            renderer: &tools.renderer,
-            renderer_env: Sample::environment(&tools, decode),
-            ffmpeg: crate::ffmpeg::ffmpeg_bin(),
-            runtime_cache: &scratch,
-            cancel: tokio_util::sync::CancellationToken::new(),
-        };
-        let windows = std::env::var("PLURX_FEL_QUALIFY_WINDOWS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(q::WINDOWS);
-        let started = std::time::Instant::now();
-        let mut measured = measure(&sample, windows).await.expect("measurement");
-        let identity = q::identity(
-            &tools.scanner_digest(),
-            plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
-        );
-        use std::os::unix::fs::MetadataExt;
-        let verdict = q::FelVerdict::from_windows(
-            identity,
-            i64::try_from(metadata.len()).expect("size"),
-            metadata.mtime(),
-            0,
-            measured.windows,
-            &mut measured.served,
-            &mut measured.dropped,
-        )
-        .expect("verdict");
-        println!(
-            "FEL qualification: {} decode={decode:?} video_kbps={video_kbps} seconds={} verdict={}",
-            path,
-            started.elapsed().as_secs(),
-            serde_json::to_string(&verdict).expect("JSON")
-        );
-    }
-
     #[test]
     fn the_window_encode_is_the_routes_recipe() {
         let clock = Clock::from_document(&document()).expect("clock");
@@ -848,5 +920,331 @@ mod tests {
         assert_eq!(value("-g"), Some("48"));
         assert_eq!(value("-qmax"), None);
         assert_eq!(args.last().map(String::as_str), Some("/x/served.mp4"));
+    }
+
+    /// Every stage child runs the threads its charge (`CONSUMER_THREADS`)
+    /// pays for: one decoder thread before its input, one filter thread.
+    #[test]
+    fn every_stage_child_is_capped_to_the_threads_it_is_charged() {
+        let clock = Clock::from_document(&document()).expect("clock");
+        let encode = encode_args(&clock, 60_000, Path::new("/x/served.mp4")).expect("args");
+        for args in [
+            encode,
+            rgb48_args("pipe:0", true),
+            rgb48_args("/x/served.mp4", false),
+        ] {
+            let input = args.iter().position(|arg| arg == "-i").expect("input");
+            let at = |flag: &str| {
+                args.windows(2)
+                    .position(|pair| pair[0] == flag && pair[1] == "1")
+                    .unwrap_or_else(|| panic!("{flag} 1 missing from {args:?}"))
+            };
+            assert!(at("-threads") < input, "{args:?}");
+            assert!(at("-filter_threads") < input, "{args:?}");
+            assert_eq!(
+                args.iter().filter(|arg| *arg == "-threads").count(),
+                1,
+                "{args:?}"
+            );
+        }
+        assert_eq!(CONSUMER_THREADS, 3);
+    }
+
+    /// The helper's own decoder report decides: a software decode under a GPU
+    /// admission is refused, a missing report is an error.
+    #[test]
+    fn the_helpers_decoder_report_decides_a_software_decode() {
+        let trace = |mode: &str| {
+            format!(
+                "{{\"kind\":\"frame\"}}\n{{\"kind\":\"decoder\",\"mode\":\"{mode}\",\"reason\":\"\"}}\n"
+            )
+        };
+        assert_eq!(decoded_in_software(&trace("vaapi")), Ok(false));
+        assert_eq!(decoded_in_software(&trace("software")), Ok(true));
+        assert!(decoded_in_software("{\"kind\":\"frame\"}").is_err());
+    }
+
+    /// A fixture measurement: four 250 ms beats, each checking the
+    /// qualification's cancellation (as every real stage does), then eight
+    /// windows.
+    fn slow_measurement<'a>(
+        sample: &'a Sample<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Measurement, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if sample.cancel.is_cancelled() {
+                    return Err("FEL qualification was preempted or cancelled".into());
+                }
+            }
+            let window = WindowScore {
+                start_ms: 0,
+                served_mean: 3.0,
+                served_p99: 9.7,
+                dropped_mean: 2.9,
+                dropped_p99: 6.6,
+                samples: 2,
+            };
+            Ok(Measurement {
+                windows: vec![window; q::WINDOWS],
+                served: vec![3.0; 16],
+                dropped: vec![2.9; 16],
+            })
+        })
+    }
+
+    async fn qualification_fixture(
+        dir: &Path,
+    ) -> (
+        crate::state::AppState,
+        plurx_core::domain::MediaFile,
+        String,
+    ) {
+        use plurx_core::domain::{
+            DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult,
+        };
+        use plurx_core::store::{SqliteStore, Store};
+        use std::sync::Arc;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let caps = plurx_core::transcode::EncoderCaps {
+            vaapi: true,
+            vaapi_hdr_policy: Some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
+            vaapi_driver: Some("Mesa Gallium driver for AMD fixture (radeonsi)".into()),
+            ..Default::default()
+        };
+        let mut state = crate::state::AppState::new(
+            "test".into(),
+            Arc::clone(&store),
+            crate::state::Dirs {
+                artwork: dir.join("artwork"),
+                transcode: dir.join("transcode"),
+                cache: dir.join("cache"),
+                subs: dir.join("subs"),
+                runtime_cache: dir.join("runtime"),
+                renditions: dir.join("renditions"),
+            },
+            "qualification-node".into(),
+            caps.clone(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(16)),
+        );
+        state.transcode = Arc::new(
+            crate::transcode::TranscodeManager::new(
+                Arc::clone(&store),
+                dir.join("runtime"),
+                caps,
+                plurx_core::transcode::Pipeline::Cpu,
+            )
+            .with_hdr10_passthrough_vaapi(true),
+        );
+        std::fs::create_dir_all(dir.join("runtime")).expect("runtime");
+        for key in [
+            plurx_core::store::keys::DV_HDR_PROCESSING,
+            plurx_core::store::keys::DV_FEL_REENCODE,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let library = store
+            .create_library(&NewLibrary {
+                name: "fel".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![dir.into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "fel".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let path = dir.join("fel.mkv");
+        std::fs::write(&path, b"fixture source").expect("source");
+        let (size, mtime) = super::super::snapshot(&path).await.expect("snapshot");
+        let document = document().to_string();
+        let id = store
+            .upsert_file(
+                item,
+                path.to_str().expect("path"),
+                size,
+                mtime,
+                &ProbeResult {
+                    video_codec: Some("hevc".into()),
+                    duration_ms: Some(7_200_000),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                        ..Default::default()
+                    },
+                    raw_json: Some(document.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("file").expect("file");
+        (state, file, document)
+    }
+
+    /// B1: the qualification's own GPU graph is a claim on the title job's
+    /// admission, so `run_admitted_probe` (which cancels the job's work as
+    /// soon as the node is not idle) does not read it as foreground pressure:
+    /// the measurement runs past several idle checks and its verdict is
+    /// stored, keyed to this renderer, recipe and encoder.
+    #[tokio::test]
+    async fn a_qualification_inside_its_title_job_is_not_preempted_by_itself_and_stores_its_verdict(
+    ) {
+        let dir = crate::test_tempdir().expect("scratch");
+        let (state, file, document) = qualification_fixture(dir.path()).await;
+        let admission = state
+            .transcode
+            .admit_dv_title()
+            .await
+            .expect("title admission");
+        let renderer_path = dir.path().join("renderer");
+        let renderer = Renderer {
+            scanner: "a".repeat(64),
+            path: &renderer_path,
+            tools: None,
+            env: Vec::new(),
+            decode: RendererDecode::Gpu,
+        };
+        let token = tokio_util::sync::CancellationToken::new();
+        let outcome = super::super::run_admitted_probe(
+            &state.transcode,
+            &admission,
+            &token,
+            &tokio_util::sync::CancellationToken::new(),
+            None,
+            qualify_with(
+                &state,
+                &file,
+                &document,
+                &renderer,
+                &admission,
+                &token,
+                slow_measurement,
+            ),
+        )
+        .await
+        .expect("qualified");
+        let Qualification::Stored(verdict) = outcome else {
+            panic!("no verdict: {outcome:?}");
+        };
+        assert!(!token.is_cancelled(), "the job's own step is not pressure");
+        assert!(!verdict.admitted);
+        let stored = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        let identity = state
+            .transcode
+            .fel_identity(&renderer.scanner)
+            .await
+            .expect("identity");
+        assert_eq!(
+            q::verdict_state(Some(&stored), file.size, file.mtime, &identity),
+            q::VerdictState::Current(verdict)
+        );
+        // The step's capacity and the slot are released with it.
+        assert!(!admission.has_extension());
+        assert!(state.transcode.fragment_worker_idle(&admission));
+        assert!(
+            !state
+                .transcode
+                .live_reconstruction_facts()
+                .await
+                .held_by_qualification
+        );
+        // With a verdict current, the next attempt does not measure again.
+        let again = qualify_with(
+            &state,
+            &file,
+            &stored,
+            &renderer,
+            &admission,
+            &token,
+            slow_measurement,
+        )
+        .await
+        .expect("not due");
+        assert!(matches!(again, Qualification::NotDue), "{again:?}");
+    }
+
+    /// S1: a live reconstructed 8.1 preempts a running qualification through
+    /// the slot: the qualification stops (no verdict), the play gets the slot.
+    #[tokio::test]
+    async fn a_live_play_preempts_a_running_qualification_and_gets_the_slot() {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        let dir = crate::test_tempdir().expect("scratch");
+        let (state, file, document) = qualification_fixture(dir.path()).await;
+        let admission = state
+            .transcode
+            .admit_dv_title()
+            .await
+            .expect("title admission");
+        let renderer_path = dir.path().join("renderer");
+        let renderer = Renderer {
+            scanner: "a".repeat(64),
+            path: &renderer_path,
+            tools: None,
+            env: Vec::new(),
+            decode: RendererDecode::Gpu,
+        };
+        let token = tokio_util::sync::CancellationToken::new();
+        let qualification = qualify_with(
+            &state,
+            &file,
+            &document,
+            &renderer,
+            &admission,
+            &token,
+            slow_measurement,
+        );
+        let play = async {
+            // Let the qualification take the slot first.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !state
+                    .transcode
+                    .live_reconstruction_facts()
+                    .await
+                    .held_by_qualification
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the qualification took the slot");
+            state
+                .transcode
+                .acquire_reconstruction_slot(DvDestination::Profile81)
+                .await
+        };
+        let (qualified, played) = tokio::join!(qualification, play);
+        assert!(qualified.is_err(), "{qualified:?}");
+        assert!(played.expect("the play takes the slot").is_some());
+        assert!(token.is_cancelled());
+        assert!(!admission.has_extension());
+        let stored = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe")
+            .expect("probe");
+        assert!(
+            !stored.contains(q::PROBE_KEY),
+            "a preempted qualification stores nothing"
+        );
     }
 }

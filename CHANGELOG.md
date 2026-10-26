@@ -103,10 +103,16 @@ bump may break compatibility and a **patch** bump never does.
   10% on the mean and be no worse at the 99th percentile. Until a title is
   measured, or when it fails, plays get the plain conversion and their FEL row
   says why. The verdict is kept with the title's Dolby Vision facts and is
-  measured again when the helper or the route's recipe changes. The route
+  measured again when the helper, the route's recipe, the FFmpeg build, the
+  VA driver or the GPU changes. The measurement runs as a claim on its title
+  job's own admission (so it is not cancelled by its own GPU step), yields
+  the reconstruction slot to a live play, is charged the threads its
+  children run, and replaces dark sample windows with alternates. The route
   encodes at the source's average rate up to 60 Mb/s with VBAQ off on
   radeonsi, and its HLS peak is advertised from that rate; other encodes keep
-  their policy.
+  their policy. One live reconstruction per worker applies to the Profile 8.1
+  route only. The VA-API Main10 decode check runs off the boot path, decodes
+  a shipped clip, and retries a failure with backoff.
 
 - Display-targeted playback reads mastering metadata carried on decoded frames
   when stream metadata omits it. The bounded probe stays bound to the held source

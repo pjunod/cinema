@@ -568,9 +568,39 @@ pub(crate) enum FelGate {
 pub(crate) const FEL_REQUALIFICATION_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(6 * 60 * 60);
 
+/// How long a live reconstructed 8.1 waits for a FEL qualification it has
+/// asked to yield the worker's reconstruction slot. The qualification kills
+/// and reaps its window children on the signal; that is well under a second.
+pub(crate) const QUALIFICATION_SLOT_YIELD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The reconstruction slot as a FEL qualification holds it: preemptible. A
+/// live play that finds the slot taken cancels `preempt` (the qualification's
+/// own cancellation) and waits for the permit. The permit is released before
+/// the registration is cleared, so a racing play never sees a taken slot
+/// with no one to ask.
+#[cfg(target_os = "linux")]
+pub(crate) struct QualificationSlot {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    holder: Arc<std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for QualificationSlot {
+    fn drop(&mut self) {
+        let mut holder = self
+            .holder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(self.permit.take());
+        *holder = None;
+    }
+}
+
 /// Node readings behind the Developer tab's FEL re-encode rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveReconstructionFacts {
+    /// A FEL qualification holds the slot (a live play would preempt it).
+    pub(crate) held_by_qualification: bool,
     pub(crate) device_present: bool,
     pub(crate) main10_vaapi_decode: bool,
     pub(crate) gpu_decode: bool,
@@ -650,6 +680,11 @@ pub struct TranscodeManager {
     /// long as the graph that spends the GPU.
     #[cfg(target_os = "linux")]
     pub(crate) processed_reconstruction_slots: Arc<tokio::sync::Semaphore>,
+    /// The FEL qualification holding the reconstruction slot, if any: its
+    /// cancellation, which a live play triggers to take the slot.
+    #[cfg(target_os = "linux")]
+    pub(crate) reconstruction_qualification:
+        Arc<std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Titles this node asked to have FEL-qualified, and when.
     #[cfg(target_os = "linux")]
     fel_requalification_requests:
