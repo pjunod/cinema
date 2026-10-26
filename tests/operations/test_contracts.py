@@ -3203,11 +3203,11 @@ assert.equal(context.ACT_TIMER, null);
         job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
         header = job.split("    steps:\n", 1)[0]
         self.assertIn(
-            "    runs-on: [self-hosted, Linux, X64, lab, unit-memory-12g]\n",
+            "    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]\n",
             header,
         )
         self.assertIn(
-            "      options: --cpus 3 --memory 12g --memory-swap 14g --pids-limit 4096\n",
+            "      options: --cpus 3 --memory 16g --memory-swap 18g --pids-limit 4096\n",
             header,
         )
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"\n      RUST_TEST_THREADS: "2"\n', header)
@@ -3227,13 +3227,13 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("continue-on-error", job)
         carriers = [
             (name, labels) for name, labels in rostered_runners()
-            if "unit-memory-12g" in labels
+            if "unit-memory-16g" in labels
         ]
-        # At least one carrier, none sharing another lane's selector. The
-        # contract does not pin a single name: a second dedicated carrier is
-        # how an offline host stops stranding the unit lane.
-        self.assertTrue(carriers, "the full unit lane needs a rostered carrier")
+        # Only the existing capacity-one registration owns this resident budget.
+        # A second carrier requires a separately reviewed host admission.
+        self.assertEqual([name for name, _ in carriers], ["gha-media1-general-01"])
         for name, labels in carriers:
+            self.assertIn("unit-memory-12g", labels, "retain existing consumers")
             self.assertFalse(
                 {"general", "high-cpu", "ci-store", "ci-topology"} & labels, name
             )
@@ -4364,7 +4364,7 @@ assert.equal(context.ACT_TIMER, null);
                 ):
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name == "check":
-                    expected = local("Linux", "X64", "lab", "unit-memory-12g")
+                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
                     # The pinned private CI image supplies shipped FFmpeg 8;
                     # host trust labels remain unchanged, without a FFmpeg-6

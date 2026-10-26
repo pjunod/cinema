@@ -30,6 +30,14 @@ runs. Temporary diagnostic probes are excluded from the committed repair.
 Exact committed-tree compiler, HTTPS/configuration and closure regressions are
 required before push; promotion evidence remains separate.
 
+The full-unit compiler exceeded its former 12 GiB cgroup in full run 5991
+(internal 6020). The unchanged source/profile workspace test build passed an
+isolated 16/18 GiB measurement with 12.54 GiB maximum child RSS. The dedicated
+capacity contract now requires one existing `unit-memory-16g` carrier. Promotion
+must verify the actual workflow child limits and complete unit run; the isolated
+compile is not qualification.
+See [the resident-capacity contract](../ci/RUNNER-DISK.md#dedicated-full-unit-resident-capacity).
+
 Full qualification, the Main promotion gate, their exact-head receipts and the
 merge outcome are tracked on [promotion PR #1134](http://forge.lan:3000/noirr/plurx/pulls/1134).
 Physical trust/playback acceptance remains open. Nothing has been deployed or

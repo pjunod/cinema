@@ -1,6 +1,6 @@
 # Runner disk — what fills a CI runner, and what is bounded
 
-**Status:** live · **Reconciled:** 2026-10-16
+**Status:** live · **Reconciled:** 2026-10-26
 
 Companion to [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md)
 (how the lanes are meant to get faster) — this is *where the bytes go, who
@@ -43,23 +43,29 @@ increasing host resident allocations.
 
 ### Dedicated full-unit resident capacity
 
-The full Rust unit job uses the dedicated `unit-memory-12g` label and the
-same pinned CI image, `make ci-rust-gate`, test profile and 90-minute job
+The full Rust unit job uses the dedicated `unit-memory-16g` label and the
+same pinned CI image, `make ci-rust-gate`, test profile and 120-minute job
 limit. Its Docker options are
-`--cpus 3 --memory 12g --memory-swap 14g --pids-limit 4096`: 12 GiB resident and 14 GiB combined memory, one Cargo
-job and two Rust test threads. This increases resident capacity without
-increasing the existing general job's combined bound or changing tests.
+`--cpus 3 --memory 16g --memory-swap 18g --pids-limit 4096`: 16 GiB resident
+and 18 GiB combined, one Cargo job and two Rust test threads.
 
-Full qualification run 5274 measured the daemon test compiler at about
-6.5 GiB resident plus 3.5 GiB swapped under the general 7 GiB resident
-cap, with sustained memory pressure and swap traffic. Two source-only
-6 GiB experiments failed before producing a test binary. Their Docker VM
-had only 1 GiB actual swap; neither established a successful profile
-change. The dedicated allowance is a capacity remedy, whose sufficiency
-still requires a complete fresh unit run.
+Full run 5991 (internal 6020) exhausted the former 12 GiB child cgroup during
+daemon test code generation: the kernel recorded a memory-cgroup OOM and
+killed `rustc`, without a Rust diagnostic or test assertion. A source-only
+build of that exact candidate with Rust 1.97.1 and unchanged workspace test
+features/profile passed under 16/18 GiB in 12m37s. Maximum child RSS was
+12.54 GiB; cgroup peak was 15.74 GiB, including file cache, with no cap-hit,
+OOM or swap event. This isolated compile establishes neither actual workflow
+limits nor a passing full unit run. Fresh qualification remains required.
+
+Earlier run 5274 measured about 6.5 GiB resident plus 3.5 GiB swapped under
+a 7 GiB resident cap. Two 6 GiB source-only experiments failed before producing
+a binary; their VM had only 1 GiB actual swap. No compiler-profile change from
+those experiments is retained.
 
 Keep this label on a single existing repository runner with capacity one,
-without `general` or `high-cpu` labels. Its existing service has a 12 GiB
+without `general`, `high-cpu`, `ci-store` or `ci-topology` labels. Retain the
+former `unit-memory-12g` capability for existing consumers. Its existing service has a 12 GiB
 high watermark and 16 GiB maximum; the explicit Docker bound is required
 because Docker children need not belong to that service's cgroup. The
 runner configuration also retains the same child-container options and
@@ -70,8 +76,11 @@ activate another registration, change unrelated services or use an offline
 registration as evidence of permission to restart it.
 
 Before activation, verify the existing registration identity and idle state,
-back up only its configuration with mode 0600, apply the dedicated labels
-and child bounds, then start that same service. Verify the effective server
+back up only its persistent Forgejo configuration with mode 0600, apply the
+dedicated labels and child bounds, then restart that same idle registration
+only if required. The older GitHub Ansible registration is not its provisioning
+authority. Check aggregate host headroom; nominal idle service caps do not
+reserve RAM. Verify the effective server
 labels and actual Docker limits before accepting a qualification result.
 Revert the dedicated configuration only together with a reviewed replacement
 for the workflow selector; stopping its sole service would strand the lane.
