@@ -284,7 +284,7 @@ async fn title_admission_accounts_one_thread_and_reaps_before_ordinary_admission
         EncoderCaps::default(),
         Pipeline::Cpu,
     ));
-    let admission = manager.admit_dv_title().await.expect("title admission");
+    let admission = Arc::new(manager.admit_dv_title().await.expect("title admission"));
     assert_eq!(manager.test_software_threads_in_use(), 1);
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
