@@ -59,7 +59,8 @@ bump may break compatibility and a **patch** bump never does.
   evaluates its output lattice once per frame instead of eight vertices per
   pixel, and CM v4.0 and CM v2.9 compile as separate shaders. The output is
   the same (the shader parity controls pass unchanged); a 4K CM v2.9 frame
-  takes about 19 ms instead of 34 ms on an Intel Arc iGPU, and the server's
+  takes about 17 ms instead of 28 ms on an Intel Arc iGPU, which now plays 4K
+  Dolby Vision in the Linux player without dropped frames, and the server's
   display-targeted renders spend less GPU time.
 
 - Reconstruct CM v2.9 near-black color from analytic IPT gamut interpolation
