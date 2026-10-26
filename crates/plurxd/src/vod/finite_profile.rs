@@ -114,7 +114,7 @@ pub(super) fn compile(
     limit_epoch: u64,
     capacity: ResourceCapacity,
     software_pool_threads: u64,
-) -> Result<SoftwareVodRequest, String> {
+) -> Result<(SoftwareVodRequest, u32), String> {
     let encoding = recipe
         .encoding
         .as_ref()
@@ -363,7 +363,7 @@ pub(super) fn compile(
         .peak_memory_bytes
         .checked_add(additional)
         .ok_or("finite requested memory component overflows")?;
-    Ok(request)
+    Ok((request, software_threads))
 }
 
 #[cfg(target_os = "linux")]

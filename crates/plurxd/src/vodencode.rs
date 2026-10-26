@@ -777,6 +777,123 @@ impl From<crate::admission::TranscodePermit> for EncodePermit {
     }
 }
 
+/// Compatibility alias of one selected finite production request. Its CPU
+/// service is already charged once by core; never add this pool entitlement
+/// as another NodeResourceRuntime role. This retains the existing exclusive
+/// worker claim, so family aliases cannot start a second worker with it.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) struct FiniteSoftwareCompatibility {
+    original: Option<EncodeWorkerPermit>,
+    possible_entry: bool,
+}
+#[cfg(target_os = "linux")]
+impl FiniteSoftwareCompatibility {
+    pub(crate) fn enter(mut self) -> Self {
+        self.possible_entry = true;
+        self
+    }
+    pub(crate) fn reservation(&self) -> EncodePermit {
+        self.original
+            .as_ref()
+            .expect("original finite worker claim")
+            .reservation()
+    }
+    /// Only exact pre-R provenance, known original R-to-S, or successful
+    /// original close with its driver/application barriers authorizes this.
+    pub(crate) fn known_retired(mut self) {
+        drop(self.original.take());
+    }
+    /// The wrapper itself is included in each owner's size_of projection.
+    /// Shared pool/BTree/allocator peaks remain Unknown, not this Arc size.
+    pub(crate) fn requested_heap_bytes() -> Option<usize> {
+        std::mem::size_of::<EncodeReservation>().checked_add(2 * std::mem::size_of::<usize>())
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for FiniteSoftwareCompatibility {
+    fn drop(&mut self) {
+        if self.possible_entry {
+            if let Some(original) = self.original.take() {
+                // A lost selector is not evidence that native work stopped.
+                // Retain THIS claim/reservation, never an invented replacement.
+                std::mem::forget(original);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Encoding {
+    /// Call only after the finite command is finalized under this same saved
+    /// software policy. Unlike the legacy frozen-command floor, the selected
+    /// compiler caps encoder creation itself; zero/undersized policies retain
+    /// the pool's original one-saturating-job exception. The pipeline estimate
+    /// remains whole, independently of the encoder's thread creation cap.
+    pub(crate) async fn admit_finite_compatibility(
+        &self,
+        software_pool_threads: u64,
+        finalized_encoder_threads: u32,
+        background: bool,
+        deadline: Instant,
+    ) -> Option<FiniteSoftwareCompatibility> {
+        let software_budget = usize::try_from(software_pool_threads).ok()?;
+        let mut resources = self.resources();
+        if finalized_encoder_threads == 0
+            || resources.hardware_slot
+            || self.plan.encoder() != plurx_core::transcode::Encoder::Software
+        {
+            return None;
+        }
+        // The actual finite compiler can choose more encoder threads than
+        // the old whole-pipeline estimate (e.g. inherited None on a large
+        // node). Never adopt a smaller entitlement. This max is compatibility
+        // arithmetic, not a measured sumless decoder/filter/native peak.
+        resources.cpu_threads = resources
+            .cpu_threads
+            .max(usize::try_from(finalized_encoder_threads).ok()?);
+        let priority = if background {
+            Priority::Background
+        } else if self.nonpreemptive_trial || self.is_speculative() {
+            Priority::Speculative
+        } else {
+            Priority::Live
+        };
+        // Same borrowed preemption protocol as ordinary frozen preparation:
+        // only foreground demand waits for actual background retirement, under
+        // the caller's original deadline. Cancellation drops this waiter only.
+        let mut waiting = (priority == Priority::Live).then(|| self.admissions.queue_for_slot());
+        loop {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            if let Some(bundle) =
+                self.admissions
+                    .try_admit_bundle(0, software_budget, &resources, priority)
+            {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                let original = EncodePermit::from(bundle).try_claim_worker()?;
+                return Some(FiniteSoftwareCompatibility {
+                    original: Some(original),
+                    possible_entry: false,
+                });
+            }
+            if priority != Priority::Live || !self.admissions.background_is_active() {
+                return None;
+            }
+            waiting.as_mut()?.mark_capacity_blocked();
+            tokio::time::sleep_until(
+                deadline
+                    .min(Instant::now() + crate::transcode::ADMISSION_POLL)
+                    .into(),
+            )
+            .await;
+        }
+    }
+}
+
 /// Conservative Source copy pipeline estimate: bounded input codec, audio
 /// encoder, filter and mux/fragment work. This is the existing governor's
 /// reservation, not a process CPU quota or a one-thread profiling claim.

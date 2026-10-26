@@ -6,6 +6,7 @@ pub(crate) struct StaticArtifactAdmissionError {
     message: String,
     definitely_unreserved: bool,
     cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
+    compatibility: Option<crate::vodencode::FiniteSoftwareCompatibility>,
 }
 #[cfg(target_os = "linux")]
 impl StaticArtifactAdmissionError {
@@ -15,8 +16,14 @@ impl StaticArtifactAdmissionError {
         String,
         bool,
         Option<crate::playback_cache::FiniteCacheReservation>,
+        Option<crate::vodencode::FiniteSoftwareCompatibility>,
     ) {
-        (self.message, self.definitely_unreserved, self.cache_grant)
+        (
+            self.message,
+            self.definitely_unreserved,
+            self.cache_grant,
+            self.compatibility,
+        )
     }
 }
 
@@ -894,7 +901,7 @@ impl VodServe {
             }
             unknown => unknown,
         };
-        let mut request = finite_profile::compile(
+        let (mut request, finalized_encoder_threads) = finite_profile::compile(
             &self.shared,
             &key,
             &recipe,
@@ -910,6 +917,21 @@ impl VodServe {
             .map_err(|error| format!("charging the static run owner: {error}"))?;
         let mut publication = publication;
         publication.set_epoch(epoch);
+        // Same finalized request/policy as core below, expressed once in the
+        // legacy compatibility pool for ordinary/selected mutual exclusion.
+        // This is an alias, never another physical NodeResourceRuntime role.
+        let compatibility = recipe
+            .encoding
+            .as_ref()
+            .expect("selected static encoding")
+            .admit_finite_compatibility(
+                software_pool_threads,
+                finalized_encoder_threads,
+                true,
+                deadline,
+            )
+            .await
+            .ok_or("static software compatibility pool is occupied")?;
         let cache_grant = tokio::time::timeout_at(
             deadline.into(),
             crate::playback_cache::reserve_finite(
@@ -923,6 +945,7 @@ impl VodServe {
         let admission = super::background_artifact::StaticArtifactAdmission {
             request,
             cache_grant,
+            compatibility,
             policy,
             workspace,
             publication,
@@ -955,10 +978,12 @@ impl VodServe {
                     message: "static artifact resource runtime is unavailable".into(),
                     definitely_unreserved: true,
                     cache_grant: None,
+                    compatibility: None,
                 })?;
         let super::background_artifact::StaticArtifactAdmission {
             request,
             cache_grant,
+            compatibility,
             policy,
             workspace,
             publication,
@@ -968,6 +993,7 @@ impl VodServe {
         // Core takes the original application lease before accepted R and
         // installs its complete cleanup owner before exposing the preparation.
         let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
+        let compatibility = compatibility.enter();
         let (owner, application_lease) = match runtime.prepare_static_software_artifact(
             request,
             workspace,
@@ -977,15 +1003,17 @@ impl VodServe {
             Ok(owners) => owners,
             Err(error) => {
                 let definitely_unreserved = error.definitely_before_reservation();
-                let cache_grant = if definitely_unreserved {
+                let (cache_grant, compatibility) = if definitely_unreserved {
                     cache_grant.known_closed();
-                    None
+                    compatibility.known_retired();
+                    (None, None)
                 } else {
-                    Some(cache_grant)
+                    (Some(cache_grant), Some(compatibility))
                 };
                 return Err(StaticArtifactAdmissionError {
                     definitely_unreserved,
                     cache_grant,
+                    compatibility,
                     message: format!("admitting the static artifact graph: {error}"),
                 });
             }
@@ -993,6 +1021,7 @@ impl VodServe {
         Ok(super::background_artifact::StaticArtifactRun::new(
             owner,
             cache_grant,
+            compatibility,
             publication,
             logical,
             application_lease,
@@ -1512,10 +1541,40 @@ impl VodServe {
                     .map(crate::vodencode::EncodePermit::retained_resources)
             })
             .collect::<Vec<_>>();
+        // A selected finite compiler can cap encoder creation above the old
+        // pipeline estimate. Adopt its SAME larger original entitlement, never
+        // silently substitute a smaller old credit or charge another permit.
+        // Keep the existing pool/family/native-shape validation authoritative.
+        if estimates.len() > 3 || estimates.len() != views.len() || media.len() != views.len() {
+            return None;
+        }
+        let mut actual = [crate::admission::TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: 0,
+            decoder_threads: None,
+        }; 3];
+        for (index, ((estimate, existing), rendition)) in
+            estimates.iter().zip(&views).zip(media).enumerate()
+        {
+            actual[index] = *estimate;
+            if rendition.dir.is_finite() {
+                if let Some(existing) = existing {
+                    let held = existing
+                        .software
+                        .map_or(0, crate::admission::SwPermit::threads);
+                    if existing.hardware.is_some() != estimate.hardware_slot
+                        || held < estimate.cpu_threads
+                    {
+                        return None;
+                    }
+                    actual[index].cpu_threads = held;
+                }
+            }
+        }
         let (family, admitted) = admissions.try_admit_family(
             hardware_limit,
             software_budget,
-            estimates,
+            &actual[..estimates.len()],
             &views,
             priority,
         )?;

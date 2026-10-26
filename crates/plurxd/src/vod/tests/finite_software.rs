@@ -799,6 +799,57 @@ async fn finite_metadata_deadline_arms_the_same_original_cleanup_owner() {
 
 async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
     let mut fixture = finite_cancellation_fixture().await;
+    fixture
+        .serve
+        .shared
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "0")
+        .await
+        .expect("actual serialized software policy");
+    let encoding = Arc::clone(
+        fixture
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("actual frozen software request"),
+    );
+    let compatibility_baseline = encoding.admissions.snapshot();
+    let legacy = encoding
+        .admissions
+        .try_admit_software(0, 1, crate::admission::Priority::Live)
+        .expect("real legacy idle-pool owner");
+    let before_refusal = fixture
+        .runtime
+        .accounting()
+        .expect("before occupied pool")
+        .used;
+    let refused = finite_software::build(
+        &fixture.serve.shared,
+        &"b".repeat(64),
+        None,
+        fixture.recipe.clone(),
+        fixture.plan.clone(),
+        &fixture.settings,
+    )
+    .await;
+    let error = match refused {
+        Err(error) => error,
+        Ok(_) => panic!("selected R must not bypass the original legacy zero-budget owner"),
+    };
+    assert!(
+        error.contains("compatibility pool"),
+        "actual compatibility refusal: {error}"
+    );
+    assert_eq!(
+        fixture.runtime.accounting().expect("pre-R refusal").used,
+        before_refusal
+    );
+    assert_eq!(
+        encoding.admissions.snapshot().software_used,
+        compatibility_baseline.software_used + 1
+    );
+    drop(legacy);
+    assert_eq!(encoding.admissions.snapshot(), compatibility_baseline);
     if exhaust_deadline {
         fixture.settings.materialize_budget = Duration::from_secs(3);
     }
@@ -831,6 +882,15 @@ async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
         })
     };
     let held = pause.reached().await;
+    let held_compatibility = encoding.admissions.snapshot().software_used;
+    assert!(held_compatibility > compatibility_baseline.software_used);
+    assert!(
+        encoding
+            .admissions
+            .try_admit_software(0, 1, crate::admission::Priority::Live)
+            .is_none(),
+        "same actual selected R blocks another legacy zero-budget owner"
+    );
     let original = fixture
         .serve
         .shared
@@ -900,6 +960,11 @@ async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
             .unknown_peak_producers,
         1
     );
+    assert_eq!(
+        encoding.admissions.snapshot().software_used,
+        held_compatibility,
+        "cancellation/deadline and original output alias do not release compatibility credit"
+    );
     drop(escaped);
     wait_until(
         "original never-entered R known close",
@@ -910,6 +975,11 @@ async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
     assert!(
         !crate::playback_cache::is_pinned(&fixture.serve.shared.base.join(&key)),
         "original closing owner releases the same quota grant after known close"
+    );
+    assert_eq!(
+        encoding.admissions.snapshot(),
+        compatibility_baseline,
+        "only known original native/app close releases the same compatibility claim"
     );
     let final_accounting = fixture.runtime.accounting().expect("known original refund");
     assert_eq!(final_accounting.unknown_peak_producers, 0);
@@ -925,12 +995,59 @@ async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
 
 #[tokio::test]
 async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm() {
-    let fixture = finite_cancellation_fixture().await;
+    let mut fixture = finite_cancellation_fixture().await;
+    Arc::get_mut(
+        fixture
+            .recipe
+            .encoding
+            .as_mut()
+            .expect("actual frozen encoding"),
+    )
+    .expect("unpublished original encoding")
+    .options
+    .software_threads = None;
+    fixture
+        .serve
+        .shared
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "0")
+        .await
+        .expect("actual serialized software policy");
+    let encoding = Arc::clone(
+        fixture
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("actual frozen software request"),
+    );
+    let compatibility_baseline = encoding.admissions.snapshot();
     let baseline = fixture
         .runtime
         .accounting()
         .expect("initial actual accounting");
     let key = "d".repeat(64);
+    let observation_deadline = Instant::now() + Duration::from_secs(90);
+    let epoch = fixture
+        .runtime
+        .refresh_admission_capacity(observation_deadline)
+        .await
+        .expect("actual hard capacity observation");
+    let (projection, finalized_threads) = finite_profile::compile(
+        &fixture.serve.shared,
+        &key,
+        &fixture.recipe,
+        None,
+        &fixture.plan,
+        epoch,
+        fixture
+            .runtime
+            .accounting()
+            .expect("actual node capacity")
+            .capacity,
+        0,
+    )
+    .expect("actual finalized encoder creation bound with inherited None");
+    drop(projection); // pure projection has no native/admission authority
     let build_gate = fixture
         .serve
         .shared
@@ -947,6 +1064,39 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
     )
     .await
     .expect("accepted dormant finite build");
+    let before_adoption = encoding.admissions.snapshot().software_used;
+    assert_eq!(
+        before_adoption - compatibility_baseline.software_used,
+        encoding
+            .resources()
+            .cpu_threads
+            .max(usize::try_from(finalized_threads).expect("actual bound fits host")),
+        "claim covers the actual finalized encoder even above the legacy estimate"
+    );
+    let original_alias = rendition
+        .retained_admission
+        .current()
+        .expect("same finite compatibility binding");
+    assert!(
+        original_alias.clone().try_claim_worker().is_none(),
+        "actual original worker claim is exclusive"
+    );
+    let family = VodServe::reserve_media_group(
+        &[Arc::clone(&rendition)],
+        Some(crate::admission::Priority::Speculative),
+    )
+    .await
+    .expect("family adopts same authentic selected finite credit");
+    assert_eq!(family.len(), 1);
+    assert!(family[0].same_reservation(&original_alias));
+    assert_eq!(
+        encoding.admissions.snapshot().software_used,
+        before_adoption,
+        "family attachment does not charge the same physical request twice"
+    );
+    assert!(family[0].clone().try_claim_worker().is_none());
+    drop(family);
+    drop(original_alias);
     let original = fixture
         .serve
         .shared
@@ -1001,6 +1151,11 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
             .unknown_peak_producers,
         1
     );
+    assert_eq!(
+        encoding.admissions.snapshot().software_used,
+        before_adoption,
+        "post-build handoff Drop retains the original worker claim through escaped app alias"
+    );
     drop(escaped);
     wait_until(
         "post-build original R known close",
@@ -1008,6 +1163,11 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
         || async { cleanup.known_closed() },
     )
     .await;
+    assert_eq!(
+        encoding.admissions.snapshot(),
+        compatibility_baseline,
+        "same known original close releases post-build compatibility claim"
+    );
     let final_accounting = fixture.runtime.accounting().expect("known original refund");
     assert_eq!(final_accounting.unknown_peak_producers, 0);
     assert_eq!(final_accounting.used, baseline.used);
@@ -1026,6 +1186,14 @@ mod actor_application;
 #[tokio::test]
 async fn finite_operator_zero_cache_budget_refuses_before_original_r_entry() {
     let fixture = finite_cancellation_fixture().await;
+    let compatibility_pool = fixture
+        .recipe
+        .encoding
+        .as_ref()
+        .expect("actual frozen encoding")
+        .admissions
+        .clone();
+    let compatibility_baseline = compatibility_pool.snapshot();
     let before = fixture.runtime.accounting().expect("before quota refusal");
     fixture
         .serve
@@ -1062,8 +1230,12 @@ async fn finite_operator_zero_cache_budget_refuses_before_original_r_entry() {
         .expect("quota refusal accounting");
     assert_eq!(after.used, before.used);
     assert_eq!(after.unknown_peak_producers, before.unknown_peak_producers);
+    assert_eq!(
+        compatibility_pool.snapshot(),
+        compatibility_baseline,
+        "actual pre-R quota refusal releases only the original unentered compatibility claim"
+    );
 }
-
 #[tokio::test]
 async fn foreign_committed_fence_closes_same_finite_owner_after_stale_cancel_and_coordinator_join()
 {

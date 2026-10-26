@@ -28,6 +28,7 @@ const ENCODED_MARKER_BYTES: u64 = 4 * 1024;
 pub(crate) struct FiniteSoftwareProducer {
     owner: Mutex<SoftwareVodOwner>,
     cache_grant: std::sync::Mutex<Option<crate::playback_cache::FiniteCacheReservation>>,
+    compatibility: std::sync::Mutex<Option<crate::vodencode::FiniteSoftwareCompatibility>>,
     // Captured before publication. Source-spec paths are only removed and
     // source Vec capacities never grow; no live owner lock is needed while
     // the original driver holds it through production and retirement.
@@ -74,12 +75,14 @@ impl FiniteSoftwareProducer {
     pub(crate) fn new(
         owner: SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
+        compatibility: crate::vodencode::FiniteSoftwareCompatibility,
     ) -> Self {
         Self {
             control: owner.control(),
             owner_heap_bound: owner.requested_heap_bytes(),
             owner: Mutex::new(owner),
             cache_grant: std::sync::Mutex::new(Some(cache_grant)),
+            compatibility: std::sync::Mutex::new(Some(compatibility)),
             stage: AtomicU8::new(PREPARED),
             produced_through: AtomicU64::new(0),
             suspended: AtomicBool::new(false),
@@ -93,7 +96,25 @@ impl FiniteSoftwareProducer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
+    pub(super) fn take_compatibility(
+        &self,
+    ) -> Option<crate::vodencode::FiniteSoftwareCompatibility> {
+        self.compatibility
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+    fn compatibility_reservation(&self) -> Option<crate::vodencode::EncodePermit> {
+        self.compatibility
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(crate::vodencode::FiniteSoftwareCompatibility::reservation)
+    }
     fn commit_retained_cache(&self) {
+        if let Some(compatibility) = self.take_compatibility() {
+            compatibility.known_retired();
+        }
         if let Some(grant) = self.take_cache_grant() {
             grant.retained();
         }
@@ -109,7 +130,8 @@ impl FiniteSoftwareProducer {
     pub(super) fn projected_heap_bytes(owner_heap: usize) -> Option<usize> {
         std::mem::size_of::<Self>()
             .checked_add(2 * std::mem::size_of::<usize>())?
-            .checked_add(owner_heap)
+            .checked_add(owner_heap)?
+            .checked_add(crate::vodencode::FiniteSoftwareCompatibility::requested_heap_bytes()?)
     }
 
     /// Resolve and observe the original media and held executable before a
@@ -357,17 +379,31 @@ pub(super) fn projected_driver_future_bytes() -> usize {
     ) -> usize {
         std::mem::size_of::<F>()
     }
-    fn metadata_frame_bytes<
-        F: std::future::Future<Output = Result<(FiniteMetadataLease, FiniteClientStateLease), String>>,
+    type BuildFutureFactory<F> = fn(
+        &'static Arc<Shared>,
+        &'static str,
+        Option<FragmentIndex>,
+        Recipe,
+        SegmentPlan,
+        &'static VodSettings,
+        Option<usize>,
+        &'static mut Option<super::shared::PreparedAttemptCleanup>,
+    ) -> F;
+    fn build_frame_bytes<
+        F: std::future::Future<
+                Output = Result<(Arc<Rendition>, Option<FiniteApplicationLease>), String>,
+            >,
     >(
-        _: fn(&'static Shared, &'static str, &'static FiniteOutput, usize, usize, Instant) -> F,
+        _: BuildFutureFactory<F>,
     ) -> usize {
         std::mem::size_of::<F>()
     }
-    // Include the concrete construction-hook, original borrowed cell wait and
-    // timeout frame. Private executor/timer/allocator storage remains Unknown.
+    // The concrete builder already contains its metadata-hook/timeout child
+    // frame, compatibility wait, finalized u32 and same-grant locals. Count
+    // that actual layout once, beside the original driver future. Plain tuple
+    // fields add no heap; private executor/timer/allocator peaks remain Unknown.
     frame_bytes(run)
-        .checked_add(metadata_frame_bytes(reserve_metadata_until))
+        .checked_add(build_frame_bytes(build_inner))
         .expect("compiler-projected finite frames fit usize")
 }
 
@@ -630,7 +666,7 @@ async fn build_inner(
             "finite software admission refused: no unspent hard CPU budget",
         ));
     }
-    let mut request = finite_profile::compile(
+    let (mut request, finalized_encoder_threads) = finite_profile::compile(
         shared,
         key,
         &recipe,
@@ -645,6 +681,26 @@ async fn build_inner(
             .charge_application_owner_bytes(bytes)
             .map_err(|error| format!("charging adaptive attempt owner: {error}"))?;
     }
+    // This aliases the same selected request for legacy compatibility only.
+    // The core CPU demand above came from hard total capacity; do not subtract
+    // this thread-pool claim again or add it as another physical core role.
+    let compatibility = recipe
+        .encoding
+        .as_ref()
+        .expect("selected finite encoding")
+        .admit_finite_compatibility(
+            software_pool_threads,
+            finalized_encoder_threads,
+            false,
+            admission_deadline,
+        )
+        .await
+        .ok_or_else(|| {
+            crate::transcode::vod_refusal_error(
+                "vod_family_capacity",
+                "finite software compatibility pool is occupied",
+            )
+        })?;
     // Reserve before the cleanup-map lock: global pressure calls back into
     // owners. No R/output IO exists while this borrowed await is pending.
     let cache_grant = tokio::time::timeout_at(
@@ -669,11 +725,13 @@ async fn build_inner(
     .await
     .map_err(|_| "finite build cleanup slot deadline elapsed".to_owned())??;
     let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
+    let compatibility = compatibility.enter();
     let owner = match runtime.prepare_software_vod(request, admission_deadline) {
         Ok(owner) => owner,
         Err(error) => {
             if error.definitely_before_reservation() {
                 cache_grant.known_closed();
+                compatibility.known_retired();
             }
             return Err(if let Some(refusal) = error.admission_refusal() {
                 crate::transcode::vod_refusal_error(
@@ -714,7 +772,7 @@ async fn build_inner(
     let application_lease = application_owner_bytes
         .map(|bytes| owner.take_application_lease(bytes))
         .transpose();
-    let dir = build_slot.install(owner, cache_grant);
+    let dir = build_slot.install(owner, cache_grant, compatibility);
     let output = dir
         .finite_output()
         .expect("installed original finite output");
@@ -781,6 +839,30 @@ async fn build_inner(
         manifest,
         IdentityState::default(),
     );
+    // Continuous/family attachment adopts this SAME entitlement, rather than
+    // charging another compatibility permit. The producer retains its worker
+    // claim so this alias cannot enter a second native generation.
+    let compatibility_alias = producer
+        .compatibility_reservation()
+        .expect("fresh finite producer retains original compatibility claim");
+    let same_compatibility = {
+        let mut binding = rendition.retained_admission.lock_binding();
+        binding.current().is_none()
+            && binding
+                .bind(compatibility_alias.clone())
+                .same_reservation(&compatibility_alias)
+    };
+    if !same_compatibility {
+        if application_owner_bytes.is_some() {
+            *failed_attempt_cleanup = Some(
+                rendition
+                    .dir
+                    .finite_build_cleanup_selector()
+                    .expect("failed fresh finite binding retains original cleanup arm"),
+            );
+        }
+        return Err("fresh finite compatibility entitlement is not the original claim".into());
+    }
     match attach_metadata_partitions(rendition, metadata_lease, client_lease) {
         Ok(rendition) => Ok((rendition, application_lease)),
         Err((error, rendition)) => {

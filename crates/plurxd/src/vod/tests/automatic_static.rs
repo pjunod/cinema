@@ -85,6 +85,10 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         .await
         .expect("cap");
     store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "0")
+        .await
+        .expect("serialized selected static compatibility policy");
+    store
         .put_setting(plurx_core::store::keys::HWACCEL, "software")
         .await
         .expect("CPU");
@@ -260,16 +264,51 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         manager.uses_selected_static_intent(&file, &intent),
         "automatic claim uses the same selected predicate as state.rs"
     );
-    assert!(manager
+    let compatibility_pool = encoding.admissions.clone();
+    let compatibility_baseline = compatibility_pool.snapshot();
+    let legacy = compatibility_pool
+        .try_admit_software(0, 1, crate::admission::Priority::Live)
+        .expect("actual original legacy owner");
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let error = manager
         .produce_encoded_output_job(
             &file,
             controller.job(),
             fence.clone(),
-            Instant::now() + Duration::from_secs(40),
-            observation
+            deadline,
+            observation,
         )
         .await
-        .expect("actual automatic worker"));
+        .expect_err("selected background R must not bypass the live legacy owner");
+    assert!(
+        matches!(error, crate::background_jobs::PreparationError::Retry(ref message)
+        if message.contains("compatibility pool")),
+        "actual compatibility refusal: {error:?}"
+    );
+    assert_eq!(
+        compatibility_pool.snapshot().software_used,
+        compatibility_baseline.software_used + 1,
+        "pre-R refusal leaves the same original legacy claim"
+    );
+    drop(legacy);
+    assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
+    assert!(
+        manager
+            .produce_encoded_output_job(
+                &file,
+                controller.job(),
+                fence.clone(),
+                deadline,
+                observation
+            )
+            .await
+            .expect("same original automatic owner resumes under zero policy")
+    );
+    assert_eq!(
+        compatibility_pool.snapshot(),
+        compatibility_baseline,
+        "known original static R-to-S releases compatibility credit without counting retained S as CPU work"
+    );
     drop(heavy);
     drop(fence);
     let _ = controller.finish().await;
@@ -484,4 +523,126 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         .shutdown()
         .await
         .expect("shutdown selected singleton");
+}
+
+#[tokio::test]
+async fn static_zero_compatibility_claim_survives_original_no_entry_ticket_and_application_alias() {
+    let fixture = finite_cancellation_fixture().await;
+    fixture
+        .serve
+        .shared
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "0")
+        .await
+        .expect("actual serialized static policy");
+    let encoding = Arc::clone(
+        fixture
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("actual frozen request"),
+    );
+    let compatibility_baseline = encoding.admissions.snapshot();
+    let baseline = fixture
+        .runtime
+        .accounting()
+        .expect("actual node baseline")
+        .used;
+    let snapshot = fixture
+        .serve
+        .shared
+        .store
+        .playback_planning_snapshot(
+            fixture.recipe.file.id,
+            &crate::transcode::QUALITY_PLANNING_KEYS,
+        )
+        .await
+        .expect("actual coherent snapshot")
+        .expect("source row");
+    let policy = background_artifact::StaticArtifactPolicy::from_snapshot(&snapshot)
+        .expect("actual static policy identity");
+    let mut selected = request("static-original-compatibility", 0.0);
+    selected.file_id = fixture.recipe.file.id;
+    selected.kind = SessionKind::Transcode { height: 360 };
+    selected.audio_index = None;
+    selected.audio_claim = None;
+    selected.audio_delivery = encoding.options.audio.clone();
+    let mut request_recipe = VodRecipeRequest {
+        request: &selected,
+        root_admission: None,
+        soundtrack: None,
+        companion: None,
+        encoding: Some(Arc::clone(&encoding)),
+        retained_capture: RetainedOutputCapture::New,
+        measured_candidate: None,
+    };
+    let prepared = fixture
+        .serve
+        .resolve_adaptive_recipe(&mut request_recipe, &fixture.recipe.file, &fixture.settings)
+        .await
+        .expect("same actual selected recipe");
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let planned = fixture
+        .serve
+        .plan_static_artifact(
+            prepared,
+            policy,
+            std::mem::size_of::<background_artifact::StaticArtifactRun>(),
+            crate::transcode::TranscodeManager::static_handoff_limit_for_test(),
+            deadline,
+        )
+        .await
+        .expect("actual static plan and zero-compatible original claim");
+    let before_r = encoding.admissions.snapshot().software_used;
+    assert!(before_r > compatibility_baseline.software_used);
+    let mut run = match fixture.serve.admit_static_artifact(planned, deadline) {
+        Ok(run) => run,
+        Err(error) => panic!("actual static R must admit: {}", error.into_parts().0),
+    };
+    let output = run.original_output_for_test();
+    let mut ticket = run
+        .prepare_cancel(deadline)
+        .await
+        .expect("same original no-entry typed close");
+    let compatibility = run
+        .take_compatibility()
+        .expect("same original worker claim");
+    let quota = run
+        .take_cache_grant()
+        .expect("same original operator quota");
+    drop(run);
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(20))
+            .await
+            .is_err(),
+        "actual retained output alias blocks the same original application barrier"
+    );
+    assert_eq!(encoding.admissions.snapshot().software_used, before_r);
+    assert!(
+        encoding
+            .admissions
+            .try_admit_software(0, 1, crate::admission::Priority::Live)
+            .is_none(),
+        "no legacy zero-budget bypass while original close is unresolved"
+    );
+    let path = output.path().to_owned();
+    assert!(crate::playback_cache::is_pinned(&path));
+    drop(output);
+    ticket
+        .finish_retirement(deadline)
+        .await
+        .expect("actual original native/app close");
+    compatibility.known_retired();
+    quota.known_closed();
+    assert_eq!(encoding.admissions.snapshot(), compatibility_baseline);
+    assert!(!crate::playback_cache::is_pinned(&path));
+    assert_eq!(
+        fixture
+            .runtime
+            .accounting()
+            .expect("same original refund")
+            .used,
+        baseline
+    );
 }

@@ -79,6 +79,7 @@ pub(crate) enum StaticArtifactExposure {
 pub(crate) struct StaticArtifactAdmission {
     pub(super) request: SoftwareVodRequest,
     pub(super) cache_grant: crate::playback_cache::CacheReservation,
+    pub(super) compatibility: crate::vodencode::FiniteSoftwareCompatibility,
     pub(super) policy: StaticArtifactPolicy,
     pub(super) workspace: u64,
     pub(super) publication: StaticArtifactPublication,
@@ -92,6 +93,7 @@ impl StaticArtifactAdmission {
     /// unknown producer peak; future R parser/native work is separate.
     pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
         std::mem::size_of::<Self>()
+            .checked_add(crate::vodencode::FiniteSoftwareCompatibility::requested_heap_bytes()?)?
             .checked_add(self.request.requested_heap_bytes()?)?
             .checked_add(self.publication.requested_heap_bytes()?)?
             .checked_add(self.logical.requested_heap_bytes()?)
@@ -276,6 +278,7 @@ impl StaticArtifactPublication {
 /// its original cancellation ticket has settled.
 pub(crate) struct StaticArtifactRun {
     cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
+    compatibility: Option<crate::vodencode::FiniteSoftwareCompatibility>,
     policy: StaticArtifactPolicy,
     owner: SoftwareVodOwner,
     output: FiniteOutput,
@@ -293,6 +296,7 @@ impl StaticArtifactRun {
     pub(super) fn new(
         mut owner: SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
+        compatibility: crate::vodencode::FiniteSoftwareCompatibility,
         publication: StaticArtifactPublication,
         logical: retained_manifest::LogicalOutput,
         application_lease: FiniteApplicationLease,
@@ -302,6 +306,7 @@ impl StaticArtifactRun {
         let output = owner.output();
         Self {
             cache_grant: Some(cache_grant),
+            compatibility: Some(compatibility),
             policy,
             owner,
             output,
@@ -319,6 +324,17 @@ impl StaticArtifactRun {
         &mut self,
     ) -> Option<crate::playback_cache::FiniteCacheReservation> {
         self.cache_grant.take()
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(super) fn original_output_for_test(&self) -> FiniteOutput {
+        self.output.clone()
+    }
+
+    pub(crate) fn take_compatibility(
+        &mut self,
+    ) -> Option<crate::vodencode::FiniteSoftwareCompatibility> {
+        self.compatibility.take()
     }
 
     pub(crate) fn request_stop(&self) -> io::Result<()> {
@@ -345,6 +361,9 @@ impl StaticArtifactRun {
         logical: &retained_manifest::LogicalOutput,
         registry_bytes: usize,
     ) -> Option<usize> {
+        // The common finite profile already charges the one original
+        // compatibility Arc. Add this run's actual fixed wrapper field via
+        // size_of<Self>, without charging that same allocation a second time.
         std::mem::size_of::<Self>()
             .checked_add(publication.requested_heap_bytes()?)?
             .checked_add(logical.requested_heap_bytes()?)?
@@ -399,6 +418,9 @@ impl StaticArtifactRun {
             .retire_output(deadline)
             .await
             .map_err(|error| error.into_io_error())?;
+        if let Some(compatibility) = self.compatibility.take() {
+            compatibility.known_retired();
+        }
         if let Some(grant) = self.cache_grant.take() {
             grant.retained();
         }

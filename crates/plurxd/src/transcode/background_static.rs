@@ -53,6 +53,7 @@ pub(super) enum StaticFinite {
     /// selector. Do not repeat the claim or infer a release from this DTO.
     AdmissionUnknown {
         _cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
+        _compatibility: Option<crate::vodencode::FiniteSoftwareCompatibility>,
     },
     Running(crate::vodserve::StaticArtifactRun),
     Retained(Arc<crate::vodserve::retained::RetainedVodArtifact>),
@@ -63,6 +64,7 @@ pub(super) enum StaticFinite {
     Closing {
         ticket: FiniteCloseTicket,
         cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
+        compatibility: Option<crate::vodencode::FiniteSoftwareCompatibility>,
     },
     Exposed,
     Closed,
@@ -400,6 +402,11 @@ fn planning_application_bytes(
 }
 
 impl TranscodeManager {
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn static_handoff_limit_for_test() -> usize {
+        super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES
+    }
+
     /// Pure shared branch selection. Once selected, every refusal remains in
     /// the same typed owner; it cannot trigger a fresh legacy preparation.
     pub(crate) fn uses_selected_static_intent(
@@ -470,11 +477,13 @@ impl TranscodeManager {
                 let _ = run.request_stop();
                 if let Ok(ticket) = run.prepare_cancel(deadline).await {
                     let cache_grant = run.take_cache_grant();
+                    let compatibility = run.take_compatibility();
                     let old = std::mem::replace(
                         &mut *finite,
                         StaticFinite::Closing {
                             ticket,
                             cache_grant,
+                            compatibility,
                         },
                     );
                     drop(old); // rich R owner/lease precede compact final settlement
@@ -483,8 +492,12 @@ impl TranscodeManager {
             StaticFinite::Closing {
                 ticket,
                 cache_grant,
+                compatibility,
             } => {
                 if ticket.finish_retirement(deadline).await.is_ok() {
+                    if let Some(compatibility) = compatibility.take() {
+                        compatibility.known_retired();
+                    }
                     if let Some(grant) = cache_grant.take() {
                         grant.known_closed();
                     }
@@ -536,6 +549,7 @@ impl TranscodeManager {
                         StaticFinite::Closing {
                             ticket,
                             cache_grant: None,
+                            compatibility: None,
                         },
                     );
                     drop(old); // original rich S aliases must precede its final refund
@@ -856,7 +870,8 @@ impl TranscodeManager {
                 match self.vod.admit_static_artifact(planned, deadline) {
                     Ok(run) => *finite = StaticFinite::Running(run),
                     Err(error) => {
-                        let (message, definitely_unreserved, cache_grant) = error.into_parts();
+                        let (message, definitely_unreserved, cache_grant, compatibility) =
+                            error.into_parts();
                         // Only core's exact pre-reservation provenance proves
                         // no original R escaped. Generic admission/rollback
                         // errors remain unknown; never replay this request.
@@ -865,6 +880,7 @@ impl TranscodeManager {
                         } else {
                             StaticFinite::AdmissionUnknown {
                                 _cache_grant: cache_grant,
+                                _compatibility: compatibility,
                             }
                         };
                         return Err(PreparationError::Retry(message));

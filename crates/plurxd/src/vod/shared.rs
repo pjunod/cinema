@@ -8,6 +8,7 @@ pub(super) struct FiniteClosingOwner {
     producer: Mutex<Option<Arc<super::finite_software::FiniteSoftwareProducer>>>,
     ticket: Mutex<Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteCloseTicket>>,
     cache_grant: std::sync::Mutex<Option<crate::playback_cache::FiniteCacheReservation>>,
+    compatibility: std::sync::Mutex<Option<crate::vodencode::FiniteSoftwareCompatibility>>,
     claimed_bytes: AtomicU64,
     claimed_admitted: AtomicBool,
     known_closed: AtomicBool,
@@ -98,8 +99,9 @@ impl FiniteBuildSlot<'_> {
         mut self,
         owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
+        compatibility: crate::vodencode::FiniteSoftwareCompatibility,
     ) -> RenditionDir {
-        let mut dir = RenditionDir::from_finite_producer(owner, cache_grant);
+        let mut dir = RenditionDir::from_finite_producer(owner, cache_grant, compatibility);
         let output = dir.finite_output().expect("fresh finite output");
         let producer = dir
             .finite_producer()
@@ -110,6 +112,7 @@ impl FiniteBuildSlot<'_> {
             producer: Mutex::new(Some(producer)),
             ticket: Mutex::new(None),
             cache_grant: std::sync::Mutex::new(None),
+            compatibility: std::sync::Mutex::new(None),
             claimed_bytes: AtomicU64::new(0),
             claimed_admitted: AtomicBool::new(false),
             known_closed: AtomicBool::new(false),
@@ -1914,6 +1917,7 @@ impl Shared {
                 producer: Mutex::new(rendition.dir.finite_producer()),
                 ticket: Mutex::new(None),
                 cache_grant: std::sync::Mutex::new(None),
+                compatibility: std::sync::Mutex::new(None),
                 claimed_bytes: AtomicU64::new(0),
                 claimed_admitted: AtomicBool::new(false),
                 known_closed: AtomicBool::new(false),
@@ -2206,6 +2210,7 @@ impl Shared {
             producer: Mutex::new(Some(producer)),
             ticket: Mutex::new(None),
             cache_grant: std::sync::Mutex::new(None),
+            compatibility: std::sync::Mutex::new(None),
             claimed_bytes: AtomicU64::new(0),
             claimed_admitted: AtomicBool::new(false),
             known_closed: AtomicBool::new(false),
@@ -2312,6 +2317,13 @@ impl Shared {
                 // the last rich closing owner. Other selectors retain their
                 // own final-drop guard and will delay final refund.
                 if let Some(producer) = producer.as_ref() {
+                    if let Some(compatibility) = producer.take_compatibility() {
+                        *closing
+                            .compatibility
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(compatibility);
+                    }
                     if let Some(grant) = producer.take_cache_grant() {
                         *closing
                             .cache_grant
@@ -2354,6 +2366,14 @@ impl Shared {
                 tracing::warn!(target: "plurxd::vodserve", rendition = %key,
                     %error, "finite terminal close remains charged for retry");
                 return;
+            }
+            if let Some(compatibility) = closing
+                .compatibility
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                compatibility.known_retired();
             }
             if let Some(grant) = closing
                 .cache_grant

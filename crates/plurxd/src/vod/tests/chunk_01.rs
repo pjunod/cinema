@@ -2698,6 +2698,13 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
             "Automatic preserves the original conservative rollback cache"
         );
     }
+    assert_eq!(
+        plurx_core::resource_settings::admission_pair(sqlite.as_ref())
+            .await
+            .expect("actual coherent effective Automatic pair"),
+        (None, None),
+        "both Automatic policies ignore their original zero rollback caches"
+    );
     let permits =
         VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
             .await
@@ -2732,6 +2739,23 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
             .await
             .expect("explicit serialized software policy")
     );
+    let incumbent_weight = encoding.resources().cpu_threads;
+    assert!(
+        incumbent_weight > 0,
+        "actual resolved software-decode/filter demand"
+    );
+    let incumbent = encoding
+        .admissions
+        .try_admit_software(0, incumbent_weight, crate::admission::Priority::Live)
+        .expect("actual incumbent software permit");
+    assert!(
+        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+            .await
+            .is_err(),
+        "explicit software zero cannot admit a family beside the incumbent"
+    );
+    drop(incumbent);
+    assert_eq!(encoding.admissions.snapshot(), baseline);
     let permits =
         VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
             .await
