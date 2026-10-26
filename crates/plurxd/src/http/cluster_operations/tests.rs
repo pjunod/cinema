@@ -1581,9 +1581,16 @@ fn supervisor_commands_require_an_active_and_fully_drained_preparation() {
         expires_at_unix_ms: None,
         drained: true,
     };
-    assert!(restart_preparation_response("node-a", 0, idle)
-        .restart_commands
-        .is_empty());
+    assert!(restart_preparation_response(
+        "node-a",
+        0,
+        OwnedWorkInventory::Known {
+            counts: OwnedWorkCounts::default()
+        },
+        idle
+    )
+    .restart_commands
+    .is_empty());
 
     let draining = crate::serving_fence::RestartDrainStatus {
         new_admissions_blocked: true,
@@ -1591,18 +1598,39 @@ fn supervisor_commands_require_an_active_and_fully_drained_preparation() {
         expires_at_unix_ms: Some(unix_ms() + 60_000),
         drained: false,
     };
-    assert!(restart_preparation_response("node-a", 0, draining)
-        .restart_commands
-        .is_empty());
+    assert!(restart_preparation_response(
+        "node-a",
+        0,
+        OwnedWorkInventory::Known {
+            counts: OwnedWorkCounts::default()
+        },
+        draining
+    )
+    .restart_commands
+    .is_empty());
 
     let drained = crate::serving_fence::RestartDrainStatus {
         admissions_in_flight: 0,
         drained: true,
         ..draining
     };
-    assert!(!restart_preparation_response("node-a", 0, drained)
-        .restart_commands
-        .is_empty());
+    assert!(!restart_preparation_response(
+        "node-a",
+        0,
+        OwnedWorkInventory::Known {
+            counts: OwnedWorkCounts::default()
+        },
+        drained
+    )
+    .restart_commands
+    .is_empty());
+    let unknown = OwnedWorkInventory::Unknown {
+        reason: OwnedWorkUnknown::ResourceLedgerUnavailable,
+    };
+    let response = restart_preparation_response("node-a", 0, unknown, drained);
+    assert!(response.restart_commands.is_empty());
+    assert!(!response.media.drained);
+    assert_eq!(response.media.owned_work, unknown);
 }
 
 #[test]
@@ -2107,6 +2135,9 @@ fn maintenance_entry_admits_the_leader_a_busy_follower_and_a_stable_learner() {
         .expect("busy follower status")
         .media = MediaDrainStatus {
         local_active_sessions: 2,
+        owned_work: OwnedWorkInventory::Known {
+            counts: OwnedWorkCounts::default(),
+        },
         drained: false,
         new_admissions_blocked: false,
         admissions_in_flight: 0,
@@ -2309,6 +2340,9 @@ fn test_local_status(node_id: &str, raft_id: Option<u64>) -> ClusterNodeOperatio
         transport: None,
         media: MediaDrainStatus {
             local_active_sessions: 0,
+            owned_work: OwnedWorkInventory::Known {
+                counts: OwnedWorkCounts::default(),
+            },
             drained: true,
             new_admissions_blocked: false,
             admissions_in_flight: 0,

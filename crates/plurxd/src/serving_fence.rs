@@ -27,6 +27,50 @@ pub(crate) struct RestartDrainStatus {
     pub(crate) drained: bool,
 }
 
+/// Original registered ownership, not utilization telemetry or close proof.
+/// Counts can overlap (an attempt may own P/M); every nonzero field blocks.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct OwnedWorkCounts {
+    pub registered_adaptive_attempts: usize,
+    pub planning_metadata_roles: usize,
+    pub native_producer_roles: usize,
+    pub unknown_resource_roles: usize,
+    pub legacy_hardware_slots: usize,
+    pub legacy_software_threads: usize,
+    pub legacy_live_waiters: usize,
+    pub legacy_reservations: usize,
+    pub legacy_background_active: bool,
+    pub background_heavy_held: bool,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OwnedWorkUnknown {
+    NotSampled,
+    AdmissionsInFlight,
+    InventoryBusy,
+    AdaptiveRegistryUnavailable,
+    ResourceLedgerUnavailable,
+    CounterOverflow,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum OwnedWorkInventory {
+    Known { counts: OwnedWorkCounts },
+    Unknown { reason: OwnedWorkUnknown },
+}
+impl Default for OwnedWorkInventory {
+    fn default() -> Self {
+        Self::Unknown {
+            reason: OwnedWorkUnknown::NotSampled,
+        }
+    }
+}
+impl OwnedWorkInventory {
+    pub(crate) fn is_empty(self) -> bool {
+        matches!(self, Self::Known { counts } if counts == OwnedWorkCounts::default())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum PlannedOutageFenceOwner {
     Restart,
@@ -129,6 +173,26 @@ impl ServingAuthority {
                 .unresolved_releases
                 .lock()
                 .expect("planned-outage release set")
+                .is_empty()
+        {
+            return None;
+        }
+        self.restart_drain.admissions.fetch_add(1, Ordering::AcqRel);
+        Some(RestartAdmission {
+            drain: Arc::clone(&self.restart_drain),
+        })
+    }
+
+    pub(crate) fn try_restart_admission_now(&self) -> Option<RestartAdmission> {
+        let mut state = self.restart_drain.state.try_lock().ok()?;
+        expire_restart_drain(&mut state);
+        if state.committed
+            || state.token.is_some()
+            || !self
+                .restart_drain
+                .unresolved_releases
+                .lock()
+                .ok()?
                 .is_empty()
         {
             return None;
@@ -813,10 +877,57 @@ impl ServingFence {
         restart_drain_status(&self.restart_drain, &state, active_sessions)
     }
 
+    #[cfg(test)]
     pub(crate) async fn restart_drain_status(&self, active_sessions: usize) -> RestartDrainStatus {
         let mut state = self.restart_drain.state.lock().await;
         expire_restart_drain(&mut state);
         restart_drain_status(&self.restart_drain, &state, active_sessions)
+    }
+
+    /// Lock order: admission state -> public session maps -> bounded original
+    /// registries/ledger. The callback sends no actor requests and performs no
+    /// Store I/O. Admission Drop is atomic and never needs this mutex. When an
+    /// admission is in flight, do not await inventory under this lock.
+    pub(crate) async fn restart_drain_status_with_owned_work<F, Fut>(
+        &self,
+        observed_public_sessions: usize,
+        snapshot: F,
+    ) -> (usize, OwnedWorkInventory, RestartDrainStatus)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = (usize, OwnedWorkInventory)>,
+    {
+        let mut state = self.restart_drain.state.lock().await;
+        expire_restart_drain(&mut state);
+        if self.restart_drain.admissions.load(Ordering::Acquire) != 0 {
+            let mut status =
+                restart_drain_status(&self.restart_drain, &state, observed_public_sessions);
+            status.drained = false;
+            return (
+                observed_public_sessions,
+                OwnedWorkInventory::Unknown {
+                    reason: OwnedWorkUnknown::AdmissionsInFlight,
+                },
+                status,
+            );
+        }
+        // This is a bounded map read, not a wait for physical work to finish.
+        let (sessions, inventory) =
+            match tokio::time::timeout(Duration::from_millis(100), snapshot()).await {
+                Ok(snapshot) => snapshot,
+                Err(_) => (
+                    observed_public_sessions,
+                    OwnedWorkInventory::Unknown {
+                        reason: OwnedWorkUnknown::InventoryBusy,
+                    },
+                ),
+            };
+        // A timed fence may expire during sampling; an expired fence can never
+        // yield reboot commands from an earlier empty snapshot.
+        expire_restart_drain(&mut state);
+        let mut status = restart_drain_status(&self.restart_drain, &state, sessions);
+        status.drained &= inventory.is_empty();
+        (sessions, inventory, status)
     }
 
     pub(crate) fn http_policy(&self, path: &str) -> Option<ServingHttpPolicy> {
@@ -1120,6 +1231,101 @@ impl Drop for PendingLossTransition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn original_work_snapshot_follows_zero_admissions_and_blocks_on_unknown() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let admission = fence
+            .try_restart_admission()
+            .await
+            .expect("original admission");
+        fence
+            .begin_restart_preparation_until(unix_ms() + 60_000)
+            .await
+            .expect("fence");
+        let (_, inventory, status) = fence
+            .restart_drain_status_with_owned_work(0, || async {
+                panic!("inventory must not be polled before original admission settles")
+            })
+            .await;
+        assert_eq!(
+            inventory,
+            OwnedWorkInventory::Unknown {
+                reason: OwnedWorkUnknown::AdmissionsInFlight
+            }
+        );
+        assert!(!status.drained);
+        // Model publication by the original admitted task before dropping its
+        // guard. This is an admission-order test, not a native close witness.
+        let original_owner = OwnedWorkCounts {
+            planning_metadata_roles: 1,
+            ..OwnedWorkCounts::default()
+        };
+        drop(admission);
+        let (_, _, status) = fence
+            .restart_drain_status_with_owned_work(0, || async {
+                (
+                    0,
+                    OwnedWorkInventory::Known {
+                        counts: original_owner,
+                    },
+                )
+            })
+            .await;
+        assert!(!status.drained);
+        let (_, _, status) = fence
+            .restart_drain_status_with_owned_work(0, || async {
+                (
+                    0,
+                    OwnedWorkInventory::Unknown {
+                        reason: OwnedWorkUnknown::ResourceLedgerUnavailable,
+                    },
+                )
+            })
+            .await;
+        assert!(!status.drained);
+        let (_, _, status) = fence
+            .restart_drain_status_with_owned_work(0, || async {
+                (
+                    0,
+                    OwnedWorkInventory::Known {
+                        counts: OwnedWorkCounts::default(),
+                    },
+                )
+            })
+            .await;
+        assert!(status.drained);
+    }
+
+    #[tokio::test]
+    async fn inventory_sampling_holds_the_original_admission_mutex() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let sampling = {
+            let fence = fence.clone();
+            tokio::spawn(async move {
+                fence
+                    .restart_drain_status_with_owned_work(0, || async {
+                        entered_tx.send(()).expect("sampling began");
+                        release_rx.await.expect("sampling released");
+                        (
+                            0,
+                            OwnedWorkInventory::Known {
+                                counts: OwnedWorkCounts::default(),
+                            },
+                        )
+                    })
+                    .await
+            })
+        };
+        entered_rx.await.expect("inventory entered");
+        assert!(fence.authority().try_restart_admission_now().is_none());
+        release_tx.send(()).expect("release snapshot");
+        sampling.await.expect("snapshot joined");
+        assert!(fence.authority().try_restart_admission_now().is_some());
+    }
+
     use plurx_core::cluster::migration::status::ReplicationMonitor;
 
     /// Continuity sustains an authority this node has; it never restores one

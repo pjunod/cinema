@@ -480,6 +480,16 @@ impl AdaptiveAttemptRegistry {
             .find_map(|entry| (entry.attempt_id == attempt_id).then(|| Arc::clone(entry)))
     }
 
+    fn drain_registered(&self) -> Result<usize, crate::serving_fence::OwnedWorkUnknown> {
+        let slots = self
+            .slots
+            .try_lock()
+            .map_err(|_| crate::serving_fence::OwnedWorkUnknown::AdaptiveRegistryUnavailable)?;
+        // Even terminal entries stay blockers until original task joins and
+        // application destruction permit exact registry removal.
+        Ok(slots.iter().flatten().count())
+    }
+
     pub(super) fn entries(&self) -> [Option<Arc<AttemptEntry>>; MAX_LOCAL_ATTEMPTS] {
         self.slots
             .lock()
@@ -693,6 +703,12 @@ impl AttemptEntry {
 }
 
 impl super::TranscodeManager {
+    pub(crate) fn adaptive_attempt_drain_count(
+        &self,
+    ) -> Result<usize, crate::serving_fence::OwnedWorkUnknown> {
+        self.adaptive_attempts.drain_registered()
+    }
+
     async fn admit_adaptive_fixed_probe(
         &self,
         entry: &Arc<AttemptEntry>,
@@ -1135,9 +1151,18 @@ impl super::TranscodeManager {
         let original = Arc::clone(&entry);
         entry
             .spawn_control(async move {
-                let result = manager
-                    .adopt_adaptive_attempt(&original, adoption, preview_json, authority, deadline)
-                    .await;
+                // No Store mutation or native adoption is polled before the fence.
+                let result = restart_guarded_adoption(
+                    authority.clone(),
+                    manager.adopt_adaptive_attempt(
+                        &original,
+                        adoption,
+                        preview_json,
+                        authority,
+                        deadline,
+                    ),
+                )
+                .await;
                 let _ = sender.send(result);
             })
             .map_err(str::to_owned)?;
@@ -2184,9 +2209,64 @@ impl super::TranscodeManager {
     }
 }
 
+/// The original registered control future owns the admission through adoption;
+/// dropping its HTTP receiver cannot release it before that future completes.
+async fn restart_guarded_adoption<T>(
+    authority: crate::serving_fence::ServingAuthority,
+    adoption: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let Some(_restart_admission) = authority.try_restart_admission().await else {
+        return Err("adaptive worker is preparing for restart".into());
+    };
+    adoption.await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn original_adopt_task_retains_restart_admission_after_waiter_drop() {
+        let monitor = plurx_core::cluster::migration::status::ReplicationMonitor::sqlite();
+        let fence = crate::serving_fence::ServingFence::new(monitor.metrics_handle());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let authority = fence.authority();
+        let original = tokio::spawn(async move {
+            let result = restart_guarded_adoption(authority, async move {
+                entered_tx.send(()).expect("entered original adoption");
+                release_rx.await.expect("release same original adoption");
+                Ok::<_, String>(())
+            })
+            .await;
+            let _ = result_tx.send(result);
+        });
+        entered_rx.await.expect("original adoption entered");
+        drop(result_rx);
+        fence
+            .begin_restart_preparation_until(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_millis() as u64
+                    + 60_000,
+            )
+            .await
+            .expect("fence");
+        assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 1);
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let denied = restart_guarded_adoption(fence.authority(), async {
+            polled.store(true, std::sync::atomic::Ordering::Release);
+            Ok::<_, String>(())
+        })
+        .await;
+        assert!(denied.is_err());
+        assert!(!polled.load(std::sync::atomic::Ordering::Acquire));
+        release_tx.send(()).expect("release original task");
+        original.await.expect("same original task joined");
+        assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+    }
 
     #[tokio::test]
     async fn registered_attempt_starts_once_and_replay_selects_same_owner() {

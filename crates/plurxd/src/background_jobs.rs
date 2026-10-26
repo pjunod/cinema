@@ -1875,7 +1875,7 @@ pub(crate) enum PreparationClaim {
     Encoded(
         plurx_core::store::background_jobs::BackgroundJob,
         ActiveBackgroundJob,
-        tokio::sync::OwnedSemaphorePermit,
+        crate::transcode::EncodedPreparationAdmission,
     ),
     Transcode(
         plurx_core::domain::PretranscodeJob,

@@ -36,7 +36,9 @@ use super::peer_transport::{
 };
 use super::{ReadinessEvaluation, ReadinessFailure};
 use crate::redact::redact_operator_text;
-use crate::serving_fence::PlannedOutageFenceToken;
+use crate::serving_fence::{
+    OwnedWorkCounts, OwnedWorkInventory, OwnedWorkUnknown, PlannedOutageFenceToken,
+};
 use crate::state::AppState;
 
 pub(crate) const INTERNAL_PATH: &str = "/api/v1/internal/cluster/operations-status";
@@ -125,6 +127,8 @@ pub(crate) struct SnapshotStatus {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct MediaDrainStatus {
     pub local_active_sessions: usize,
+    #[serde(default)]
+    pub owned_work: OwnedWorkInventory,
     pub drained: bool,
     #[serde(default)]
     pub new_admissions_blocked: bool,
@@ -1076,8 +1080,7 @@ pub(crate) async fn prepare_restart(
                 "restart preparation expired before pre-existing admissions settled; run preflight again",
             ));
         }
-        let active_sessions = local_owned_media_sessions(&state).await;
-        let drain = state.serving.restart_drain_status(active_sessions).await;
+        let (active_sessions, owned_work, drain) = local_media_drain_snapshot(&state).await;
         if !drain.new_admissions_blocked {
             lease.release().await;
             return Err(ApiError::typed(
@@ -1090,6 +1093,7 @@ pub(crate) async fn prepare_restart(
         Ok(Json(restart_preparation_response(
             &state.node_id,
             active_sessions,
+            owned_work,
             drain,
         )))
     })
@@ -1123,13 +1127,15 @@ pub(crate) async fn cancel_restart(
             return Err(error);
         }
         let active_sessions = local_owned_media_sessions(&state).await;
-        let drain = state
+        state
             .serving
             .cancel_current_restart_preparation(cancellation, active_sessions)
             .await;
+        let (active_sessions, owned_work, drain) = local_media_drain_snapshot(&state).await;
         Ok(Json(restart_preparation_response(
             &state.node_id,
             active_sessions,
+            owned_work,
             drain,
         )))
     })
@@ -1139,15 +1145,16 @@ pub(crate) async fn cancel_restart(
 fn restart_preparation_response(
     node_id: &str,
     active_sessions: usize,
+    owned_work: OwnedWorkInventory,
     drain: crate::serving_fence::RestartDrainStatus,
 ) -> RestartPreparationResponse {
-    let restart_commands = (drain.new_admissions_blocked && drain.drained)
+    let restart_commands = (drain.new_admissions_blocked && drain.drained && owned_work.is_empty())
         .then(restart_commands)
         .unwrap_or_default();
     RestartPreparationResponse {
         schema_version: 1,
         node_id: node_id.to_owned(),
-        media: media_drain_status(active_sessions, drain),
+        media: media_drain_status(active_sessions, owned_work, drain),
         restart_commands,
     }
 }
@@ -1169,8 +1176,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
     let valid_watermark = view.watermark_valid.then_some(view.watermark).flatten();
     let mut snapshot = SnapshotStatus::from(view.snapshot_metrics);
     snapshot.db_bytes = view.state_machine_bytes.map(|bytes| bytes.db);
-    let active_sessions = local_owned_media_sessions(state).await;
-    let drain = state.serving.restart_drain_status(active_sessions).await;
+    let (active_sessions, owned_work, drain) = local_media_drain_snapshot(state).await;
     let mut wal_snapshot = state.replication.wal_status_snapshot();
     if let Some(error) = wal_snapshot
         .as_mut()
@@ -1213,7 +1219,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
         },
         snapshot,
         transport: state.replication.transport_status_snapshot(),
-        media: media_drain_status(active_sessions, drain),
+        media: media_drain_status(active_sessions, owned_work, drain),
     }
 }
 
@@ -1260,14 +1266,77 @@ pub(crate) async fn local_owned_media_sessions(state: &AppState) -> usize {
         .saturating_add(state.live_tv.recording_activities().len())
 }
 
+/// These are original registered owners, not sampled CPU/RSS or a refund.
+fn local_owned_work_inventory(state: &AppState) -> OwnedWorkInventory {
+    let read = || -> Result<OwnedWorkCounts, OwnedWorkUnknown> {
+        #[cfg(target_os = "linux")]
+        let registered_adaptive_attempts = state.transcode.adaptive_attempt_drain_count()?;
+        // The adaptive attempt module cannot register on these platforms.
+        #[cfg(not(target_os = "linux"))]
+        let registered_adaptive_attempts = 0;
+        let (pool, background_heavy_held) = state.transcode.original_legacy_drain_counts();
+        let mut counts = OwnedWorkCounts {
+            registered_adaptive_attempts,
+            legacy_hardware_slots: pool.hardware_used,
+            legacy_software_threads: pool.software_used,
+            legacy_live_waiters: pool.live_waiting,
+            legacy_reservations: pool.reservations,
+            legacy_background_active: pool.background_active,
+            background_heavy_held,
+            ..OwnedWorkCounts::default()
+        };
+        if let Some(runtime) = state.resource_runtime.as_ref() {
+            let ledger = runtime
+                .accounting()
+                .map_err(|_| OwnedWorkUnknown::ResourceLedgerUnavailable)?;
+            counts.planning_metadata_roles = ledger.planning_metadata_held;
+            counts.native_producer_roles = ledger
+                .unknown_peak_producers
+                .checked_add(ledger.active_bounded_producers)
+                .ok_or(OwnedWorkUnknown::CounterOverflow)?;
+            counts.unknown_resource_roles = ledger.unknown_held;
+        }
+        Ok(counts)
+    };
+    match read() {
+        Ok(counts) => OwnedWorkInventory::Known { counts },
+        Err(reason) => OwnedWorkInventory::Unknown { reason },
+    }
+}
+
+/// Public session maps are resampled only after the in-flight admission
+/// barrier, under the same mutex that fences all newly admitted work. The
+/// first count is a compatibility diagnostic hint used ONLY on an Unknown
+/// busy result; it can never authorize a drained/ready verdict.
+pub(crate) async fn local_media_drain_snapshot(
+    state: &AppState,
+) -> (
+    usize,
+    OwnedWorkInventory,
+    crate::serving_fence::RestartDrainStatus,
+) {
+    let observed_public_sessions = local_owned_media_sessions(state).await;
+    state
+        .serving
+        .restart_drain_status_with_owned_work(observed_public_sessions, || async {
+            let public_sessions = local_owned_media_sessions(state).await;
+            let owned = local_owned_work_inventory(state);
+            (public_sessions, owned)
+        })
+        .await
+}
+
 fn media_drain_status(
     active_sessions: usize,
+    owned_work: OwnedWorkInventory,
     drain: crate::serving_fence::RestartDrainStatus,
 ) -> MediaDrainStatus {
-    let ready_for_supervisor = drain.new_admissions_blocked && drain.drained;
+    let drained = drain.drained && owned_work.is_empty();
+    let ready_for_supervisor = drain.new_admissions_blocked && drained;
     MediaDrainStatus {
         local_active_sessions: active_sessions,
-        drained: drain.drained,
+        owned_work,
+        drained,
         new_admissions_blocked: drain.new_admissions_blocked,
         admissions_in_flight: drain.admissions_in_flight,
         preparation_expires_at_unix_ms: drain.expires_at_unix_ms,

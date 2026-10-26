@@ -1167,6 +1167,9 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         target_height: i64,
     ) -> Result<Option<PretranscodeAdmission>, String> {
+        let Some(restart_admission) = self.serving_authority.try_restart_admission().await else {
+            return Ok(None);
+        };
         if !self.pretranscode_worker_idle() {
             return Ok(None);
         }
@@ -1207,6 +1210,7 @@ impl TranscodeManager {
                 encoder,
                 threads,
                 _permit: permit,
+                _restart_admission: restart_admission,
             }))
     }
 
@@ -1256,6 +1260,9 @@ impl TranscodeManager {
         threads: usize,
         heavy: tokio::sync::OwnedSemaphorePermit,
     ) -> Option<FragmentAdmission> {
+        // All direct, title and FIFO source paths converge here before native
+        // work; a heavy permit alone cannot cross the restart barrier.
+        let restart_admission = self.serving_authority.try_restart_admission().await?;
         if !self.pretranscode_worker_idle() {
             return None;
         }
@@ -1274,16 +1281,32 @@ impl TranscodeManager {
                 _heavy: heavy,
                 threads,
                 _permit: permit,
+                _restart_admission: restart_admission,
             })
     }
 
     /// Own the existing heavy-worker lane, not an encoder estimate invented
     /// before exact resolution. The rendition driver admits the real bundle.
-    pub(crate) fn admit_encoded_preparation(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    pub(crate) fn admit_encoded_preparation(&self) -> Option<EncodedPreparationAdmission> {
+        let restart_admission = self.serving_authority.try_restart_admission_now()?;
         if !self.pretranscode_worker_idle() {
             return None;
         }
-        Arc::clone(&self.background_heavy).try_acquire_owned().ok()
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
+        Some(EncodedPreparationAdmission {
+            _heavy: heavy,
+            _restart_admission: restart_admission,
+        })
+    }
+
+    /// Read the actual legacy permit books and heavy lane, not sampled load.
+    pub(crate) fn original_legacy_drain_counts(&self) -> (crate::admission::PoolSnapshot, bool) {
+        (
+            self.admissions.snapshot(),
+            self.background_heavy.available_permits() == 0,
+        )
     }
 
     pub(crate) fn encoded_preparation_still_idle(&self, observation: u64) -> bool {

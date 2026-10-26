@@ -535,8 +535,8 @@ async fn prepare_owned(
         }
     }
     current_topology(&state).await?;
-    let active = cluster_operations::local_owned_media_sessions(&state).await;
-    if !state.serving.restart_drain_status(active).await.drained {
+    let (_active, _owned, drain) = cluster_operations::local_media_drain_snapshot(&state).await;
+    if !drain.drained {
         return Err(unsafe_shutdown(
             "playback, recordings or response delivery remain active; wait for idle and try again",
         ));
@@ -606,8 +606,12 @@ async fn prepare_owned(
             "preparation expired before media admissions drained",
         ));
     }
-    let active = cluster_operations::local_owned_media_sessions(&state).await;
-    if active != 0 || !state.serving.planned_outage_is_current(token).await {
+    let (active, owned, drain) = cluster_operations::local_media_drain_snapshot(&state).await;
+    if active != 0
+        || !owned.is_empty()
+        || !drain.drained
+        || !state.serving.planned_outage_is_current(token).await
+    {
         lease.release().await;
         return Err(unsafe_shutdown(
             "playback or recordings remain active; wait for idle and try again",
@@ -698,7 +702,12 @@ async fn commit_owned(
             "topology or protocol generation changed; prepare again",
         ));
     }
-    let active = cluster_operations::local_owned_media_sessions(&state).await;
+    let (active, owned, drain) = cluster_operations::local_media_drain_snapshot(&state).await;
+    if !owned.is_empty() || !drain.drained {
+        return Err(unsafe_shutdown(
+            "owned work inventory is active or unavailable",
+        ));
+    }
     binding(&context.control, &peer, &request.process_nonce)?;
     if !state
         .serving

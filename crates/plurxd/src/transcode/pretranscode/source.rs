@@ -646,6 +646,8 @@ pub(crate) struct FragmentAdmission {
     // Release resources before handing the shared gate to the next waiter.
     pub(super) _permit: crate::admission::TranscodePermit,
     pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
+    // Last: release original physical permits before the admission barrier.
+    pub(super) _restart_admission: crate::serving_fence::RestartAdmission,
 }
 
 impl FragmentAdmission {
@@ -655,12 +657,21 @@ impl FragmentAdmission {
     }
 }
 
+/// One original encoded preparation claim retains both gates through its
+/// publication/cleanup, even while the caller waits on a Store outcome.
+pub(crate) struct EncodedPreparationAdmission {
+    pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
+    pub(super) _restart_admission: crate::serving_fence::RestartAdmission,
+}
+
 pub(crate) struct PretranscodeAdmission {
     pub(super) encoder: Encoder,
     pub(super) threads: usize,
     // A queued worker must see the released resources when it gets the gate.
     pub(super) _permit: crate::admission::TranscodePermit,
     pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
+    // Last: the original job/fence retains this through cleanup and permit Drop.
+    pub(super) _restart_admission: crate::serving_fence::RestartAdmission,
 }
 
 impl PretranscodeFence {

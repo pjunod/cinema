@@ -1841,11 +1841,12 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
     let runtime = state.transcode.media_node_runtime().await;
     #[cfg(target_os = "linux")]
     let adaptive_worker_quote = {
+        let accepting = state.serving.accepting_new_media().await;
         let serving = state.serving.authority().state();
         state
             .resource_runtime
             .as_ref()
-            .filter(|_| serving.ready && !state.membership.local_maintenance_active())
+            .filter(|_| accepting && serving.ready && !state.membership.local_maintenance_active())
             .map(|runtime| AdaptiveWorkerQuote {
                 version: 1,
                 owner_id: runtime.owner().owner_id,

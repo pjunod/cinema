@@ -12,7 +12,7 @@ use plurx_core::cluster::membership::{
 use serde::Deserialize;
 
 use super::cluster_operations::{
-    acquire_planned_outage_preflight, local_owned_media_sessions,
+    acquire_planned_outage_preflight, local_media_drain_snapshot,
     run_serialized_planned_outage_task, PlannedOutageOperation,
 };
 use super::error::ApiError;
@@ -255,8 +255,7 @@ pub async fn enter_maintenance(
                 "maintenance preparation expired before pre-existing admissions settled; run preflight again",
             ));
         }
-        let active_sessions = local_owned_media_sessions(&state).await;
-        let drain = state.serving.restart_drain_status(active_sessions).await;
+        let (_active_sessions, _owned_work, drain) = local_media_drain_snapshot(&state).await;
         if !drain.new_admissions_blocked {
             lease.release().await;
             return Err(ApiError::typed(
@@ -345,8 +344,7 @@ pub async fn exit_maintenance(
             }
             return Ok(Json(status));
         }
-        let active_sessions = local_owned_media_sessions(&state).await;
-        let drain = state.serving.restart_drain_status(active_sessions).await;
+        let (active_sessions, _owned_work, drain) = local_media_drain_snapshot(&state).await;
         if !drain.drained {
             return Err(ApiError::typed(
                 StatusCode::CONFLICT,
@@ -701,7 +699,7 @@ mod tests {
             .0;
         assert!(exit.contains("local_maintenance_active"));
         assert!(
-            exit.find("local_owned_media_sessions") < exit.find(".exit_maintenance(&node_id)"),
+            exit.find("local_media_drain_snapshot") < exit.find(".exit_maintenance(&node_id)"),
             "local direct streams and offline work must drain before the durable fence clears"
         );
         assert!(exit.contains("node_id != state.node_id"));
