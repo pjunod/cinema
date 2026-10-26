@@ -1,11 +1,18 @@
-"""The desktop entry registers the scheme, and the package never edits associations as root."""
+"""The desktop entry registers the scheme, the package never edits associations
+as root, and the private mpv/libplacebo build is pinned where the launcher and
+the package version expect it."""
 
 import configparser
 import glob
 import os
+import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 import support
+from plurx_player import VERSION, mpv
 
 ROOT = support.PACKAGE_ROOT
 
@@ -38,8 +45,184 @@ class Packaging(unittest.TestCase):
             control = handle.read()
         self.assertIn("zenity", control)
 
+    def test_private_launcher_bytecode_is_owned_by_dh_python3(self):
+        # A root run of the launcher writes __pycache__ under the private
+        # directory (the -I shebang ignores PYTHONDONTWRITEBYTECODE); only
+        # dh_python3 over that directory makes prerm remove it, so dpkg -r
+        # leaves nothing behind.
+        with open(os.path.join(ROOT, "debian/rules"), encoding="utf-8") as handle:
+            rules = handle.read()
+        self.assertRegex(rules, r"(?m)^override_dh_python3:\n\tdh_python3 /\$\(PRIVATE\)$")
+        self.assertRegex(rules, r"(?m)^PRIVATE = usr/lib/plurx-player$")
+        with open(os.path.join(ROOT, "debian/control"), encoding="utf-8") as handle:
+            control = handle.read()
+        self.assertIn("dh-sequence-python3", control)
+        self.assertIn("${python3:Depends}", control)
+
     def test_launcher_script_is_executable(self):
         self.assertTrue(os.access(os.path.join(ROOT, "plurx-player"), os.X_OK))
+
+
+def read(relative):
+    with open(os.path.join(ROOT, relative), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def pins():
+    rows = {}
+    for line in read("packaging/upstream.lock").splitlines():
+        if line.strip() and not line.startswith("#") and not line.startswith("apt-snapshot "):
+            name, version, sha256, url = line.split()
+            rows[name] = (version, sha256, url)
+    return rows
+
+
+class PrivateBuild(unittest.TestCase):
+    def test_sources_are_pinned_by_sha256(self):
+        rows = pins()
+        self.assertEqual(sorted(rows), ["libplacebo", "mpv"])
+        for name, (version, sha256, url) in rows.items():
+            self.assertRegex(sha256, r"^[0-9a-f]{64}$", name)
+            self.assertTrue(url.startswith("https://"), url)
+            self.assertIn(version, url, name)
+
+    def test_the_build_environment_is_a_pinned_apt_snapshot(self):
+        rows = [line.split() for line in read("packaging/upstream.lock").splitlines()
+                if line.startswith("apt-snapshot ")]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertRegex(rows[0][1], r"^[0-9]{8}T[0-9]{6}Z$")
+
+    def test_package_version_names_the_pinned_versions(self):
+        rows = pins()
+        version = re.match(r"plurx-player \(([^)]+)\)", read("debian/changelog")).group(1)
+        self.assertTrue(version.startswith(f"{VERSION}+"), (version, VERSION))
+        self.assertIn(f'"plurx-player {VERSION}"', read("plurx-player.1"))
+        upstream, _, revision = version.rpartition("-")
+        self.assertRegex(revision, r"^[0-9]+$", "a Debian revision: the source package is 3.0 (quilt)")
+        self.assertTrue(
+            upstream.endswith(f"+lp{rows['libplacebo'][0]}.mpv{rows['mpv'][0]}"), version)
+        self.assertEqual(read("debian/source/format").strip(), "3.0 (quilt)")
+
+    def test_each_patch_series_lists_exactly_its_patches(self):
+        for name in ("libplacebo", "mpv"):
+            directory = os.path.join(ROOT, "packaging/patches", name)
+            entries = os.listdir(directory)
+            self.assertIn("series", entries)
+            for entry in entries:
+                self.assertTrue(entry == "series" or entry.endswith(".patch"), entry)
+            listed = [line.split("#")[0].strip() for line in read(f"packaging/patches/{name}/series").splitlines()]
+            listed = [entry for entry in listed if entry]
+            self.assertEqual(sorted(listed), sorted(e for e in entries if e.endswith(".patch")), name)
+
+    def test_verification_never_lets_a_failed_check_fall_through_to_pass(self):
+        # Under set -e, `cmd && pass` lets a failing cmd fall through; every
+        # check is `cmd || fail ...` then `pass ...`.
+        for number, line in enumerate(read("packaging/verify-in-container.sh").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            self.assertNotRegex(line, r"&&\s*pass\b", f"verify-in-container.sh:{number}")
+            self.assertNotRegex(line, r"\|\|\s*true\b", f"verify-in-container.sh:{number}")
+
+    def test_launcher_default_is_the_installed_private_mpv(self):
+        rules = read("debian/rules")
+        private = re.search(r"^PRIVATE = (\S+)$", rules, re.M).group(1)
+        self.assertIn("$(PKG)/$(PRIVATE)/bin/mpv", rules)
+        self.assertEqual(mpv.DEFAULT_BINARY, f"/{private}/bin/mpv")
+
+    def test_description_states_what_hdr_needs(self):
+        control = read("debian/control")
+        self.assertIn("Architecture: amd64", control)
+        self.assertIn("${shlibs:Depends}", control)
+        self.assertIn("wp_color_manager_v1 in HDR mode", control)
+        self.assertIn("reports the panel's real luminance", control)
+        self.assertNotIn("Recommends: mpv", control)
+        self.assertIn("Recommends: desktop-file-utils, mesa-vulkan-drivers | vulkan-icd", control)
+        self.assertIn("Built-Using: ${plurx:Built-Using}", control)
+
+
+GIT_AM_PATCH = """From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@plurx.invalid>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH] two becomes TWO
+
+---
+ a.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+{diff}--
+2.0
+"""
+
+
+def diff(old, new):
+    return f"--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n one\n-{old}\n+{new}\n three\n"
+
+
+@unittest.skipUnless(shutil.which("git"), "needs git")
+class PatchSeries(unittest.TestCase):
+    """packaging/apply-series.sh applies the series exactly, in series order."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.tree = os.path.join(self.tmp, "tree")
+        self.patches = os.path.join(self.tmp, "patches")
+        os.makedirs(self.tree)
+        os.makedirs(self.patches)
+        with open(os.path.join(self.tree, "a.txt"), "w", encoding="utf-8") as handle:
+            handle.write("one\ntwo\nthree\n")
+        self.series()
+
+    def series(self, *names):
+        with open(os.path.join(self.patches, "series"), "w", encoding="utf-8") as handle:
+            handle.write("# comment\n" + "".join(f"{name}\n" for name in names))
+
+    def patch(self, name, text):
+        with open(os.path.join(self.patches, name), "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def apply(self):
+        return subprocess.run(
+            ["bash", os.path.join(ROOT, "packaging/apply-series.sh"), self.tree, self.patches,
+             "1.2.3", "1767225600"], capture_output=True, text=True)
+
+    def describe(self):
+        return subprocess.run(["git", "-C", self.tree, "describe"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    def test_an_empty_series_tags_the_base(self):
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.describe(), "v1.2.3-plurx")
+
+    def test_patches_apply_in_series_order_not_name_order(self):
+        self.patch("0002-first.patch", GIT_AM_PATCH.format(diff=diff("two", "TWO")))
+        self.patch("0001-second.patch", diff("TWO", "2"))
+        self.series("0002-first.patch", "0001-second.patch")
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(os.path.join(self.tree, "a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "one\n2\nthree\n")
+        self.assertRegex(self.describe(), r"^v1\.2\.3-plurx-2-g[0-9a-f]+$")
+
+    def test_a_patch_whose_context_does_not_match_fails(self):
+        self.patch("0001-fuzzy.patch", diff("zwei", "2"))
+        self.series("0001-fuzzy.patch")
+        result = self.apply()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not apply exactly", result.stderr)
+
+    def test_an_unlisted_patch_fails(self):
+        self.patch("0001-unlisted.patch", diff("two", "2"))
+        result = self.apply()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("present, unlisted: 0001-unlisted.patch", result.stderr)
+
+    def test_a_listed_patch_that_is_missing_fails(self):
+        self.series("0001-missing.patch")
+        result = self.apply()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("listed, missing: 0001-missing.patch", result.stderr)
 
 
 if __name__ == "__main__":

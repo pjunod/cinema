@@ -23,7 +23,7 @@ from .caps import device_caps
 from .handoff import HandoffUrlError, normalize_origin, parse_handoff_url
 from .mpv import Mpv, MpvError, resolve_binary
 from .playback import Playback, PlaybackError, Timing
-from .trust import TrustStore, ensure_trusted, zenity_confirm, zenity_error
+from .trust import TrustStore, default_config_dir, ensure_trusted, zenity_confirm, zenity_error
 
 EXIT_OK = 0
 EXIT_URL = 2
@@ -160,7 +160,8 @@ def _redeem_and_play(args, deps, handoff, http, gate):
         if not binary:
             raise PlaybackError("mpv is not installed")
         runtime = tempfile.mkdtemp(prefix="plurx-player-", dir=_runtime_base(deps))
-        mpv = Mpv(binary, os.path.join(runtime, "mpv.sock"))
+        mpv = Mpv(binary, os.path.join(runtime, "mpv.sock"),
+                  config_dir=os.path.join(deps.config_dir or default_config_dir(), "mpv"))
         mpv.start()
         playback = Playback(http, mpv, redeemed, device_caps(VERSION), deps.clock, deps.sleep,
                             deps.timing, log)

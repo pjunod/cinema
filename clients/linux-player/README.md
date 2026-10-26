@@ -2,19 +2,23 @@
 
 This is the launcher half of the native Linux player in [the Linux player plan](../../docs/clients/LINUX-PLAYER-PLAN.md). Browsing stays in the plurx web app. When Settings → Playback → **Open titles in** says **plurx Player (Linux)**, Play mints a one-time handoff code and opens `plurx-player://play?server=<origin>&code=<code>`. This launcher handles that URL: it redeems the code for a token scoped to one file, asks the server how to deliver the file, plays it in mpv, and keeps the server informed until mpv closes. It is Python 3 with the standard library only (`urllib`, `json`, a Unix socket for mpv's JSON IPC, `subprocess`), so it installs on any Ubuntu with no dependencies beyond `zenity`.
 
-Status: milestone M4 built against a fake server and a fake mpv; the server handoff endpoints (M1) are being built in parallel, so nothing here has met a real plurx server yet. The private mpv/libplacebo build with plurx's closed-form display management and the finished `.deb` are M5. Acceptance on the ROG is M6.
+Status: milestone M4 built against a fake server and a fake mpv; the server handoff endpoints (M1) are being built in parallel, so nothing here has met a real plurx server yet. The M5 package is built: `make linux-player-deb` produces an Ubuntu 26.10 `.deb` with a private mpv and libplacebo, but their plurx closed-form display-management patches are not written yet (the patch series is empty). Acceptance on the ROG is M6.
 
 ## Install and run
 
-Until M5 ships a package, run it from a checkout with a system mpv:
+Install the package (see [Packaging](#packaging)), or run it from a checkout with a system mpv:
 
 ```sh
 clients/linux-player/plurx-player 'plurx-player://play?server=http%3A%2F%2Fmedia1%3A8096&code=CODE'
 ```
 
-`--mpv PATH` picks the mpv binary; otherwise it uses `/usr/lib/plurx-player/bin/mpv` (the private build) when installed, then `mpv` on `PATH`. `PLURX_PLAYER_MPV` does the same as `--mpv`. `--ca FILE` adds a CA for a server with a private certificate, because Python uses the system CA store rather than Chrome's; the path is remembered for that server.
+`man plurx-player` covers the options, the URL and the files below. `--mpv PATH` picks the mpv binary; otherwise it uses `/usr/lib/plurx-player/bin/mpv` (the private build) when installed, then `mpv` on `PATH`. `PLURX_PLAYER_MPV` does the same as `--mpv`. `--ca FILE` adds a CA for a server with a private certificate, because Python uses the system CA store rather than Chrome's; the path is remembered for that server.
 
 The package (`debian/`, see below) installs the code under `/usr/lib/plurx-player`, the launcher as `/usr/bin/plurx-player`, and `plurx-player.desktop` with `MimeType=x-scheme-handler/plurx-player;`. dpkg's `update-desktop-database` trigger registers the scheme. There is deliberately no `xdg-mime` call in `postinst`: that runs as root and would edit root's associations, not the user's.
+
+## mpv configuration
+
+The launcher runs mpv with `--config-dir=$XDG_CONFIG_HOME/plurx-player/mpv` (by default `~/.config/plurx-player/mpv`), so plurx Player has its own optional mpv configuration and never reads the general `~/.config/mpv`: a stray `vo=` or `tone-mapping=` there would silently defeat the closed-form mapping. The directory does not exist by default; an `mpv.conf`, `input.conf` or script placed there applies to plurx Player only. mpv's built-in key bindings and on-screen controller work without it (the launcher does not pass `--no-config`). The options the player depends on (`--vo=gpu-next --gpu-api=vulkan --hwdec=auto-safe --target-colorspace-hint=yes`, the IPC socket, `--idle=once`) are on the command line, which mpv applies over any config file. `--ytdl=no` is always passed: the player only opens plurx URLs from an allowed server, and mpv's ytdl hook would otherwise run `yt-dlp` on anything else. mpv also starts without `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT`, which would otherwise outrank the private build's own library path or inject code into it (see [Packaging](#packaging)).
 
 ## What it does, in order
 
@@ -35,7 +39,69 @@ HDR output needs a compositor with `wp_color_manager_v1` in HDR mode, such as GN
 
 ## Packaging
 
-`debian/` is a skeleton: `dpkg-buildpackage -us -uc -b` from this folder builds an `Architecture: all` package that depends on `python3` and `zenity`, recommends the system `mpv` and runs these tests at build time. The private mpv and libplacebo are placeholders marked `M5` in `debian/rules`, `debian/install` and `debian/control`; when they land the package becomes architecture-specific and installs them under `/usr/lib/plurx-player`, leaving the distribution's mpv and libplacebo untouched.
+```sh
+make linux-player-deb        # or: clients/linux-player/packaging/build-deb.sh [--out DIR] [--no-verify] [--no-rebuild-check]
+```
+
+This builds the Debian source package and `plurx-player_<version>_amd64.deb` in a disposable `ubuntu:26.10` container, checks that the verification really fails when a check fails, installs and checks the package in a second fresh container, then builds everything again and requires the two builds to be byte-identical. Nothing is installed on the host; it needs only Docker. The output goes to `target/linux-player-deb/` (or `PLURX_DEB_OUT`):
+
+- `plurx-player_<version>_amd64.deb`;
+- the source package: `plurx-player_<version>.dsc`, `plurx-player_<upstream>.orig.tar.gz` (the launcher and the patch series), `.orig-libplacebo.tar.gz` and `.orig-mpv.tar.gz` (upstream's tarballs, byte for byte), and `plurx-player_<version>.debian.tar.xz`;
+- `SHA256SUMS` over all of those, the `.buildinfo` (the exact build environment), `build.log`, `verify.log` and `rebuild.log`.
+
+`PLURX_DEB_JOBS` (default 8) caps the compile jobs and the container's CPUs. It is not part of CI: one run downloads sources and compiles twice, about ten minutes in all.
+
+**What the package contains, and why.**
+
+- `/usr/bin/plurx-player` and the launcher modules in `/usr/lib/plurx-player/plurx_player/`.
+- `/usr/share/applications/plurx-player.desktop` with `MimeType=x-scheme-handler/plurx-player;`. dpkg's `update-desktop-database` trigger registers the scheme, which is why the package recommends `desktop-file-utils`. There is deliberately no `xdg-mime` call in `postinst`: it would run as root and edit root's associations, not the user's. The only maintainer scripts are the ones `dh_python3` generates to byte-compile the launcher modules and to remove every `.pyc` on removal.
+- A private libplacebo and mpv: `/usr/lib/plurx-player/lib/libplacebo.so.360` and `/usr/lib/plurx-player/bin/mpv`, the launcher's default mpv. Plan §5 needs them private: the closed-form Dolby Vision mapping is a patch to libplacebo/mpv, and patching the distribution's copy would change every program on the machine.
+  - mpv is linked with the DT_RPATH `$ORIGIN/../lib`, not DT_RUNPATH. The loader searches DT_RPATH before `LD_LIBRARY_PATH`, so even running `/usr/lib/plurx-player/bin/mpv` by hand with `LD_LIBRARY_PATH` pointing at another libplacebo loads the private one. The launcher also starts mpv without `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT`, so nothing in the desktop session can redirect or inject into it.
+  - The private directory is not in `ld.so.conf` and the package installs no shlibs file, so the system mpv and everything else linked against the system libplacebo never see the private one.
+  - libplacebo links glslang and SPIRV-Tools statically, as Ubuntu's does, because Ubuntu ships only their static libraries. `Built-Using` names their exact versions, and their copyright files are installed as `copyright.glslang` and `copyright.spirv-tools`.
+- `/usr/share/man/man1/plurx-player.1.gz`.
+- `/usr/share/doc/plurx-player/private-build.txt`: the upstream versions, sha256, `git describe`, the patches applied, the statically linked glslang and SPIRV-Tools, the apt snapshot, and the corresponding source package.
+
+`Depends` is `python3 (>= 3.10)`, `zenity` and what `dpkg-shlibdeps` finds for the private build (Vulkan, FFmpeg 8, Wayland, VAAPI and the rest). `Recommends` adds `desktop-file-utils` and a Vulkan driver (`mesa-vulkan-drivers | vulkan-icd`). The version is `<launcher>+lp<libplacebo>.mpv<mpv>-<revision>`, for example `0.1.1+lp7.360.1.mpv0.41.0-1`. The bundled upstream versions are visible in `apt` and `dpkg -l`. The launcher part is bumped for launcher changes and for each change to the patch series, and the revision is bumped for packaging-only changes.
+
+**Corresponding source.** mpv is built GPL and libplacebo is LGPL, so every build also publishes the Debian source package the `.deb` was built from. The build makes the source package first, unpacks it afresh, and builds the binary from that tree; `dpkg-source -x plurx-player_<version>.dsc` then `dpkg-buildpackage -b` rebuilds the same package. The launcher, the patch series and `debian/` are its own parts; libplacebo and mpv are its `libplacebo` and `mpv` components.
+
+**How the build works.**
+
+1. **Environment.** `packaging/upstream.lock` pins an apt snapshot timestamp. `packaging/apt-snapshot.sh` points apt at `snapshot.ubuntu.com` at that time, so every package in the build and verification containers is the one that was current then, whenever the build runs.
+2. **Sources.** The lock also pins libplacebo 7.360.1 and mpv 0.41.0, the versions Ubuntu 26.10 ships, by URL and sha256. `packaging/fetch-sources.sh` makes the launcher orig tarball reproducibly, fetches the upstream tarballs, refuses a checksum mismatch, and checks that the changelog's upstream version ends in `+lp<libplacebo>.mpv<mpv>`. `dpkg-source -b` then makes the source package.
+3. **Build.** In the unpacked source package, `dpkg-buildpackage` runs `debian/rules`, which calls `packaging/build-private.sh`:
+   - each component is copied, made a git repository tagged `v<version>-plurx`, and patched with its series by `packaging/apply-series.sh`;
+   - libplacebo is built with Vulkan, OpenGL, glslang, lcms2 and its built-in Dolby Vision support, as Ubuntu builds it;
+   - mpv is built against it with the Wayland, X11 and DRM outputs, Vulkan, VAAPI and CUDA hwdec, the system FFmpeg 8 and Lua 5.2 (for mpv's own on-screen controller; the launcher needs only the JSON IPC). Disc, capture and other inputs a plurx stream never uses are left out.
+   - The build fails unless mpv's DT_RPATH is exactly `$ORIGIN/../lib` with no DT_RUNPATH, the staged mpv resolves the staged libplacebo, and neither binary contains the build path.
+   - libplacebo's test suite and these launcher tests run at build time. The launcher tests use `packaging/run-tests`, which fails on any skip. The one skip allowed there is the caps drift check, because the source package does not carry the server's `caps.rs`; `make linux-player-check` and the package verification run it.
+4. **Byte-identical rebuild.** The build always runs in `/build/plurx-player` and dates everything from the changelog, so the same inputs give the same bytes. `build-deb.sh` builds a second time and compares every file in `SHA256SUMS`.
+
+**Patches drop in here.**
+
+- Put each series in `packaging/patches/libplacebo/` or `packaging/patches/mpv/`, and list the files in order in that directory's `series` file.
+- The build fails if `series` and the directory disagree in either direction, or if any patch does not apply exactly. A `git format-patch` file goes through `git am`, anything else through `git apply`, with no fuzz and no three-way merge.
+- Both series are empty until the closed-form display management from the rog_hdr_dv work lands.
+- A patched build shows itself. mpv prints `libplacebo version: v7.360.1 (v7.360.1-plurx-<n>-g<hash>)`, read at run time from the loaded library, and `mpv v0.41.0-plurx-<n>-g<hash>`.
+- When the series changes, bump the launcher part of the version in `debian/changelog`.
+- When Ubuntu moves to a new libplacebo or mpv, change `upstream.lock` and the changelog version together; `fetch-sources.sh` refuses one without the other.
+
+**What the verification checks** (`verify.log`), in order:
+
+1. The checksums. A self-test run, with one digest deliberately wrong, must fail at this check before the real run counts.
+2. `lintian` on the `.deb` and the source package: errors fail, and warnings are listed.
+3. `dpkg -i` then `apt-get -f install` succeeds.
+4. The private mpv reports the `-plurx` libplacebo and has DT_RPATH. `ldd` resolves the private libplacebo alone, beside the system `mpv`, and with `LD_LIBRARY_PATH` pointing at the system libplacebo, and the private mpv still reports the private one under that `LD_LIBRARY_PATH`.
+5. The scheme is in `mimeinfo.cache`, `desktop-file-validate` passes, and no maintainer script calls `xdg-mime`.
+6. The launcher resolves its mpv to the private one.
+7. The system mpv uses the system libplacebo.
+8. Both mpvs render a 10-bit PQ HEVC clip through `vo=gpu-next` on Vulkan (Mesa's software device under Xvfb).
+9. The installed launcher's exact mpv command line plays through gpu-next without reading a hostile `~/.config/mpv/mpv.conf`, and never runs the ytdl hook on a URL mpv cannot open. Each of these has a positive control showing the same mpv does read that file without `--config-dir`, and does run the hook with `--ytdl=yes`.
+10. These tests pass on the container's Python with no skip.
+11. `dpkg -r` and `dpkg -P` remove everything, including the scheme registration, leaving the system mpv working.
+
+Every check is written to fail the script; `tests/test_packaging.py` rejects the `cmd && pass` form that would not.
 
 ## Focused evidence and remaining acceptance
 
@@ -46,4 +112,4 @@ make linux-player-check
 
 The tests run the real launcher in-process against a fake plurx server (`http.server` in a thread) and a fake mpv (`tests/fake_mpv.py`, which speaks the JSON IPC on the socket), on a virtual clock so cadence is exact; one test runs it as a subprocess and sends SIGTERM. They cover the call sequence and which calls carry the bearer, the caps fields against `caps.rs`, the 5 s/10 s cadence, progress = mpv time + origin, seeks inside and outside the range, control 404/410, teardown and revoke on exit, mpv crash, launcher crash and SIGTERM, the trust prompt, malformed URLs, redeem refusals, direct play, subtitles, the mapper line, and that the token reaches no file and no argv. The fake server is written from the M1 contract in the plan, not from a server.
 
-Still required: the M1 server endpoints and a run against them; whether mpv reports the seek target as `time-pos` at its `seek` event on a growing playlist (the seek re-creation depends on it); the libplacebo mapper log line (M5); the `.deb` install, scheme registration and uninstall on Ubuntu 26.10 (M5); and the plan's M6 acceptance on the ROG.
+Still required: the M1 server endpoints and a run against them; whether mpv reports the seek target as `time-pos` at its `seek` event on a growing playlist (the seek re-creation depends on it); the closed-form patch series and the libplacebo mapper log line it adds (M5, rog_hdr_dv); a desktop session check that a browser actually opens the scheme through the installed package; and the plan's M6 acceptance on the ROG.

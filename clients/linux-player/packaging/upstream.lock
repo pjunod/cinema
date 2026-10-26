@@ -1,0 +1,20 @@
+# Pinned upstream sources for the private libplacebo and mpv in plurx-player.
+#
+# These are the versions Ubuntu 26.10 ships (libplacebo 7.360.1-1,
+# mpv 0.41.0-2ubuntu5). The tarballs are byte-for-byte upstream's; their
+# unpacked contents are identical to Ubuntu's libplacebo_7.360.1.orig.tar.gz
+# and mpv_0.41.0.orig.tar.gz (checked when they were pinned).
+#
+# Changing a version here changes the package version too: the upstream part
+# of debian/changelog's version must end in +lp<libplacebo>.mpv<mpv>, and
+# fetch-sources.sh refuses a mismatch.
+#
+# apt-snapshot pins the build and verification environment: every apt
+# command in the containers resolves against snapshot.ubuntu.com at that
+# timestamp (packaging/apt-snapshot.sh), so a later build gets the same
+# compiler, FFmpeg, glslang and the rest. Move it forward deliberately.
+apt-snapshot 20261025T000000Z
+#
+# name      version  sha256                                                            url
+libplacebo  7.360.1  14c0a99f4b01557ec9826ce6b1d52f6de21be274ba03fd5aab7307f18766dc39  https://code.videolan.org/videolan/libplacebo/-/archive/v7.360.1/libplacebo-v7.360.1.tar.gz
+mpv         0.41.0   ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209  https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz

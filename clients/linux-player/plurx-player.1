@@ -1,0 +1,107 @@
+.TH PLURX-PLAYER 1 2026-10-25 "plurx-player 0.1.1" "User Commands"
+.SH NAME
+plurx-player \- play a plurx title handed over by the plurx web app
+.SH SYNOPSIS
+.B plurx-player
+.RB [ \-\-ca
+.IR FILE ]
+.RB [ \-\-mpv
+.IR PATH ]
+.I URL
+.br
+.B plurx-player
+.RB \-\-help " | " \-\-version
+.SH DESCRIPTION
+.B plurx-player
+handles
+.B plurx-player://
+links.
+When Settings \(-> Playback \(-> Open titles in says plurx Player (Linux),
+Play in the plurx web app opens
+.IP
+.B plurx-player://play?server=\c
+.IB ORIGIN &code= CODE
+.PP
+where
+.I ORIGIN
+is the server's percent-encoded http(s) origin, with no path, and
+.I CODE
+is a one-time handoff code.
+The browser starts
+.B plurx-player
+through its desktop entry.
+It can also be run by hand with such a URL.
+.PP
+It redeems the code for a token scoped to one file, asks the server how to
+deliver the file, plays it in the private mpv in
+.IR /usr/lib/plurx-player/bin/mpv ,
+and keeps the server informed until mpv closes.
+The token is kept in memory only.
+.PP
+Any URL other than exactly
+.B plurx-player://play
+with
+.B server
+and
+.B code
+is refused.
+.SH OPTIONS
+.TP
+.BI \-\-ca " FILE"
+Trust the CA certificate in
+.I FILE
+for a server with a private certificate.
+The path is remembered for that server.
+Python uses the system CA store, not the browser's.
+.TP
+.BI \-\-mpv " PATH"
+Use this mpv binary instead of the private one.
+.TP
+.B \-\-help
+Show a short usage message.
+.TP
+.B \-\-version
+Show the version.
+.SH FILES
+.TP
+.I ~/.config/plurx-player/servers.json
+The servers this user allowed.
+The first time a link names a new origin, a dialog names it and the player
+refuses unless the user allows it.
+Plain http is allowed only through that dialog.
+Any web page can open a
+.B plurx-player://
+link, so the list keeps a hostile page from pointing the player at its own
+server.
+.TP
+.I ~/.config/plurx-player/mpv/
+plurx Player's own mpv configuration directory, passed to mpv as
+.BR \-\-config\-dir .
+It does not exist by default.
+.IR mpv.conf ,
+.I input.conf
+and scripts placed there apply to plurx Player only; the general
+.I ~/.config/mpv
+is never read.
+mpv's built-in key bindings and on-screen controller work without it.
+The options the player needs for correct output, including
+.BR \-\-vo=gpu\-next ,
+are on mpv's command line and take precedence over this directory.
+.PP
+Both paths follow
+.B XDG_CONFIG_HOME
+when it is set.
+.SH ENVIRONMENT
+.TP
+.B PLURX_PLAYER_MPV
+The same as
+.BR \-\-mpv .
+.TP
+.B XDG_CONFIG_HOME
+The base of the configuration paths above.
+.SH NOTES
+HDR output needs a Wayland compositor with wp_color_manager_v1 in HDR mode.
+An accurate target luminance needs one that reports the panel's real
+luminance.
+.SH SEE ALSO
+.BR mpv (1)

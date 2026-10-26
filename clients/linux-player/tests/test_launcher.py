@@ -57,6 +57,10 @@ class CallSequence(LauncherCase):
         for flag in ("--vo=gpu-next", "--gpu-api=vulkan", "--hwdec=auto-safe",
                      "--target-colorspace-hint=yes", "--idle=once"):
             self.assertIn(flag, args)
+        self.assertIn("--ytdl=no", args, "the ytdl hook never runs yt-dlp on a URL")
+        self.assertIn(f"--config-dir={os.path.join(self.config, 'mpv')}", args,
+                      "plurx Player's own mpv config, never ~/.config/mpv")
+        self.assertNotIn("--no-config", args, "built-in key bindings and the OSC stay")
         sock = next(a for a in args if a.startswith("--input-ipc-server="))
         self.assertTrue(sock.split("=", 1)[1].startswith(self.runtime))
         self.assertEqual(os.listdir(self.runtime), [], "the private socket directory is removed")
@@ -236,6 +240,8 @@ class Signals(LauncherCase):
         self.assertTrue(self.server.revoked)
         self.assertIn(["quit"], self.mpv.commands())
         self.assertEqual(os.listdir(self.runtime), [])
+        # Run as installed, the mpv config directory follows XDG_CONFIG_HOME.
+        self.assertIn(f"--config-dir={os.path.join(self.config, 'mpv')}", self.mpv.argv())
 
 
 class Trust(LauncherCase):
@@ -447,6 +453,15 @@ class Mapper(LauncherCase):
 
 
 class NoTokenOnDisk(LauncherCase):
+    def test_mpv_gets_no_dynamic_loader_overrides(self):
+        # LD_LIBRARY_PATH would beat the private mpv's rpath and pick up the
+        # system libplacebo; LD_PRELOAD and LD_AUDIT inject code.
+        self.close_at(6)
+        loader = {"LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu", "LD_PRELOAD": "", "LD_AUDIT": ""}
+        with mock.patch.dict(os.environ, loader):
+            self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.mpv.env(), {})
+
     def test_the_token_never_reaches_a_file_or_mpv_argv(self):
         self.server.decision = transcode_decision(method="direct_play", delivery={
             "mode": "direct", "url": f"/api/v1/files/{FILE_ID}/direct"})
