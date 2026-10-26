@@ -790,6 +790,11 @@ function qualityLabel(){
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
+  // Settings → Playback → Open titles in → plurx Player: a cold start is
+  // handed to the native player (docs/clients/LINUX-PLAYER-PLAN.md §4.1).
+  // With the default, This browser, this returns false and nothing changes.
+  if(playerHandoffWanted(fileId,meta,reservedOpenAttempt,retryIntent))
+    return handOffToPlayer(fileId,title,resumeMs,knownDurMs,meta);
   const fileContext=playbackFileContextForPlay(fileId,meta);
   meta={...(meta||{}),fileContext};
   const beginning=beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent);

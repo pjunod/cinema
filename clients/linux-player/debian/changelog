@@ -1,0 +1,7 @@
+plurx-player (0.1.0~m4) unstable; urgency=medium
+
+  * Launcher (milestone M4): redeem, decide, play in mpv, heartbeat,
+    progress, seek re-creation, teardown. The private mpv/libplacebo
+    build arrives with M5.
+
+ -- plurx maintainers <noreply@plurx.invalid>  Sun, 25 Oct 2026 12:00:00 +0000
