@@ -66,18 +66,72 @@ fn json_value(v: &serde_json::Value) -> Option<usize> {
 }
 
 fn quality_candidate(v: &plurx_core::playback::candidate::QualityCandidate) -> usize {
+    // Exhaustive inventory: an added field must force accounting review.
+    let plurx_core::playback::candidate::QualityCandidate {
+        id: _,
+        recipe_digest: _,
+        route: _,
+        planned_codec: _,
+        processed_hdr10: _,
+        normalized_geometry: _,
+        width: _,
+        height: _,
+        target_height: _,
+        average_bps: _,
+        peak_bps: _,
+        grade: _,
+        decoder_compatible: _,
+        complete_cache: _,
+        sustainable: _,
+    } = v;
     opt_string(&v.planned_codec)
 }
 
 fn device_caps(v: &plurx_core::playback::DeviceCaps) -> Option<usize> {
+    // Exhaustive inventory: an added field must force accounting review.
+    let plurx_core::playback::DeviceCaps {
+        decoder_compaction: _,
+        v: _,
+        client: _,
+        video: _,
+        audio: _,
+        audio_sinks: _,
+        containers: _,
+        transports: _,
+        progressive_hevc_sample_entries: _,
+        hls_hevc_sample_entries: _,
+        subtitle_overlays: _,
+        dv_transport: _,
+        display: _,
+        learned_limits: _,
+        legacy_blanket_dolby_vision: _,
+        max_height: _,
+    } = v;
     let mut n = opt_string(&v.decoder_compaction);
     if let Some(client) = &v.client {
+        // Exhaustive inventory: an added field must force accounting review.
+        let plurx_core::playback::caps::ClientInfo {
+            kind: _,
+            build: _,
+            ua: _,
+        } = client;
         n = add(n, client.kind.capacity())?;
         n = add(n, client.build.capacity())?;
         n = add(n, client.ua.capacity())?;
     }
     n = add(n, vec_bytes(&v.video)?)?;
     for entry in &v.video {
+        // Exhaustive inventory: an added field must force accounting review.
+        let plurx_core::playback::caps::VideoCaps {
+            codec: _,
+            profiles: _,
+            max_height: _,
+            max_width: _,
+            max_frame_rate: _,
+            max_bitrate_bps: _,
+            present: _,
+            dv_profiles: _,
+        } = entry;
         n = add(n, entry.codec.capacity())?;
         n = add(n, strings(&entry.profiles)?)?;
         n = add(n, vec_bytes(&entry.present)?)?;
@@ -104,6 +158,15 @@ fn device_caps(v: &plurx_core::playback::DeviceCaps) -> Option<usize> {
     n = add(n, opt_string(&v.dv_transport))?;
     n = add(n, vec_bytes(&v.learned_limits)?)?;
     for limit in &v.learned_limits {
+        // Exhaustive inventory: an added field must force accounting review.
+        let plurx_core::playback::caps::LearnedLimit {
+            identity: _,
+            label: _,
+            lost: _,
+            secs: _,
+            rate: _,
+            at_ms: _,
+        } = limit;
         n = add(n, limit.identity.capacity())?;
         n = add(n, limit.label.capacity())?;
     }
@@ -111,6 +174,31 @@ fn device_caps(v: &plurx_core::playback::DeviceCaps) -> Option<usize> {
 }
 
 fn start_response(v: &StartResponse) -> Option<usize> {
+    // Exhaustive inventory: an added field must force accounting review.
+    let StartResponse {
+        delivered_audio: _,
+        quality_catalog_status: _,
+        display_aware_auto_protocol: _,
+        quality_candidate_id: _,
+        quality_candidates: _,
+        measured_candidate_outputs: _,
+        enhancement: _,
+        effective_processing: _,
+        session_id: _,
+        playlist_url: _,
+        duration_ms: _,
+        start_seconds: _,
+        media_origin_ms: _,
+        height: _,
+        encoder: _,
+        vod: _,
+        ladder: _,
+        prior_kbps: _,
+        delivered_dynamic_range: _,
+        delivered_dolby_vision_profile: _,
+        control: _,
+        plan_notes: _,
+    } = v;
     // These are process-only sidecars skipped by durable response decoding.
     // The selected finite control handler parsed its StartResponse from the
     // route, so a future path retaining one needs a new explicit accounting.
@@ -148,6 +236,35 @@ fn start_response(v: &StartResponse) -> Option<usize> {
 }
 
 fn session_request(v: &crate::transcode::SessionRequest) -> Option<usize> {
+    // Exhaustive inventory: an added field must force accounting review.
+    let crate::transcode::SessionRequest {
+        continuous_media: _,
+        quality_catalog: _,
+        candidate_context: _,
+        sdr_master_codecs: _,
+        vod_only: _,
+        passive_vod: _,
+        finite_bitrate_limit_bps: _,
+        file_id: _,
+        playback_id: _,
+        request_id: _,
+        control_sequence: _,
+        automatic: _,
+        previous_session_id: _,
+        reopen_reason: _,
+        kind: _,
+        start_seconds: _,
+        audio_index: _,
+        audio_delivery: _,
+        audio_claim: _,
+        subtitle_burn: _,
+        audio_offset_ms: _,
+        hdr10: _,
+        dv_processing_destination: _,
+        presentation: _,
+        block_budget_secs: _,
+        transport: _,
+    } = v;
     // The fixed ordinary finite profile excludes continuous families. The
     // route's durable decode also has no skipped process-local candidates.
     if v.continuous_media.is_some() || v.quality_catalog.is_some() || v.candidate_context.is_some()
@@ -169,6 +286,23 @@ fn session_request(v: &crate::transcode::SessionRequest) -> Option<usize> {
 }
 
 fn recipe(v: &RemoteStartRequest) -> Option<usize> {
+    // Exhaustive inventory: an added field must force accounting review.
+    let RemoteStartRequest {
+        retained_output_receiver: _,
+        retained_output: _,
+        candidate_catalog: _,
+        candidate_id: _,
+        presentation_target: _,
+        decoder_caps: _,
+        protocol_version: _,
+        incarnation_id: _,
+        principal: _,
+        source_size: _,
+        source_mtime: _,
+        typeless_playlist: _,
+        library_channel: _,
+        request: _,
+    } = v;
     let mut n = 0usize;
     n = add(n, v.incarnation_id.capacity())?;
     if let plurx_core::playback_principal::PlaybackPrincipal::Sharing { viewer_key, .. } =
@@ -181,6 +315,12 @@ fn recipe(v: &RemoteStartRequest) -> Option<usize> {
         n = add(n, output.output_identity.capacity())?;
     }
     if let Some(catalog) = &v.candidate_catalog {
+        // Exhaustive inventory: an added field must force accounting review.
+        let crate::media_sessions::CandidateCatalogContext {
+            caps: _,
+            candidate: _,
+            binding: _,
+        } = catalog;
         n = add(n, device_caps(&catalog.caps)?)?;
         n = add(n, quality_candidate(&catalog.candidate))?;
         n = add(n, catalog.binding.source_digest.capacity())?;
@@ -195,6 +335,28 @@ fn recipe(v: &RemoteStartRequest) -> Option<usize> {
 }
 
 fn request(v: &crate::playback_control::ControlRequestV1) -> Option<usize> {
+    // Exhaustive inventory: an added field must force accounting review.
+    let crate::playback_control::ControlRequestV1 {
+        protocol: _,
+        generation: _,
+        control_epoch: _,
+        client_instance_id: _,
+        sequence: _,
+        demand: _,
+        position_ms: _,
+        buffered_from_ms: _,
+        buffered_through_ms: _,
+        playback_rate: _,
+        render_state: _,
+        seek_target_ms: _,
+        observed_download_bps: _,
+        selection: _,
+        capabilities: _,
+        observation: _,
+        acknowledgement: _,
+        supported_actions: _,
+        intent: _,
+    } = v;
     let mut n = 0usize;
     for value in [&v.protocol, &v.generation, &v.client_instance_id] {
         n = add(n, value.capacity())?;
@@ -218,6 +380,30 @@ fn request(v: &crate::playback_control::ControlRequestV1) -> Option<usize> {
 }
 
 fn route(v: &MediaSessionRoute) -> Option<usize> {
+    // Exhaustive inventory: an added field must force accounting review.
+    let MediaSessionRoute {
+        incarnation_id: _,
+        session_id: _,
+        principal: _,
+        playback_id: _,
+        recovery_epoch: _,
+        request_fingerprint: _,
+        owner_node_id: _,
+        owner_epoch: _,
+        lease_expires_at_ms: _,
+        state: _,
+        terminal_reason: _,
+        publication_ready_at_ms: _,
+        recipe_json: _,
+        response_json: _,
+        produced_playable_through_ms: _,
+        fetched_through_ms: _,
+        media_origin_ms: _,
+        media_sequence: _,
+        discontinuity_sequence: _,
+        updated_at_ms: _,
+        drain_deadline_ms: _,
+    } = v;
     let mut n = 0usize;
     for value in [
         &v.incarnation_id,
@@ -241,13 +427,32 @@ fn route(v: &MediaSessionRoute) -> Option<usize> {
     Some(n)
 }
 
+pub(super) fn committer_parts(
+    route_value: &MediaSessionRoute,
+    start: &StartResponse,
+    recipe_value: &RemoteStartRequest,
+    request_value: &crate::playback_control::ControlRequestV1,
+) -> Option<usize> {
+    let mut n = crate::playback_control::arc_requested_layout(std::alloc::Layout::new::<
+        DurableTerminalCommitter,
+    >())?;
+    n = add(n, route(route_value)?)?;
+    n = add(n, start_response(start)?)?;
+    n = add(n, recipe(recipe_value)?)?;
+    add(n, request(request_value)?)
+}
+
 pub(super) fn committer(v: &DurableTerminalCommitter) -> Option<usize> {
-    // Inline fields live inside this allocation; walkers below add only their
-    // separately allocated payload capacities. Shared Store/Arc internals are
-    // not charged to this finite continuation.
-    let mut n = std::mem::size_of::<DurableTerminalCommitter>();
-    n = add(n, route(&v.route)?)?;
-    n = add(n, start_response(&v.start)?)?;
-    n = add(n, recipe(&v.recipe)?)?;
-    add(n, request(&v.request)?)
+    let DurableTerminalCommitter {
+        store: _,
+        route,
+        start,
+        recipe,
+        request,
+        faults: _,
+        _allocation: _,
+    } = v;
+    // Shared Store/fault owners are not deep copied. The concrete context Arc
+    // and each owned DTO field above are separately inventoried.
+    committer_parts(route, start, recipe, request)
 }

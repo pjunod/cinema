@@ -1019,7 +1019,8 @@ impl RollingControlActor {
         } else {
             None
         };
-        // All reservations precede adoption, including all mandatory clones.
+        // These actor-owned DTO reservations precede adoption. HTTP context
+        // and final consumer allocations must compose their own reservations.
         self.prepared_control = Some(plan);
         Ok(Some(PreparedActorAccounting {
             _transient: transient,

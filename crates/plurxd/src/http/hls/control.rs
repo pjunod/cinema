@@ -1335,6 +1335,8 @@ struct DurableTerminalCommitter {
     recipe: RemoteStartRequest,
     request: crate::playback_control::ControlRequestV1,
     faults: Option<Arc<TerminalCommitFaults>>,
+    // Last: destroy the retained context before returning its original quota.
+    _allocation: Option<crate::playback_control::ActorPayloadAllocation>,
 }
 
 pub(super) const TERMINAL_COMMIT_RETRY_BUDGET: Duration = Duration::from_secs(5);
@@ -2845,16 +2847,47 @@ async fn control_local_with_observation(
             Err(()) => crate::playback_control::PreparedSuccessorObservation::Unavailable,
         }
     };
+    #[cfg(target_os = "linux")]
+    let terminal_context_allocation = if request.demand
+        == crate::playback_control::PlaybackDemand::End
+    {
+        let Some(bytes) = terminal_memory::committer_parts(route, &start, &recipe, &request) else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        match state
+            .transcode
+            .reserve_rolling_control_payload(&route.session_id, bytes)
+            .await
+        {
+            Ok(allocation) => allocation,
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let terminal_context_allocation = None;
     let terminal_committer =
         (request.demand == crate::playback_control::PlaybackDemand::End).then(|| {
-            Arc::new(DurableTerminalCommitter {
+            let committer = DurableTerminalCommitter {
                 store: Arc::clone(&state.store),
                 route: route.clone(),
                 start: start.clone(),
                 recipe: recipe.clone(),
                 request: request.clone(),
                 faults: None,
-            }) as Arc<dyn crate::playback_control::TerminalControlCommitter>
+                _allocation: terminal_context_allocation,
+            };
+            #[cfg(target_os = "linux")]
+            if let Some(allocation) = committer._allocation.as_ref() {
+                allocation
+                    .validate_actual(
+                        terminal_memory::committer(&committer)
+                            .expect("same retained terminal context projection"),
+                    )
+                    .expect("terminal context clone exceeded its original source capacities");
+            }
+            Arc::new(committer) as Arc<dyn crate::playback_control::TerminalControlCommitter>
         });
     // Resolve the engine-local gate before actor acceptance. It must remain
     // available even on a request without an acknowledgement: an owner-epoch

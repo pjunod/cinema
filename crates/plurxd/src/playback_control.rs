@@ -13483,6 +13483,20 @@ impl RollingControlHandle {
         .await
     }
 
+    /// Private allocation connection to the already admitted selected copy
+    /// role. Legacy/VOD handles cannot manufacture a selected-copy partition.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn reserve_selected_payload(
+        &self,
+        bytes: usize,
+    ) -> Result<Option<ActorPayloadAllocation>, ControlStateError> {
+        self.reply_budget
+            .as_ref()
+            .map(|budget| budget.reserve(bytes))
+            .transpose()
+            .map_err(|_| ControlStateError::Unavailable)
+    }
+
     async fn request_allocated_control<R>(
         &self,
         #[cfg(target_os = "linux")] payload_bytes: Option<usize>,
