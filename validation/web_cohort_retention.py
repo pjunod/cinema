@@ -284,8 +284,37 @@ def checkout(raw,commit,job):
         str(job['task_id'])+r' of job web_compile, triggered by event: pull_request',line)]
     require(len(banners) == 1,'Web job log task differs')
     require(lines and lines[-1] == '🏁  Job succeeded','Web job log incomplete/failed')
-    require(lines.count('node: '+RUNTIME['node']) == lines.count('npm: '+RUNTIME['npm']) == 1
-        and lines.count(RUNTIME['git']) == 1,'Web logged runtime differs')
+    # The pinned checkout reports Git both during initialization and Post.
+    # Bind each observation to its real action section, never to an arbitrary
+    # number of version strings a test could print elsewhere in the log.
+    action = 'https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
+    def unique(line):
+        found = [i for i,value in enumerate(lines) if value == line]
+        require(len(found) == 1,'Web runtime section missing/ambiguous')
+        return found[0]
+    main = unique('⭐ Run Main '+action)
+    info = unique('##[group]Getting Git version info')
+    clean = unique('::remove-matcher owner=checkout-git::')
+    environment = unique('##[group]Environment details')
+    post = unique('⭐ Run Post '+action)
+    finished = [i for i,line in enumerate(lines) if line.strip() == '✅  Success - Post '+action]
+    require(len(finished) == 1,'Web checkout Post section missing/ambiguous')
+    commands = [i for i,line in enumerate(lines) if line == '[command]/usr/bin/git version']
+    versions = [i for i,line in enumerate(lines) if line.startswith('git version ')]
+    require(len(commands) == 2 and versions == [i+1 for i in commands]
+        and all(lines[i] == RUNTIME['git'] for i in versions)
+        and main < info and commands[0] == info+2
+        and re.fullmatch(r"Working directory is '[^'\r\n]+'",lines[info+1]) is not None
+        and lines[commands[0]+2] == '##[endgroup]'
+        and commands[0]+2 < positions[0] < clean < environment < post
+        and post < commands[1] <= post+16 and commands[1]+1 < finished[0] < len(lines)-1,
+        'Web checkout Git runtime sections differ')
+    require(environment+3 < len(lines) and lines[environment+1] == 'node: '+RUNTIME['node']
+        and lines[environment+2] == 'npm: '+RUNTIME['npm']
+        and [i for i,line in enumerate(lines) if line.startswith(('node: ','npm: '))]
+            == [environment+1,environment+2]
+        and any(lines[i] == '##[endgroup]' for i in range(environment+3,min(environment+9,post))),
+        'Web Node runtime section differs')
     require(lines[0] == banners[0] and sum(line.startswith('Runner ') for line in lines) == 1,
         'Web trusted runner preamble differs')
     return lines

@@ -300,3 +300,42 @@ class WebCohortRetentionTests(unittest.TestCase):
              mock.patch.dict(os.environ,{'NODE_OPTIONS':'--require /outside/helper.js'}):
             with self.assertRaisesRegex(receipts.ReceiptError,'interpreter configuration'):
                 web.live_inputs(ROOT)
+
+    def test_checkout_runtime_sections_accept_real_two_git_observations_and_reject_conflicts(self):
+        # Sanitized section/order fixture reconstructed from complete job 57771:
+        # initialization Git, final checkout HEAD, setup-node environment, then
+        # checkout Post Git and completion. The private 595,925-byte log stays out.
+        action='https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
+        lines=[
+            'Runner 00000000-0000-0000-0000-000000000001 (version:v13.1.0) received task 23006 of job web_compile, triggered by event: pull_request',
+            'workflow prepared','⭐ Run Main '+action,'Syncing repository: example/project',
+            '##[group]Getting Git version info',"Working directory is '/work/project'",
+            '[command]/usr/bin/git version','git version 2.55.0','##[endgroup]',
+            '[command]/usr/bin/git init /work/project',
+            '[command]/usr/bin/git log -1 --format=%H',COMMIT,
+            '##[group]Removing auth','##[endgroup]','::remove-matcher owner=checkout-git::',
+            'Found in cache @ /tools/node/22.23.4/x64','##[group]Environment details',
+            'node: v22.23.4','npm: 10.9.9','yarn: ','##[endgroup]',
+            'js-check: 96 served scripts OK','PASS jsconfig.json',
+            'web-types: installing typescript 6.0.3','web-types: OK, unchanged',
+            'PASS the Player typedef','TAP version 13','ok 1 - complete web cohort',
+            '# fail 0','# cancelled 0','# skipped 0',
+            '⭐ Run Post https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+            '  ✅  Success - Post https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+            '⭐ Run Post '+action,'[command]/usr/bin/git version','git version 2.55.0',
+            '[command]/usr/bin/git config --local --name-only --get-regexp core.sshCommand',
+            '  ✅  Success - Post '+action,'🏁  Job succeeded']
+        def raw(values):return ('\n'.join('2026-10-25T23:27:07.0000000Z '+line for line in values)+'\n').encode()
+        job={'task_id':23006}
+        self.assertEqual(web.checkout(raw(lines),COMMIT,job),lines)
+        versions=[i for i,line in enumerate(lines) if line == 'git version 2.55.0']
+        self.assertEqual(len(versions),2)
+        for index in versions:
+            conflicting=lines.copy();conflicting[index]='git version 2.54.0'
+            with self.subTest(index=index),self.assertRaisesRegex(receipts.ReceiptError,'Git runtime sections differ'):
+                web.checkout(raw(conflicting),COMMIT,job)
+        for changed in (lines[:versions[1]]+lines[versions[1]+1:],
+                        lines[:-1]+['git version 2.55.0',lines[-1]],
+                        [line for line in lines if line != '⭐ Run Post '+action]):
+            with self.assertRaisesRegex(receipts.ReceiptError,'runtime section|Git runtime sections'):
+                web.checkout(raw(changed),COMMIT,job)
