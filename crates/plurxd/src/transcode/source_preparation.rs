@@ -71,6 +71,22 @@ struct PausingSourceProbeHooks {
     spawned_pid: std::sync::atomic::AtomicU32,
     closed_parents: std::sync::atomic::AtomicUsize,
     open_parent_at_settlement: std::sync::atomic::AtomicBool,
+    #[cfg(target_os = "linux")]
+    fixed_mode: std::sync::atomic::AtomicU8,
+    #[cfg(target_os = "linux")]
+    fixed_before_inputs: AtomicBool,
+    #[cfg(target_os = "linux")]
+    fixed_gate: Mutex<
+        Option<
+            Arc<plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningNativeGate>,
+        >,
+    >,
+    #[cfg(target_os = "linux")]
+    fixed_changed: Notify,
+    #[cfg(target_os = "linux")]
+    fixed_cpu_denial: AtomicBool,
+    #[cfg(target_os = "linux")]
+    fixed_refusal: Mutex<Option<String>>,
 }
 #[cfg(test)]
 impl SourceProbeHooks for PausingSourceProbeHooks {
@@ -141,6 +157,146 @@ impl SourceProbeHookOwner {
         self.test_hooks()
             .spawned_pid
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Fixture handle releases the SAME original native gate on assertion failure,
+/// even while the manager's diagnostic slot still retains a cheap Arc alias.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) struct SourceFixedNativeGate(
+    Arc<plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningNativeGate>,
+);
+#[cfg(all(test, target_os = "linux"))]
+impl SourceFixedNativeGate {
+    pub(crate) async fn started(
+        &self,
+    ) -> plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningNativeStarted {
+        self.0.started().await
+    }
+    pub(crate) fn release(&self) {
+        self.0.release();
+    }
+}
+#[cfg(all(test, target_os = "linux"))]
+impl Drop for SourceFixedNativeGate {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+#[cfg(all(test, target_os = "linux"))]
+impl SourceProbeHookOwner {
+    pub(crate) fn arm_fixed_cpu_denial(&self) {
+        self.test_hooks()
+            .fixed_cpu_denial
+            .store(true, Ordering::Release);
+    }
+    pub(crate) fn deny_fixed_cpu_if_armed(
+        &self,
+        runtime: &plurx_core::adaptive_resources::runtime::NodeResourceRuntime,
+    ) -> Result<(), String> {
+        if self.test_hooks().fixed_cpu_denial.load(Ordering::Acquire) {
+            // Only the exclusive, fresh runtime in Source fixture19 arms
+            // this negative ceiling. No standalone sampler exists there.
+            runtime
+                .fixture_deny_planning_cpu()
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+    pub(crate) fn record_fixed_refusal(&self, error: &str) {
+        if self.test_hooks().fixed_cpu_denial.load(Ordering::Acquire) {
+            *self
+                .test_hooks()
+                .fixed_refusal
+                .lock()
+                .expect("actual fixture refusal") = Some(error.to_owned());
+        }
+    }
+    pub(crate) fn assert_fixed_cpu_refusal(&self) {
+        let refusal = self
+            .test_hooks()
+            .fixed_refusal
+            .lock()
+            .expect("actual fixture refusal");
+        let refusal = refusal
+            .as_deref()
+            .expect("actual synchronous P refusal was observed");
+        assert!(
+            refusal.contains("HardLimit(Cpu)"),
+            "actual refusal must be CPU budget, got: {refusal}"
+        );
+        assert!(
+            !refusal.contains("StaleEpoch"),
+            "a stale epoch is not CPU refusal"
+        );
+    }
+    pub(crate) fn arm_fixed_native(&self, panic_after_native_return: bool) {
+        self.test_hooks().fixed_mode.store(
+            if panic_after_native_return { 2 } else { 1 },
+            Ordering::Release,
+        );
+    }
+    pub(crate) fn pause_before_fixed_inputs(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.test_hooks()
+            .fixed_before_inputs
+            .store(true, Ordering::Release);
+        self.pause_before_spawn()
+    }
+    pub(crate) async fn before_fixed_inputs(&self) {
+        if self
+            .test_hooks()
+            .fixed_before_inputs
+            .load(Ordering::Acquire)
+        {
+            self.slot.get().before_spawn().await;
+        }
+    }
+    pub(crate) async fn before_fixed_collect(&self) {
+        if !self
+            .test_hooks()
+            .fixed_before_inputs
+            .load(Ordering::Acquire)
+        {
+            self.slot.get().before_spawn().await;
+        }
+    }
+    pub(crate) async fn install_fixed_native(&self, operation: &SourceProbeOperation) {
+        let hooks = self.test_hooks();
+        let mode = hooks.fixed_mode.load(Ordering::Acquire);
+        if mode == 0
+            || hooks
+                .fixed_gate
+                .lock()
+                .expect("fixture gate slot")
+                .is_some()
+        {
+            return;
+        }
+        let SourceProbeState::Fixed(state) = &operation.state else {
+            panic!("original fixed Source state")
+        };
+        let gate = state
+            .work
+            .lock()
+            .await
+            .owner
+            .fixture_native_gate(mode == 2)
+            .await
+            .expect("same original P native gate");
+        *hooks.fixed_gate.lock().expect("fixture gate slot") = Some(Arc::new(gate));
+        hooks.fixed_changed.notify_waiters();
+    }
+    pub(crate) async fn fixed_native_gate(&self) -> SourceFixedNativeGate {
+        let hooks = self.test_hooks();
+        loop {
+            let changed = hooks.fixed_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(gate) = hooks.fixed_gate.lock().expect("fixture gate slot").as_ref() {
+                return SourceFixedNativeGate(Arc::clone(gate));
+            }
+            changed.await;
+        }
     }
 }
 
@@ -331,14 +487,77 @@ struct FixedSourceWork {
 struct FixedSourceState {
     work: tokio::sync::Mutex<FixedSourceWork>,
     snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+    recipe_binding: String,
     // All original application payloads above drop before this last fence.
     // It signals lifetime only; the original core supervisor settles M.
     _application: plurx_core::adaptive_resources::runtime::finite_lifetime::FiniteApplicationLease,
+}
+/// A failed constructor may already have reserved P/M without returning its
+/// selector. Missing owner is uncertainty, never never-acquired evidence.
+#[cfg(target_os = "linux")]
+struct UncertainSourcePlanning {
+    snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+    reason: String,
+    // If an owner was returned before application retention failed, preserve
+    // that SAME selector. Drop requests cleanup only after rich fields above.
+    _original:
+        Option<plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner>,
+}
+#[cfg(target_os = "linux")]
+pub(crate) struct SourceFixedStartFailure {
+    reason: String,
+    held: Option<SourceProbeOperation>,
+}
+#[cfg(target_os = "linux")]
+impl std::fmt::Debug for SourceFixedStartFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceFixedStartFailure")
+            .field("reason", &self.reason)
+            .field("uncertainty_held", &self.held.is_some())
+            .finish()
+    }
+}
+#[cfg(target_os = "linux")]
+impl SourceFixedStartFailure {
+    pub(crate) fn into_parts(self) -> (String, Option<SourceProbeOperation>) {
+        (self.reason, self.held)
+    }
+    fn before_call(reason: &str) -> Self {
+        Self {
+            reason: reason.to_owned(),
+            held: None,
+        }
+    }
+    fn held(
+        reason: String,
+        assignment: SourceDispatchAssignment,
+        snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+        original: Option<
+            plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner,
+        >,
+    ) -> Self {
+        let held = SourceProbeOperation {
+            assignment,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            state: SourceProbeState::PlanningUncertain(UncertainSourcePlanning {
+                snapshot,
+                reason: reason.clone(),
+                _original: original,
+            }),
+        };
+        Self {
+            reason,
+            held: Some(held),
+        }
+    }
 }
 enum SourceProbeState {
     Legacy(Arc<ProbeState>),
     #[cfg(target_os = "linux")]
     Fixed(Arc<FixedSourceState>),
+    #[cfg(target_os = "linux")]
+    PlanningUncertain(UncertainSourcePlanning),
 }
 pub(crate) struct SourceProbeOperation {
     assignment: SourceDispatchAssignment,
@@ -354,6 +573,13 @@ impl SourceProbeOperation {
     pub(crate) async fn settle(&self) -> SourceProbeSettlement {
         let state = match &self.state {
             SourceProbeState::Legacy(state) => state,
+            #[cfg(target_os = "linux")]
+            SourceProbeState::PlanningUncertain(held) => {
+                tracing::warn!(target: "plurxd::transcode", reason = %held.reason, "Source planning constructor uncertainty retains the original Source assignment");
+                // No returned selector/Err/status can authorize Source SQL
+                // release. No native or NeverAcquired fact is reconstructed.
+                return std::future::pending::<SourceProbeSettlement>().await;
+            }
             #[cfg(target_os = "linux")]
             SourceProbeState::Fixed(_) => {
                 // Cancellation is not a close receipt. Keep the exact P
@@ -396,7 +622,7 @@ impl SourceProbeOperation {
         let state = match &self.state {
             SourceProbeState::Legacy(state) => state,
             #[cfg(target_os = "linux")]
-            SourceProbeState::Fixed(_) => {
+            SourceProbeState::Fixed(_) | SourceProbeState::PlanningUncertain(_) => {
                 return Err("fixed Source planning requires its admitted metadata lease".into())
             }
         };
@@ -409,17 +635,31 @@ impl SourceProbeOperation {
             .ok_or_else(|| "Source probe result already consumed".to_owned())?
     }
     #[cfg(target_os = "linux")]
-    pub(crate) fn is_fixed(&self) -> bool {
-        matches!(self.state, SourceProbeState::Fixed(_))
+    pub(crate) fn uses_fixed_planning(&self) -> bool {
+        matches!(
+            self.state,
+            SourceProbeState::Fixed(_) | SourceProbeState::PlanningUncertain(_)
+        )
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fixed_matches(
+        &self,
+        assignment: &SourceDispatchAssignment,
+        fingerprint: &str,
+    ) -> bool {
+        matches!(&self.state, SourceProbeState::Fixed(state) if self.assignment.same_identity(assignment) && state.recipe_binding == fingerprint)
     }
     #[cfg(target_os = "linux")]
     pub(crate) fn fixed_snapshot(
         &self,
     ) -> Result<&Arc<plurx_core::store::PlaybackPlanningSnapshot>, String> {
-        let SourceProbeState::Fixed(state) = &self.state else {
-            return Err("Source original fixed planning owner is absent".into());
-        };
-        Ok(&state.snapshot)
+        match &self.state {
+            SourceProbeState::Fixed(state) => Ok(&state.snapshot),
+            SourceProbeState::PlanningUncertain(held) => Ok(&held.snapshot),
+            SourceProbeState::Legacy(_) => {
+                Err("Source original fixed planning owner is absent".into())
+            }
+        }
     }
     #[cfg(target_os = "linux")]
     pub(crate) async fn prepare_fixed_inputs(&self, deadline: Instant) -> Result<(), String> {
@@ -438,6 +678,9 @@ impl SourceProbeOperation {
         if work.native_closed {
             return Err("Source original planning is already closed".into());
         }
+        self.assignment
+            .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+            .map_err(|_| "Source original planning observation expired")?;
         work.owner
             .prepare_inputs(deadline)
             .await
@@ -463,6 +706,9 @@ impl SourceProbeOperation {
         if let Some(report) = &work.report {
             return Ok(report.clone());
         }
+        self.assignment
+            .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+            .map_err(|_| "Source original planning observation expired")?;
         let report = work
             .owner
             .collect_and_refine(deadline)
@@ -496,18 +742,47 @@ impl SourceProbeOperation {
 #[cfg(target_os = "linux")]
 pub(crate) fn start_source_fixed_probe(
     runtime: &Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
-    request: plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeRequest,
+    mut request: plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeRequest,
     snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
     assignment: SourceDispatchAssignment,
     deadline: Instant,
-) -> Result<SourceProbeOperation, String> {
+) -> Result<SourceProbeOperation, SourceFixedStartFailure> {
+    let recipe_binding = request.recipe_source_binding.clone();
+    // Count the capacities of the actual moved assignment and the retained
+    // replay binding, including a refreshed membership snapshot's real size.
+    request.application_metadata_bytes = request
+        .application_metadata_bytes
+        .checked_add(assignment.requested_heap_bytes().ok_or_else(|| {
+            SourceFixedStartFailure::before_call("Source assignment capacity overflow")
+        })?)
+        .and_then(|bytes| bytes.checked_add(recipe_binding.capacity()))
+        .ok_or_else(|| {
+            SourceFixedStartFailure::before_call("Source original replay capacity overflow")
+        })?;
     let requested_bytes = request.application_metadata_bytes;
-    let owner = runtime
-        .prepare_fixed_planning_probe(request, deadline)
-        .map_err(|error| format!("admitting Source original planning: {error}"))?;
-    let application = owner
-        .take_application_lease(requested_bytes)
-        .map_err(|error| format!("retaining Source original planning application: {error}"))?;
+    let owner = match runtime.prepare_fixed_planning_probe(request, deadline) {
+        Ok(owner) => owner,
+        Err(error) => {
+            let definite = error.definitely_before_reservation();
+            let reason = format!("admitting Source original planning: {error}");
+            return Err(if definite {
+                SourceFixedStartFailure { reason, held: None }
+            } else {
+                SourceFixedStartFailure::held(reason, assignment, snapshot, None)
+            });
+        }
+    };
+    let application = match owner.take_application_lease(requested_bytes) {
+        Ok(application) => application,
+        Err(error) => {
+            return Err(SourceFixedStartFailure::held(
+                format!("retaining Source original planning application: {error}"),
+                assignment,
+                snapshot,
+                Some(owner),
+            ))
+        }
+    };
     Ok(SourceProbeOperation {
         assignment,
         state: SourceProbeState::Fixed(Arc::new(FixedSourceState {
@@ -517,6 +792,7 @@ pub(crate) fn start_source_fixed_probe(
                 native_closed: false,
             }),
             snapshot,
+            recipe_binding,
             _application: application,
         })),
         cancel: tokio_util::sync::CancellationToken::new(),

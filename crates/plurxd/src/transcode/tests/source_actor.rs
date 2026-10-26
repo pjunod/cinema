@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+#[path = "source_fixed_native.rs"]
+mod fixed_native;
+
 use super::*;
 
 /// This fixture boots the production one-voter selector. Candidate installation
@@ -191,7 +195,7 @@ async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Optio
         .await
         .expect("actual Source startup coordinator"));
     #[cfg(target_os = "linux")]
-    let fixed_runtime = if fixed_case.is_some() {
+    let fixed_runtime = if fixed_case.is_some() || (12..=20).contains(&mode) {
         Some(
             crate::resource_runtime::open_before_cleanup(&mut selected, &config)
                 .await
@@ -228,6 +232,11 @@ async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Optio
         config.sharing.clone(),
     ));
     state_mut.node_id = selected.identity.node_id.clone();
+    #[cfg(target_os = "linux")]
+    {
+        state_mut.resource_runtime = fixed_runtime.clone();
+    }
+
     state_mut
         .membership
         .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
@@ -676,12 +685,29 @@ async fn source_copy_preadmission_fixture_with_fixed(mode: u8, fixed_case: Optio
             .expect("actual cold index read")
             .is_none());
     }
-    let manager = Arc::new(TranscodeManager::new(
+    let manager = TranscodeManager::new(
         Arc::clone(store),
         directory.path().join("workers"),
         EncoderCaps::default(),
         Pipeline::Cpu,
-    ));
+    );
+    #[cfg(target_os = "linux")]
+    let manager = if let Some(runtime) = fixed_runtime {
+        let dirs = crate::configured_dirs(&config.storage);
+        manager.with_cache_layout(
+            dirs.cache,
+            dirs.runtime_cache,
+            dirs.subs,
+            dirs.renditions,
+            "fixture cache configuration; recipe uses original P attestation".into(),
+            selected.identity.node_id.clone(),
+            Some(membership.clone()),
+            Some(runtime),
+        )
+    } else {
+        manager
+    };
+    let manager = Arc::new(manager);
     if let Some(mut second_prepared) = second_prepared {
         let now = crate::fragment_index_cluster::unix_ms();
         let SourceIntentRead::Ready(second_intent) = store
@@ -1071,7 +1097,11 @@ async fn source_actual_actor(
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
         return;
     }
-    if matches!(mode, 3 | 19 | 28) {
+    #[cfg(target_os = "linux")]
+    if mode == 19 {
+        manager.source_workers.probe_hooks.arm_fixed_cpu_denial();
+    }
+    if matches!(mode, 3 | 28) || (mode == 19 && !cfg!(target_os = "linux")) {
         state
             .store
             .put_setting(keys::SW_POOL_THREADS, "3")
@@ -1212,14 +1242,49 @@ async fn source_actual_actor(
                 .index_hooks
                 .pause_after_wait_failure(),
         ),
-        13 => Some(manager.source_workers.probe_hooks.pause_after_spawn()),
-        14 | 16 | 17 | 18 => Some(manager.source_workers.probe_hooks.pause_before_spawn()),
-        15 => Some(
-            manager
-                .source_workers
-                .probe_hooks
-                .pause_after_wait_failure(),
-        ),
+        13 => {
+            #[cfg(target_os = "linux")]
+            {
+                manager.source_workers.probe_hooks.arm_fixed_native(false);
+                None
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Some(manager.source_workers.probe_hooks.pause_after_spawn())
+            }
+        }
+        17 => {
+            #[cfg(target_os = "linux")]
+            {
+                Some(
+                    manager
+                        .source_workers
+                        .probe_hooks
+                        .pause_before_fixed_inputs(),
+                )
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Some(manager.source_workers.probe_hooks.pause_before_spawn())
+            }
+        }
+        14 | 16 | 18 => Some(manager.source_workers.probe_hooks.pause_before_spawn()),
+        15 => {
+            #[cfg(target_os = "linux")]
+            {
+                manager.source_workers.probe_hooks.arm_fixed_native(true);
+                None
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Some(
+                    manager
+                        .source_workers
+                        .probe_hooks
+                        .pause_after_wait_failure(),
+                )
+            }
+        }
         20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
         22 => Some(manager.source_workers.native_hooks.pause_after_spawn()),
         23 | 25 | 26 | 27 => Some(manager.source_workers.native_hooks.pause_before_spawn()),
@@ -1302,12 +1367,37 @@ async fn source_actual_actor(
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
     assert!(Arc::ptr_eq(&actor.0, &joined.0));
+    #[cfg(target_os = "linux")]
+    if matches!(mode, 13 | 15) {
+        drop(joined);
+        fixed_native::exercise(&state, &manager, &actor, &assignment, mode, ingress_monitor).await;
+        return;
+    }
+
     if let Some(pause) = index_pause {
-        let held = pause.reached().await;
+        let held = tokio::time::timeout(Duration::from_secs(30), pause.reached())
+            .await
+            .expect("FAILURE watchdog: original Source stage was not reached");
+        let fixed = cfg!(target_os = "linux") && (12..=20).contains(&mode);
         assert_eq!(
             manager.admissions.software_in_use(),
-            if mode == 20 { 0 } else { 4 }
+            if fixed || mode == 20 { 0 } else { 4 }
         );
+        #[cfg(target_os = "linux")]
+        if fixed {
+            let counts = manager
+                .resource_runtime
+                .as_ref()
+                .expect("real Source runtime")
+                .planning_ownership_diagnostics()
+                .expect("complete P/M stage inventory");
+            assert_eq!(counts.metadata_owners, 1);
+            assert_eq!(counts.native_roles_held, usize::from(mode != 20));
+            assert_eq!(
+                counts.original_tasks_pending, 0,
+                "the pre-collector/after-close fixture stage is not native entry proof"
+            );
+        }
         assert!(manager.vod.session_ids().await.is_empty());
         assert!(state
             .store
@@ -1322,11 +1412,15 @@ async fn source_actual_actor(
         } else {
             manager.source_workers.index_hooks.spawned_pid()
         };
-        if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
-            assert!(pid > 0, "actual Source index child started");
-        } else {
-            assert_eq!(pid, 0, "refusal point precedes any actual child");
+        if !fixed {
+            if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
+                assert!(pid > 0, "actual legacy Source child started");
+            } else {
+                assert_eq!(pid, 0, "legacy refusal point precedes its child");
+            }
         }
+        // Fixed mode20 already joined its actual native tasks; its legacy
+        // PID slot is unused and cannot stand in for native absence proof.
         assert!(matches!(
             actor.wait_ready(Instant::now()).await,
             Err(SourceWorkerError::Deadline)
@@ -1372,8 +1466,8 @@ async fn source_actual_actor(
         }
         assert_eq!(
             manager.admissions.software_in_use(),
-            if mode == 20 { 0 } else { 4 },
-            "probe capacity matches actual settlement stage"
+            if fixed || mode == 20 { 0 } else { 4 },
+            "actual P/M custody or legacy permit matches its own stage"
         );
         assert_eq!(actor.settlement_status(), None);
         drop(held);
@@ -1426,6 +1520,35 @@ async fn source_actual_actor(
             .expect("owned no-spawn cleanup budget")
             .expect("actual admission failed without a child");
         assert_eq!(manager.admissions.software_in_use(), 0);
+        #[cfg(target_os = "linux")]
+        if mode == 19 {
+            manager
+                .source_workers
+                .probe_hooks
+                .assert_fixed_cpu_refusal();
+            let runtime = manager
+                .resource_runtime
+                .as_ref()
+                .expect("exclusive fresh19runtime");
+            let accounting = runtime
+                .accounting()
+                .expect("actual negative admission accounting");
+            assert!(matches!(
+                accounting.capacity.cpu_ns_per_second,
+                plurx_core::process::observation::Metric::Known(0)
+            ));
+            assert_eq!(
+                accounting.used,
+                plurx_core::adaptive_resources::ResourceVector::default()
+            );
+            let counts = runtime
+                .planning_ownership_diagnostics()
+                .expect("complete postrefusal inventory");
+            assert_eq!(counts.native_roles_held, 0);
+            assert_eq!(counts.metadata_owners, 0);
+            assert_eq!(counts.original_tasks_pending, 0);
+        }
+
         assert!(state
             .store
             .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
