@@ -53,6 +53,24 @@ pub(super) async fn enqueue(
     Ok(())
 }
 
+/// Retain the same admitted value in the existing native-thread task, even
+/// after its async waiter is dropped. This is lifetime ownership, not a new
+/// admission or a proof that the model's native runtime has become absent.
+fn spawn_admitted_inference<T, F>(
+    admission: Arc<crate::transcode::FragmentAdmission>,
+    inference: F,
+) -> tokio::task::JoinHandle<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        // Declared before inference so it survives the call and its unwind.
+        let _original_admission = admission;
+        inference()
+    })
+}
+
 pub(super) async fn run(
     state: &AppState,
     boot: &str,
@@ -88,6 +106,9 @@ pub(super) async fn run(
     let Some(admission) = state.transcode.admit_fragment().await else {
         return Ok(false);
     };
+    // One Arc allocation shares this same moved original admission. Its value
+    // size is not an allocator, blocking-frame or native-runtime peak bound.
+    let admission = Arc::new(admission);
 
     let identity = model_identity();
     for candidate in page.jobs {
@@ -153,7 +174,7 @@ pub(super) async fn run(
             let revision = entry.record.as_ref().map_or(0, |record| record.revision);
             let r = runtime();
             let cancelled = cancel.clone();
-            let mut task = tokio::task::spawn_blocking(move || -> Result<Vec<f32>> {
+            let mut task = spawn_admitted_inference(Arc::clone(&admission), move || -> Result<Vec<f32>> {
                 let r = r.lock().map_err(|_| anyhow::anyhow!("model lock"))?;
                 if cancelled.is_cancelled() || !ENABLED.load(Ordering::Acquire) { bail!("embedding cancelled"); }
                 r.encoder.as_ref().ok_or_else(|| anyhow::anyhow!("encoder unloaded"))?.embed(&text)
@@ -216,3 +237,7 @@ pub(super) async fn run(
     *cursor = page.next;
     Ok(false)
 }
+
+#[cfg(test)]
+#[path = "semantic_work/tests.rs"]
+mod tests;
