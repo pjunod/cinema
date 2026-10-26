@@ -1,6 +1,33 @@
 version = 1
 enforce_after = "e8a910f"
 
+# HTTPS qualification: current Apple unit contracts, with execution recorded separately.
+[[fixes]]
+id = "https.apple-unit-current-contracts"
+commits = ["88ab6e0d03e90e7e323495b9f3795160f20e68ff"]
+source = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+source_anchor = 'XCTAssertEqual(pick(processed(grade: "sdr")), 720)'
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testProcessedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+
+[[fixes]]
+id = "https.apple-developer-graduation-fixture"
+commits = []
+supplements = "https.apple-unit-current-contracts"
+source = "clients/apple/Tests/LiveTvTests.swift"
+source_anchor = 'XCTAssertTrue(card.contains("graduates from Developer after those checks pass"), title)'
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+[[fixes]]
+id = "https.apple-native-adaptive-sidebar-fixture"
+commits = []
+supplements = "https.apple-unit-current-contracts"
+source = "clients/apple/Tests/MeridianTests.swift"
+source_anchor = "let nativeSidebarHidden = nativeTabs.sidebar.isHidden"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
+
 # HTTPS qualification: retain one native accessibility snapshot per guide move.
 [[fixes]]
 id = "https.apple-guide-native-snapshot-poll"
