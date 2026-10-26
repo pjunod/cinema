@@ -207,8 +207,8 @@ Published checkpoint `269923bb7` adds the selected finite path's bounded client
 payload partitions; `ee8cc4674` adds streaming custody history and indexed
 family/asset-operation membership. The pinned host all-target core+daemon+
 cluster-fixture check passed in 112.938 seconds, and a later core-only check
-passed in 12.445 seconds. Their receipts are recorded above. Exact native archive
-checking for `269923bb7` is still RUNNING, so it has no result yet.
+passed in 12.445 seconds. Their receipts are recorded above. At that historical checkpoint, native archive checking for `269923bb7` had no
+result. Current compiler receipts and source attribution are recorded above.
 
 The selected ordinary Linux software-transcode path is connected through local
 admission, source/output custody, producer joins, publication, HTTP readers,
@@ -222,7 +222,8 @@ Direct-source adapter work is active. All V1–V5 and R1/M0–M7 remain OPEN; te
 remain NOT RUN, and there has been no final review or qualification.
 
 Earlier compiler receipts and source scopes remain historical evidence only.
-They do not cover the checkpoints above or the in-progress native archive check.
+They do not cover later source checkpoints; current native results must be
+read from their exact source-bound receipts above.
 See the [finite delivery table](ADAPTIVE-PLAYBACK-DELIVERY.md) for remaining
 adapters and the [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md) for recovery
 scope.
