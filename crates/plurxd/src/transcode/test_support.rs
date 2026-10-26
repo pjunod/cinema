@@ -821,8 +821,6 @@ fn test_session_with_optional_child(
         suspend_count: AtomicU64::new(0),
         takeover: None,
         first_slide_logged: AtomicBool::new(false),
-        #[cfg(target_os = "linux")]
-        core_copy_app: None,
     }
 }
 

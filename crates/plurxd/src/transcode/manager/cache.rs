@@ -1012,8 +1012,6 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
-            #[cfg(target_os = "linux")]
-            core_copy_app: None,
         });
         if let Err(reason) = self
             .register_session(&session_id, Arc::clone(&session), 0)

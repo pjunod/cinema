@@ -188,8 +188,6 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
-            #[cfg(target_os = "linux")]
-            core_copy_app: None,
         });
         // Source/engine equality is checked after actor await and immediately
         // before the real attachment. Received rates/locator never enter here.
