@@ -6,7 +6,7 @@ use crate::scan::dv_title::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub const DISPLAY_TARGET_METHOD: &str = "dolby-closed-form-cm4-cm29-v4";
+pub const DISPLAY_TARGET_METHOD: &str = "dolby-closed-form-cm4-cm29-v5";
 pub const DISPLAY_TARGET_BUCKETS: [u32; 6] = [400, 600, 1000, 1600, 2000, 4000];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
