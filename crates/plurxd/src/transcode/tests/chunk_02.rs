@@ -84,7 +84,7 @@ quality_catalog: None,
             .find(|(key, _)| *key == "XDG_CACHE_HOME")
             .and_then(|(_, value)| value)
             .expect("XDG_CACHE_HOME");
-        assert_eq!(inherited, expected.as_os_str());
+        assert_eq!(inherited, expected.join("gpu-cache").as_os_str());
     }
 
     #[test]

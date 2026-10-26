@@ -704,6 +704,37 @@ async fn a_capture_whose_frozen_faces_diverge_is_refused() {
         );
         std::fs::remove_file(&frozen).expect("unlink the frozen entry, not its target");
         std::fs::write(&frozen, &replacement).expect("replace only the owned snapshot entry");
+        // Make this fixture's mutation observable even to directory caches
+        // that compare whole-second mtimes, without sleeping or changing the
+        // live source/cache. Prove the intended face divergence explicitly.
+        let directory = std::fs::File::open(frozen.parent().expect("font directory"))
+            .expect("owned frozen font directory");
+        let modified = directory
+            .metadata()
+            .expect("directory metadata")
+            .modified()
+            .expect("directory mtime")
+            + Duration::from_secs(2);
+        directory
+            .set_modified(modified)
+            .expect("invalidate frozen directory cache");
+        let frozen_env = vec![
+            ("FONTCONFIG_SYSROOT", root.clone().into_os_string()),
+            ("FONTCONFIG_FILE", fixture.config.clone().into_os_string()),
+        ];
+        let faces = |env: &FcEnv| {
+            let mut faces: Vec<_> = fc("fc-list", env, &["--format=%{family}\t%{style}\n"])
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            faces.sort();
+            faces
+        };
+        assert_ne!(
+            faces(&frozen_env),
+            faces(&live_fc(&fixture.config)),
+            "the corrupted frozen entry must actually change Fontconfig's faces"
+        );
         let frozen_hash = Sha256::digest(std::fs::read(&frozen).expect("replacement bytes"));
         assert_eq!(frozen_hash, replacement_hash);
         assert_ne!(frozen_hash, live_hash);

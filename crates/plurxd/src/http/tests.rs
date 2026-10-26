@@ -8815,6 +8815,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "coverage",
             "durable_queue",
             "durable_role",
+            "dv_target_cache",
             // Display-aware Auto on a single node owns every session.
             "local_session_owner",
             // Output preparation and rolling retention: the budget is the
