@@ -128,18 +128,29 @@ impl SoftwareAvcPumpPlan {
         self.plan.entries.len()
     }
 
-    /// Explicit retained partitions, not the final end-to-end profile. Engine
-    /// Parser metadata, native process/launcher and runtime/journal state still
-    /// need their own partition before a production demand or receipt relies on it.
+    /// The private Tokio channel layout, block rollover/reuse peak, allocator
+    /// rounding, and native producer peak have no certified finite bound here.
+    /// This claim must accompany the numeric known component at admission.
+    pub(in crate::adaptive_resources::runtime) fn memory_claim(
+        &self,
+    ) -> crate::adaptive_resources::MemoryClaim {
+        crate::adaptive_resources::MemoryClaim::UnknownProducerPeak
+    }
+
+    /// Known requested partitions, including the inline pump/receiver owners,
+    /// the initial event block's payload and both identity copies. This is a minimum, not an upper bound on Tokio
+    /// channel or task/native memory; `memory_claim` retains that uncertainty.
     pub(in crate::adaptive_resources) fn minimum_memory_bytes(&self) -> io::Result<u64> {
-        let total = size_of::<Self>()
-            .checked_add(
-                self.plan
-                    .entries
-                    .capacity()
-                    .checked_mul(size_of::<PlanEntry>())
-                    .ok_or_else(overflow)?,
-            )
+        let total = size_of::<SoftwarePump>()
+            .checked_add(size_of::<mpsc::Receiver<SoftwareVodEvent>>())
+            .and_then(|n| {
+                n.checked_add(
+                    self.plan
+                        .entries
+                        .capacity()
+                        .checked_mul(size_of::<PlanEntry>())?,
+                )
+            })
             .and_then(|n| n.checked_add(self.encoded_process.capacity()))
             .and_then(|n| n.checked_add(self.memory.reader.buffer_bytes))
             .and_then(|n| n.checked_add(self.memory.read_chunk_bytes))
@@ -161,7 +172,7 @@ impl SoftwareAvcPumpPlan {
             })
             .and_then(|n| n.checked_add(self.diagnostic_bytes))
             .and_then(|n| n.checked_add(self.metadata_bytes))
-            .and_then(|n| n.checked_add(8192))
+            .and_then(|n| n.checked_add(initial_event_requested_bytes()?))
             .ok_or_else(overflow)?;
         u64::try_from(total).map_err(|_| overflow())
     }
@@ -170,7 +181,7 @@ impl SoftwareAvcPumpPlan {
 /// Bounded-channel metadata; never a terminal receipt or a resource refund.
 #[allow(
     clippy::large_enum_variant,
-    reason = "Keep the bounded event payload inline; boxing InitIdentity adds an uncharged heap allocation. The separate Tokio block/channel and cloned-payload inventory remains an explicit open implementation item."
+    reason = "Keep the event inline; boxing adds another allocation. initial_event_requested_bytes counts the initial block payload and both AVC identity copies; the private channel layout and live block peak remain UnknownProducerPeak."
 )]
 pub enum SoftwareVodEvent {
     Initialized(InitIdentity),
@@ -179,6 +190,47 @@ pub enum SoftwareVodEvent {
         bytes: u64,
         digest: [u8; 32],
     },
+}
+
+// Tokio 1.53.1 sync/mpsc/mod.rs: BLOCK_CAP is 32 on 64-bit and 16 on
+// 32-bit. list::channel allocates one Block immediately, irrespective of the
+// bounded semaphore's message capacity. block::Values is an inline array of
+// that many event slots. This is only a payload projection, not a mirror of
+// Tokio's private Block/Chan/CachePadded/semaphore or allocator layouts.
+const EVENT_CHANNEL_CAPACITY: usize = 1;
+#[cfg(target_pointer_width = "64")]
+const INITIAL_EVENT_BLOCK_SLOTS: usize = 32;
+#[cfg(not(target_pointer_width = "64"))]
+const INITIAL_EVENT_BLOCK_SLOTS: usize = 16;
+// identity::digest formats two SHA-256 digests as 64-byte hex strings. AVC
+// always establishes with empty/default promotion facts. The original and one
+// Initialized clone coexist; no parameter-set Vec backing may enter this path.
+const IDENTITY_DIGEST_BYTES: usize = 64;
+const LIVE_IDENTITY_COPIES: usize = 2;
+
+fn initial_event_requested_bytes() -> Option<usize> {
+    INITIAL_EVENT_BLOCK_SLOTS
+        .checked_mul(size_of::<SoftwareVodEvent>())?
+        .checked_add(
+            LIVE_IDENTITY_COPIES
+                .checked_mul(2)?
+                .checked_mul(IDENTITY_DIGEST_BYTES)?,
+        )
+}
+
+fn initialized_event(identity: &InitIdentity) -> io::Result<SoftwareVodEvent> {
+    if identity.muxer_init.len() != IDENTITY_DIGEST_BYTES
+        || identity.served_init.len() != IDENTITY_DIGEST_BYTES
+        || identity.muxer_init.capacity() != IDENTITY_DIGEST_BYTES
+        || identity.served_init.capacity() != IDENTITY_DIGEST_BYTES
+        || identity.promotion != PromotionInputs::default()
+        || identity.promotion.requested_heap_bytes() != Some(0)
+    {
+        return Err(invalid(
+            "finite AVC event identity exceeds its requested partition",
+        ));
+    }
+    Ok(SoftwareVodEvent::Initialized(identity.clone()))
 }
 
 pub(in crate::adaptive_resources) struct SoftwarePump {
@@ -277,7 +329,7 @@ impl SoftwarePump {
         output: FiniteOutput,
         plan: SoftwareAvcPumpPlan,
     ) -> (Self, mpsc::Receiver<SoftwareVodEvent>) {
-        let (events, receiver) = mpsc::channel(1);
+        let (events, receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         (
             Self {
                 output,
@@ -414,7 +466,7 @@ impl SoftwarePump {
         publish(&self.output, FiniteFile::Init, &mut served.bytes).await?;
         drop(served);
         self.events
-            .send(SoftwareVodEvent::Initialized(identity.clone()))
+            .send(initialized_event(&identity)?)
             .await
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "finite VOD observer dropped")
@@ -605,3 +657,6 @@ fn invalid(message: &'static str) -> io::Error {
 fn overflow() -> io::Error {
     invalid("finite pump memory accounting overflow")
 }
+
+#[cfg(test)]
+mod memory_tests;

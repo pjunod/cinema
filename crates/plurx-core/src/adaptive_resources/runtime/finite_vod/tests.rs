@@ -120,7 +120,7 @@ fn preparation(runtime: &NodeResourceRuntime) -> super::super::operations::Owned
 }
 
 #[cfg(target_os = "linux")]
-fn pump_plan() -> SoftwareAvcPumpPlan {
+pub(super) fn pump_plan() -> SoftwareAvcPumpPlan {
     let grid = crate::transcode::VodFrameGrid::new(24_000, 1).expect("canonical grid");
     let plan = SegmentPlan {
         version: SEGPLAN_VERSION,

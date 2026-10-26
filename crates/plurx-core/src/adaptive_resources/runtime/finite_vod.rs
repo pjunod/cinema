@@ -1558,6 +1558,7 @@ impl NodeResourceRuntime {
         let control_for_launch = Arc::clone(&control);
         let directory_for_output = Arc::clone(&directory_path);
         let guard_for_output = Arc::clone(&app_guard);
+        let producer_memory_claim = request.producer.memory_claim();
         let (preparation, events) = match self.prepare_typed_families_claiming_initialized(
             &[FamilyDemand {
                 identity: family,
@@ -1567,7 +1568,7 @@ impl NodeResourceRuntime {
                 attempt_id: None,
                 members: plans,
             }],
-            Some(&[super::super::MemoryClaim::UnknownProducerPeak]),
+            Some(&[producer_memory_claim]),
             deadline,
             |preparation| {
                 let output = FiniteOutput {
