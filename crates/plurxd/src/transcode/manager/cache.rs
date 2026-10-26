@@ -920,6 +920,8 @@ impl TranscodeManager {
             #[cfg(target_os = "linux")]
             core_copy_close: Mutex::new(None),
             #[cfg(target_os = "linux")]
+            core_copy_quota: std::sync::Mutex::new(None),
+            #[cfg(target_os = "linux")]
             core_copy_refresh_gate: Mutex::new(()),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: false,

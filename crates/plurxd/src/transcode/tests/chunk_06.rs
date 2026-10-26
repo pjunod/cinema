@@ -391,6 +391,8 @@
         #[cfg(target_os = "linux")]
         core_copy_close: Mutex::new(None),
         #[cfg(target_os = "linux")]
+        core_copy_quota: std::sync::Mutex::new(None),
+        #[cfg(target_os = "linux")]
         core_copy_refresh_gate: Mutex::new(()),
             actor_managed_response_publication: actor_managed_prepublication,
             actor_managed_prepublication_process: actor_managed_prepublication,
