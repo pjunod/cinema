@@ -134,6 +134,14 @@ def current_context(workspace,run,attempt):
     return api,scope,commit,run,jobs[0]
 
 
+def recheck_current_context(workspace,run,attempt,scope,commit,job):
+    """Current integrity failure is fatal, never a rejected-history fallback."""
+    _,confirmed_scope,confirmed_commit,confirmed_run,confirmed_job = current_context(workspace,run,attempt)
+    receipts.require(confirmed_scope == scope and confirmed_commit == commit and confirmed_run == run
+      and all(confirmed_job[key] == job[key] for key in ('id','task_id','attempt')),
+      'Async current proof context changed during restore')
+
+
 def selected(parts, is_dir=False):
     if is_dir: return False
     if len(parts) == 1:
@@ -273,6 +281,7 @@ def prepare():
         shutil.rmtree(destination); destination.mkdir()
         origin.update({'available':False,'hydrated_files':0,'hydrated_bytes':0,
           'result_class':'rejected_prior_evidence','reason':f'Prior evidence not adopted ({type(error).__name__})'})
+    recheck_current_context(workspace,run,attempt,scope,commit,job)
     origin_path.write_text(json.dumps(origin,sort_keys=True,indent=2)+'\n')
     output = os.environ.get('GITHUB_OUTPUT')
     receipts.require(output,'GitHub step output unavailable')

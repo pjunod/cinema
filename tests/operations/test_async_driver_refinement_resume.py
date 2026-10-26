@@ -833,8 +833,14 @@ class ExplicitTransportAuthentication(unittest.TestCase):
             blobs[14] = blobs[14][:-1]+b'!'
             prefix = shared.find_prior(API(),scope,11,commit,ROOT,spec=spec)
             self.assertEqual(prefix['artifact_phase'],'prefix')
-            self.assertIsNone(shared.artifact_for_run(API(),scope,run,11,commit,ROOT,spec=adapter.transport_spec(1)))
             job.update(attempt=1,task_id=13,status='running')
+            self.assertIsNone(shared.artifact_for_run(API(),scope,run,11,commit,ROOT,spec=adapter.transport_spec(1)))
+            job.update(attempt=2,task_id=20,status='running')
+            job.update(attempt=3,task_id=30,status='running')
+            with self.assertRaisesRegex(receipts.ReceiptError,'current proof attempt changed'):
+                shared.artifact_for_run(API(),scope,run,11,commit,ROOT,spec=spec)
+            job.update(attempt=2,task_id=20,status='running')
+            lines[0] = 'untrusted test output'
             self.assertIsNone(shared.artifact_for_run(API(),scope,run,11,commit,ROOT,spec=spec))
             self.assertIsNone(shared.artifact_for_run(API(),scope,run,11,commit,ROOT))
 
@@ -871,3 +877,15 @@ class ExplicitTransportAuthentication(unittest.TestCase):
                 adapter.attempt_log(api,latest,1)
         with self.assertRaisesRegex(receipts.ReceiptError,'not terminal'):adapter.attempt_log(api,latest,3)
         with self.assertRaisesRegex(receipts.ReceiptError,'attempt differs'):adapter.attempt_log(api,latest,4)
+
+    def test_async_restore_rechecks_current_context_before_publishing_outputs(self):
+        scope={'repository':1,'pr':2};job={'id':12,'task_id':13,'attempt':2}
+        confirmed=(None,scope,'a'*40,11,job)
+        with patch.object(adapter,'current_context',return_value=confirmed):
+            adapter.recheck_current_context(ROOT,11,2,scope,'a'*40,job)
+        for index,value in ((1,{'repository':2,'pr':2}),(2,'b'*40),(3,99),
+                            (4,{**job,'task_id':99}),(4,{**job,'attempt':3})):
+            changed=list(confirmed);changed[index]=value
+            with self.subTest(index=index,value=value),patch.object(adapter,'current_context',return_value=tuple(changed)):
+                with self.assertRaisesRegex(receipts.ReceiptError,'context changed during restore'):
+                    adapter.recheck_current_context(ROOT,11,2,scope,'a'*40,job)

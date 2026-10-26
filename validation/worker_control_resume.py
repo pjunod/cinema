@@ -376,6 +376,9 @@ def artifact_candidates_for_run(api, scope, run, current_run, current_commit, wo
           and selected[0]["attempt"] > 0 and spec.attempt_log is not None,
           "Scoped proof latest job identity/attempt differs")
         latest = selected[0]
+        if run_id == current_run:
+            receipts.require(latest["attempt"] == spec.same_run_attempt
+              and latest.get("status") in ("running","in_progress"),"Scoped current proof attempt changed during restore")
         receipts.require(type(latest.get("repo_id")) is int and type(latest.get("run_id")) is int,
           "Scoped proof job numeric identity differs")
         receipts.positive(latest.get("id"));receipts.positive(latest.get("task_id"))
