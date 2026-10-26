@@ -1259,3 +1259,55 @@ async fn selected_copy_request_uses_core_segment_cap_and_admits_same_original_ow
         .selected_copy_profile_admission_regression(fixture.recipe.file.id)
         .await;
 }
+
+#[tokio::test]
+async fn selected_copy_quota_waits_for_original_native_ticket_after_actor_and_app_aliases() {
+    selected_copy_quota_fixture(0).await;
+}
+#[tokio::test]
+async fn selected_copy_quota_refuses_only_with_exact_before_r_provenance() {
+    selected_copy_quota_fixture(1).await;
+}
+#[tokio::test]
+async fn selected_copy_zero_operator_quota_refuses_actual_start_before_r() {
+    selected_copy_quota_fixture(2).await;
+}
+async fn selected_copy_quota_fixture(case: u8) {
+    let fixture = finite_cancellation_fixture().await;
+    let base = fixture._base.path();
+    let manager = crate::transcode::TranscodeManager::new(
+        Arc::clone(&fixture.serve.shared.store),
+        base.join("quota-transcode"),
+        Default::default(),
+        plurx_core::transcode::Pipeline::Cpu,
+    )
+    .with_cache_layout(
+        base.join("quota-cache"),
+        base.join("quota-runtime"),
+        base.join("quota-subs"),
+        fixture.serve.shared.base.clone(),
+        "selected-copy-quota-test".into(),
+        fixture._selected_store.identity.node_id.clone(),
+        None,
+        Some(Arc::clone(&fixture.runtime)),
+    )
+    .with_copy_test_vod(Arc::clone(&fixture.serve));
+    match case {
+        0 => {
+            manager
+                .selected_copy_quota_terminal_regression(fixture.recipe.file.id)
+                .await
+        }
+        1 => {
+            manager
+                .selected_copy_quota_refusal_regression(fixture.recipe.file.id)
+                .await
+        }
+        2 => {
+            manager
+                .selected_copy_zero_quota_regression(fixture.recipe.file.id)
+                .await
+        }
+        _ => unreachable!("closed quota fixture cases"),
+    }
+}

@@ -22,7 +22,7 @@ fn executable_path() -> PathBuf {
     std::fs::canonicalize(selected).expect("canonical actual executable")
 }
 
-async fn actual_owner(root: &Path, rejected: bool) -> (Arc<NodeResourceRuntime>, CopyVodOwner) {
+async fn actual_request(root: &Path, rejected: bool) -> (Arc<NodeResourceRuntime>, CopyVodRequest) {
     crate::testfixtures::require_ffmpeg();
     let source =
         std::fs::canonicalize(crate::testfixtures::source("h264")).expect("actual media source");
@@ -124,63 +124,66 @@ async fn actual_owner(root: &Path, rejected: bool) -> (Arc<NodeResourceRuntime>,
     runtime
         .update_capacity(1, Metric::Known(capacity))
         .expect("original known fixture capacity");
+    let request = CopyVodRequest {
+        rendition_id: "original-copy".into(),
+        generation_epoch: 0,
+        recipe_source_binding: "actual-original-copy-source".into(),
+        source: FiniteSourceRequest {
+            path: source,
+            media_file_id: file.id.to_string(),
+            object_version: identity.render_s1(),
+            scanner_size: file.size,
+            scanner_mtime: file.mtime,
+        },
+        command,
+        max_segments: 8,
+        parser_limits: crate::copy_segmenter::Limits {
+            max_bytes: 64 * 1024,
+            ..Default::default()
+        },
+        reader_bounds: crate::fmp4::FragmentReaderBounds {
+            buffer_bytes: 64 * 1024,
+            unit_bytes: 64 * 1024,
+            max_tracks: 8,
+            max_runs: 64,
+            max_samples: 4096,
+        },
+        max_pending_fragments: 2,
+        operation_timeout: Duration::from_secs(30),
+        application_owner_bytes: 1024 * 1024,
+        demand: WorkloadDemand {
+            resources: Metric::Known(capacity),
+            limit_epoch: 1,
+            trial: false,
+        },
+        output: FiniteOutputLimits {
+            response_memory_bytes: 1024 * 1024,
+            retained_metadata_bytes: 1024 * 1024,
+            client_state_bytes: 1024 * 1024,
+            resident_file_objects: 5,
+            resident_logical_bytes: 5 * 1024 * 1024,
+            reserved_storage_bytes: 64 * 1024 * 1024,
+            one_file_logical_bytes: 1024 * 1024,
+            one_io_payload_bytes: 1024 * 1024,
+            // Queued immutable limits are validated by the actual DB worker.
+            // No hook injects its known rollback or manufactures a close fact.
+            live_handles: if rejected { 1 } else { 8 },
+            reader_leases: 4,
+            resident_memory_bytes: 1024 * 1024,
+            allocation_unit_bytes: 4096,
+            per_object_reserve_bytes: 4096,
+            child_directory_reserve_bytes: 4096,
+            parent_entry_reserve_bytes: 4096,
+            bootstrap_memory_bytes: 1024 * 1024,
+        },
+    };
+    (runtime, request)
+}
+
+async fn actual_owner(root: &Path, rejected: bool) -> (Arc<NodeResourceRuntime>, CopyVodOwner) {
+    let (runtime, request) = actual_request(root, rejected).await;
     let owner = runtime
-        .prepare_copy_vod(
-            CopyVodRequest {
-                rendition_id: "original-copy".into(),
-                generation_epoch: 0,
-                recipe_source_binding: "actual-original-copy-source".into(),
-                source: FiniteSourceRequest {
-                    path: source,
-                    media_file_id: file.id.to_string(),
-                    object_version: identity.render_s1(),
-                    scanner_size: file.size,
-                    scanner_mtime: file.mtime,
-                },
-                command,
-                max_segments: 8,
-                parser_limits: crate::copy_segmenter::Limits {
-                    max_bytes: 64 * 1024,
-                    ..Default::default()
-                },
-                reader_bounds: crate::fmp4::FragmentReaderBounds {
-                    buffer_bytes: 64 * 1024,
-                    unit_bytes: 64 * 1024,
-                    max_tracks: 8,
-                    max_runs: 64,
-                    max_samples: 4096,
-                },
-                max_pending_fragments: 2,
-                operation_timeout: Duration::from_secs(30),
-                application_owner_bytes: 1024 * 1024,
-                demand: WorkloadDemand {
-                    resources: Metric::Known(capacity),
-                    limit_epoch: 1,
-                    trial: false,
-                },
-                output: FiniteOutputLimits {
-                    response_memory_bytes: 1024 * 1024,
-                    retained_metadata_bytes: 1024 * 1024,
-                    client_state_bytes: 1024 * 1024,
-                    resident_file_objects: 5,
-                    resident_logical_bytes: 5 * 1024 * 1024,
-                    reserved_storage_bytes: 64 * 1024 * 1024,
-                    one_file_logical_bytes: 1024 * 1024,
-                    one_io_payload_bytes: 1024 * 1024,
-                    // Queued immutable limits are validated by the actual DB worker.
-                    // No hook injects its known rollback or manufactures a close fact.
-                    live_handles: if rejected { 1 } else { 8 },
-                    reader_leases: 4,
-                    resident_memory_bytes: 1024 * 1024,
-                    allocation_unit_bytes: 4096,
-                    per_object_reserve_bytes: 4096,
-                    child_directory_reserve_bytes: 4096,
-                    parent_entry_reserve_bytes: 4096,
-                    bootstrap_memory_bytes: 1024 * 1024,
-                },
-            },
-            deadline(),
-        )
+        .prepare_copy_vod(request, deadline())
         .await
         .expect("actual original queued copy owner");
     (runtime, owner)
@@ -293,4 +296,71 @@ async fn known_unaccepted_copy_uses_its_original_absence_receipt_and_never_refun
         ResourceVector::default()
     );
     lost_ticket_still_uses_original_maintenance(runtime, owner).await;
+}
+
+#[tokio::test]
+async fn invalid_copy_profile_has_exact_before_reservation_provenance_and_no_family() {
+    let root = tempfile::tempdir().expect("actual copy invalid-profile fixture");
+    let (runtime, mut request) = actual_request(root.path(), false).await;
+    let before = runtime.accounting().expect("actual baseline accounting");
+    let family_counter = runtime
+        .ledger
+        .inner
+        .lock()
+        .expect("actual family allocator")
+        .next_family;
+    request.parser_limits.max_bytes = COPY_VOD_MAX_SEGMENT_BYTES + 1;
+    let error = runtime
+        .prepare_copy_vod(request, deadline())
+        .await
+        .err()
+        .expect("actual pure pre-R rejection");
+    assert!(error.definitely_before_reservation());
+    assert_eq!(
+        runtime
+            .ledger
+            .inner
+            .lock()
+            .expect("same family allocator")
+            .next_family,
+        family_counter,
+        "pure rejection occurs before the original family is minted"
+    );
+    let after = runtime.accounting().expect("actual unchanged accounting");
+    assert_eq!(after.used, before.used);
+    assert_eq!(after.held, before.held);
+    assert_eq!(after.unknown_peak_producers, before.unknown_peak_producers);
+}
+
+#[tokio::test]
+async fn copy_constructor_error_after_r_never_becomes_before_reservation_provenance() {
+    let root = tempfile::tempdir().expect("actual copy post-R fixture");
+    let (runtime, mut request) = actual_request(root.path(), false).await;
+    let family_counter = runtime
+        .ledger
+        .inner
+        .lock()
+        .expect("actual family allocator")
+        .next_family;
+    // The actual bounded CopySink constructor refuses this after R was queued.
+    // No hook injects an error or manufactures an original close receipt.
+    request.operation_timeout = Duration::from_secs(121);
+    let error = runtime
+        .prepare_copy_vod(request, deadline())
+        .await
+        .err()
+        .expect("actual post-R sink refusal");
+    assert!(
+        !error.definitely_before_reservation(),
+        "generic constructor errors never release caller quota"
+    );
+    assert!(
+        runtime
+            .ledger
+            .inner
+            .lock()
+            .expect("same family allocator")
+            .next_family
+            > family_counter
+    );
 }

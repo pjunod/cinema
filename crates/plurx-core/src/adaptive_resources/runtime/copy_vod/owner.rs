@@ -38,6 +38,17 @@ fn invalid() -> FiniteVodError {
     super::super::operations::OperationError::State.into()
 }
 
+/// Pure request/profile rejection before the original family is allocated.
+/// Never use for constructor, native, journal or cleanup failures after R.
+fn invalid_before_reservation() -> FiniteVodError {
+    super::super::operations::OperationError::BeforeReservation(
+        super::super::operations::PreReservationRefusal::Admission(
+            crate::adaptive_resources::AdmissionRefusal::InvalidBundle,
+        ),
+    )
+    .into()
+}
+
 fn known_copy_memory(
     request: &CopyVodRequest,
     selected_directory_capacity: usize,
@@ -742,6 +753,18 @@ impl Drop for CopyVodOwner {
 }
 
 impl NodeResourceRuntime {
+    /// Pure configured output metadata for operator quota lookup before R.
+    /// This opens nothing and grants no path-based native close authority.
+    pub fn copy_vod_output_path(&self, rendition_id: &str) -> Result<PathBuf, FiniteVodError> {
+        let root = self
+            .rendition_root
+            .as_ref()
+            .and_then(|path| path.to_str())
+            .ok_or_else(invalid)?;
+        let (_, path) = finite_directory_path(root, rendition_id)?;
+        Ok(path)
+    }
+
     /// Requested capacity of the exact session path this copy role will
     /// construct. This is pure metadata sizing before native admission.
     pub fn copy_vod_application_path_capacity(
@@ -801,18 +824,19 @@ impl NodeResourceRuntime {
             || request.max_pending_fragments == 0
             || request.max_pending_fragments > 65_536
         {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let root = self
             .rendition_root
             .as_ref()
             .and_then(|p| p.to_str())
-            .ok_or_else(invalid)?;
+            .ok_or_else(invalid_before_reservation)?;
         let (protected_child, selected_directory_path) =
-            finite_directory_path(root, &request.rendition_id)?;
+            finite_directory_path(root, &request.rendition_id)
+                .map_err(|_| invalid_before_reservation())?;
         let components: Vec<String> = root
             .strip_prefix('/')
-            .ok_or_else(invalid)?
+            .ok_or_else(invalid_before_reservation)?
             .split('/')
             .map(str::to_owned)
             .collect();
@@ -825,17 +849,17 @@ impl NodeResourceRuntime {
                     || c.contains(['\\', '\0'])
             })
         {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let Metric::Known(resources) = request.demand.resources else {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         };
         let bounds = &request.output;
         let max_pending_bytes = request
             .parser_limits
             .max_bytes
             .checked_add(request.reader_bounds.unit_bytes)
-            .ok_or_else(invalid)?;
+            .ok_or_else(invalid_before_reservation)?;
         let media_path_capacity = request.source.path.capacity();
         let binary_path_for_source = request.command.executable().path().to_owned();
         let binary_path_projected = binary_path_for_source.capacity();
@@ -843,7 +867,8 @@ impl NodeResourceRuntime {
             &request,
             selected_directory_path.capacity(),
             binary_path_projected,
-        )?;
+        )
+        .map_err(|_| invalid_before_reservation())?;
         if resources.processes != 1 || resources.cpu_ns_per_second == 0
             || resources.hardware_slots != 0 || resources.tuner_slots != 0
             || resources.handles < u64::from(bounds.live_handles).saturating_add(9)
@@ -854,26 +879,26 @@ impl NodeResourceRuntime {
             // bounds the charged rolling window, including an init, one old
             // and one new playlist, a live segment and its publication overlap.
             || bounds.resident_file_objects < 5
-            || bounds.one_io_payload_bytes < u64::try_from(request.parser_limits.max_bytes).map_err(|_| invalid())?
+            || bounds.one_io_payload_bytes < u64::try_from(request.parser_limits.max_bytes).map_err(|_| invalid_before_reservation())?
         {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let playlist_capacity =
             CopySink::playlist_capacity_for(request.max_segments, request.parser_limits)
-                .ok_or_else(invalid)?;
+                .ok_or_else(invalid_before_reservation)?;
         if request.application_owner_bytes
             < u64::try_from(playlist_capacity)
-                .map_err(|_| invalid())?
+                .map_err(|_| invalid_before_reservation())?
                 .checked_mul(2)
-                .ok_or_else(invalid)?
+                .ok_or_else(invalid_before_reservation)?
         {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         if bounds.response_memory_bytes
             < FiniteResponseBuffer::required_partition_bytes(playlist_capacity, 2)
-                .ok_or_else(invalid)?
+                .ok_or_else(invalid_before_reservation)?
         {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let namespace = std::fs::metadata("/proc/self/ns/mnt")
             .map_err(|e| {
@@ -904,7 +929,8 @@ impl NodeResourceRuntime {
             path: binary_path_for_source,
             media_file_id: binary_binding.clone(),
             object_version: binary_identity.render_s1(),
-            scanner_size: i64::try_from(binary_identity.size).map_err(|_| invalid())?,
+            scanner_size: i64::try_from(binary_identity.size)
+                .map_err(|_| invalid_before_reservation())?,
             scanner_mtime: binary_identity.mtime,
         };
         let media_association = v2::SourceAssociation {
@@ -928,7 +954,11 @@ impl NodeResourceRuntime {
         for (index, (source, expected_sha256, binding)) in source_requests.into_iter().enumerate() {
             let member = id();
             let source_copy = id();
-            let protected_path = source.path.to_str().ok_or_else(invalid)?.to_owned();
+            let protected_path = source
+                .path
+                .to_str()
+                .ok_or_else(invalid_before_reservation)?
+                .to_owned();
             plans.push(TypedMemberPlan::Source {
                 slot: slot(member, vec![protected_path]),
                 source: SourcePlan {
@@ -972,7 +1002,7 @@ impl NodeResourceRuntime {
                 .as_ref()
                 .is_none_or(|spec| spec.path.capacity() > binary_path_projected)
         {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let limits = ScratchLimitsV1 {
             resident_file_objects: bounds.resident_file_objects,
@@ -1012,7 +1042,7 @@ impl NodeResourceRuntime {
                         child_component: protected_child
                             .rsplit('/')
                             .next()
-                            .ok_or_else(invalid)?
+                            .ok_or_else(invalid_before_reservation)?
                             .to_owned(),
                         protected_child_path: protected_child,
                         bounds: BootstrapBoundsV1 {
@@ -1046,7 +1076,7 @@ impl NodeResourceRuntime {
                 .command
                 .program()
                 .to_str()
-                .ok_or_else(invalid)?
+                .ok_or_else(invalid_before_reservation)?
                 .to_owned(),
             recovery: if self.owner.platform_domain.continuity_provider.as_deref()
                 == Some("linux_kernel_pid_namespace_v1")
@@ -1091,7 +1121,8 @@ impl NodeResourceRuntime {
                     pending_io: vec![],
                     buffers: vec![v2::OwnerAllocation {
                         owner_id: task_buffer,
-                        memory_bytes: u64::try_from(minimum_task_memory).map_err(|_| invalid())?,
+                        memory_bytes: u64::try_from(minimum_task_memory)
+                            .map_err(|_| invalid_before_reservation())?,
                         handles: 0,
                     }],
                     readers: vec![

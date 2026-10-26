@@ -33,6 +33,11 @@ pub(super) struct Session {
     #[cfg(target_os = "linux")]
     pub(super) core_copy_close:
         Mutex<Option<plurx_core::adaptive_resources::runtime::copy_vod::CopyCloseTicket>>,
+    /// Same pre-R operator quota grant. Unexpected Session destruction holds
+    /// its original pending grant; only the original terminal ticket settles it.
+    #[cfg(target_os = "linux")]
+    pub(super) core_copy_quota:
+        std::sync::Mutex<Option<crate::playback_cache::FiniteCacheReservation>>,
     /// Bound selected-copy playlist parses and complete index snapshots to
     /// one original session operation at a time, including publication.
     #[cfg(target_os = "linux")]

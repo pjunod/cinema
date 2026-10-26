@@ -22,6 +22,11 @@ impl Drop for SelectedCopyTicketAttempt {
 }
 
 impl TranscodeManager {
+    #[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
+    pub(super) async fn reconcile_selected_copy_tickets_for_test(&self) {
+        self.reconcile_selected_copy_tickets().await;
+    }
+
     #[cfg(target_os = "linux")]
     async fn reconcile_selected_copy_tickets(&self) {
         let next = {
@@ -69,6 +74,12 @@ impl TranscodeManager {
         }
         match ticket.native.finish_retirement(deadline).await {
             Ok(()) => {
+                // Actor join and actual selector destruction above are only
+                // application barriers. This SAME native ticket's known
+                // completion is the quota release event; copy has no R-to-S.
+                if let Some(quota) = ticket.quota.take() {
+                    quota.known_closed();
+                }
                 attempt.ticket.take();
             }
             Err(error) => tracing::debug!(target: "plurxd::transcode", %error,

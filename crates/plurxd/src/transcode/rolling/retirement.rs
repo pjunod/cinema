@@ -370,6 +370,7 @@ pub(super) type RetiredPresentations =
 /// control task join together after every rich Session alias has gone away.
 #[cfg(target_os = "linux")]
 pub(super) struct SelectedCopyTerminalTicket {
+    pub(super) quota: Option<crate::playback_cache::FiniteCacheReservation>,
     pub(super) native: plurx_core::adaptive_resources::runtime::copy_vod::CopyCloseTicket,
     pub(super) actor: Option<crate::playback_control::RollingControlActorJoin>,
 }
@@ -875,33 +876,45 @@ async fn park_selected_copy_ticket(session: &Session) -> Result<(), String> {
             return Err("selected copy compact retirement registry is full".into());
         }
     }
-    let ticket = session
-        .core_copy_close
-        .lock()
-        .await
+    // Keep the SAME original close slot through the synchronous book decision.
+    // Rejection restores both selectors before any subsequent await; a dropped
+    // waiter cannot lose the native ticket while retaining only a quota pin.
+    let mut held = session.core_copy_close.lock().await;
+    let native = held
         .take()
         .ok_or("selected copy native close ticket is absent")?;
-    // The std guard must be out of scope before any await on the rejection
-    // path; the rejected ticket returns to the same Session slot.
+    let quota = session
+        .core_copy_quota
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let original = SelectedCopyTerminalTicket {
+        native,
+        quota,
+        actor: Some(session.control.original_actor_join()),
+    };
     let rejected = {
         let mut book = tickets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if book.len() >= 1024 || book.contains_key(&session.response_incarnation) {
-            Some(ticket)
+            Some(original)
         } else {
-            book.insert(
-                session.response_incarnation,
-                SelectedCopyTerminalTicket {
-                    native: ticket,
-                    actor: Some(session.control.original_actor_join()),
-                },
-            );
+            book.insert(session.response_incarnation, original);
             None
         }
     };
-    if let Some(ticket) = rejected {
-        *session.core_copy_close.lock().await = Some(ticket);
+    if let Some(SelectedCopyTerminalTicket {
+        native,
+        quota,
+        actor: _,
+    }) = rejected
+    {
+        *held = Some(native);
+        *session
+            .core_copy_quota
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = quota;
         return Err("selected copy compact retirement registry cannot accept this ticket".into());
     }
     Ok(())

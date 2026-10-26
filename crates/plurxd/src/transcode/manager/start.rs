@@ -271,6 +271,286 @@ fn selected_copy_request(
 
 #[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
 impl TranscodeManager {
+    async fn selected_copy_quota_request_fixture(
+        &self,
+        file_id: i64,
+    ) -> plurx_core::adaptive_resources::runtime::copy_vod::CopyVodRequest {
+        let runtime = self
+            .resource_runtime
+            .as_ref()
+            .expect("actual selected runtime");
+        let inputs = self
+            .rolling_start_inputs(file_id, None)
+            .await
+            .expect("actual source snapshot");
+        let options = CopySessionOptions {
+            transcode_audio: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let mut planning = self
+            .collect_selected_copy_planning(
+                &inputs.file,
+                inputs.probe_json.as_deref(),
+                None,
+                &options,
+            )
+            .await
+            .expect("same real selected P");
+        let capacity = runtime.accounting().expect("actual observed capacity");
+        let request = selected_copy_request(
+            runtime,
+            &planning,
+            &inputs.file,
+            format!("copy-quota-{}", uuid::Uuid::new_v4()),
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+            None,
+            false,
+            plurx_core::transcode::Pacing::unpaced(),
+            None,
+            self.runtime_cache.clone(),
+            0,
+            capacity.limit_epoch,
+            capacity.capacity,
+        )
+        .expect("real finalized selected request");
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        planning
+            .owner
+            .finish_native(deadline)
+            .await
+            .expect("same original P native close");
+        let mut cleanup = planning.owner.into_cleanup();
+        drop(planning.report);
+        drop(planning.application);
+        cleanup
+            .finish_retirement(deadline)
+            .await
+            .expect("actual P payload/journal close");
+        request
+    }
+
+    pub(crate) async fn selected_copy_quota_terminal_regression(&self, file_id: i64) {
+        let runtime = self.resource_runtime.as_ref().expect("actual runtime");
+        let baseline = runtime.accounting().expect("original baseline");
+        let request = self.selected_copy_quota_request_fixture(file_id).await;
+        let path = runtime
+            .copy_vod_output_path(&request.rendition_id)
+            .expect("configured same copy root");
+        let application_bytes =
+            usize::try_from(request.application_owner_bytes).expect("actual application bytes");
+        let client_bytes =
+            usize::try_from(request.output.client_state_bytes).expect("actual client partition");
+        let quota =
+            crate::playback_cache::reserve_finite(&path, request.output.reserved_storage_bytes)
+                .await
+                .expect("authentic global quota");
+        let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let mut original = runtime
+            .prepare_copy_vod(request, deadline)
+            .await
+            .expect("actual original copy R");
+        assert!(crate::playback_cache::is_pinned(&path));
+        let application = original
+            .take_application_lease(application_bytes)
+            .expect("actual original app lease");
+        let output = original.output();
+        let actor_bytes = crate::playback_control::RollingActorAccounting::owner_bytes()
+            .expect("actual actor layout");
+        let (metadata, client) = tokio::time::timeout_at(
+            deadline.into(),
+            output.reserve_metadata_partitions(
+                actor_bytes,
+                client_bytes
+                    .checked_sub(actor_bytes)
+                    .expect("actor fits actual partition"),
+            ),
+        )
+        .await
+        .expect("real borrowed metadata deadline")
+        .expect("same original budget slices");
+        let accounting = crate::playback_control::RollingActorAccounting::new(metadata, client)
+            .expect("actual actor accounting");
+        let (control, registration) = crate::playback_control::RollingControlHandle::spawn_prepublication_producer_with_application(
+            "copy-quota-original-actor", application, accounting);
+        let snapshot = control.snapshot().await.expect("actual actor snapshot");
+        let last_alias = snapshot.clone();
+        let actor = control.original_actor_join();
+        let native = original
+            .prepare_retirement(true, deadline)
+            .await
+            .expect("same original copy no-entry ticket");
+        drop(output);
+        drop(original);
+        drop(registration);
+        drop(control);
+        let identity = uuid::Uuid::new_v4();
+        self.retired_copy_tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                identity,
+                SelectedCopyTerminalTicket {
+                    native,
+                    quota: Some(quota),
+                    actor: Some(actor),
+                },
+            );
+        for _ in 0..16 {
+            self.reconcile_selected_copy_tickets_for_test().await;
+            let joined = self
+                .retired_copy_tickets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&identity)
+                .is_some_and(|ticket| ticket.actor.is_none());
+            if joined {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            self.retired_copy_tickets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&identity)
+                .is_some_and(|ticket| ticket.actor.is_none() && ticket.quota.is_some()),
+            "actual actor joined but same original native/app close still owns quota"
+        );
+        assert!(crate::playback_cache::is_pinned(&path));
+        drop(snapshot);
+        self.reconcile_selected_copy_tickets_for_test().await;
+        assert!(
+            crate::playback_cache::is_pinned(&path),
+            "last actual application alias still holds original native retirement"
+        );
+        drop(last_alias);
+        tokio::time::timeout_at(deadline.into(), async {
+            loop {
+                self.reconcile_selected_copy_tickets_for_test().await;
+                if !self
+                    .retired_copy_tickets
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .contains_key(&identity)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("original native/app close completes through existing book");
+        assert!(!crate::playback_cache::is_pinned(&path));
+        assert_eq!(
+            runtime.accounting().expect("actual final refund").used,
+            baseline.used
+        );
+    }
+
+    pub(crate) async fn selected_copy_quota_refusal_regression(&self, file_id: i64) {
+        let runtime = self.resource_runtime.as_ref().expect("actual runtime");
+        let mut request = self.selected_copy_quota_request_fixture(file_id).await;
+        let baseline = runtime.accounting().expect("actual before-R baseline");
+        let path = runtime
+            .copy_vod_output_path(&request.rendition_id)
+            .expect("same configured output");
+        let quota =
+            crate::playback_cache::reserve_finite(&path, request.output.reserved_storage_bytes)
+                .await
+                .expect("same authentic grant before invalid request");
+        let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);
+        request.parser_limits.max_bytes =
+            plurx_core::adaptive_resources::runtime::copy_vod::COPY_VOD_MAX_SEGMENT_BYTES + 1;
+        let error = runtime
+            .prepare_copy_vod(request, std::time::Instant::now() + Duration::from_secs(90))
+            .await
+            .err()
+            .expect("actual pure invalid request refusal");
+        assert!(error.definitely_before_reservation());
+        quota.known_closed(); // Exact private core provenance; never generic Err.
+        assert!(!crate::playback_cache::is_pinned(&path));
+        assert_eq!(
+            runtime.accounting().expect("actual unchanged ledger").used,
+            baseline.used
+        );
+        assert!(!path.exists());
+
+        let mut request = self.selected_copy_quota_request_fixture(file_id).await;
+        let path = runtime
+            .copy_vod_output_path(&request.rendition_id)
+            .expect("same configured second output");
+        let quota =
+            crate::playback_cache::reserve_finite(&path, request.output.reserved_storage_bytes)
+                .await
+                .expect("authentic grant before actual constructor error");
+        let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);
+        // Real CopySink constructor refuses this only after R was queued.
+        request.operation_timeout = Duration::from_secs(121);
+        let error = runtime
+            .prepare_copy_vod(request, std::time::Instant::now() + Duration::from_secs(90))
+            .await
+            .err()
+            .expect("actual generic post-R constructor error");
+        assert!(!error.definitely_before_reservation());
+        drop(quota);
+        assert!(
+            crate::playback_cache::is_pinned(&path),
+            "generic error/default Drop keeps SAME pending grant"
+        );
+    }
+
+    pub(crate) async fn selected_copy_zero_quota_regression(&self, file_id: i64) {
+        let runtime = self.resource_runtime.as_ref().expect("actual runtime");
+        let baseline = runtime.accounting().expect("actual baseline");
+        self.store
+            .put_setting(keys::CACHE_MAX_GB, "0")
+            .await
+            .expect("actual operator setting");
+        let result = self
+            .start_copy(
+                file_id,
+                0.0,
+                None,
+                CopySessionOptions {
+                    transcode_audio: false,
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                },
+                "actual-copy-quota-test",
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .await;
+        assert!(result
+            .err()
+            .expect("actual selected start refuses zero quota")
+            .contains("operator quota"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        tokio::time::timeout_at(deadline.into(), async {
+            loop {
+                runtime.maintain_planning_cleanup(deadline).await;
+                if runtime
+                    .accounting()
+                    .expect("actual original P cleanup")
+                    .used
+                    == baseline.used
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("same original P cleanup after before-R quota refusal");
+        assert!(self
+            .retired_copy_tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+        assert!(self.sessions.lock().await.is_empty());
+    }
+
     pub(crate) async fn selected_copy_profile_admission_regression(&self, file_id: i64) {
         use plurx_core::adaptive_resources::runtime::copy_vod::COPY_VOD_MAX_SEGMENT_BYTES;
         let runtime = self
@@ -2003,6 +2283,8 @@ impl TranscodeManager {
             #[cfg(target_os = "linux")]
             core_copy_close: Mutex::new(None),
             #[cfg(target_os = "linux")]
+            core_copy_quota: std::sync::Mutex::new(None),
+            #[cfg(target_os = "linux")]
             core_copy_refresh_gate: Mutex::new(()),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: true,
@@ -2761,12 +3043,25 @@ impl TranscodeManager {
                 .map_err(|_| "selected copy client partition overflows")?;
             let app_bytes = usize::try_from(request.application_owner_bytes)
                 .map_err(|_| "selected copy application charge overflows")?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(90);
+            let quota_path = runtime
+                .copy_vod_output_path(&request.rendition_id)
+                .map_err(|error| format!("projecting selected copy quota path: {error}"))?;
+            let quota = tokio::time::timeout_at(
+                deadline.into(),
+                crate::playback_cache::reserve_finite(
+                    &quota_path,
+                    request.output.reserved_storage_bytes,
+                ),
+            )
+            .await
+            .map_err(|_| "selected copy operator quota deadline expired")?
+            .map_err(|error| format!("reserving selected copy operator quota: {error}"))?;
             // All JSON interpretation, command construction and hard-vector
             // sizing above occur while the actual P owner remains charged.
             // P native closure is the last step before the distinct R admit.
             drop(probe_json);
             drop(stored_probe);
-            let deadline = std::time::Instant::now() + Duration::from_secs(90);
             planning
                 .owner
                 .finish_native(deadline)
@@ -2779,10 +3074,21 @@ impl TranscodeManager {
                 .finish_retirement(deadline)
                 .await
                 .map_err(|error| format!("settling selected copy planning metadata: {error}"))?;
-            let owner = runtime
-                .prepare_copy_vod(request, deadline)
-                .await
-                .map_err(|error| format!("admitting selected rolling copy: {error}"))?;
+            // Error cleanup may await after R. Convert the SAME grant before
+            // polling this constructor; generic errors/default Drop hold it.
+            let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);
+            let owner = match runtime.prepare_copy_vod(request, deadline).await {
+                Ok(owner) => owner,
+                Err(error) => {
+                    if error.definitely_before_reservation() {
+                        quota.known_closed();
+                    }
+                    return Err(format!("admitting selected rolling copy: {error}"));
+                }
+            };
+            if owner.directory_path() != quota_path {
+                return Err("selected copy output differs from its original quota path".into());
+            }
             let app = owner
                 .take_application_lease(app_bytes)
                 .map_err(|error| format!("retaining selected copy application owner: {error}"))?;
@@ -2808,7 +3114,12 @@ impl TranscodeManager {
             drop(output);
             let accounting = crate::playback_control::RollingActorAccounting::new(metadata, client)
                 .map_err(|_| "reserving initial selected copy actor payload")?;
-            Some((owner, (app, accounting), selected_session_metadata_bytes))
+            Some((
+                owner,
+                (app, accounting),
+                selected_session_metadata_bytes,
+                quota,
+            ))
         } else {
             None
         };
@@ -2824,7 +3135,7 @@ impl TranscodeManager {
         };
         let dir = {
             #[cfg(target_os = "linux")]
-            if let Some((owner, _, _)) = selected_owner.as_ref() {
+            if let Some((owner, _, _, _)) = selected_owner.as_ref() {
                 owner.directory_path().to_owned()
             } else {
                 self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()))
@@ -2952,11 +3263,13 @@ impl TranscodeManager {
         .with_completion_expectation(expected_remaining_ms, completion_tolerance_ms);
         let progress = Arc::new(Progress::new());
         #[cfg(target_os = "linux")]
-        let (selected_core_owner, selected_core_app, selected_metadata_bound) = match selected_owner
-        {
-            Some((owner, app, bound)) => (Some(owner), Some(app), Some(bound)),
-            None => (None, None, None),
-        };
+        let (selected_core_owner, selected_core_app, selected_metadata_bound, selected_core_quota) =
+            match selected_owner {
+                Some((owner, app, bound, quota)) => {
+                    (Some(owner), Some(app), Some(bound), Some(quota))
+                }
+                None => (None, None, None, None),
+            };
         #[cfg(target_os = "linux")]
         let (control, mut executor_registration) = match selected_core_app {
             Some((application, accounting)) => crate::playback_control::RollingControlHandle::spawn_prepublication_producer_with_application(
@@ -2988,6 +3301,8 @@ impl TranscodeManager {
             core_copy: Mutex::new(selected_core_owner),
             #[cfg(target_os = "linux")]
             core_copy_close: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            core_copy_quota: std::sync::Mutex::new(selected_core_quota),
             #[cfg(target_os = "linux")]
             core_copy_refresh_gate: Mutex::new(()),
             actor_managed_response_publication: true,
