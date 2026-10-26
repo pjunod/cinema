@@ -56,7 +56,10 @@ pub async fn with_original_work_keeper<T>(
     ORIGINAL_WORK_KEEPER.scope(keeper, operation).await
 }
 
-fn original_keeper() -> Option<Arc<dyn OriginalWorkKeeper>> {
+/// Clone only the same opt-in original owner. Existing worker launchers must
+/// capture this before spawning: task locals are not inherited by workers.
+/// Presence/completion supplies no acquisition, native absence or refund proof.
+pub(crate) fn original_keeper() -> Option<Arc<dyn OriginalWorkKeeper>> {
     ORIGINAL_WORK_KEEPER.try_with(Arc::clone).ok()
 }
 

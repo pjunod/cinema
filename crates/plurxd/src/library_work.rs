@@ -257,7 +257,9 @@ impl JobManager {
         // phase/resource combinations are driver programming errors, rather
         // than a second cleanup protocol alongside the controller.
         let mut active = Some(active);
-        let mut admission = Some(admission);
+        // Same original admission, shared with existing native/FS workers.
+        // One requested Arc allocation is not a native/allocator peak bound.
+        let mut admission = Some(Arc::new(admission));
         let mut lease = None;
         let mut publisher = None;
         let mut work_result = None;
@@ -356,10 +358,15 @@ impl JobManager {
                                 }),
                             )
                             .await;
-                            let work = plurx_core::process::bounded::cancellable(
-                                cancellation.clone(),
-                                self.process_library_requests(
-                                    &job.id, library_id, lease, publisher, &fence,
+                            let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> =
+                                admission.clone();
+                            let work = plurx_core::process::bounded::with_original_work_keeper(
+                                keeper,
+                                plurx_core::process::bounded::cancellable(
+                                    cancellation.clone(),
+                                    self.process_library_requests(
+                                        &job.id, library_id, lease, publisher, &fence,
+                                    ),
                                 ),
                             );
                             tokio::pin!(work);

@@ -94,8 +94,12 @@ where
     F: Fn() + Send + 'static,
 {
     let cancellation = crate::process::bounded::cancellation();
+    let original_keeper = crate::process::bounded::original_keeper();
     let (tx, rx) = tokio::sync::mpsc::channel(WALK_PAGES_IN_FLIGHT);
     let handle = tokio::task::spawn_blocking(move || {
+        // Declared first: directory iterators/FDs created by this actual worker
+        // retire before its same original keeper, including unwind/early exit.
+        let _original_keeper = original_keeper;
         let mut page = Vec::with_capacity(WALK_PAGE);
         let mut last_root = None;
         for root in roots {
@@ -774,7 +778,9 @@ pub async fn scan_library_with_publication_and_prune_limit(
     // canonical read gives the spellings a catalogued path can carry (see
     // `superseded_paths`).
     let fingerprint_paths = library.paths.clone();
+    let original_keeper = crate::process::bounded::original_keeper();
     let (fingerprint, spellings) = match tokio::task::spawn_blocking(move || {
+        let _original_keeper = original_keeper;
         (
             library_root_fingerprint(&fingerprint_paths),
             root_spellings(&fingerprint_paths),
@@ -1058,7 +1064,9 @@ pub async fn scan_library_with_publication_and_prune_limit(
 /// catalogued file missing asks this before concluding the file is gone.
 pub async fn library_root_available(root: &Path) -> bool {
     let root = root.to_path_buf();
+    let original_keeper = crate::process::bounded::original_keeper();
     tokio::task::spawn_blocking(move || {
+        let _original_keeper = original_keeper;
         library_root_fingerprint(std::slice::from_ref(&root)).is_ok()
             && std::fs::read_dir(&root)
                 .map(|mut entries| entries.next().is_some())
@@ -1277,7 +1285,9 @@ pub async fn scan_path_with_publication(
     // host" for anyone holding a scan key.
     let target_path = target.to_path_buf();
     let configured_roots = library.paths.clone();
+    let original_keeper = crate::process::bounded::original_keeper();
     let canonicalized = tokio::task::spawn_blocking(move || {
+        let _original_keeper = original_keeper;
         let canonical = target_path.canonicalize()?;
         let is_file = canonical.is_file();
         let roots = configured_roots
@@ -2133,3 +2143,7 @@ fn skip_group_folder(library: &Library, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/original_keeper.rs"]
+mod original_keeper_tests;
