@@ -1,6 +1,6 @@
 # Apple runners — the M4 primary and M3 Max standby
 
-**Status:** live · **Updated:** 2026-10-23
+**Status:** live · **Updated:** 2026-10-26
 
 Companion to [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) (what Apple
 CI verifies) and [RUNNER-DISK.md](RUNNER-DISK.md) (runner disk maintenance).
@@ -18,9 +18,22 @@ The toolchain pin is Xcode 27.1 (`27A9275`). The standby was observed on
 reports 27.0 and must match the pin before it can serve Apple jobs. This
 source change does not install or restart either runner.
 
-DerivedData cache keys and restore prefixes include the Xcode build and both
-mobile SDK versions. A different toolchain starts cold; its cache is saved only
-after success. The Effort Apple compile budget is 45 minutes because it also
+Apple jobs keep DerivedData inside their own checkout and reuse it between
+that job's build, unit-test and navigation steps. Whole DerivedData is neither
+restored nor uploaded by full, effort or main-fast CI: its build database
+contains absolute paths, while repeated Forgejo jobs have used different
+checkout roots. Path-specific keys would miss those jobs and still upload the
+cache. Existing Forgejo cache blobs, Rust caches and tool caches are unchanged.
+
+Generic iOS and tvOS simulator builds still cover arm64 and x86_64. Toolchain
+pins, concurrency, job budgets and promotion gates are unchanged. This cache
+boundary does not establish the cause of a compiler failure or qualify a new
+candidate; the existing build and native test checks remain required.
+The [workflow regression](../../tests/operations/test_apple_tv_navigation_gate.py)
+rejects whole-DerivedData transfer in all three workflows and retains their
+build commands, pins and scheduling limits.
+
+The Effort Apple compile budget is 45 minutes because it also
 builds both macOS tray architectures before generic iOS and tvOS simulators.
 Run 5877 exhausted the old 10-minute budget during the first iOS cold build;
 that failure establishes neither iOS nor tvOS compilation. Full CI and main

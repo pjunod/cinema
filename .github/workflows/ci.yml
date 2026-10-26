@@ -1563,20 +1563,8 @@ jobs:
           simulator_runtimes="$(xcrun simctl list runtimes)"
           grep -Fq "iOS 26.5 (26.5 - 23F77)" <<< "$simulator_runtimes"
           grep -Fq "tvOS 26.5 (26.5 - 23L470)" <<< "$simulator_runtimes"
-      # Warm Swift incrementals: the Makefile builds into
-      # clients/apple/build/DerivedData precisely so this cache can restore it.
-      # restore-keys accepts the newest prior entry when sources moved — an
-      # incremental rebuild from a near miss still beats a cold compile, and a
-      # poisoned cache only ever costs the rebuild we paid before caching.
-      - name: Cache DerivedData
-        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
-        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: clients/apple/build/DerivedData
-          key: apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
-          restore-keys: |
-            apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-
-            apple-dd-xcode-27A9275-ios27.1-tvos27.0-
+      # Keep DerivedData local to this checkout across build/test steps.
+      # Its absolute-path build state is not transferred between job roots.
       - name: Create isolated iPhone, iPad, and Apple TV simulators
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
