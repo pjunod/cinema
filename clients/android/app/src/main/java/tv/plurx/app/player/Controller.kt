@@ -1043,6 +1043,7 @@ class Controller internal constructor(
 
     internal val subtitleTextTranslation = SubtitleTextTranslation(
         api = { vm.api() }, scope = scope, fileId = plan.fileId, intent = subtitleTextIntent,
+        captionSelectionRevision = { progressiveCaptionIntent.selectionRevision },
         authorized = { Session.playbackAuthorization().generation == diagnosticAuthorizationGeneration },
     )
     internal fun reloadTranslatedCaption() {
@@ -6681,7 +6682,18 @@ internal fun TrackMenu(
             if (progressiveCaptions.selected != null) {
                 if (progressiveCaptions.options?.permissions?.stop == true) {
                     TrackRow("Stop generation for everyone", false, true, onClick = progressiveCaptions::stop)
-                    TrackRow("Resume / retry generation", false, true, onClick = progressiveCaptions::retry)
+                    val op = progressiveCaptions.operation
+                    val target = op?.let { runCatching { captionRetryTarget(it) }.getOrNull() }
+                    if (progressiveCaptions.hasPendingRetry) TrackRow("Resolve previous retry", false, true,
+                        onClick = progressiveCaptions::retry)
+                    else if (target != null) TrackRow("Resume / retry generation", false, true) { progressiveCaptions.retry(target) }
+                    else if (op == null) TrackRow("Retry generation request", false, true, onClick = progressiveCaptions::retry)
+                    if (op?.state == "partial") op.failed_ranges.filter { it.retryable }.forEach { range ->
+                        val rangeTarget = captionRetryTarget(op, range)
+                        TrackRow("Retry failed range ${range.core_index + 1}", false, true) { progressiveCaptions.retry(rangeTarget) }
+                    }
+                    if (op?.failed_ranges_next_cursor != null) TrackRow("More failed ranges", false, true,
+                        onClick = progressiveCaptions::loadMoreFailedRanges)
                 }
                 TrackRow("Caption delay: ${progressiveCaptions.offsetMs} ms (−250 ms)", false, true) {
                     progressiveCaptions.setOffset(progressiveCaptions.offsetMs - 250)

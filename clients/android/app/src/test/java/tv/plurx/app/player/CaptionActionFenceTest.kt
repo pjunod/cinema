@@ -1,5 +1,9 @@
 package tv.plurx.app.player
 
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
+import retrofit2.HttpException
+import retrofit2.Response
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -46,4 +50,14 @@ class CaptionActionFenceTest {
         assertFalse(view.acceptCurrent("operation", "2", "9007199254740993"))
         assertTrue(view.acceptCurrent("operation", "2", "9007199254740994"))
     }
+    @Test fun untypedHttpAuthorityRefusalsAreDefinitiveWhileServiceFailuresRemainAmbiguous() {
+        fun failure(status: Int) = HttpException(Response.error<okhttp3.ResponseBody>(status,
+            "{}".toResponseBody("application/json".toMediaType())))
+        assertFalse(captionActionAmbiguous(failure(401)))
+        assertFalse(captionActionAmbiguous(failure(403)))
+        assertFalse(captionActionAmbiguous(failure(409)))
+        assertTrue(captionActionAmbiguous(failure(408)))
+        assertTrue(captionActionAmbiguous(failure(503)))
+    }
+
 }

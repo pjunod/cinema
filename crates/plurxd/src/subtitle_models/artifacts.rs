@@ -656,20 +656,25 @@ mod local {
             )
     }
 
+    fn reviewed_initial_url(spec: &CatalogModel, url: &reqwest::Url) -> bool {
+        approved_url(url)
+            && url.host_str() == Some("huggingface.co")
+            && url.query().is_none()
+            && url.as_str() == spec.url
+            && (url.path()
+                == format!(
+                    "/ggerganov/whisper.cpp/resolve/{REVISION}/ggml-{}.bin",
+                    spec.id
+                )
+                || crate::subtitle_text_translation::artifacts::registered_file(spec))
+    }
+
     async fn response(
         spec: &CatalogModel,
         cancel: &CancellationToken,
     ) -> Result<reqwest::Response, String> {
         let mut url = reqwest::Url::parse(&spec.url).map_err(|_| "invalid_model_catalog_url")?;
-        if !approved_url(&url)
-            || url.host_str() != Some("huggingface.co")
-            || url.path()
-                != format!(
-                    "/ggerganov/whisper.cpp/resolve/{REVISION}/ggml-{}.bin",
-                    spec.id
-                )
-            || url.query().is_some()
-        {
+        if !reviewed_initial_url(spec, &url) {
             return Err("invalid_model_catalog_url".into());
         }
         let client = reqwest::Client::builder()
@@ -1041,6 +1046,45 @@ mod local {
             };
         }
 
+        #[test]
+        fn model_downloads_accept_only_reviewed_family_catalogs() {
+            let catalog: serde_json::Value =
+                serde_json::from_str(include_str!("../subtitle_text_translation/catalog.json"))
+                    .expect("pinned text catalog");
+            for entry in catalog["files"].as_array().expect("pinned parts") {
+                let mut entry = entry.clone();
+                entry.as_object_mut().expect("part object").remove("role");
+                let spec: CatalogModel =
+                    serde_json::from_value(entry).expect("pinned artifact identity");
+                let url = reqwest::Url::parse(&spec.url).expect("pinned artifact URL");
+                assert!(reviewed_initial_url(&spec, &url), "{}", spec.id);
+                let mut changed = spec.clone();
+                changed.sha256 = "0".repeat(64);
+                assert!(!reviewed_initial_url(&changed, &url));
+                changed = spec.clone();
+                changed.download_bytes += 1;
+                assert!(!reviewed_initial_url(&changed, &url));
+                changed = spec.clone();
+                changed.id.push_str("-other");
+                assert!(!reviewed_initial_url(&changed, &url));
+                changed = spec.clone();
+                changed.url =
+                    "https://huggingface.co/unreviewed/model/resolve/main/weights.bin".into();
+                assert!(!reviewed_initial_url(
+                    &changed,
+                    &reqwest::Url::parse(&changed.url).expect("other URL")
+                ));
+                assert!(!reviewed_initial_url(
+                    &spec,
+                    &reqwest::Url::parse("https://huggingface.co/other").expect("different URL")
+                ));
+            }
+            let legacy = crate::subtitle_translation::profile::model_spec();
+            assert!(reviewed_initial_url(
+                &legacy,
+                &reqwest::Url::parse(&legacy.url).expect("speech URL")
+            ));
+        }
         #[tokio::test]
         async fn model_root_and_artifacts_refuse_symlinks_and_world_writes() {
             let temporary = tempfile::tempdir().expect("test root");

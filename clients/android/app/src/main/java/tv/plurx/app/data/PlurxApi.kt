@@ -36,6 +36,11 @@ interface PlurxApi {
     suspend fun stopCaptions(@Path("id") id: String, @Body body: CaptionStop): Response<ResponseBody>
     @Streaming @POST("subtitle-translation/operations/{id}/retry")
     suspend fun retryCaptions(@Path("id") id: String, @Body body: CaptionRetry): Response<ResponseBody>
+    @Streaming @POST("subtitle-translation/operations/{id}/retry")
+    suspend fun retryCaptionRange(@Path("id") id: String, @Body body: CaptionRangeRetry): Response<ResponseBody>
+    @Streaming @GET("subtitle-translation/operations/{id}/failed-ranges")
+    suspend fun captionFailedRanges(@Path("id") id: String, @Query("cursor") cursor: String,
+        @Header("x-translation-read-lease") lease: String): Response<ResponseBody>
     @Streaming @GET("subtitle-translation/assets/{id}/manifest")
     suspend fun captionManifest(@Path("id") id: String, @Query("position_ms") position: Long,
         @Header("x-translation-read-lease") lease: String? = null): Response<ResponseBody>

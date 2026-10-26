@@ -1,7 +1,7 @@
 package tv.plurx.app.player
 
 import java.util.UUID
-import tv.plurx.app.data.RefusalException
+import tv.plurx.app.data.refusalStatusOf
 
 /** One mutation owner, with exact request identity retained only across uncertain outcomes. */
 internal class CaptionActionFence(private val newId: () -> String = { UUID.randomUUID().toString() }) {
@@ -30,5 +30,7 @@ internal class CaptionActionFence(private val newId: () -> String = { UUID.rando
     }
     fun invalidate(keepPending: Boolean = false) { active = null; if (!keepPending) pending = null }
 }
-internal fun captionActionAmbiguous(error: Exception): Boolean =
-    error !is RefusalException || error.status == 408 || error.status >= 500
+internal fun captionActionAmbiguous(error: Exception): Boolean {
+    val status = refusalStatusOf(error)
+    return status == null || status == 408 || status >= 500
+}

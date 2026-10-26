@@ -40,6 +40,7 @@ final class ProgressiveCaptionSession: ObservableObject {
     private var authObserver: UUID?
     private var loop: Task<Void, Never>?
     private var action: Task<Void, Never>?
+    private var actionSerial = 0
     private var now: (() -> (position: Int, base: Int, rate: Double, paused: Bool))?
     private var isPlaybackCurrent: (() -> Bool)?
     private var playbackId = UUID().uuidString.lowercased()
@@ -96,6 +97,17 @@ final class ProgressiveCaptionSession: ObservableObject {
         captured == generation && authGeneration == Session.shared.playbackAuthorization.generation &&
             isPlaybackCurrent?() == true && !Task.isCancelled
     }
+    /// Mutation busy state belongs to an action, independently of Task cancellation.
+    private func replaceAction() {
+        action?.cancel(); action = nil; actionSerial += 1; busy = false
+    }
+    private func currentAction(_ captured: Int, _ serial: Int) -> Bool {
+        serial == actionSerial && current(captured)
+    }
+    private func finishAction(_ captured: Int, _ serial: Int) {
+        guard generation == captured, actionSerial == serial else { return }
+        busy = false; action = nil
+    }
     private func clock(_ ms: Int) { serverClock = (ms, ProcessInfo.processInfo.systemUptime) }
     private func envelope() throws -> [String: CaptionValue] {
         guard let clock = serverClock else { throw CaptionProtocolError.expired }
@@ -148,22 +160,22 @@ final class ProgressiveCaptionSession: ObservableObject {
         guard let profile, profile.task == task, profile.inputLanguages.contains(spokenLanguage),
               options?.permissions.demand == true,
               let audioOrdinal else { status = "Choose a compatible model and the actual spoken language. An administrator can request work."; return false }
-        releaseDemand(); action?.cancel(); loop?.cancel()
+        releaseDemand(); replaceAction(); loop?.cancel()
         intents = intents.filter { $0.key.hasPrefix("create:") }
         windowGeneration += 1; cues = []; ranges = []; lease = nil; window = nil
         operationId = nil; operation = nil; assetId = nil; contentRevision = nil; epoch = "0"; view = "0"
         chosenProfile = profile; chosenLanguage = spokenLanguage
         let language = spokenLanguage
         selected = true; busy = true; stopRequested = false
-        let captured = generation
+        let captured = generation, serial = actionSerial
         action = Task { [weak self] in
             guard let self, let api = self.api else { return }
-            defer { if self.current(captured) { self.busy = false } }
+            defer { self.finishAction(captured, serial) }
             do {
                 if self.serverClock.map({ ProcessInfo.processInfo.systemUptime - $0.uptime >= 240 }) ?? true {
                     try await self.loadOptions(captured)
                 }
-                guard self.current(captured), let options = self.options else { return }
+                guard self.currentAction(captured, serial), let options = self.options else { return }
                 let key = "create:\(profile.profileId):\(audioOrdinal):\(language)"
                 var body = try self.intents[key] ?? self.envelope()
                 if self.intents[key] == nil {
@@ -176,7 +188,7 @@ final class ProgressiveCaptionSession: ObservableObject {
                 }
                 self.status = "Preparing captions. Playback continues."
                 let reply: CaptionHTTPReply<CaptionReceipt> = try await api.caption("files/\(self.fileId)/subtitle-translation", method: "POST", body: body)
-                guard self.current(captured), self.selected else { return }
+                guard self.currentAction(captured, serial), self.selected else { return }
                 try self.adopt(reply.value)
                 self.intents[key] = nil; self.chosenProfile = profile; self.chosenLanguage = language
                 await self.poll(captured)
@@ -191,7 +203,7 @@ final class ProgressiveCaptionSession: ObservableObject {
               let profile = profiles.first(where: { $0.profileId == asset.profileId }), asset.audioIndex == audioOrdinal else { return }
         releaseDemand()
         intents = intents.filter { $0.key.hasPrefix("create:") }
-        action?.cancel(); loop?.cancel(); windowGeneration += 1; cues = []; ranges = []; lease = nil
+        replaceAction(); loop?.cancel(); windowGeneration += 1; cues = []; ranges = []; lease = nil; window = nil
         selected = true; stopRequested = false; assetId = asset.assetId; operationId = asset.operationId
         chosenProfile = profile; chosenLanguage = asset.spokenLanguage; epoch = "0"; view = "0"; contentRevision = nil
         let captured = generation
@@ -203,7 +215,7 @@ final class ProgressiveCaptionSession: ObservableObject {
 
     func deselect() {
         selected = false; window = nil; seekDemandPosition = nil
-        loop?.cancel(); loop = nil; action?.cancel(); action = nil
+        loop?.cancel(); loop = nil; replaceAction()
         windowGeneration += 1; releaseDemand()
         busy = false
     }
@@ -301,36 +313,42 @@ final class ProgressiveCaptionSession: ObservableObject {
 
     func stop() {
         guard !busy, let operationId, let api else { return }
-        stopRequested = true; busy = true
-        let captured = generation
+        replaceAction(); stopRequested = true; busy = true
+        let captured = generation, serial = actionSerial
         action = Task { [weak self] in
             guard let self else { return }
-            defer { if self.current(captured) { self.busy = false } }
+            defer { self.finishAction(captured, serial) }
             do {
                 var body = try self.intents["stop"] ?? self.envelope()
                 if self.intents["stop"] == nil { body["expected_operation_epoch"] = .string(self.epoch) }
                 self.intents["stop"] = body
                 let reply: CaptionHTTPReply<CaptionReceipt> = try await api.caption("subtitle-translation/operations/\(operationId)/stop", method: "POST", body: body)
-                guard self.current(captured) else { return }
+                guard self.currentAction(captured, serial) else { return }
                 try self.adopt(reply.value); self.intents["stop"] = nil
                 self.demandId = nil; self.demandGeneration = nil
                 self.status = "Caption work stopped. Published captions remain available."
                 await self.poll(captured)
-            } catch { self.fail(error, captured, intent: "stop"); self.status = "Stop is unconfirmed. Retry Stop; playback continues." }
+            } catch {
+                guard self.currentAction(captured, serial), !(error is CancellationError),
+                      (error as NSError).code != NSURLErrorCancelled else { return }
+                self.fail(error, captured, intent: "stop")
+                guard self.currentAction(captured, serial) else { return }
+                self.status = "Stop is unconfirmed. Retry Stop; playback continues."
+            }
         }
     }
 
     func retry(_ range: CaptionFailedRange? = nil) {
         guard !busy, let api, let operationId, operation != nil else { return }
         let key = range.map { "retry:\($0.coreIndex)" } ?? "retry"
-        busy = true
-        let captured = generation
+        replaceAction(); busy = true
+        let captured = generation, serial = actionSerial
         action = Task { [weak self] in
             guard let self else { return }
-            defer { if self.current(captured) { self.busy = false } }
+            defer { self.finishAction(captured, serial) }
             do {
                 if self.intents[key] == nil { await self.poll(captured) }
-                guard self.current(captured), let operation = self.operation else { return }
+                guard self.currentAction(captured, serial), let operation = self.operation else { return }
                 var body = try self.intents[key] ?? self.envelope()
                 if self.intents[key] == nil {
                     body.merge(self.playbackFields()) { _, next in next }
@@ -346,7 +364,7 @@ final class ProgressiveCaptionSession: ObservableObject {
                     self.intents[key] = body
                 }
                 let reply: CaptionHTTPReply<CaptionReceipt> = try await api.caption("subtitle-translation/operations/\(operationId)/retry", method: "POST", body: body)
-                guard self.current(captured) else { return }
+                guard self.currentAction(captured, serial) else { return }
                 try self.adopt(reply.value); self.intents[key] = nil; self.stopRequested = false
                 self.startLoop(captured)
             } catch { self.fail(error, captured, intent: key) }

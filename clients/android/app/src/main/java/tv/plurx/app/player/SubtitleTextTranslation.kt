@@ -34,6 +34,7 @@ internal fun subtitleTextResultForUse(job: SubtitleTextJob, fileId: Long, option
 internal class SubtitleTextTranslation(
     private val api: () -> PlurxApi, private val scope: CoroutineScope, private val fileId: Long,
     private val intent: SubtitleTextTranslationIntent, private val authorized: () -> Boolean,
+    private val captionSelectionRevision: () -> Long,
 ) {
     var options: SubtitleTextOptions? by mutableStateOf(null); private set
     var job: SubtitleTextJob? by mutableStateOf(null); private set
@@ -183,15 +184,16 @@ internal class SubtitleTextTranslation(
     fun use(onUse: (Long) -> Unit) {
         val value = job ?: return
         val g = generation
+        val selectedAt = captionSelectionRevision()
         scope.launch {
             try {
                 val latest = readOptions()
-                if (!current(g)) return@launch
+                if (!current(g) || captionSelectionRevision() != selectedAt) return@launch
                 val index = subtitleTextResultForUse(value, fileId, latest, intent)
                 options = latest
                 onUse(index)
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (current(g)) status = e.message ?: "Could not use translated subtitle" }
+            catch (e: Exception) { if (current(g) && captionSelectionRevision() == selectedAt) status = e.message ?: "Could not use translated subtitle" }
         }
     }
     fun release() { active = false; generation++; actions.invalidate(); polling?.cancel() }

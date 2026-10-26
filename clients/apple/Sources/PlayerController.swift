@@ -2857,7 +2857,7 @@ final class PlayerController: ObservableObject {
 
     func selectSubtitle(_ index: Int?) {
         let wasProgressive = progressiveCaptionOutputSelected
-        progressiveCaptionTask?.cancel(); progressiveCaptionTask = nil
+        retireProgressiveCaptionSelection()
         progressiveCaptions.deselect()
         player.allowsExternalPlayback = !pgsOverlayIsActive
         let cold = started && decision == nil
@@ -2944,20 +2944,24 @@ final class PlayerController: ObservableObject {
         raiseSurfaceNotice(source: "control_hold", context: .attached, detail: message)
     }
 
-    private func applySubtitleSelection(
+    @discardableResult private func applySubtitleSelection(
         _ index: Int?,
         route: SubtitleSelectionRoute,
         destination: (target: Int, generation: Int)? = nil,
         expectedActionEpoch: Int
-    ) async {
-        guard expectedActionEpoch == viewerActionEpoch else { return }
+    ) async -> Bool {
+        guard !Task.isCancelled, expectedActionEpoch == viewerActionEpoch else { return false }
         // Overlay teardown/installation changes visible presentation and
         // external-output behavior, so it belongs after the urgent intent
         // publication and stale-action guard just like the AVPlayer mutation.
         updatePGSOverlaySelection(index)
         switch route {
         case .reopen:
-            await reopen(at: destination?.target ?? positionForPlaybackIntent())
+            let incumbent = player.currentItem
+            var applied = false
+            await reopen(at: destination?.target ?? positionForPlaybackIntent(), applied: { applied = $0 })
+            return applied && !Task.isCancelled && expectedActionEpoch == viewerActionEpoch
+                && player.currentItem != nil && player.currentItem !== incumbent
         case .bitmapOverlay:
             // Moving from a native rendition to bitmap presentation must also
             // turn AVPlayer's legible option off. The synchronized layer then
@@ -2972,7 +2976,9 @@ final class PlayerController: ObservableObject {
                 currentActionEpoch: viewerActionEpoch
             ) {
                 settleInPlaceSubtitleDestination(destination)
+                return true
             }
+            return false
         case .mediaSelection:
             // Selection belongs to AVPlayerItem, not the HLS session. This is
             // the no-restart path that preserves video copy, HDR, position,
@@ -2988,7 +2994,9 @@ final class PlayerController: ObservableObject {
                 currentActionEpoch: viewerActionEpoch
                ) {
                 settleInPlaceSubtitleDestination(destination)
+                return true
             }
+            return false
         }
     }
 
@@ -3853,7 +3861,10 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    private func reopen(at position: Int, intent: PlayerOpenIntent = .normal) async {
+    private func reopen(at position: Int, intent: PlayerOpenIntent = .normal,
+                        applied: ((Bool) -> Void)? = nil) async {
+        var attached = false
+        defer { applied?(attached) }
         #if os(iOS)
         if offlineId != nil {
             await reloadOffline(at: position)
@@ -3878,6 +3889,8 @@ final class PlayerController: ObservableObject {
         }
         do {
             try await openAndDrain(decision: decision, request: next)
+            attached = isCurrentLifecycle(lifecycle) && !Task.isCancelled
+                && !isChangingStream && !recipeRevision.needsReopen
         } catch {
             guard isCurrentLifecycle(lifecycle) else { return }
             reopenQueue.clear()
@@ -4509,7 +4522,7 @@ final class PlayerController: ObservableObject {
     }
 
     private func configureProgressiveCaptions() {
-        progressiveCaptionTask?.cancel(); progressiveCaptionTask = nil
+        retireProgressiveCaptionSelection()
         guard started, let model, fileId > 0 else { return }
         let lifecycle = lifecycleGeneration
         subtitleTextTranslation.configure(api: model.requireAPI(), fileId: fileId)
@@ -4520,23 +4533,36 @@ final class PlayerController: ObservableObject {
             }, current: { [weak self] in self?.isCurrentLifecycle(lifecycle) == true })
     }
 
+    private func retireProgressiveCaptionSelection() {
+        // An attached stream replacement owns the reopen queue until it drains.
+        // Retire caption intent through viewerActionEpoch without cancelling
+        // that physical owner and stranding its queued newer subtitle change.
+        if !isChangingStream { progressiveCaptionTask?.cancel() }
+        progressiveCaptionTask = nil
+    }
+
     /// Explicit local caption output is chosen by the player UI before entry.
     func selectProgressiveCaptions(_ task: CaptionTask) {
         guard started, !player.isExternalPlaybackActive else {
             showPlaybackNotice("Return playback to this device to show progressive captions.")
             return
         }
-        progressiveCaptionTask?.cancel()
-        let actionEpoch = beginViewerAction()
+        retireProgressiveCaptionSelection()
+        let actionEpoch = beginViewerAction(), lifecycle = lifecycleGeneration
         let route = Self.subtitleSelectionRoute(for: nil, tracks: subtitles,
             activeBurn: activeBurnedSubtitle, isDirectPlayback: isDirectPlayback, activeOverlay: pgsOverlayTrackIndex)
+        if route == .reopen { recipeRevision.change() }
         selectedSubtitle = nil
         progressiveCaptionTask = Task {
             defer { if actionEpoch == viewerActionEpoch { progressiveCaptionTask = nil; objectWillChange.send() } }
             retainControlSequence(await playbackControl.reportIntent())
-            guard !Task.isCancelled, actionEpoch == viewerActionEpoch else { return }
-            await applySubtitleSelection(nil, route: route, expectedActionEpoch: actionEpoch)
-            guard !Task.isCancelled, started, actionEpoch == viewerActionEpoch, !player.isExternalPlaybackActive else { return }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), actionEpoch == viewerActionEpoch else { return }
+            let applied = await applySubtitleSelection(nil, route: route, expectedActionEpoch: actionEpoch)
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), actionEpoch == viewerActionEpoch, !player.isExternalPlaybackActive else { return }
+            guard applied, activeBurnedSubtitle == nil, !recipeRevision.needsReopen else {
+                showPlaybackNotice("Captions were not selected because subtitle removal did not attach. Try again after the stream change finishes.")
+                return
+            }
             if progressiveCaptions.request(task) { player.allowsExternalPlayback = false }
         }
     }
@@ -4546,17 +4572,22 @@ final class PlayerController: ObservableObject {
             showPlaybackNotice("Return playback to this device to show progressive captions.")
             return
         }
-        progressiveCaptionTask?.cancel()
-        let actionEpoch = beginViewerAction()
+        retireProgressiveCaptionSelection()
+        let actionEpoch = beginViewerAction(), lifecycle = lifecycleGeneration
         let route = Self.subtitleSelectionRoute(for: nil, tracks: subtitles,
             activeBurn: activeBurnedSubtitle, isDirectPlayback: isDirectPlayback, activeOverlay: pgsOverlayTrackIndex)
+        if route == .reopen { recipeRevision.change() }
         selectedSubtitle = nil
         progressiveCaptionTask = Task {
             defer { if actionEpoch == viewerActionEpoch { progressiveCaptionTask = nil; objectWillChange.send() } }
             retainControlSequence(await playbackControl.reportIntent())
-            guard !Task.isCancelled, actionEpoch == viewerActionEpoch else { return }
-            await applySubtitleSelection(nil, route: route, expectedActionEpoch: actionEpoch)
-            guard !Task.isCancelled, started, actionEpoch == viewerActionEpoch, !player.isExternalPlaybackActive else { return }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), actionEpoch == viewerActionEpoch else { return }
+            let applied = await applySubtitleSelection(nil, route: route, expectedActionEpoch: actionEpoch)
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), actionEpoch == viewerActionEpoch, !player.isExternalPlaybackActive else { return }
+            guard applied, activeBurnedSubtitle == nil, !recipeRevision.needsReopen else {
+                showPlaybackNotice("Captions were not selected because subtitle removal did not attach. Try again after the stream change finishes.")
+                return
+            }
             player.allowsExternalPlayback = false
             progressiveCaptions.read(asset)
         }

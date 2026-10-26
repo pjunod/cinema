@@ -121,4 +121,71 @@ class ProgressiveCaptionsTest {
         assertEquals(0, embeddedTextTrackIndex(1, listOf(downloaded, embedded), listOf("en")))
         assertEquals("plurx-downloaded-0", downloadedCaptionId(0))
     }
+    private fun partialOperation() = CaptionOperation(1, "operation", "7", "11", "partial", retryable = false,
+        asset_id = hash, content_revision = "b".repeat(64), source_size = "9007199254740993", source_mtime = "123",
+        audio_index = 1, task = "transcribe", spoken_language = "ja", output_language = "ja", profile_id = hash,
+        source_check = CaptionSourceCheck("verified", "9007199254740993", "9007199254740993"), server_now_ms = 1_000,
+        failed_ranges = listOf(CaptionFailedRange(2, "9007199254740993", "worker_lost", true, 1)))
+    @Test fun partialOperationRetriesOnlyTheExactPublishedFailedRangeAndPreservesCues() {
+        val operation = partialOperation()
+        val target = captionRetryTarget(operation, operation.failed_ranges.single())
+        val attempt = captionRetryAttempt(target, "request", 60_000, "playback", 17_000, 1.0, false)
+        assertNull(attempt.operation)
+        val body = Net.json.encodeToString(requireNotNull(attempt.range))
+        assertTrue(body.contains("\"scope\":\"range\""))
+        assertTrue(body.contains("\"core_index\":2"))
+        assertTrue(body.contains("\"expected_range_revision\":\"9007199254740993\""))
+        assertTrue(body.contains("\"expected_operation_state\":\"partial\""))
+        assertFalse(body.contains("expected_view_revision"))
+        assertFalse(body.contains("\"expected_state\""))
+        val window = CaptionWindow()
+        window.replace(listOf(verify(segment())), 0, 120_000)
+        assertTrue(captionRetryTargetCurrent(target, operation))
+        assertEquals("<literal> 日本語 & text", window.textAt(1_000))
+    }
+    @Test fun staleFailedRangeTargetCannotRedirectToANewRevisionRangeOrOperation() {
+        val operation = partialOperation()
+        val target = captionRetryTarget(operation, operation.failed_ranges.single())
+        assertFalse(captionRetryTargetCurrent(target, operation.copy(view_revision = "12")))
+        assertFalse(captionRetryTargetCurrent(target, operation.copy(operation_epoch = "8")))
+        assertFalse(captionRetryTargetCurrent(target, operation.copy(operation_id = "other")))
+        assertFalse(captionRetryTargetCurrent(target, operation.copy(failed_ranges = listOf(operation.failed_ranges.single().copy(range_revision = "9007199254740994")))))
+        assertFalse(captionRetryTargetCurrent(target, operation.copy(failed_ranges = listOf(operation.failed_ranges.single().copy(core_index = 3)))))
+        refuses { captionRetryTarget(operation) }
+        refuses { captionRetryTarget(operation, operation.failed_ranges.single().copy(retryable = false)) }
+    }
+    @Test fun operationResumeRemainsDistinctFromRangeRetryAndFailurePagesAreBounded() {
+        val operation = partialOperation().copy(state = "stopped")
+        val attempt = captionRetryAttempt(captionRetryTarget(operation), "request", 60_000, "playback", 0, 1.0, true)
+        assertNull(attempt.range)
+        assertEquals("operation", attempt.operation?.scope)
+        assertEquals("11", attempt.operation?.expected_view_revision)
+        captionValidateFailures(operation.failed_ranges, "cursor")
+        refuses { captionValidateFailures(operation.failed_ranges + operation.failed_ranges, null) }
+        refuses { captionValidateFailures(listOf(operation.failed_ranges.single().copy(core_index = 2048)), null) }
+        refuses { captionValidateFailures(listOf(operation.failed_ranges.single().copy(range_revision = "01")), null) }
+    }
+
+    @Test fun lostDemandRenewalReplaysExactIdentityAndLateCompletionCannotClearItsSuccessor() {
+        val pending = CaptionDemandAttempt()
+        val receipt = CaptionReceipt(1, "accepted", "operation", "7", "11", "running", demand_id = "demand",
+            demand_generation = "9007199254740993", server_now_ms = 1_000)
+        var ids = 0
+        fun request(value: CaptionReceipt = receipt) = pending.request(value, "7") {
+            CaptionDemand(1, "request-${++ids}", 60_000, "7", nextCaptionCounter(requireNotNull(value.demand_generation)),
+                "playback", 1_000, 1.0, false)
+        }
+        val first = request()
+        pending.finish(first, ambiguous = true)
+        assertSame(first, request())
+        assertEquals(1, ids)
+        assertEquals("9007199254740994", first.demand_generation)
+        val newer = request(receipt.copy(demand_id = "replacement"))
+        assertNotSame(first, newer)
+        pending.finish(first, ambiguous = false)
+        assertSame(newer, request(receipt.copy(demand_id = "replacement")))
+        pending.finish(newer, ambiguous = false)
+        assertNotSame(newer, request(receipt.copy(demand_id = "replacement")))
+    }
+
 }

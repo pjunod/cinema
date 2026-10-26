@@ -27,6 +27,11 @@ struct Catalog {
 static SPEC: LazyLock<Catalog> =
     LazyLock::new(|| serde_json::from_str(CATALOG).expect("pinned text translation catalog"));
 
+/// Only immutable compiled catalog entries may use the shared artifact downloader.
+pub(crate) fn registered_file(spec: &CatalogModel) -> bool {
+    SPEC.files.iter().any(|part| part.spec == *spec)
+}
+
 pub(crate) fn expected_bundle_digest() -> String {
     hex::encode(Sha256::digest(CATALOG.as_bytes()))
 }

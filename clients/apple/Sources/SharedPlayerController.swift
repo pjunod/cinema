@@ -21,9 +21,10 @@ final class SharedPlayerController: ObservableObject {
         case remoteControl(SharedControlIntent, () -> Bool, (CinemaRemoteOutcome) -> Void)
         case change(SharedDirectedChange)
         case restartDirect(session: String)
-        case caption(SharedCaptionAsset)
+        case caption(SharedCaptionAsset, Int)
     }
     let player = AVPlayer()
+    private var captionIntentSerial = 0
     let captions = SharedCaptionReadSession()
     private var captionObservation: AnyCancellable?
     private func observeCaptions() { captionObservation = captions.objectWillChange.sink { [weak self] in self?.objectWillChange.send() } }
@@ -35,6 +36,16 @@ final class SharedPlayerController: ObservableObject {
         makeClient = { try SharedDecisionClient(testConfiguration: testConfiguration) }
         self.beforeStopCleanup = beforeStopCleanup
         observeCaptions()
+    }
+    /// Inject only an already authenticated Start and its attached item. The
+    /// caption/change operation and B control exchange remain production code.
+    func seedCaptionPlaybackForTesting(plan: SharedPlaybackPlan, playback: SharedStartedPlayback,
+                                       client: SharedDecisionClient, item: AVPlayerItem) throws {
+        self.plan=plan;self.playback = .hls(playback);self.client=client
+        var capabilities=Caps.controlCapabilities();capabilities.dualPlayerPreparation=false
+        channel=try SharedControlChannel(playback:playback,clientInstanceId:clientInstanceId,capabilities:capabilities)
+        player.replaceCurrentItem(with:item)
+        configureCaptions(plan,client:client)
     }
     #endif
     @Published private(set) var playback: SharedStartedMedia?
@@ -159,21 +170,38 @@ final class SharedPlayerController: ObservableObject {
 
     /// Quality, audio or subtitle. B declines a directed change on a shared
     /// session with `preparation: "none"`, and the answer is a fresh Start.
-    func change(_ change: SharedDirectedChange) async { await retireNetworkBeforePhysicalOperation(); await run(.change(change)) }
+    func change(_ change: SharedDirectedChange) async {
+        if change.subtitleIndex != nil || change.audioIndex != nil { captionIntentSerial += 1 }
+        await retireNetworkBeforePhysicalOperation(); await run(.change(change))
+    }
 
     func selectCaption(_ asset: SharedCaptionAsset) async {
+        captionIntentSerial += 1
+        let intent = captionIntentSerial
         await retireNetworkBeforePhysicalOperation()
-        await run(.caption(asset))
+        guard intent == captionIntentSerial else { return }
+        await run(.caption(asset, intent))
     }
     func useLocalCaptionOutput() { player.allowsExternalPlayback=false }
-    private func performCaptionSelection(_ asset: SharedCaptionAsset) async {
+    private func performCaptionSelection(_ asset: SharedCaptionAsset, intent: Int) async {
+        guard intent == captionIntentSerial, let initialPlan = plan else { return }
+        let owner = operationSerial, source = initialPlan.subject.context.sourceKey
+        let burned = initialPlan.request.subtitleBurn != nil
+        let incumbent = player.currentItem
         guard !player.isExternalPlaybackActive else { notice="Return playback to this device to display published captions.";return }
         if plan?.request.subtitleBurn != nil { await performChange(SharedDirectedChange(subtitleIndex:.some(nil))) }
-        guard !closing,!Task.isCancelled,let item=player.currentItem else { return }
+        guard !closing,!Task.isCancelled,intent == captionIntentSerial,owner == operationSerial,!preemptRequested,
+              let acceptedPlan=plan,acceptedPlan.subject.context.sourceKey == source,let item=player.currentItem else { return }
+        guard acceptedPlan.request.subtitleBurn == nil,
+              !burned || (item !== incumbent && acceptedPlan.rawSubtitleIndex == nil) else {
+            notice="Captions were not selected because subtitle removal did not attach. Try again after the stream change finishes."
+            return
+        }
         if let group=try? await item.asset.loadMediaSelectionGroup(for:.legible) {
-            guard !closing,!Task.isCancelled,player.currentItem===item else { return }
+            guard !closing,!Task.isCancelled,intent == captionIntentSerial,owner == operationSerial,!preemptRequested,player.currentItem===item else { return }
             item.select(nil,in:group)
         }
+        guard intent == captionIntentSerial,!closing,!Task.isCancelled,!preemptRequested,player.currentItem===item else { return }
         captions.choose(asset)
         if captions.selected != nil { player.allowsExternalPlayback=false }
     }
@@ -226,7 +254,7 @@ final class SharedPlayerController: ObservableObject {
         case .remoteControl(let intent, let permit, let complete): complete(await performControl(intent, permit: permit))
         case .change(let change): await performChange(change)
         case .restartDirect(let session): await restartDirect(session)
-        case .caption(let asset): await performCaptionSelection(asset)
+        case .caption(let asset, let intent): await performCaptionSelection(asset, intent: intent)
         }
     }
 

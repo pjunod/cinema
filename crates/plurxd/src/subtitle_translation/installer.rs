@@ -300,3 +300,207 @@ mod tests {
         );
     }
 }
+
+/// Explicit local runtime qualification; excluded from every ordinary test run.
+/// The production model-operation helper is also the HTTP setup handler's seam.
+#[cfg(all(test, unix))]
+mod qualification {
+    use super::*;
+    use plurx_core::store::{
+        background_jobs::{JobPayload, JobState},
+        keys,
+        subtitle_translation_read::{TranslationQuery, TranslationRead},
+        BackgroundJobStore, SqliteStore, Store,
+    };
+    use serde_json::json;
+    use std::{os::unix::fs::DirBuilderExt, path::PathBuf, sync::Arc};
+
+    fn required_path(name: &str) -> PathBuf {
+        let path = std::env::var_os(name)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                panic!("{name} must name an explicit qualification-owned absolute path")
+            });
+        assert!(path.is_absolute(), "{name} must be absolute");
+        path
+    }
+
+    /// Downloads/reuses the pinned small model and exercises real decoding,
+    /// Whisper inference, task-specific cue checks and durable receipt publish.
+    /// It proves the compiled German fixture, not arbitrary media or languages.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "real pinned model download/inference; requires PLURX_SPEECH_QUALIFICATION_ROOT, PLURX_SUBTITLE_ENGINE, PLURX_FFMPEG and owned TMPDIR"]
+    async fn pinned_whisper_install_and_verify_qualify_both_speech_tasks() {
+        let root = required_path("PLURX_SPEECH_QUALIFICATION_ROOT");
+        let temporary = required_path("TMPDIR");
+        assert!(
+            temporary.starts_with(&root),
+            "TMPDIR must be inside the explicit qualification root"
+        );
+        let engine_path = required_path("PLURX_SUBTITLE_ENGINE");
+        let decoder_path = required_path("PLURX_FFMPEG");
+        assert!(
+            engine_path.is_file(),
+            "build the pinned packaged engine first"
+        );
+        assert!(decoder_path.is_file(), "provide the real decoder");
+        std::fs::create_dir_all(&root).expect("qualification root");
+        std::fs::create_dir_all(&temporary).expect("owned temporary root");
+        let session = root.join(format!("speech-session-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&session)
+            .expect("exclusive private qualification session");
+        eprintln!(
+            "private speech qualification session: {}",
+            session.display()
+        );
+        let database = session.join("qualification.sqlite");
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open(&database).expect("private durable SQLite"));
+        store
+            .put_setting(keys::SW_POOL_THREADS, "2")
+            .await
+            .expect("bounded production CPU budget");
+        let mut state = AppState::new_unhooked(
+            "Local pinned speech qualification".into(),
+            store,
+            crate::state::Dirs {
+                artwork: session.join("artwork"),
+                transcode: session.join("transcode"),
+                cache: session.join("cache"),
+                subs: session.join("subs"),
+                runtime_cache: session.join("runtime"),
+                renditions: session.join("renditions"),
+            },
+            "speech-qualification".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        // Only model bytes persist between independent private job databases.
+        state.subtitle_models = Arc::new(crate::subtitle_models::Runtime::new(&root));
+        let engine = artifacts::inspect_engine()
+            .await
+            .expect("verify real packaged engine and companions");
+        let spec = profile::model_spec();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20 * 60);
+        let mut evidence = Vec::new();
+        for selected in profile::profiles() {
+            let profile_id = selected.id().expect("registered profile ID");
+            for action in [
+                ModelAction::TranslationInstall,
+                ModelAction::TranslationVerify,
+            ] {
+                let request = json!({
+                    "version":2, "request_id":uuid::Uuid::new_v4().to_string(),
+                    "intent_expires_at_ms":crate::state::clock_ms()+300000,
+                    "purpose":"translation", "profile_id":profile_id,
+                    "node_ids":[state.node_id],
+                });
+                let axum::Json(reply) =
+                    crate::subtitle_translation::model_operation(&state, &spec.id, action, request)
+                        .await
+                        .expect("production setup request enqueue");
+                let job_id = reply["operations"][0]["job_id"]
+                    .as_str()
+                    .expect("durable setup job")
+                    .to_owned();
+                let queued = state
+                    .store
+                    .background_job(&job_id)
+                    .await
+                    .expect("queued job read")
+                    .expect("queued job");
+                assert_eq!(queued.state, JobState::Queued);
+                assert!(
+                    matches!(queued.supported_payload().expect("typed model payload"),
+                    JobPayload::SubtitleModelOperation { translation_profile:Some(ref accepted), action:accepted_action, .. }
+                        if accepted == &selected && accepted_action == action)
+                );
+                let cancel = CancellationToken::new();
+                let worker = crate::subtitle_translation::manager::worker_pass(&state, &cancel);
+                tokio::pin!(worker);
+                let progressed = tokio::select! {
+                    result = &mut worker => result.expect("real serial setup worker"),
+                    () = tokio::time::sleep_until(deadline) => {
+                        cancel.cancel();
+                        let result = worker.await;
+                        panic!("bounded qualification deadline reached; cancelled worker fully awaited: {result:?}");
+                    }
+                };
+                assert!(
+                    progressed,
+                    "the setup job must run in the real serial worker"
+                );
+                let completed = state
+                    .store
+                    .background_job(&job_id)
+                    .await
+                    .expect("completed job read")
+                    .expect("completed job");
+                assert_eq!(completed.state, JobState::Succeeded,
+                    "real task {:?} action {action:?}: error={:?}, checkpoint={:?}, attempt_errors={}",
+                    selected.task, completed.last_error_code, completed.checkpoint, completed.attempt_errors);
+                assert!(completed.fence > 0, "actual durable claim required");
+                assert_eq!(
+                    state.transcode.admissions().software_in_use(),
+                    0,
+                    "production resource guards released after publish"
+                );
+                let workers = crate::subtitle_translation::workers_public(&state)
+                    .await
+                    .expect("live physical readiness inspection");
+                assert!(
+                    workers
+                        .iter()
+                        .any(
+                            |worker| worker["capabilities"].as_array().is_some_and(|caps| caps
+                                .iter()
+                                .any(|cap| cap["profile_id"] == profile_id
+                                    && cap["status"] == "verified"))
+                        ),
+                    "actual published receipt must qualify its own task profile: {workers:?}"
+                );
+                evidence.push(
+                    json!({"job_id":job_id,"task":selected.task,"profile_id":profile_id,
+                    "action":action,"state":"succeeded","fence":completed.fence}),
+                );
+            }
+        }
+        let reopened =
+            SqliteStore::open(&database).expect("reopen committed qualification database");
+        let receipts = reopened
+            .read_subtitle_translation(TranslationRead {
+                user_id: 0,
+                now_ms: crate::state::clock_ms(),
+                query: TranslationQuery::Capabilities {
+                    node_id: state.node_id.clone(),
+                },
+            })
+            .await
+            .expect("durable qualified capabilities");
+        for selected in profile::profiles() {
+            let id = selected.id().expect("profile ID");
+            assert!(
+                receipts.iter().any(|receipt| receipt["profile_id"] == id
+                    && receipt["model"]["model_sha256"] == spec.sha256
+                    && receipt["model"]["engine_sha256"] == engine.binary_sha256
+                    && receipt["model"]["boot_id"] == state.subtitle_models.boot_id
+                    && receipt["self_test_sha256"] == profile::SELF_TEST_SHA256),
+                "both exact task receipts must survive reopening private SQLite"
+            );
+        }
+        state.shutdown.cancel();
+        let receipt = json!({"version":1,"scope":"local pinned German fixture through production queued Install/Verify for both speech tasks",
+            "model_sha256":spec.sha256,"engine_sha256":engine.binary_sha256,"adapter_contract":engine.adapter_contract,
+            "fixture_sha256":profile::SELF_TEST_SHA256,"operations":evidence});
+        let receipt_path = session.join("speech-qualification.json");
+        std::fs::write(
+            &receipt_path,
+            serde_json::to_vec_pretty(&receipt).expect("receipt JSON"),
+        )
+        .expect("persistent local evidence");
+        eprintln!("speech qualification receipt: {}", receipt_path.display());
+    }
+}

@@ -1,6 +1,17 @@
 package tv.plurx.app.player
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
+import okhttp3.Headers.Companion.headersOf
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
+import retrofit2.Response
+import java.lang.reflect.Proxy
 import kotlinx.serialization.json.Json
 import org.junit.Assert.*
 import org.junit.Test
@@ -44,4 +55,46 @@ class SubtitleTextTranslationTest {
         assertFalse(body.contains("audio_index"))
         assertFalse(body.contains("task"))
     }
+    private fun heldUse(newChoice: ((ProgressiveCaptions) -> Unit)?, expectedAdoptions: Int) = runBlocking {
+        val released = CompletableDeferred<Unit>()
+        val started = CompletableDeferred<Unit>()
+        var optionReads = 0
+        val unused = Proxy.newProxyInstance(PlurxApi::class.java.classLoader, arrayOf(PlurxApi::class.java)) { _, method, _ ->
+            error("Unexpected caption API ${method.name}")
+        } as PlurxApi
+        fun response(value: String): Response<ResponseBody> = Response.success(value.toResponseBody("application/json".toMediaType()),
+            headersOf("Content-Type", "application/json"))
+        val api = object : PlurxApi by unused {
+            override suspend fun subtitleTextOptions(id: Long): Response<ResponseBody> {
+                if (++optionReads > 1) { started.complete(Unit); released.await() }
+                return response(Net.json.encodeToString(options().copy(subtitles = listOf(options().subtitles.single().copy(index = 7)))))
+            }
+            override suspend fun subtitleTextJob(id: String) = response(Net.json.encodeToString(job()))
+            override suspend fun captionOptions(id: Long): Response<ResponseBody> = awaitCancellation()
+        }
+        val captionIntent = ProgressiveCaptionIntent()
+        val captions = ProgressiveCaptions({ api }, this, this, 41, captionIntent, { 1L }, { 0L }, { it },
+            { error("No playback mutation belongs to a held text Use") }, { true })
+        val translation = SubtitleTextTranslation({ api }, this, 41, intent, { true }, { captionIntent.selectionRevision })
+        translation.loadOptions()
+        withTimeout(1_000) { while (translation.job == null) yield() }
+        var adopted = 0
+        translation.use { index -> assertEquals(7L, index); adopted++ }
+        started.await()
+        newChoice?.invoke(captions)
+        released.complete(Unit)
+        yield()
+        assertEquals(expectedAdoptions, adopted)
+        captions.release(); translation.release()
+    }
+    @Test fun heldTextUseCannotOverrideNewerOffIntent() = heldUse({ it.off() }, 0)
+    @Test fun heldTextUseCannotOverrideNewerOrdinaryCaptionIntent() = heldUse({ captions ->
+        // Controller.switchSubtitle accepted an ordinary track: its common transition clears progressive intent.
+        captions.off()
+    }, 0)
+    @Test fun heldTextUseCannotOverrideNewerProgressiveCaptionIntent() = heldUse({
+        it.select(ProgressiveCaptionSelection("transcribe", "ja"))
+    }, 0)
+    @Test fun heldTextUseAdoptsStableCaptionAtItsRefreshedIndexWhenIntentIsUnchanged() = heldUse(null, 1)
+
 }

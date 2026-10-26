@@ -123,17 +123,32 @@ private final class CaptionFixture: @unchecked Sendable {
 }
 private final class CaptionFixtureProtocol: URLProtocol {
     static var fixture: CaptionFixture?
+    static var statusOverrides: [String:Int] = [:]
+    static var holdSuffix: String?
+    static var onHeld: (() -> Void)?
+    static var releaseHeld: (() -> Void)?
+    private var cancelled = false
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         guard let fixture = Self.fixture else { client?.urlProtocol(self, didFailWithError: URLError(.cancelled)); return }
         let body = fixture.reply(request)
-        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+        if let suffix = Self.holdSuffix, request.url?.path.hasSuffix(suffix) == true {
+            Self.releaseHeld = { [weak self] in self?.deliver(body) }
+            Self.onHeld?()
+            return
+        }
+        deliver(body)
+    }
+    private func deliver(_ body: Data) {
+        guard !cancelled else { return }
+        let status=Self.statusOverrides.first { request.url?.path.hasSuffix($0.key)==true }?.value ?? 200
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
-    override func stopLoading() { }
+    override func stopLoading() { cancelled = true }
 }
 
 @MainActor
@@ -144,6 +159,8 @@ final class ProgressiveCaptionTests: XCTestCase {
     private var owner: ProgressiveCaptionSession!
     override func setUp() {
         fixture = CaptionFixture(); CaptionFixtureProtocol.fixture = fixture
+        CaptionFixtureProtocol.statusOverrides=[:]
+        CaptionFixtureProtocol.holdSuffix=nil;CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [CaptionFixtureProtocol.self]
         transport = URLSession(configuration: config)
         owner = ProgressiveCaptionSession()
@@ -151,6 +168,7 @@ final class ProgressiveCaptionTests: XCTestCase {
     }
     override func tearDown() {
         owner.retire(); subscriptions = []; transport.invalidateAndCancel()
+        CaptionFixtureProtocol.holdSuffix=nil;CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
         Session.shared.setCredentials(origin: "", token: nil); CaptionFixtureProtocol.fixture = nil
     }
     private func configure() async {
@@ -326,4 +344,127 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertNil(CaptionRenderWindow.itemInterval(cue, baseMs: 2000, offsetMs: 0))
         XCTAssertEqual(CaptionRenderWindow.itemInterval(cue, baseMs: 2000, offsetMs: 250), 0..<250)
     }
+    private var publishedAsset: CaptionAsset {
+        CaptionAsset(assetId:fixture.asset,profileId:fixture.profileID,operationId:fixture.operation,
+                     audioIndex:2,spokenLanguage:"en",outputLanguage:"en",task:.transcribe)
+    }
+    private func eventually(_ condition: @MainActor () -> Bool) async throws {
+        for _ in 0..<400 { if condition() { return };try await Task.sleep(for:.milliseconds(10)) }
+        XCTFail("caption transition did not settle");throw CaptionProtocolError.expired
+    }
+    func testPublishedReadCancelsMutationWithoutRetainingBusyOrLateStopStatus() async throws {
+        for mutation in ["create","stop","retry"] {
+            owner.retire();fixture.stopped=false
+            await configure();owner.spokenLanguage="en"
+            if mutation != "create" {
+                XCTAssertTrue(owner.request(.transcribe));try await eventually { !self.owner.busy && self.owner.window != nil }
+            }
+            if mutation == "retry" { owner.stop();try await eventually { !self.owner.busy && self.owner.stopped } }
+            let held=expectation(description:"held "+mutation)
+            CaptionFixtureProtocol.holdSuffix=mutation == "create" ? "/subtitle-translation" : "/"+mutation
+            CaptionFixtureProtocol.onHeld={ held.fulfill() }
+            switch mutation { case "create":XCTAssertTrue(owner.request(.transcribe));case "stop":owner.stop();default:owner.retry() }
+            await fulfillment(of:[held],timeout:2);XCTAssertTrue(owner.busy)
+            owner.read(publishedAsset)
+            XCTAssertFalse(owner.busy,"the read owns presentation, not the cancelled mutation's busy flag")
+            try await eventually { self.owner.window != nil }
+            let replacementStatus=owner.status
+            CaptionFixtureProtocol.holdSuffix=nil;CaptionFixtureProtocol.releaseHeld?()
+            for _ in 0..<20 { await Task.yield() }
+            XCTAssertFalse(owner.busy);XCTAssertEqual(owner.status,replacementStatus)
+            XCTAssertFalse(owner.status.contains("Stop is unconfirmed"))
+            XCTAssertTrue(owner.request(.transcribe),"Generate remains usable after replacing "+mutation)
+            owner.deselect();CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
+        }
+    }
+    func testCancelledStopCannotOverwriteReconfiguredCaptionOwner() async throws {
+        await configure();owner.spokenLanguage="en";XCTAssertTrue(owner.request(.transcribe))
+        try await eventually { !self.owner.busy && self.owner.window != nil }
+        let held=expectation(description:"held Stop")
+        CaptionFixtureProtocol.holdSuffix="/stop";CaptionFixtureProtocol.onHeld={ held.fulfill() }
+        owner.stop();await fulfillment(of:[held],timeout:2)
+        owner.retire();await configure()
+        let status=owner.status
+        CaptionFixtureProtocol.holdSuffix=nil;CaptionFixtureProtocol.releaseHeld?()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(owner.busy);XCTAssertFalse(owner.selected);XCTAssertEqual(owner.status,status)
+    }
+
+    private func burnHandoff(_ outcome: String, generate: Bool) async throws {
+        let decision=try JSONDecoder().decode(Decision.self,from:Data("""
+        {"fileId":7,"method":"transcode","playUrl":"/not-fetched","source":{"height":1080,"durationMs":120000},
+         "audio":[{"index":2,"codec":"aac","default":true}],
+         "subtitles":[{"index":0,"codec":"ass","language":"en","default":false,"forced":false,"text":true,"native":false}],"ladder":[]}
+        """.utf8))
+        func session(_ id:String) throws -> HlsStart { try JSONDecoder().decode(HlsStart.self,from:Data("""
+        {"sessionId":"\(id)","playlistUrl":"/hls/\(id)/index.m3u8","mediaOriginMs":0,"durationMs":120000,"vod":true}
+        """.utf8)) }
+        let queued=outcome.hasPrefix("queued")
+        let caps=Caps.snapshot().document,entered=expectation(description:"subtitle-off successor held")
+        var calls=0,release:CheckedContinuation<HlsStart,Error>?
+        let controller=PlayerController(requestPlaybackDecision:{ _,_,_,_ in (decision,caps) },
+            mediaSelectionPreparation:.init(native:{ _,_,_ in .init(hasSubtitleOptions:false,apply:{true}) },audio:{_,_ in nil}),
+            itemPreparation:.init(ready:{_,_ in },seek:{_,_ in true}),
+            releaseHlsSession:{_,_ in },prepareGrowingPlaylist:{_ in },requestHlsSession:{_,_,body in
+                calls+=1
+                if calls==1 { XCTAssertEqual(body.subtitleBurn,0);return try session("burned") }
+                if queued,calls==2 { XCTAssertEqual(body.subtitleBurn,0) }
+                else { XCTAssertNil(body.subtitleBurn) }
+                if calls==2 { return try await withCheckedThrowingContinuation { release=$0;entered.fulfill() } }
+                return try session("subtitle-off-queued")
+            },requestHlsStatus:{_,id in PlaybackSessionStatus(id:id)})
+        defer { release?.resume(throwing:CancellationError());controller.stop() }
+        controller.start(model:AppModel(),itemId:7,fileId:7,startMs:0,durationMs:120000,title:"Burned fixture",selection:PrePlaySelection(audioIndex:2,subtitleIndex:0))
+        await controller.loadingTask?.value
+        let incumbent=try XCTUnwrap(controller.player.currentItem)
+        let captions=controller.progressiveCaptions
+        captions.retire()
+        let loaded=expectation(description:"caption options")
+        captions.$options.compactMap{$0}.prefix(1).sink{_ in loaded.fulfill()}.store(in:&subscriptions)
+        captions.configure(api:PlurxAPI(origin:"https://captions.test",testTransport:transport),fileId:7,sourceAudioIndex:2,
+                           now:{(65000,0,1,false)},current:{true})
+        await fulfillment(of:[loaded],timeout:2);captions.spokenLanguage="en"
+        let before=fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/subtitle-translation")==true}.count
+        if queued { controller.selectQuality(720);await fulfillment(of:[entered],timeout:2) }
+        if generate { controller.selectProgressiveCaptions(.transcribe) } else { controller.selectProgressiveAsset(publishedAsset) }
+        if !queued { await fulfillment(of:[entered],timeout:2) }
+        XCTAssertFalse(captions.selected);XCTAssertTrue(controller.player.currentItem===incumbent)
+        XCTAssertEqual(fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/subtitle-translation")==true}.count,before)
+        if outcome=="newer-off" { controller.selectSubtitle(nil) }
+        if queued { try await eventually { !controller.progressiveCaptionOutputSelected } }
+        let continuation=try XCTUnwrap(release);release=nil
+        if outcome=="failure" || outcome=="queued-failure" { continuation.resume(throwing:URLError(.cannotConnectToHost)) }
+        else { continuation.resume(returning:try session("subtitle-off")) }
+        if outcome=="success" {
+            try await eventually { captions.selected }
+            XCTAssertFalse(controller.player.currentItem===incumbent)
+            XCTAssertEqual(fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/subtitle-translation")==true}.count,before+(generate ? 1:0))
+        } else {
+            try await eventually { !controller.isChangingStream && !controller.progressiveCaptionOutputSelected }
+            XCTAssertFalse(captions.selected)
+            XCTAssertEqual(fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/subtitle-translation")==true}.count,before)
+            if outcome=="failure" || outcome=="queued-failure" { XCTAssertTrue(controller.player.currentItem===incumbent) }
+            if outcome=="queued" { XCTAssertGreaterThanOrEqual(calls,3,"the existing reopen owner still drains the queued removal") }
+        }
+    }
+    func testBurnRemovalFailureNeverStartsSpeechOrPublishedCaptions() async throws {
+        for generate in [true,false] { try await burnHandoff("failure",generate:generate) }
+    }
+    func testBurnRemovalMustAttachBeforeSpeechOrPublishedCaptionsStart() async throws {
+        for generate in [true,false] { try await burnHandoff("success",generate:generate) }
+    }
+    func testQueuedRemovalAndNewerOffCannotAdoptOldCaptionIntent() async throws {
+        for outcome in ["queued","queued-failure","newer-off"] { for generate in [true,false] { try await burnHandoff(outcome,generate:generate) } }
+    }
+
+    func testStopAccessRetirementKeepsAuthenticationStatus() async throws {
+        await configure();owner.spokenLanguage="en";XCTAssertTrue(owner.request(.transcribe))
+        try await eventually { !self.owner.busy && self.owner.window != nil }
+        CaptionFixtureProtocol.statusOverrides=["/stop":403]
+        owner.stop();try await eventually { self.owner.options == nil }
+        XCTAssertFalse(owner.busy);XCTAssertFalse(owner.selected)
+        XCTAssertTrue(owner.status.contains("Caption access ended"))
+        XCTAssertFalse(owner.status.contains("Retry Stop"))
+    }
+
 }

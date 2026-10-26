@@ -1,12 +1,12 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Date:** 2026-10-25 · **Status:** addressing final review · **Updated:** 2026-10-26 · **Owner:** Codex /root · **Branch:** `effort/subtitle-completion`
+**Date:** 2026-10-25 · **Status:** final qualification · **Updated:** 2026-10-26 · **Owner:** Codex /root · **Branch:** `effort/subtitle-completion`
 
 Companion to the [subtitle generation plan](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md)
 and [progressive translation plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).
 
 The complete implementation is being integrated in one owned clone and one
-batched PR. Owner: Codex /root. Merge state: not ready; final adversarial review found six P2 issues, now being fixed. The fast lane and unit/runtime tests have not run. The user will deploy the merged result. **No agent
+batched PR. Owner: Codex /root. Merge state: review findings resolved and independently checked; final qualification is starting. No fast-lane or unit/runtime success is claimed yet. The user will deploy the merged result. **No agent
 deployment is authorized.** Target acceptance includes the server and Apple TV;
 compile evidence alone does not establish physical playback or model accuracy.
 
@@ -32,14 +32,14 @@ separate Apple and Android/web readers. It executed no tests.
 
 | Finding | Owner | Disposition |
 |---|---|---|
-| Apple cancelled mutation leaves controls busy; stale Stop status | Apple owner | Fixing the action ownership transition and cancellation guards. |
-| Apple caption adoption precedes proven subtitle-off handoff | Apple owner | Require accepted attachment proof and preserve incumbent on failure. |
-| Android late text Use overrides newer caption choice | Android owner | Capture and recheck player caption-selection intent. |
-| Android partial failed range uses operation Retry | Android owner | Carry and retry the exact failed range/revision. |
-| Android transient reads end polling and can starve demand renewal | Android owner | Recover bounded reads within the owned lifecycle; renew independently of slow reads. |
-| Text cue IDs accepted at 256 bytes but stored at 128 | Integrator | Shared 256-byte bound implemented; parser and durable-publication regression definitions added. |
+| Apple cancelled mutation leaves controls busy; stale Stop status | Apple owner | Resolved: action serial and cancellation/status guards; compiled regression definitions. |
+| Apple caption adoption precedes proven subtitle-off handoff | Apple owner | Resolved: accepted attachment proof, lifecycle/intent guard and preserved incumbent. |
+| Android late text Use overrides newer caption choice | Android owner | Resolved: capture and recheck shared caption-selection intent. |
+| Android partial failed range uses operation Retry | Android owner | Resolved: immutable range/revision retry targets, bounded failure pages and explicit ambiguity resolution. |
+| Android transient reads end polling and can starve demand renewal | Android owner | Resolved: bounded concurrent read/renewal children, exact replay and lease expiry. |
+| Text cue IDs accepted at 256 bytes but stored at 128 | Integrator | Resolved: shared 256-byte bound; parser and durable-publication regression definitions. |
 
-All findings must be resolved before final test execution. No physical Apple TV
+The independent reviewer closed all six findings by bounded source review. An additional installer integration blocker was found during preparation: the shared downloader accepted only Whisper URLs. The fix admits only exact immutable compiled text-catalog entries and preserves the existing HTTPS/redirect checks; bounded source review also closed this issue. Real fresh download and inference remain required final checks. No physical Apple TV
 or deployed acceptance is implied by static review or compilation.
 
 ## Scope and initial inventory
