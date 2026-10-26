@@ -634,8 +634,16 @@ async fn source_copy_preadmission_fixture_with_restart(
             ),
         );
         if fixed_case == 1 {
-            source_actual_actor_boxed(state, manager, prepared, assignment, 12, client.clone())
-                .await;
+            source_actual_actor_boxed(
+                state,
+                manager,
+                prepared,
+                assignment,
+                12,
+                restart_case,
+                client.clone(),
+            )
+            .await;
             tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
                     if runtime
@@ -783,7 +791,16 @@ async fn source_copy_preadmission_fixture_with_restart(
         return;
     }
     if mode >= 5 {
-        source_actual_actor_boxed(state, manager, prepared, assignment, mode, client.clone()).await;
+        source_actual_actor_boxed(
+            state,
+            manager,
+            prepared,
+            assignment,
+            mode,
+            restart_case,
+            client.clone(),
+        )
+        .await;
         selected.shutdown().await.expect("actual voter shutdown");
         return;
     }
@@ -824,7 +841,16 @@ async fn source_copy_preadmission_fixture_with_restart(
     drop(admitted);
     assert_eq!(manager.admissions.software_in_use(), 0);
     if (2..=4).contains(&mode) {
-        source_actual_actor_boxed(state, manager, prepared, assignment, mode, client.clone()).await;
+        source_actual_actor_boxed(
+            state,
+            manager,
+            prepared,
+            assignment,
+            mode,
+            restart_case,
+            client.clone(),
+        )
+        .await;
         selected.shutdown().await.expect("actual voter shutdown");
         return;
     }
@@ -1096,10 +1122,17 @@ fn source_actual_actor_boxed(
     prepared: crate::http::hls::PreparedSourcePlayback,
     assignment: SourceDispatchAssignment,
     mode: u8,
+    restart_case: Option<u8>,
     client: hiqlite::Client,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(source_actual_actor(
-        state, manager, prepared, assignment, mode, client,
+        state,
+        manager,
+        prepared,
+        assignment,
+        mode,
+        restart_case,
+        client,
     ))
 }
 async fn source_actual_actor(
@@ -1108,6 +1141,7 @@ async fn source_actual_actor(
     prepared: crate::http::hls::PreparedSourcePlayback,
     assignment: SourceDispatchAssignment,
     mode: u8,
+    restart_case: Option<u8>,
     client: hiqlite::Client,
 ) {
     if mode == 55 {
