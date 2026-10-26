@@ -12,9 +12,13 @@ Install the package (see [Packaging](#packaging)), or run it from a checkout wit
 clients/linux-player/plurx-player 'plurx-player://play?server=http%3A%2F%2Fmedia1%3A8096&code=CODE'
 ```
 
-`--mpv PATH` picks the mpv binary; otherwise it uses `/usr/lib/plurx-player/bin/mpv` (the private build) when installed, then `mpv` on `PATH`. `PLURX_PLAYER_MPV` does the same as `--mpv`. `--ca FILE` adds a CA for a server with a private certificate, because Python uses the system CA store rather than Chrome's; the path is remembered for that server.
+`man plurx-player` covers the options, the URL and the files below. `--mpv PATH` picks the mpv binary; otherwise it uses `/usr/lib/plurx-player/bin/mpv` (the private build) when installed, then `mpv` on `PATH`. `PLURX_PLAYER_MPV` does the same as `--mpv`. `--ca FILE` adds a CA for a server with a private certificate, because Python uses the system CA store rather than Chrome's; the path is remembered for that server.
 
 The package (`debian/`, see below) installs the code under `/usr/lib/plurx-player`, the launcher as `/usr/bin/plurx-player`, and `plurx-player.desktop` with `MimeType=x-scheme-handler/plurx-player;`. dpkg's `update-desktop-database` trigger registers the scheme. There is deliberately no `xdg-mime` call in `postinst`: that runs as root and would edit root's associations, not the user's.
+
+## mpv configuration
+
+The launcher runs mpv with `--config-dir=$XDG_CONFIG_HOME/plurx-player/mpv` (by default `~/.config/plurx-player/mpv`), so plurx Player has its own optional mpv configuration and never reads the general `~/.config/mpv`: a stray `vo=` or `tone-mapping=` there would silently defeat the closed-form mapping. The directory does not exist by default; an `mpv.conf`, `input.conf` or script placed there applies to plurx Player only. mpv's built-in key bindings and on-screen controller work without it (the launcher does not pass `--no-config`). The options the player depends on (`--vo=gpu-next --gpu-api=vulkan --hwdec=auto-safe --target-colorspace-hint=yes`, the IPC socket, `--idle=once`) are on the command line, which mpv applies over any config file. `--ytdl=no` is always passed: the player only opens plurx URLs from an allowed server, and mpv's ytdl hook would otherwise run `yt-dlp` on anything else.
 
 ## What it does, in order
 
@@ -46,6 +50,7 @@ This builds `plurx-player_<version>_amd64.deb` in a disposable `ubuntu:26.10` co
 - `/usr/bin/plurx-player` and the launcher modules in `/usr/lib/plurx-player/plurx_player/`.
 - `/usr/share/applications/plurx-player.desktop` with `MimeType=x-scheme-handler/plurx-player;`. dpkg's `update-desktop-database` trigger registers the scheme. There is deliberately no `xdg-mime` call in `postinst`: it would run as root and edit root's associations, not the user's. The only maintainer scripts are the ones `dh_python3` generates to byte-compile the launcher modules and to remove every `.pyc` on removal.
 - A private libplacebo and mpv: `/usr/lib/plurx-player/lib/libplacebo.so.360` and `/usr/lib/plurx-player/bin/mpv`, the launcher's default mpv. mpv carries the RUNPATH `$ORIGIN/../lib`, so it loads the private libplacebo and never the system one. The private directory is not in `ld.so.conf` and the package installs no shlibs file, so the system mpv and everything else linked against the system libplacebo never see the private one. Plan §5 needs this: the closed-form Dolby Vision mapping is a patch to libplacebo/mpv, and patching the distribution's copy would change every program on the machine.
+- `/usr/share/man/man1/plurx-player.1.gz`.
 - `/usr/share/doc/plurx-player/private-build.txt`: the upstream versions, sha256 and the patches applied.
 
 `Depends` is `python3 (>= 3.10)`, `zenity` and what `dpkg-shlibdeps` finds for the private build (Vulkan, FFmpeg 8, Wayland, VAAPI and the rest). The package version is `<launcher>+lp<libplacebo>.mpv<mpv>`, for example `0.1.0+lp7.360.1.mpv0.41.0`: the bundled upstream versions are visible in `apt` and `dpkg -l`, and the launcher part is bumped for launcher changes and for each change to the patch series.

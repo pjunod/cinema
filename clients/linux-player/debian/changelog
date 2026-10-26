@@ -1,3 +1,12 @@
+plurx-player (0.1.1+lp7.360.1.mpv0.41.0) stonking; urgency=medium
+
+  * Run mpv with plurx Player's own --config-dir
+    ($XDG_CONFIG_HOME/plurx-player/mpv), never the general ~/.config/mpv,
+    and with --ytdl=no.
+  * Add the plurx-player(1) manual page and copyright years.
+
+ -- plurx maintainers <noreply@plurx.invalid>  Sun, 25 Oct 2026 20:00:00 +0000
+
 plurx-player (0.1.0+lp7.360.1.mpv0.41.0) stonking; urgency=medium
 
   * Package the private mpv and libplacebo (milestone M5 packaging):

@@ -7,15 +7,15 @@ Comment: The launcher is part of plurx; see LICENSE and NOTICE at the
  private-build.txt names the exact versions and patches.
 
 Files: *
-Copyright: plurx contributors
+Copyright: 2026 plurx contributors
 License: Apache-2.0
 
 Files: upstream/libplacebo/*
-Copyright: Niklas Haas and the libplacebo contributors
+Copyright: 2017-2026 Niklas Haas and the libplacebo contributors
 License: LGPL-2.1+
 
 Files: upstream/mpv/*
-Copyright: the MPlayer and mpv contributors
+Copyright: 2000-2025 the MPlayer, mplayer2 and mpv contributors
 License: GPL-2+
 Comment: mpv is built with -Dgpl=true, so /usr/lib/plurx-player/bin/mpv as
  a whole is GPL-2.0-or-later. Some of its source files are also available

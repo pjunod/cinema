@@ -9,7 +9,7 @@ import re
 import unittest
 
 import support
-from plurx_player import mpv
+from plurx_player import VERSION, mpv
 
 ROOT = support.PACKAGE_ROOT
 
@@ -72,6 +72,8 @@ class PrivateBuild(unittest.TestCase):
     def test_package_version_names_the_pinned_versions(self):
         rows = pins()
         version = re.match(r"plurx-player \(([^)]+)\)", read("debian/changelog")).group(1)
+        self.assertTrue(version.startswith(f"{VERSION}+"), (version, VERSION))
+        self.assertIn(f'"plurx-player {VERSION}"', read("plurx-player.1"))
         self.assertTrue(
             version.endswith(f"+lp{rows['libplacebo'][0]}.mpv{rows['mpv'][0]}"), version)
 
