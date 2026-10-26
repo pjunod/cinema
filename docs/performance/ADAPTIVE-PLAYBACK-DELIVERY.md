@@ -1,64 +1,53 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete · resumed 2026-10-25.
-The sole integrator is direct Codex harness `/root`, following the user's
-resumption request. Work stays on `effort/adaptive-playback-resources`, effort
-PR #1248. Published head remains `0fc539264d5a`; the preserved local source
-checkpoint `ab2f95b3d` extends beyond it. The previous Claude worker ended at its
-iteration limit. Its changes and all compiler receipts are preserved; the old
-Hermes implementation card is parked to prevent a competing writer.
+**Status:** open · implementation active · resumed 2026-10-25. Direct Codex
+`/root` is the sole integrator on `effort/adaptive-playback-resources`, PR #1248.
+Published head remains `0fc539264d5a`; preserved local source `f4d3bf800` extends
+beyond it. Isolated helpers own disjoint source slices; the original Hermes
+writer stays parked. Claude's planning settlement and compiler repairs are
+preserved. Actual complete-candidate Fable 5.1 review/fixes precede behavioral
+tests, which remain NOT RUN.
 
-**Implemented source:** the selected Linux ordinary software VOD branch connects
-finite admission, original native source/process/publication/HTTP, known R→S
-and cleanup/capacity reuse. Copy output separates produced inventory from
-actor-selected served revisions, charges HTTP backing and revision overlap, and
-joins the original reader before admission release. Six producer evidence slots
-use fixed storage; executor-loss cleanup streams the original mailbox prefix.
-The selected application lease survives original actor join and selector drop.
-Dynamic mailbox/command/reply and private executor allocation bounds remain open.
+**Source now connected:** selected Linux ordinary software VOD connects finite
+admission, original native source/process/publication/HTTP, R→S and cleanup.
+Its construction retains original cleanup before the first post-R await and
+through actual Shared publication; metadata waits honor the original deadline.
+Known partial native cleanup exists. Interrupted acquisition acknowledgments
+and generic cancellation with live finite application owners remain under
+correction. Uncertain closes keep their charges.
 
-Planning follows thinker decision `t_054582a2#497`: G1 checks live multi-member
-settlement and the durable scratch fold; G2 admits monotonic discovered-source
-growth. Positive closure uses original native tokens and one seven-member
-settlement. The arbitrary 64 MiB book allowance is replaced by structural M
-accounting and exact survivor capacity. Never-entered P uses an original sealed
-no-task graph witness and original source cleanup. Generic cancellation
-preflights P/M together, drops actual P payload backing before refund, and
-retains uncertainty durably. Cancelled source-close waits resume the same
-original task and operation. UnknownHeld P pins M until restart; definite
-prepare rollback with live payloads remains conservatively held.
+Planning uses original closure tokens and one seven-member P settlement with
+M retained. Structural M replaces the 64 MiB allowance. Never-entered P uses an
+original sealed no-task witness. Journal waits now honor the internal deadline
+while keeping the original pending operation. Authored regressions cover actual
+mid-enrichment Deadline and one actual closure with its sibling pending.
+UnknownHeld P still pins M until restart.
 
-Static accepted-R setup constructs fallible application ownership before
-acceptance and installs response budget, finite launch and lifetime together.
-Automatic SDR/AVC jobs share the pure selected predicate and admitted no-follow
-source acquisition, with exact intent/caps/recipe/claim validation and a pinned
-stored carrier across retries. M waits for known same-claim Store closure,
-original heartbeat join and destruction of the original outer payloads. Proven
-pre-reservation refusal uses that same barrier; uncertain failures remain held.
-Strict source acquisition may refuse configured symlink roots. Static-S policy
-eviction and other pipeline adapters remain open.
+Automatic SDR/AVC static routing keeps its admitted claim/recipe and original
+controller through known Store Close, heartbeat join and payload destruction.
+Static policy changes withdraw the exact original S artifact; actual readers
+and typed native/journal close still gate its release. Selected copy control
+now reserves command, private-plan, state and reply payloads from its existing
+client partition; HTTP terminal contexts reserve before cloning. Mandatory
+final-consumer preflight, preparation continuations and escaping observer
+lifetimes are active work. Private executor/native allocation peaks remain
+Unknown; initial message-block accounting is not a complete producer bound.
 
-**Evidence:** the exact `ab2f95b3d` source passed pinned Rust 1.97.1 host
-core+daemon all-target+cluster compilation in 42.657 seconds, source stable.
-The same committed checkpoint passed native x86_64 Linux core+daemon
-all-target+cluster compilation in 362.845 seconds, source stable; log SHA-256
-`3ffb5068ef9a09fb3199e462f187f867f9b079cbc5badc2ec8f7ebc6e5aaba18`.
-Sixty-two additional regression anchors resolve statically; all original 490
-fields are preserved. Static paperwork's sole catalog failure was repaired and
-catalog lint passed. Behavioral tests remain NOT RUN. Strict native Clippy on the same
-`ab2f95b3d` source failed with 80 core diagnostics; full log and categorized
-receipt are preserved. Complete-candidate actual independent Fable 5.1 review
-and qualification remain pending.
+**Evidence:** pinned Rust 1.97.1 native x86_64 core+daemon all-target+cluster
+check passed on `ab2f95b3d` (362.845 seconds, source stable). Its strict Clippy
+failed with 80 core diagnostics. Fixes passed combined strict Linux-cfg on
+`5bc54dbc1`; that check links no native executable. The corresponding macOS run
+found two more issues, now repaired. Current combined strict checks and an
+exact-source native Clippy run are in progress. Static regression resolution
+is source evidence only. No behavioral qualification or independent final
+review has run.
 
-All V1–V5 and R1/M0–M7 remain OPEN. Complete partial-start closure, full
-application and native allocation bounds, policy eviction, recovery and the
-other agreed pipelines/worker/placement/policy/operations before final review.
-Fable review and fixes precede once-only affected behavioral qualification,
-fast lane and authorized merge. No deployment. Bounded direct restart recovery
-retains its explicit held-lock and positive same-boot/PID-namespace old-daemon
-exit requirement; uncertain cases retain holds. Separate obsolete recovered-cache
-eviction remains unimplemented; the earlier automatic-review rejection and
-approval boundary are unchanged.
+All V1–V5 and R1/M0–M7 remain OPEN. Complete the finite bounds/cleanup work,
+restart drain accounting, other pipeline adapters, worker retry/placement and
+learned admission policy before final review. Bounded direct recovery keeps
+its existing positive old-daemon completion and held-lock requirements;
+uncertainty retains holds. Separate obsolete recovered-cache eviction and its
+existing approval boundary are unchanged. No deployment.
 
 The [approved plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md#10-delivery-sequence--integrate-one-effort-prove-each-seam)
 remains normative. The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md)
