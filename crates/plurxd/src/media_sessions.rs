@@ -92,7 +92,7 @@ pub(crate) const CONTROL_PATH: &str = "/internal/cluster/media/sessions/control"
 pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
 /// Adopt carries the canonical response and recipe plus the separate Prepared
 /// preview. The aggregate is charged and checked before transport entry.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) const MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_ACTIVATION_REQUEST_BYTES: usize = 128 * 1024;
 pub(crate) const REMOTE_START_OWNERSHIP_HEADER: &str = "x-plurx-start-ownership";
@@ -1862,6 +1862,11 @@ pub(crate) struct RemoteStartResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_generation: Option<u64>,
 }
+
+#[cfg(any(target_os = "linux", test))]
+mod adaptive_intent;
+#[cfg(target_os = "linux")]
+pub(crate) use adaptive_intent::bounded_digest as bounded_adaptive_digest;
 
 /// Versioned adaptive preparation retains the authoritative attempt identity
 /// alongside intent that the worker rederives locally before native entry.

@@ -44,6 +44,9 @@ pub struct RequestBinding {
     pub planning_generation: i64,
     pub planning_source_digest: String,
     pub settings_digest: String,
+    /// Digest of the immutable root-scoped worker wire envelope, before its
+    /// route/request IDs are rewritten for a particular physical attempt.
+    /// The original worker rederives this value; it grants no native closure.
     pub intent_digest: String,
     pub original_deadline_ms: i64,
     #[serde(default, deserialize_with = "optional_canonical_uuid")]

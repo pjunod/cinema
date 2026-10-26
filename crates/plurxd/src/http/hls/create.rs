@@ -261,37 +261,7 @@ async fn adopt_adaptive_origin(
 
 #[cfg(target_os = "linux")]
 fn adaptive_digest<T: serde::Serialize>(value: &T) -> Result<String, ApiError> {
-    use sha2::{Digest, Sha256};
-    struct HashedEnvelope {
-        hash: Sha256,
-        bytes: usize,
-    }
-    impl std::io::Write for HashedEnvelope {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.bytes = self
-                .bytes
-                .checked_add(bytes.len())
-                .filter(|count| *count <= crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES)
-                .ok_or_else(|| {
-                    std::io::Error::other("adaptive binding exceeds its fixed envelope")
-                })?;
-            self.hash.update(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut output = HashedEnvelope {
-        hash: Sha256::new(),
-        bytes: 0,
-    };
-    serde_json::to_writer(&mut output, value).map_err(|_| {
-        ApiError::ServiceUnavailable(
-            "adaptive source binding exceeds its bounded request envelope".into(),
-        )
-    })?;
-    Ok(hex::encode(output.hash.finalize()))
+    crate::media_sessions::bounded_adaptive_digest(value).map_err(ApiError::ServiceUnavailable)
 }
 
 /// The existing root request claim is the durable starting authority. A
@@ -330,6 +300,10 @@ async fn prepare_adaptive_origin(
         .map_err(|_| ApiError::ServiceUnavailable("adaptive root incarnation is invalid".into()))?;
     let recovery_id = uuid::Uuid::parse_str(recovery_epoch)
         .map_err(|_| ApiError::ServiceUnavailable("adaptive recovery epoch is invalid".into()))?;
+    // Immutable request intent precedes per-attempt route/request identity.
+    let intent_digest = recipe
+        .adaptive_intent_digest()
+        .map_err(ApiError::ServiceUnavailable)?;
     let route_id = uuid::Uuid::new_v4();
     let session_id = uuid::Uuid::new_v4();
     recipe.incarnation_id = route_id.to_string();
@@ -356,7 +330,7 @@ async fn prepare_adaptive_origin(
         planning_generation: snapshot.generation,
         planning_source_digest: adaptive_digest(&(source.id, source.size, source.mtime))?,
         settings_digest: adaptive_digest(&snapshot.settings)?,
-        intent_digest: adaptive_digest(&recipe)?,
+        intent_digest,
         original_deadline_ms: original_claim_deadline_ms,
         expected_predecessor_incarnation_id: expected_predecessor_incarnation_id
             .map(uuid::Uuid::parse_str)

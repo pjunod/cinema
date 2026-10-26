@@ -5,6 +5,24 @@
 
 Companion to the [current adaptive playback resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md), which records implementation and evidence. This file preserves the two former M0 contract sections verbatim so their historical constraints and limits remain available without presenting them as current ownership or completed behavior. The approved implementation scope remains in the [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md).
 
+## M4 request intent decision — 2026-10-26
+
+Fable 5.1 decision `t_9095ec22` fixes the version-1 `intent_digest` meaning as
+the complete original worker wire envelope with route and request IDs scoped
+to the root incarnation. The origin hashes it before attempt identity rewrite;
+the worker rederives it before planning admission. A borrowed projection retains
+the existing field order, principal aliases and omission rules without cloning
+the envelope. This unreleased effort changes neither its schema nor wire version.
+
+A retry must reuse the exact immutable request binding and original deadline.
+The predecessor must be durably Cleanup, Losing or Closed; origin Fence never
+proves native cleanup and the origin never issues Close. Worker cleanup may use
+a foreign committed fence only after its original native/application owners
+settle. Bounded coordinator retry remains implementation work at this checkpoint.
+Worker-node domains remain the only available identity; shared source/storage
+domains and a production consumer for unclosed provisional rows remain open.
+This decision is design evidence, not complete-candidate review or execution.
+
 ## M0 proposed exact contracts for manager check
 
 These are implementation contracts awaiting bounded manager confirmation, not

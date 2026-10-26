@@ -802,7 +802,7 @@ impl super::TranscodeManager {
     pub(super) async fn prepare_adaptive_worker_recipe(
         &self,
         _state: &crate::state::AppState,
-        envelope: &crate::media_sessions::RemoteStartRequest,
+        envelope: &mut crate::media_sessions::RemoteStartRequest,
         claim: &AttemptClaim,
         entry: &Arc<AttemptEntry>,
         coordinator_frame_bytes: usize,
@@ -816,6 +816,11 @@ impl super::TranscodeManager {
             || std::time::Instant::now() >= deadline
         {
             return Err("adaptive worker intent or original deadline is invalid".into());
+        }
+        if envelope.adaptive_root_intent_digest(claim.binding.key.request_incarnation_id)?
+            != claim.binding.intent_digest
+        {
+            return Err("adaptive worker intent digest differs from the original request".into());
         }
         let user_id = envelope
             .principal
@@ -949,7 +954,7 @@ impl super::TranscodeManager {
     async fn run_adaptive_prepare(
         &self,
         state: crate::state::AppState,
-        request: crate::media_sessions::AdaptiveAttemptPrepareV1,
+        mut request: crate::media_sessions::AdaptiveAttemptPrepareV1,
         entry: Arc<AttemptEntry>,
         deadline: std::time::Instant,
         frame_rx: tokio::sync::oneshot::Receiver<usize>,
@@ -999,7 +1004,7 @@ impl super::TranscodeManager {
         let planned_result = self
             .prepare_adaptive_worker_recipe(
                 &state,
-                &request.recipe,
+                &mut request.recipe,
                 &request.claim,
                 &entry,
                 coordinator_frame_bytes,
@@ -1528,12 +1533,10 @@ impl super::TranscodeManager {
                 Err(error) => return Err(format!("failed-planning Fence is unknown: {error}")),
             }
         }
-        if !matches!(attempt.phase, AttemptPhase::Cleanup | AttemptPhase::Losing)
-            || failed
-                .fence
-                .as_ref()
-                .is_some_and(|fence| attempt.last_operation_id != fence.context.operation_id)
-        {
+        // A known origin/other-worker Fence may win this race. Close still
+        // names that exact committed operation, which Store validates as a
+        // cleanup-authorizing Fence; native/application cleanup stays required.
+        if !matches!(attempt.phase, AttemptPhase::Cleanup | AttemptPhase::Losing) {
             return Err("failed adaptive planning is not a fenced or losing attempt".into());
         }
         if !entry.planning_sealed_for_logical_close().await?
