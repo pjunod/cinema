@@ -1,57 +1,56 @@
 # Adaptive playback — finite delivery closure
 
 **Status:** open · implementation active · updated 2026-10-26. PR #1248 on
-`effort/adaptive-playback-resources` remains the sole effort. Published source
-is `0fc539264d5a`; local committed checkpoint is `db82d7475`; bounded same-request worker
-retry is connected, with worker foreign-fence cleanup under correction. Current main `e02fb1283` is merged locally.
-Direct Codex `/root` integrates isolated helpers; the old Hermes writer stays
-parked. Actual complete-candidate Fable 5.1 review/fixes must precede behavioral
-tests. Behavioral tests remain NOT RUN.
+`effort/adaptive-playback-resources` is the sole effort. Work continues on normal
+committed source; current main `087e836d3` is merged. Draft source publication
+and [copy-start review](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) use the ordinary
+branch/PR workflow. No Hermes or external API review is being dispatched.
+Complete-candidate independent Fable review/fixes precede behavioral tests,
+which remain NOT RUN. All V1–V5 and R1/M0–M7 remain OPEN.
 
-Selected Linux software VOD retains original source/process/publication/HTTP
-ownership and R→S cleanup. Interrupted acquisition and live application-owner
-cancellation repairs are implemented. The finalized output bound now reserves
-the authentic operator cache budget before R; the same grant follows original
-production and compact cleanup. Unknown owner loss retains it. Fresh finite
-cache pressure uses typed retirement; raw legacy deletion checks runtime
-protection. Recovered outputs without original producers remain protected.
+Selected software/static VOD retains original native/application cleanup,
+operator cache quota and typed pressure retirement. Copy request limits now
+match core's existing48MiB cap; its finalized quota is reserved before R and
+follows the same Session/native close ticket until actual actor/app/native
+retirement. Copy has no R→S transfer. Generic errors retain charge; only exact
+before-R provenance refunds an unentered quota grant. All session initializers
+now compile with that field. Copy native launch and partial-start closure are
+still open; the pinned review identifies the earlier named-arm wiring refusal
+and four acquisition boundaries rather than claiming they already run.
 
-Planning retains its original deadline, native closures, source witness and
-seven-member P settlement; structural M replaces the arbitrary 64 MiB allowance.
-UnknownHeld P still pins M until restart. Static policy withdrawal retains actual
-readers and typed cleanup. Selected copy control preflights payload/final-result
-slots and keeps original app ownership through escaping aliases. Preparation
-services and immutable context now share original allocations. Original controller
-join/Store proof, actual-plan conditional End admission, copy partial-start native
-witnesses and copy global quota remain open. Private task/channel/allocator and
-native aggregate peaks remain Unknown, not a complete finite-memory claim.
+Preparation now retains its real controller handle through positive join and
+same-operation Store proof. Unknown outcomes and response aliases keep the
+same context/capacity. Selected End probes its actor's actual private plan,
+skips unnecessary preparation ownership and refuses an intervening missing-
+admission race before adoption; input allocation precedes snapshot creation.
+Private task/channel/serializer/allocator and native aggregate peaks remain
+Unknown, so these projections are not complete finite-memory qualification.
 
-Drain admission now follows original probe tasks/pipes and prepared owners;
-missing/busy inventory blocks readiness. Original inference now retains its admission in the same blocking task. The
-full caller audit found further library/subtitle/fragment owner gaps. Worker intent is the exact
-root-scoped borrowed wire digest, rederived before planning. Bounded retry from Fable design `t_9095ec22` is connected; source/storage domain identity
-and a production consumer for unclosed provisional attempts remain missing.
+Planning retains its deadline, native/source witnesses and seven-member P
+settlement with structural M. UnknownHeld P still pins M until restart.
+Root-scoped worker intent, bounded durable-fence retry and foreign-fence cleanup
+are connected. Origin never issues Close or refunds native ownership.
+Shared storage domains and the unclosed-provisional inventory consumer remain
+missing. Original probe/inference/library workers retain their admissions;
+subtitle worker/result lifetime repairs are being compiled in isolation.
+Remaining fragment/native adapters and selective recovery are still open.
 
-**Evidence:** original strict Clippy repairs passed native x86_64 core+daemon
-all-target+cluster on `8305720ef` (417.086 seconds, source stable; log SHA-256
-`105a6f5ef0aa0c2e3ccb9ae6dacd46437e332bce3173b97ae96436bbc302b364`).
-After the main merge, Mac strict all-target+fixtures passed immutable-intent
-source `6232e9542` with its integrated pipe/cache safety fixes (185.322 seconds,
-source stable; log SHA-256
-`5496fdb22aa0d50f3aa7bafcf7202544738e73da4586133c21506cff604a0a3f`).
-The matching Linux-cfg check passed; its stubbed C objects link no executable.
-Software-quota and service-sharing deliveries each passed strict checks in their
-isolated clones. Combined Mac and Linux-cfg strict checks passed `b53874a2a` source, including
-real-Store retry regressions (compiled only). Exact committed native x86_64
-checks on `db82d7475` are running. These receipts do not qualify changed source
-or replace final review or behavioral execution.
+**Compiler evidence:** Rust1.97.1 native x86_64 core+daemon all-target+cluster
+strict Clippy passed exact `41ad7bebad6c` after current-main and quota integration
+(439.437s, source stable; log SHA-256
+`bd14e391641ca34d13ecebc445572e4ca05f2a9f6ddc397d003293d17a0f0925`).
+The later End delivery passed Mac and Linux-cfg strict checks on its isolated
+source; Linux-cfg stubs link no executable. Combined final-source checks are
+still required. Default-feature Mac strict passed the preceding c420+cfg-fix
+source; Linux default-feature verification remains to run on the joined tree.
+Local compilers run sequentially at j1 after an actual host file-handle failure.
+Static paperwork passed15/15 at `de8f9f4c1`;618 regression anchors resolve,
+including the original490 unchanged fields. These are static/compile facts,
+not behavioral acceptance or completed review.
 
-All V1–V5 and R1/M0–M7 remain OPEN. Complete the finite bounds/cleanup work,
-restart drain accounting, other pipeline adapters, worker retry/placement and
-learned admission policy before final review. Bounded direct recovery keeps
-its existing positive old-daemon completion and held-lock requirements;
-uncertainty retains holds. Separate obsolete recovered-cache eviction and its
-existing approval boundary are unchanged. No deployment.
+Bounded direct recovery retains positive old-daemon completion and held-lock
+requirements; uncertainty keeps charges. Obsolete recovered-cache eviction
+retains its separate approval boundary. No deployment.
 
 The [approved plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md#10-delivery-sequence--integrate-one-effort-prove-each-seam)
 remains normative. The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md)
@@ -145,8 +144,8 @@ No source-ownership transfer or additional permission gate is introduced.
 | M1 — observations/diagnostics | `process/observation.rs`, launcher observations and `resource_observation.rs` provide identity-bound Known/Unknown counters/service windows. | Complete production progress/phase sampling and diagnostic projection for each M3 adapter; bind overhead/platform limits to actual owners. | Operator can see current node/workload CPU, memory, progress and Unknown reasons; pacing is not misreported as low encode capacity. Platform/overhead acceptance remains M7. | Primary Codex harness (`/root`). |
 | M2 — policy/settings/learning | `adaptive_resources.rs` has atomic vectors/families/retained roles; `resource_history.rs` bounded priors; `resource_policy.rs` advisory trial/deadline/cooldown logic; `resource_settings` and `store/planning_capacity.rs` preserve settings provenance/authority. | Wire these components into the live node owner and production planning/admission; feed real service samples/epochs, persist useful history, apply current hard bounds and four-state settings without rewriting saved intent. The selected finite core owner now records actual identity-bound service windows and projects history diagnostics. Production planning still does not consume those samples or the trial policy; helper existence is not adaptive admission. Depends on M1 and finite M3 owners. | A normal request uses current hard caps and genuine measured evidence; Automatic can learn safely, explicit/legacy caps and both zero meanings retain their contract; failure cooldown and paced workloads cannot invent headroom. | Primary Codex harness (`/root`). |
 | M3a — critical custody/runtime backend | Dedicated node-local journal, lock-bound startup/reconstruction, retained prepare/arm/seal/settlement book, actual root/source/discard-pipe ownership; Windows LIVE original-Job proof plus restricted private local-graph receipt. | C1–C3 below: supported Linux pre-entry/nonescape/object-continuity recovery; exact runtime manifest/member settlement; real production source/writer/scratch adapters and retirement. Current Windows storage/restart unsupported and current Unix cleanup UnknownHeld do not satisfy this. | One finite producer can actually start, stop, commit settlement and free capacity; restart retains/reconciles its original obligations without deleting protected work or leaking every normal slot forever. | Primary Codex harness (`/root`); use existing authorized native compiler/environment evidence. |
-| M3b — all pipeline adapters | Selected ordinary Linux software VOD and selected copy connect finite/native owners; automatic SDR/AVC static output, typed cache retirement and original quota custody are connected. Other recipes retain legacy admission. | After the first finite path: connect finite/rolling/continuous and processed helper graphs, audio/subtitle/copy/cached/direct/range, Live/DVR shared transport plus each sink, fragment/index/background work and ingress relay; replace whole-budget background holders with real yield/retirement; preserve shared-role transfer and paced/producing phases. Depends on M3a plus M1/M2. | Every M0 row uses the service, counts each retained/shared owner once and retains costs until its real terminal event; foreground playback can reclaim background capacity without stealing live work. | Primary Codex harness (`/root`). |
-| M4 — worker runtime (Store is delivered) | Integrated SQLite/Hiqlite attempt/request/domain transactions, Prepared/winner/adoption fences, legacy-writer guards and Source activation guards. | Worker Prepare/Adopt/cancel/status and capability advertisement are connected for selected ordinary software/copy; immutable root intent is checked. Bounded same-request retry is connected; finish worker foreign-fence cleanup, the unclosed-provisional inventory consumer and remaining native/copy/processed ownership adapters. Source/storage domains remain unresolved; origin Fence never issues Close. Depends on local M3a/M3b owners; Store rows alone are not remote workers. | A same-quality remote preparation really runs on an eligible worker, only one exact winner adopts, losers retain physical cleanup, old peers keep legacy behavior and cannot bypass new authority. | Primary Codex harness (`/root`). |
+| M3b — all pipeline adapters | Selected software VOD connects finite/native custody. Copy has R admission, app/control/quota custody; its named-arm launch and partial-start closures remain open. Automatic static output and typed cache retirement are connected. Other recipes retain legacy admission. | After the first finite path: connect finite/rolling/continuous and processed helper graphs, audio/subtitle/copy/cached/direct/range, Live/DVR shared transport plus each sink, fragment/index/background work and ingress relay; replace whole-budget background holders with real yield/retirement; preserve shared-role transfer and paced/producing phases. Depends on M3a plus M1/M2. | Every M0 row uses the service, counts each retained/shared owner once and retains costs until its real terminal event; foreground playback can reclaim background capacity without stealing live work. | Primary Codex harness (`/root`). |
+| M4 — worker runtime (Store is delivered) | Integrated SQLite/Hiqlite attempt/request/domain transactions, Prepared/winner/adoption fences, legacy-writer guards and Source activation guards. | Worker Prepare/Adopt/cancel/status and capability advertisement are connected for selected ordinary software/copy; immutable root intent is checked. Bounded same-request retry is connected; foreign-fence cleanup is connected. Finish the unclosed-provisional inventory consumer, copy native launch/partial-start and remaining processed/native adapters. Source/storage domains remain unresolved; origin Fence never issues Close. Depends on local M3a/M3b owners; Store rows alone are not remote workers. | A same-quality remote preparation really runs on an eligible worker, only one exact winner adopts, losers retain physical cleanup, old peers keep legacy behavior and cannot bypass new authority. | Primary Codex harness (`/root`). |
 | M5 — placement/delivery domains | Advisory policy contains peer-first/common-deadline concepts; M4 Store supplies bounded attempt/domain claims. These are prerequisites, not dispatch. | Connect offers/ranking and bounded same-quality peer retry before quality fallback; spend one original deadline including activation reserve; bind NAS/shared source and ingress/relay commitments, partition/mixed-peer/drain decisions to actual owners and telemetry. Depends on M4 and M1/M2/M3 accounting. | Local-full/peer-idle requests preserve quality and incumbent playback; shared storage/relay saturation or drain refuses misleading capacity instead of moving only the processing label. | Primary Codex harness (`/root`). |
 | M6 — operations/client explanations | Custody/source evidence docs and existing settings authority/API contracts are present. | Expose normal settings and read-only readiness/Unknown/fallback/placement explanations, real drain blockers and compatible client diagnostics; complete API/operations references. Depends on actual M2–M5 behavior, not a new feature toggle. | Operator sees why a request stayed local, moved, waited or fell back; drain does not report reboot-ready while prepared/losing/relay owners remain. | Primary Codex harness (`/root`); same draft PR #1248. |
 | M7 — final review/qualification/landing | Source-bound compile receipts and authored regression anchors; draft-paperwork checks only. No implementation behavioral test batch or completed-candidate review yet. | Finish implementation, actual independent final Fable review, fix findings, then once-only affected tests/fast lane and applicable native/cluster/platform acceptance; merge authorized exact candidate. Retry only failed/invalidated checks. | A reviewed, actually qualified artifact is merged with explicit platform/evidence limits. Compilation/body counts never replace this. No deployment is authorized. | Fable independent review; primary Codex harness (`/root`) fixes/qualification and authenticated publication/merge. |

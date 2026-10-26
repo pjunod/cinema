@@ -1,60 +1,56 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation active · updated 2026-10-26. PR #1248 on
-`effort/adaptive-playback-resources` remains the sole effort. Published source
-is `0fc539264d5a`; local committed checkpoint is `db82d7475`; bounded same-request worker
-retry is connected, with worker foreign-fence cleanup under correction. Current main `e02fb1283` is merged locally.
-Direct Codex `/root` integrates isolated helpers; the old Hermes writer stays
-parked. Actual complete-candidate Fable 5.1 review/fixes must precede behavioral
-tests. Behavioral tests remain NOT RUN.
+`effort/adaptive-playback-resources` is the sole effort. Work continues on normal
+committed source; current main `087e836d3` is merged. Draft source publication
+and [copy-start review](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) use the ordinary
+branch/PR workflow. No Hermes or external API review is being dispatched.
+Complete-candidate independent Fable review/fixes precede behavioral tests,
+which remain NOT RUN. All V1–V5 and R1/M0–M7 remain OPEN.
 
-Selected Linux software VOD retains original source/process/publication/HTTP
-ownership and R→S cleanup. Interrupted acquisition and live application-owner
-cancellation repairs are implemented. The finalized output bound now reserves
-the authentic operator cache budget before R; the same grant follows original
-production and compact cleanup. Unknown owner loss retains it. Fresh finite
-cache pressure uses typed retirement; raw legacy deletion checks runtime
-protection. Recovered outputs without original producers remain protected.
+Selected software/static VOD retains original native/application cleanup,
+operator cache quota and typed pressure retirement. Copy request limits now
+match core's existing48MiB cap; its finalized quota is reserved before R and
+follows the same Session/native close ticket until actual actor/app/native
+retirement. Copy has no R→S transfer. Generic errors retain charge; only exact
+before-R provenance refunds an unentered quota grant. All session initializers
+now compile with that field. Copy native launch and partial-start closure are
+still open; the pinned review identifies the earlier named-arm wiring refusal
+and four acquisition boundaries rather than claiming they already run.
 
-Planning retains its original deadline, native closures, source witness and
-seven-member P settlement; structural M replaces the arbitrary 64 MiB allowance.
-UnknownHeld P still pins M until restart. Static policy withdrawal retains actual
-readers and typed cleanup. Selected copy control preflights payload/final-result
-slots and keeps original app ownership through escaping aliases. Preparation
-services and immutable context now share original allocations. Original controller
-join/Store proof, actual-plan conditional End admission, copy partial-start native
-witnesses and copy global quota remain open. Private task/channel/allocator and
-native aggregate peaks remain Unknown, not a complete finite-memory claim.
+Preparation now retains its real controller handle through positive join and
+same-operation Store proof. Unknown outcomes and response aliases keep the
+same context/capacity. Selected End probes its actor's actual private plan,
+skips unnecessary preparation ownership and refuses an intervening missing-
+admission race before adoption; input allocation precedes snapshot creation.
+Private task/channel/serializer/allocator and native aggregate peaks remain
+Unknown, so these projections are not complete finite-memory qualification.
 
-Drain admission now follows original probe tasks/pipes and prepared owners;
-missing/busy inventory blocks readiness. Original inference now retains its admission in the same blocking task. The
-full caller audit found further library/subtitle/fragment owner gaps. Worker intent is the exact
-root-scoped borrowed wire digest, rederived before planning. Bounded retry from Fable design `t_9095ec22` is connected; source/storage domain identity
-and a production consumer for unclosed provisional attempts remain missing.
+Planning retains its deadline, native/source witnesses and seven-member P
+settlement with structural M. UnknownHeld P still pins M until restart.
+Root-scoped worker intent, bounded durable-fence retry and foreign-fence cleanup
+are connected. Origin never issues Close or refunds native ownership.
+Shared storage domains and the unclosed-provisional inventory consumer remain
+missing. Original probe/inference/library workers retain their admissions;
+subtitle worker/result lifetime repairs are being compiled in isolation.
+Remaining fragment/native adapters and selective recovery are still open.
 
-**Evidence:** original strict Clippy repairs passed native x86_64 core+daemon
-all-target+cluster on `8305720ef` (417.086 seconds, source stable; log SHA-256
-`105a6f5ef0aa0c2e3ccb9ae6dacd46437e332bce3173b97ae96436bbc302b364`).
-After the main merge, Mac strict all-target+fixtures passed immutable-intent
-source `6232e9542` with its integrated pipe/cache safety fixes (185.322 seconds,
-source stable; log SHA-256
-`5496fdb22aa0d50f3aa7bafcf7202544738e73da4586133c21506cff604a0a3f`).
-The matching Linux-cfg check passed; its stubbed C objects link no executable.
-Software-quota and service-sharing deliveries each passed strict checks in their
-isolated clones. Combined Mac and Linux-cfg strict checks passed `b53874a2a` source, including
-real-Store retry regressions (compiled only). Exact committed native x86_64
-checks on `db82d7475` are running. These receipts do not qualify changed source
-or replace final review or behavioral execution.
+**Compiler evidence:** Rust1.97.1 native x86_64 core+daemon all-target+cluster
+strict Clippy passed exact `41ad7bebad6c` after current-main and quota integration
+(439.437s, source stable; log SHA-256
+`bd14e391641ca34d13ecebc445572e4ca05f2a9f6ddc397d003293d17a0f0925`).
+The later End delivery passed Mac and Linux-cfg strict checks on its isolated
+source; Linux-cfg stubs link no executable. Combined final-source checks are
+still required. Default-feature Mac strict passed the preceding c420+cfg-fix
+source; Linux default-feature verification remains to run on the joined tree.
+Local compilers run sequentially at j1 after an actual host file-handle failure.
+Static paperwork passed15/15 at `de8f9f4c1`;618 regression anchors resolve,
+including the original490 unchanged fields. These are static/compile facts,
+not behavioral acceptance or completed review.
 
-All V1–V5 and R1/M0–M7 remain OPEN. Remaining implementation includes complete
-copy/application/native bounds, restart drain accounting, nonselected pipeline
-adapters, worker retry/placement and learned admission policy. Drain work must
-retain original admission guards and count unresolved adaptive owners, including
-prepared planning/closing work absent from public session maps. Unknown
-inventory blocks truthful readiness. No deployment. Bounded direct recovery
-keeps its existing held-lock and positive same-boot/PID-namespace old-daemon exit
-requirements; uncertainty retains holds. Separate obsolete recovered-cache
-eviction and its existing approval boundary are unchanged.
+No deployment. Bounded direct recovery retains its held-lock and positive
+same-boot/PID-namespace old-daemon-exit requirements. Separate obsolete
+recovered-cache eviction retains its existing approval boundary.
 
 Normative [plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md),
 [acceptance](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) and

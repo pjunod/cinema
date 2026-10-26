@@ -18,7 +18,7 @@ A retry must reuse the exact immutable request binding and original deadline.
 The predecessor must be durably Cleanup, Losing or Closed; origin Fence never
 proves native cleanup and the origin never issues Close. Worker cleanup may use
 a foreign committed fence only after its original native/application owners
-settle. Bounded coordinator retry is connected: it retains original Claim/Fence operations, confirms a fresh durable predecessor phase, and re-fetches each quote within the common deadline. Worker stale/foreign-fence cleanup remains under correction; behavioral qualification has not run.
+settle. Bounded coordinator retry is connected: it retains original Claim/Fence operations, confirms a fresh durable predecessor phase, and re-fetches each quote within the common deadline. Worker stale/foreign-fence cleanup is connected; behavioral qualification has not run.
 Worker-node domains remain the only available identity; shared source/storage
 domains and a production consumer for unclosed provisional rows remain open.
 The integrator preserves the stricter plan §7.1 boundary where the design's
