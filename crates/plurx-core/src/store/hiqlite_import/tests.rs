@@ -442,7 +442,17 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     assert!(names.contains(&"jellyfin_login_tokens"));
     assert!(names.contains(&"jellyfin_entity_ids"));
     assert!(names.contains(&"jellyfin_plays"));
-    assert_eq!(names.len(), 92, "review every imported durable table");
+    // v113 adds three durable annotation tables; the schema authority marker
+    // is installed locally and is not an imported catalogue row population.
+    for table in [
+        "library_annotations_lists",
+        "library_annotations_ratings",
+        "library_annotations_rating_fetches",
+    ] {
+        assert!(names.contains(&table), "durable annotation table: {table}");
+    }
+    assert!(!names.contains(&"library_annotations_schema"));
+    assert_eq!(names.len(), 95, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its

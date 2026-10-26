@@ -121,14 +121,6 @@ private final class SubtitleCallbackQueue: @unchecked Sendable {
         defer { lock.unlock() }
         return callbacks.isEmpty ? nil : callbacks.removeFirst()
     }
-
-    func takeAll() -> [@MainActor @Sendable () -> Void] {
-        lock.lock()
-        defer { lock.unlock() }
-        let batch = callbacks
-        callbacks = []
-        return batch
-    }
 }
 
 /// Holds one exchange open so a test can stage a race that is otherwise

@@ -855,9 +855,10 @@ async fn v6_rebuild_preserves_everything() {
     // cancellation and v103 continuous dependencies; v104–v105 add sharing
     // authority and outer-ingress custody; v106-v110 append Cinema receiver
     // credentials, consent, revision fencing, login rebind and cleanup guards.
-    // v111 appends managed subtitles; v112 appends progressive translation.
+    // v111 appends managed subtitles; v112 appends progressive translation;
+    // v113 adds ratings/lists and v114 adds source-revision title acquisition.
     assert_eq!(
-        version, 112,
+        version, 114,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

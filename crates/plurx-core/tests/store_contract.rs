@@ -587,6 +587,13 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    // Both-backend title publication/cancellation/reprobe and priority
+    // contracts in store_contract/dv_title_jobs.rs exercise these five.
+    "dv_title_readiness",
+    "dv_title_demands",
+    "bind_dv_title_demand",
+    "publish_dv_title_job",
+    "probe_can_preempt_title",
     // Progressive translation's actual source-bind/publication/Stop/read-lease
     // contract below exercises these on every backend, including three voters.
     "maintain_translation_cache",
@@ -20678,7 +20685,9 @@ fn contract_inventory_matches_every_store_method() {
     // (set, flags, a page of a list, membership of a batch). All six are named
     // in `ANNOTATION_METHODS` and covered on both backends by
     // `annotation_contract_runs_through_dyn_store`.
-    assert_eq!(declared.len(), 503, "review the Store method count");
+    // +5: source-revision title demand/readiness, binding, fenced publication
+    // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
+    assert_eq!(declared.len(), 508, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

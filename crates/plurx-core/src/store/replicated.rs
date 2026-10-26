@@ -158,14 +158,13 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
-    // Compare the configured root set, delete only admitted files and prune
-    // emptied items within the same authority boundary.
+    // Replace the provider scores and their fetch marker in one boundary.
     SqliteTransactionSite {
-        module: "media.rs",
-        method: "remove_files_outside_library_roots",
+        module: "annotations.rs",
+        method: "put_item_ratings",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
+        shape: TransactionShape::BatchWrite,
     },
     // Receiver and all grants revoke in the same boundary.
     SqliteTransactionSite {
@@ -1159,6 +1158,7 @@ mod tests {
     use super::*;
 
     const SQLITE_MODULES: &[(&str, &str)] = &[
+        ("annotations.rs", include_str!("sqlite/annotations.rs")),
         ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
         ("cache.rs", include_str!("sqlite/cache.rs")),
         (
@@ -1414,8 +1414,9 @@ mod tests {
         // guarded transaction, each measured in sqlite/sharing.rs.
         // Cinema adds one paired receiver/grant revoke and four guarded
         // invitation admission/cleanup boundaries, registered above.
-        // Root removal adds one guarded delete/prune boundary.
-        assert_eq!(methods.len(), 114);
+        // Root removal adds one guarded delete/prune boundary, named once.
+        // v113 adds the atomic annotation rating replacement/fetch marker.
+        assert_eq!(methods.len(), 115);
     }
 
     mod source_inventory {
