@@ -9,6 +9,92 @@ pub(super) type ActorApplication =
 #[cfg(not(target_os = "linux"))]
 pub(super) struct ActorApplication;
 
+/// An application allocation in the already admitted role's finite client
+/// partition. It grants no physical entry, closure, or durable refund.
+#[derive(Clone)]
+pub(crate) struct ActorPayloadAllocation {
+    #[cfg(target_os = "linux")]
+    slot: Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+}
+impl std::fmt::Debug for ActorPayloadAllocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ActorPayloadAllocation")
+    }
+}
+impl PartialEq for ActorPayloadAllocation {
+    fn eq(&self, _: &Self) -> bool {
+        // Allocation identity is not playback state. Payload comparisons stay
+        // semantic; deep copies still require their own reservation below.
+        true
+    }
+}
+impl Eq for ActorPayloadAllocation {}
+#[cfg(target_os = "linux")]
+impl ActorPayloadAllocation {
+    pub(crate) fn reserve_related(&self, bytes: usize) -> Result<Self, ()> {
+        Ok(Self {
+            slot: self.slot.reserve_related(bytes).map_err(|_| ())?,
+        })
+    }
+    pub(crate) fn validate_actual(&self, bytes: usize) -> Result<(), ()> {
+        self.slot.validate_actual(bytes).map_err(|_| ())
+    }
+    pub(crate) fn into_slot(
+        self,
+    ) -> Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot> {
+        self.slot
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) struct ActorReplyBudget {
+    client: plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientStateLease,
+    // Last: the actual immutable budget-owner allocation is destroyed before
+    // its partition lease. ResponseBudget owns the original close barrier.
+    _metadata: plurx_core::adaptive_resources::runtime::finite_vod::FiniteMetadataLease,
+}
+#[cfg(target_os = "linux")]
+impl ActorReplyBudget {
+    pub(super) fn owner_bytes() -> Option<usize> {
+        super::finite_memory::arc_requested_bytes::<Self>()
+    }
+    pub(super) fn reserve(&self, bytes: usize) -> Result<ActorPayloadAllocation, ()> {
+        Ok(ActorPayloadAllocation {
+            slot: self.client.reserve(bytes).map_err(|_| ())?,
+        })
+    }
+}
+
+/// Original admitted partition and the reservation made BEFORE constructing
+/// the actor's two initial ControlState observation-token allocations.
+#[cfg(target_os = "linux")]
+pub(crate) struct RollingActorAccounting {
+    pub(super) budget: Arc<ActorReplyBudget>,
+    pub(super) initial_state: ActorPayloadAllocation,
+}
+#[cfg(target_os = "linux")]
+impl RollingActorAccounting {
+    pub(crate) fn owner_bytes() -> Option<usize> {
+        ActorReplyBudget::owner_bytes()
+    }
+    pub(crate) fn new(
+        metadata: plurx_core::adaptive_resources::runtime::finite_vod::FiniteMetadataLease,
+        client: plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientStateLease,
+    ) -> Result<Self, ()> {
+        let bytes = ControlState::initial_finite_heap_bytes().ok_or(())?;
+        let initial_state = ActorPayloadAllocation {
+            slot: client.reserve(bytes).map_err(|_| ())?,
+        };
+        Ok(Self {
+            budget: Arc::new(ActorReplyBudget {
+                client,
+                _metadata: metadata,
+            }),
+            initial_state,
+        })
+    }
+}
+
 pub(super) struct OriginalRollingActorTask {
     #[cfg_attr(
         all(not(target_os = "linux"), not(test)),

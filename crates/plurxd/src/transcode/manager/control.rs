@@ -622,20 +622,7 @@ impl TranscodeManager {
                     terminal_committer: terminal_committer.clone(),
                 }) as Arc<dyn crate::playback_control::RollingTerminalAdmission>
             });
-        let (
-            disposition,
-            accepted_sequence,
-            action,
-            action_suppressed,
-            preparation_directive,
-            platform,
-            selection,
-            lease_expires_at_unix_ms,
-            lease_timeout_ms,
-            flow_ticket,
-            lease_state,
-            acknowledged_end,
-        ) = match session
+        let (outcome, acknowledged_end) = match session
             .accept_control(
                 control,
                 deadline_unix_ms,
@@ -647,6 +634,7 @@ impl TranscodeManager {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
+        let disposition = outcome.disposition;
         drop(transition);
         if acknowledged_end {
             let terminal = session
@@ -676,24 +664,7 @@ impl TranscodeManager {
         }
         Some(
             Arc::clone(self)
-                .finish_hls_session_control(
-                    session_id,
-                    session,
-                    disposition,
-                    accepted_sequence,
-                    action,
-                    action_suppressed,
-                    preparation_directive,
-                    platform,
-                    selection,
-                    lease_expires_at_unix_ms,
-                    lease_timeout_ms,
-                    flow_ticket,
-                    lease_state,
-                    false,
-                    None,
-                    None,
-                )
+                .finish_hls_session_control(session_id, session, outcome, false, None, None)
                 .await,
         )
     }
@@ -703,17 +674,7 @@ impl TranscodeManager {
         self: Arc<Self>,
         session_id: String,
         session: Arc<Session>,
-        disposition: crate::playback_control::ControlDisposition,
-        accepted_sequence: u64,
-        action: crate::playback_control::ControlAction,
-        action_suppressed: bool,
-        preparation_directive: Option<crate::playback_control::PreparationDirective>,
-        platform: crate::playback_control::ClientPlatform,
-        selection: crate::playback_control::SelectionObservation,
-        lease_expires_at_unix_ms: i64,
-        lease_timeout_ms: u32,
-        flow_ticket: u64,
-        lease_state: &'static str,
+        outcome: crate::playback_control::RollingControlOutcome,
         acknowledged_end: bool,
         terminal_handoff: Option<crate::playback_control::TerminalResponseHandoff>,
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
@@ -721,8 +682,22 @@ impl TranscodeManager {
         crate::playback_control::LocalControlResult,
         crate::playback_control::ControlStateError,
     > {
+        let disposition = outcome.disposition;
+        let accepted_sequence = outcome.accepted_sequence;
+        let action_suppressed = outcome.action_suppressed;
+        let platform = outcome.platform;
+        let flow_ticket = outcome.flow_ticket;
+        let lease_expires_at_unix_ms = outcome.lease.expires_at_unix_ms();
+        let lease_timeout_ms = outcome.lease.timeout_ms();
+        let lease_state = outcome.lease.terminal.map_or(
+            "active",
+            crate::playback_control::RollingTerminalCause::status,
+        );
         let rescue = terminal_handoff.clone();
-        let outcome = async {
+        let result = async move {
+            // Capture the complete carrier, not disjoint heap fields whose
+            // accounting guard could be dropped before a remaining snapshot.
+            let outcome = outcome;
             session.hooks.get().after_control_applied().await;
             // The actor also tickets replayed sequences. A caller whose first
             // response was lost can therefore wait for physical convergence.
@@ -750,14 +725,22 @@ impl TranscodeManager {
             {
                 return Err(crate::playback_control::ControlStateError::OwnerTransition);
             }
-            let status = session_info(
+            #[cfg(target_os = "linux")]
+            let moved_result_bytes = outcome
+                .requested_clone_heap_bytes()
+                .ok_or(crate::playback_control::ControlStateError::Unavailable)?;
+            #[cfg(not(target_os = "linux"))]
+            let moved_result_bytes = 0;
+            let owned_status = session_info_owned(
                 &session_id,
                 &session,
                 limits,
                 global_live_bytes,
                 global_ahead_bytes,
+                outcome.allocation.as_ref(),
+                moved_result_bytes,
             )
-            .await;
+            .await?;
             if session.control.is_retired() && !acknowledged_end {
                 return Err(session
                     .control
@@ -781,19 +764,21 @@ impl TranscodeManager {
             let mut result = crate::playback_control::LocalControlResult {
                 disposition,
                 accepted_sequence,
-                action,
+                action: outcome.action,
                 action_suppressed,
-                preparation_directive,
+                preparation_directive: outcome.preparation_directive,
                 lease_expires_at_unix_ms,
                 lease_timeout_ms,
                 lease_state,
-                status: HlsSessionInfo::Live(Box::new(status)),
+                status: HlsSessionInfo::Live(Box::new(owned_status.status)),
                 platform,
                 terminal_handoff,
                 terminal_commit: None,
-                selection,
+                selection: outcome.selection,
                 #[cfg(target_os = "linux")]
-                finite_client_slot: None,
+                finite_client_slot: owned_status
+                    .allocation
+                    .map(crate::playback_control::ActorPayloadAllocation::into_slot),
             };
             if acknowledged_end {
                 if let Some(committer) = terminal_committer {
@@ -805,12 +790,12 @@ impl TranscodeManager {
             Ok(result)
         }
         .await;
-        if outcome.is_err() {
+        if result.is_err() {
             if let Some(handoff) = rescue {
                 handoff.complete();
             }
         }
-        outcome
+        result
     }
 
     pub(super) async fn emit_session_event(

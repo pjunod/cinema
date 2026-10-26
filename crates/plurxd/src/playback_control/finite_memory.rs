@@ -4,10 +4,29 @@
 
 #![cfg_attr(
     all(test, not(target_os = "linux")),
-    allow(dead_code, reason = "portable private-token model fixtures exercise the shared pure compute/measure/adopt step; remaining finite production projections are composed only on Linux")
+    allow(
+        dead_code,
+        reason = "portable private-token model fixtures exercise the shared pure compute/measure/adopt step; remaining finite production projections are composed only on Linux"
+    )
 )]
 
 use super::*;
+
+/// Pinned Rust1.97.1 ArcInner is repr(C): two pointer-sized atomic
+/// refcounts followed by T. Extend and pad like alloc::sync does; merely
+/// adding header+payload misses trailing alignment for Arc<AtomicBool>.
+/// Source: rust-lang/rust 8bab26f4f68e0e26f0bb7960be334d5b520ea452,
+/// library/alloc/src/sync.rs:365-386.
+pub(crate) fn arc_requested_layout(payload: std::alloc::Layout) -> Option<usize> {
+    std::alloc::Layout::new::<[std::sync::atomic::AtomicUsize; 2]>()
+        .extend(payload)
+        .ok()
+        .map(|(layout, _)| layout.pad_to_align().size())
+}
+
+pub(super) fn arc_requested_bytes<T>() -> Option<usize> {
+    arc_requested_layout(std::alloc::Layout::new::<T>())
+}
 
 fn add(left: usize, right: usize) -> Option<usize> {
     left.checked_add(right)
@@ -171,6 +190,9 @@ impl PreparedActionBinding {
 }
 
 impl PreparationDirective {
+    pub(super) fn requested_finite_heap_bytes(&self) -> usize {
+        self.requested_heap_bytes()
+    }
     fn requested_heap_bytes(&self) -> usize {
         match self {
             Self::Commit {
@@ -226,8 +248,7 @@ impl SelectionObservation {
 
 impl ControlState {
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
-        let mut bytes = 2usize
-            .checked_mul(std::mem::size_of::<AtomicBool>() + 2 * std::mem::size_of::<usize>())?;
+        let mut bytes = arc_requested_bytes::<AtomicBool>()?.checked_mul(2)?;
         for value in [
             &self.generation,
             &self.prior_request_fingerprint,
@@ -268,12 +289,7 @@ impl ControlState {
     ) -> Option<usize> {
         let mut bytes = self.requested_heap_bytes()?; // detached next = self.clone()
                                                       // Two fresh observational Arc<AtomicBool> tokens in accept_step_detached.
-        bytes = add(
-            bytes,
-            2usize.checked_mul(
-                std::mem::size_of::<AtomicBool>() + 2 * std::mem::size_of::<usize>(),
-            )?,
-        )?;
+        bytes = add(bytes, arc_requested_bytes::<AtomicBool>()?.checked_mul(2)?)?;
         bytes = add(bytes, generation.len())?; // first accepted generation
         bytes = add(bytes, string(&snapshot.request_fingerprint))?; // acceptance input
 
@@ -516,7 +532,10 @@ impl LocalControlResult {
                 )?;
                 bytes = add(bytes, status.requested_heap_bytes()?)?;
             }
-            crate::transcode::HlsSessionInfo::Live(_) => return None,
+            crate::transcode::HlsSessionInfo::Live(status) => {
+                bytes = add(bytes, std::mem::size_of::<crate::transcode::SessionInfo>())?;
+                bytes = add(bytes, status.requested_heap_bytes()?)?;
+            }
         }
         Some(bytes)
     }
@@ -546,5 +565,560 @@ impl ControlResponseV1 {
         }
         bytes = add(bytes, self.effective_selection.requested_heap_bytes()?)?;
         add(bytes, self.action.requested_heap_bytes()?)
+    }
+}
+
+impl ControlState {
+    pub(super) fn initial_finite_heap_bytes() -> Option<usize> {
+        // Exactly the two Arc<AtomicBool> allocations in Default. No state
+        // constructor is invoked before this reservation is taken.
+        arc_requested_bytes::<AtomicBool>()?.checked_mul(2)
+    }
+}
+
+impl RollingProducerOperationalSnapshot {
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let RollingProducerOperationalSnapshot {
+            phase: _,
+            deadline_attempt: _,
+            deadline_mode: _,
+            deadline_remaining_ms: _,
+            due_attempt: _,
+            due_mode: _,
+            due_overdue_ms: _,
+            process_exit_attempt: _,
+            process_exit_due: _,
+            physical_flow: _,
+            last_flow_applied_sequence: _,
+            last_applied_sequence: _,
+            observation_only: _,
+            action_owner: _,
+            startup_kind: _,
+            presentation_contract_fingerprint,
+            metadata_response_authorized: _,
+            producer_media_published: _,
+            retry_state: _,
+            decision_sequence: _,
+            decision_reason: _,
+            executor_state: _,
+            executor_pending_decision_age_ms: _,
+            executor_last_observed_sequence: _,
+            executor_last_action_failure: _,
+            executor_registered: _,
+            decision_applied_sequence: _,
+            decision_installed_attempt: _,
+            pending_probe_sequence: _,
+            pending_probe_attempt: _,
+            pending_probe_deadline_remaining_ms: _,
+            last_probe_outcome: _,
+            producer_ended_with_proposal: _,
+            proposal,
+            decode_fault: _,
+            decode_error_records: _,
+            diagnostics_qualification: _,
+            completion: _,
+            completion_attempt: _,
+            completion_final_segment: _,
+            completion_final_end_ms: _,
+        } = self;
+        add(
+            string(presentation_contract_fingerprint),
+            proposal
+                .as_ref()
+                .map_or(0, |value| value.proposal_id.capacity()),
+        )
+    }
+}
+
+impl RollingLeaseSnapshot {
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let RollingLeaseSnapshot {
+            mode: _,
+            idle_for: _,
+            remaining: _,
+            deadline: _,
+            last_renewal_kind: _,
+            demand,
+            accepted_demand_sequence: _,
+            demand_observation_age: _,
+            settled_target: _,
+            startup: _,
+            pause_remaining: _,
+            delivery: _,
+            retired: _,
+            terminal: _,
+            expiration_claimed: _,
+            producer_control,
+        } = self;
+        add(
+            demand
+                .as_ref()
+                .map_or(Some(0), PlaybackDemandSnapshot::requested_heap_bytes)?,
+            producer_control.requested_heap_bytes()?,
+        )
+    }
+}
+
+impl RollingControlOutcome {
+    pub(crate) fn requested_clone_heap_bytes(&self) -> Option<usize> {
+        let RollingControlOutcome {
+            disposition: _,
+            accepted_sequence: _,
+            action,
+            action_suppressed: _,
+            preparation_directive,
+            platform: _,
+            lease,
+            flow_ticket: _,
+            selection,
+            allocation: _,
+        } = self;
+        let mut bytes = add(std::mem::size_of::<Self>(), action.requested_heap_bytes()?)?;
+        bytes = add(
+            bytes,
+            preparation_directive
+                .as_ref()
+                .map_or(0, PreparationDirective::requested_heap_bytes),
+        )?;
+        bytes = add(bytes, lease.requested_heap_bytes()?)?;
+        add(bytes, selection.requested_heap_bytes()?)
+    }
+}
+
+impl crate::transcode::SessionInfo {
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let crate::transcode::SessionInfo {
+            vod_observation,
+            id,
+            presentation: _,
+            file_id: _,
+            item_id: _,
+            item_title,
+            user_name,
+            target_height: _,
+            encoder: _,
+            tone_map_peak_nits: _,
+            tone_map_peak_source: _,
+            started_unix: _,
+            idle_seconds: _,
+            last_request: _,
+            lease_mode: _,
+            lease_state: _,
+            lease_timeout_ms: _,
+            startup_state: _,
+            startup_remaining_ms: _,
+            presentation_progress_seen: _,
+            produced_end_ms: _,
+            served_end_ms: _,
+            budget_anchor_sequence: _,
+            allowed_end_ms: _,
+            carried_surplus_ms: _,
+            demand_observation_age_ms: _,
+            staged_bytes: _,
+            playlist_target_ms: _,
+            served_revision: _,
+            last_segment_advanced_idle_ms: _,
+            next_publication_in_ms: _,
+            publication_deadline_remaining_ms: _,
+            maintenance_state: _,
+            rate_estimate_source: _,
+            estimate_active_speed: _,
+            pause_grace_remaining_ms: _,
+            retirement_reason: _,
+            advertised_bytes: _,
+            grace_bytes: _,
+            reserved_bytes: _,
+            live_bytes: _,
+            control_demand: _,
+            reported_position_ms: _,
+            client_runway_ms: _,
+            render_state: _,
+            server_ready_state: _,
+            server_ready_anchor_ms: _,
+            server_ready_end_ms: _,
+            server_ready_seconds: _,
+            server_next_ready_start_ms: _,
+            server_next_ready_end_ms: _,
+            production_policy: _,
+            production_ahead_seconds: _,
+            production_target_seconds: _,
+            producer_control,
+            producer_state: _,
+            producer_attempt: _,
+            playlist_ready: _,
+            published_segment: _,
+            next_media_sequence: _,
+            pending_fetched_segment: _,
+            speed: _,
+            recent_speed: _,
+            out_time_ms: _,
+            progress_idle_ms: _,
+            producer_exit_success: _,
+            producer_exit_code: _,
+            producer_exit_signal: _,
+            producer_exit_idle_ms: _,
+            published_end_ms: _,
+            fetched_end_ms: _,
+            fetched_segment: _,
+            first_retained_segment: _,
+            playlist_shape: _,
+            ahead_seconds: _,
+            hold_reason: _,
+            resume_below_seconds: _,
+            resume_below_bytes: _,
+            ahead_bytes: _,
+            delivered_bytes: _,
+            delivered_bps: _,
+            delivered_idle_ms: _,
+            http_wait_count: _,
+            http_wait_oldest_ms: _,
+            http_wait_segment: _,
+            status_generated_unix_ms: _,
+            readrate: _,
+            suspended: _,
+            suspend_count: _,
+        } = self;
+        // Selected rolling status has no VOD observation sidecar. Any new
+        // shape refuses until its complete owned field inventory is added.
+        if vod_observation.is_some() {
+            return None;
+        }
+        let mut bytes = add(id.capacity(), item_title.capacity())?;
+        bytes = add(bytes, user_name.capacity())?;
+        add(
+            bytes,
+            producer_control.as_ref().map_or(
+                Some(0),
+                RollingProducerOperationalSnapshot::requested_heap_bytes,
+            )?,
+        )
+    }
+}
+
+impl PreparedFiniteControl {
+    pub(super) fn retained_state_bytes(&self) -> Option<usize> {
+        self.next.requested_heap_bytes()
+    }
+}
+
+impl ControlState {
+    /// Same private-token step as finite VOD, preserving the actor's original
+    /// directive-before-observation order and published ingress timestamp.
+    pub(super) fn prepare_finite_actor_control_at(
+        &self,
+        now: Instant,
+        request: ControlRequestView<'_>,
+        snapshot: &PlaybackDemandSnapshot,
+    ) -> PreparedFiniteControl {
+        let (mut next, result, private) = accept_step_detached(self, now, request);
+        let directive = next.preparation_directive();
+        let observation = if matches!(
+            &result,
+            Ok(Disposition {
+                disposition: ControlDisposition::Accepted,
+                ..
+            })
+        ) {
+            next.observe(&snapshot.selection, snapshot.capabilities.as_ref())
+        } else {
+            SelectionObservation::default()
+        };
+        PreparedFiniteControl {
+            next,
+            result,
+            private,
+            observation,
+            directive,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl RollingControlActor {
+    /// The only owned strings built by producer_operational_snapshot_at are
+    /// clones of these actual retained fingerprint/proposal sources.
+    pub(super) fn finite_operational_snapshot_bound(&self) -> Option<usize> {
+        let mut bytes = self
+            .prepublication
+            .as_ref()
+            .and_then(|value| value.initial_policy.as_ref())
+            .map_or(0, |value| {
+                value.presentation_contract_fingerprint.capacity()
+            });
+        bytes = add(
+            bytes,
+            self.response_publication_contract
+                .as_ref()
+                .map_or(0, |value| {
+                    value.presentation_contract_fingerprint.capacity()
+                }),
+        )?;
+        let proposal = self
+            .pending_decision
+            .as_ref()
+            .or(self.last_decision.as_ref())
+            .and_then(|value| match value.as_ref() {
+                ProducerDecision::Fail { proposal, .. } => proposal.as_ref(),
+                _ => None,
+            });
+        add(
+            bytes,
+            proposal.map_or(0, |value| value.proposal_id.capacity()),
+        )
+    }
+
+    pub(super) fn finite_snapshot_control_bound(
+        &self,
+        request: &OwnedLocalControlRequest,
+    ) -> Option<usize> {
+        // claim_expiry_at can clone the old demand; an accepted exchange's
+        // final snapshot clones the incoming one. Both are real sources.
+        let old = self
+            .demand
+            .as_ref()
+            .map_or(Some(0), PlaybackDemandSnapshot::requested_heap_bytes)?;
+        add(
+            add(old, request.snapshot.requested_heap_bytes()?)?,
+            self.finite_operational_snapshot_bound()?,
+        )
+    }
+
+    pub(super) fn finite_control_transient_bound(
+        &self,
+        request: &OwnedLocalControlRequest,
+    ) -> Option<usize> {
+        let mut bytes = self.control.finite_prepare_transient_bytes(
+            &request.generation,
+            &request.snapshot,
+            &request.prepared_successor,
+        )?;
+        // claim_expiry_at always builds one old snapshot and may build a
+        // second committed terminal snapshot before dropping the first.
+        let snapshot = self.finite_snapshot_control_bound(request)?;
+        bytes = add(bytes, snapshot.checked_mul(2)?)?;
+        bytes = add(bytes, std::mem::size_of::<PreparedFiniteControl>())?;
+        bytes = add(bytes, std::mem::size_of::<RollingControlOutcome>())?;
+        // Actor retention duplicates accepted capabilities independently of
+        // ControlState::observe; clone_from can retain the previous capacity.
+        bytes = add(
+            bytes,
+            self.retained_capabilities
+                .as_ref()
+                .map_or(Some(0), DynamicCapabilities::requested_heap_bytes)?,
+        )?;
+        bytes = add(
+            bytes,
+            request
+                .snapshot
+                .capabilities
+                .as_ref()
+                .map_or(Some(0), DynamicCapabilities::requested_heap_bytes)?,
+        )?;
+        add(bytes, arc_requested_bytes::<AtomicBool>()?) // terminal observation-token replacement
+    }
+}
+
+impl OwnedLocalControlRequest {
+    pub(super) fn projected_borrowed_bytes(request: &LocalControlRequest<'_>) -> Option<usize> {
+        let LocalControlRequest {
+            generation,
+            client_instance_id,
+            snapshot,
+            prepared_successor,
+            session_id: _,
+            owner_node_id: _,
+            owner_epoch: _,
+            sequence: _,
+        } = request;
+        let mut bytes = add(std::mem::size_of::<Self>(), generation.len())?;
+        bytes = add(bytes, client_instance_id.len())?;
+        bytes = add(bytes, snapshot.requested_heap_bytes()?)?;
+        if let PreparedSuccessorObservation::Ready(value) = prepared_successor {
+            bytes = add(bytes, std::mem::size_of::<PreparedSuccessorAction>())?;
+            bytes = add(bytes, value.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) struct PreparedActorAccounting {
+    pub(super) _transient: ActorPayloadAllocation,
+    pub(super) state: ActorPayloadAllocation,
+    pub(super) reply: ActorPayloadAllocation,
+    pub(super) terminal: Option<ActorPayloadAllocation>,
+    pub(super) preparation: Option<ActorPayloadAllocation>,
+}
+
+#[cfg(target_os = "linux")]
+impl RollingControlActor {
+    pub(super) fn prepare_finite_actor_accounting(
+        &mut self,
+        now: Instant,
+        request: &OwnedLocalControlRequest,
+        terminal: bool,
+        preparation: bool,
+    ) -> Result<Option<PreparedActorAccounting>, ()> {
+        let Some(budget) = self.reply_budget.as_ref().map(Arc::clone) else {
+            return Ok(None);
+        };
+        let transient = budget.reserve(self.finite_control_transient_bound(request).ok_or(())?)?;
+        let plan = self.control.prepare_finite_actor_control_at(
+            now,
+            ControlRequestView {
+                generation: &request.generation,
+                owner_epoch: request.owner_epoch,
+                client_instance_id: &request.client_instance_id,
+                sequence: request.sequence,
+                acceptance: ControlAcceptance::observed(
+                    request.snapshot.platform(),
+                    &request.prepared_successor,
+                    request.snapshot.acknowledgement.as_ref(),
+                    request.snapshot.request_fingerprint.as_deref(),
+                    &request.snapshot.selection,
+                    request.snapshot.capabilities.as_ref(),
+                ),
+            },
+            &request.snapshot,
+        );
+        transient.validate_actual(plan.requested_heap_bytes().ok_or(())?)?;
+        let incoming = request.snapshot.requested_heap_bytes().ok_or(())?;
+        let retained_caps = plan
+            .next
+            .last_capabilities
+            .as_ref()
+            .map_or(Some(0), DynamicCapabilities::requested_heap_bytes)
+            .ok_or(())?;
+        let state_bytes = add(
+            add(plan.retained_state_bytes().ok_or(())?, incoming).ok_or(())?,
+            retained_caps,
+        )
+        .ok_or(())?;
+        let state = budget.reserve(state_bytes)?;
+        // Current state covers an exact terminal replay before the private
+        // plan is adopted. External plan payload covers an accepted exchange.
+        let external = add(
+            plan.external_payload_bytes().ok_or(())?,
+            self.control.requested_heap_bytes().ok_or(())?,
+        )
+        .ok_or(())?;
+        let reply_bytes = add(
+            add(std::mem::size_of::<RollingControlOutcome>(), external).ok_or(())?,
+            self.finite_snapshot_control_bound(request).ok_or(())?,
+        )
+        .ok_or(())?;
+        let reply = budget.reserve(reply_bytes)?;
+        let terminal = if terminal {
+            Some(budget.reserve(reply_bytes)?)
+        } else {
+            None
+        };
+        let preparation = if preparation {
+            let bytes = add(std::mem::size_of::<PreparationControlOutcome>(), external).ok_or(())?;
+            Some(budget.reserve(bytes)?)
+        } else {
+            None
+        };
+        // All reservations precede adoption, including all mandatory clones.
+        self.prepared_control = Some(plan);
+        Ok(Some(PreparedActorAccounting {
+            _transient: transient,
+            state,
+            reply,
+            terminal,
+            preparation,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod allocation_layout_tests {
+    use super::*;
+    #[test]
+    fn atomic_bool_arc_projection_includes_refcount_alignment() {
+        let word = std::mem::size_of::<usize>();
+        assert_eq!(arc_requested_bytes::<AtomicBool>(), Some(3 * word));
+        assert_eq!(ControlState::initial_finite_heap_bytes(), Some(6 * word));
+    }
+    #[test]
+    fn arc_projection_preserves_payload_alignment_and_final_padding() {
+        #[repr(C, align(64))]
+        struct Aligned {
+            byte: u8,
+        }
+        let value = Aligned { byte: 1 };
+        assert_eq!(value.byte, 1);
+        assert_eq!(arc_requested_bytes::<Aligned>(), Some(128));
+    }
+
+    #[test]
+    fn rolling_prepare_refusal_keeps_original_state_and_tokens_live() {
+        // A pure private-plan test: no physical receipt or native execution.
+        let snapshot = PlaybackDemandSnapshot {
+            intent: None,
+            request_fingerprint: Some("same original request".to_owned()),
+            demand: PlaybackDemand::Active,
+            position_ms: 0,
+            buffered_from_ms: None,
+            buffered_through_ms: 0,
+            playback_rate: 1.0,
+            render_state: RenderState::Starting,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: ClientSelection {
+                quality: QualitySelection::Auto {
+                    height: None,
+                    candidate_id: None,
+                },
+                audio_track: None,
+                subtitle: SubtitleSelection {
+                    mode: SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: CodecPolicy::Auto,
+                dynamic_range: DynamicRangePolicy::Auto,
+            },
+            capabilities: None,
+            observation: None,
+            acknowledgement: None,
+        };
+        let request = || ControlRequestView {
+            generation: "original rolling generation",
+            owner_epoch: 1,
+            client_instance_id: "22222222-2222-4222-8222-222222222222",
+            sequence: 1,
+            acceptance: ControlAcceptance::observed(
+                None,
+                &PreparedSuccessorObservation::NotRequested,
+                None,
+                snapshot.request_fingerprint.as_deref(),
+                &snapshot.selection,
+                None,
+            ),
+        };
+        let mut state = ControlState::default();
+        let original_live = Arc::clone(&state.observational_live);
+        let original_stage = Arc::clone(&state.observational_stage_live);
+        let now = Instant::now();
+        let refused = state.prepare_finite_actor_control_at(now, request(), &snapshot);
+        assert!(refused.accepted());
+        assert!(refused.requested_heap_bytes().is_some());
+        drop(refused); // The actual caller refuses a slot before adoption.
+        assert_eq!(state.last_sequence, 0);
+        assert!(state.generation.is_none());
+        assert!(Arc::ptr_eq(&original_live, &state.observational_live));
+        assert!(Arc::ptr_eq(
+            &original_stage,
+            &state.observational_stage_live
+        ));
+        assert!(original_live.load(Ordering::Acquire));
+        let admitted = state.prepare_finite_actor_control_at(now, request(), &snapshot);
+        let (result, _, _) = admitted.adopt(&mut state);
+        assert_eq!(
+            result.expect("private plan accepted").0,
+            ControlDisposition::Accepted
+        );
+        assert_eq!(state.last_sequence, 1);
     }
 }

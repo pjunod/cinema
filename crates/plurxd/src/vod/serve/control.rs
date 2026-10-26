@@ -542,6 +542,7 @@ impl VodServe {
                     // gate can still settle that exact slot even if the HTTP
                     // waiter disappears after this critical section.
                     admission.accepted(crate::playback_control::PreparationControlOutcome {
+                        _allocation: None,
                         disposition,
                         accepted_sequence,
                         action: action.clone(),
@@ -656,6 +657,7 @@ impl VodServe {
                     // lifecycle/control fence. The HTTP future may disappear
                     // immediately after this scope without stranding the slot.
                     admission.accepted(crate::playback_control::PreparationControlOutcome {
+                        _allocation: None,
                         disposition,
                         accepted_sequence,
                         action: action.clone(),

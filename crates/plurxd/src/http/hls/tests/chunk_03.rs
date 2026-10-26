@@ -1585,6 +1585,7 @@
         crate::playback_control::PreparationSettlementAdmission::accepted(
             &retry,
             crate::playback_control::PreparationControlOutcome {
+                _allocation: None,
                 disposition: crate::playback_control::ControlDisposition::Replay,
                 accepted_sequence: request.sequence,
                 action: crate::playback_control::ControlAction::None,
@@ -1670,6 +1671,7 @@
         crate::playback_control::PreparationSettlementAdmission::accepted(
             &admission,
             crate::playback_control::PreparationControlOutcome {
+                _allocation: None,
                 disposition: crate::playback_control::ControlDisposition::Accepted,
                 accepted_sequence: request.sequence,
                 action: crate::playback_control::ControlAction::None,

@@ -4738,6 +4738,7 @@ fn relay_request() -> ControlRelayRequest {
 
 fn owned_control(request: &ControlRequestV1) -> OwnedLocalControlRequest {
     OwnedLocalControlRequest {
+        _allocation: None,
         generation: request.generation.clone(),
         owner_epoch: request.control_epoch,
         client_instance_id: request.client_instance_id.clone(),
@@ -5356,6 +5357,7 @@ async fn preparation_ownership_transfers_before_a_dropped_actor_reply() {
     handle
         .enqueue_command(RollingControlCommand::Control {
             request: Box::new(OwnedLocalControlRequest {
+                _allocation: None,
                 generation: request.generation.clone(),
                 owner_epoch: request.control_epoch,
                 client_instance_id: request.client_instance_id.clone(),

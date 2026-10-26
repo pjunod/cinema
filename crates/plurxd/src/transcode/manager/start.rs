@@ -33,26 +33,25 @@ fn selected_copy_session_dynamic_bytes(session: &Session) -> Option<usize> {
 
 #[cfg(target_os = "linux")]
 fn selected_copy_session_fixed_heap_bytes() -> Option<usize> {
-    let header = 2usize.checked_mul(std::mem::size_of::<usize>())?;
     // These are the actual Arc::new payloads in the selected Session literal.
     // Its inline fields and the Arc<Session> header are counted separately.
     [
-        std::mem::size_of::<AtomicBool>(), // actor_prepublication_producer
-        std::mem::size_of::<AtomicBool>(), // terminal_response_pending
-        std::mem::size_of::<AtomicBool>(), // failed
-        std::mem::size_of::<AtomicBool>(), // retention_cleanup_active
-        std::mem::size_of::<AtomicI64>(),  // high_segment
-        std::mem::size_of::<AtomicI64>(),  // fetched_end_ms
-        std::mem::size_of::<AtomicI64>(),  // live_bytes
-        std::mem::size_of::<AtomicI64>(),  // retention_garbage_bytes
-        std::mem::size_of::<Progress>(),
-        std::mem::size_of::<RetiredRelease>(),
-        std::mem::size_of::<std::sync::Mutex<Vec<(std::path::PathBuf, i64)>>>(),
-        std::mem::size_of::<std::sync::Mutex<u64>>(), // compatibility_attempt
+        std::alloc::Layout::new::<AtomicBool>(), // actor_prepublication_producer
+        std::alloc::Layout::new::<AtomicBool>(), // terminal_response_pending
+        std::alloc::Layout::new::<AtomicBool>(), // failed
+        std::alloc::Layout::new::<AtomicBool>(), // retention_cleanup_active
+        std::alloc::Layout::new::<AtomicI64>(),  // high_segment
+        std::alloc::Layout::new::<AtomicI64>(),  // fetched_end_ms
+        std::alloc::Layout::new::<AtomicI64>(),  // live_bytes
+        std::alloc::Layout::new::<AtomicI64>(),  // retention_garbage_bytes
+        std::alloc::Layout::new::<Progress>(),
+        std::alloc::Layout::new::<RetiredRelease>(),
+        std::alloc::Layout::new::<std::sync::Mutex<Vec<(std::path::PathBuf, i64)>>>(),
+        std::alloc::Layout::new::<std::sync::Mutex<u64>>(), // compatibility_attempt
     ]
     .into_iter()
     .try_fold(0usize, |total, payload| {
-        total.checked_add(payload.checked_add(header)?)
+        total.checked_add(crate::playback_control::arc_requested_layout(payload)?)
     })
 }
 
@@ -2630,6 +2629,8 @@ impl TranscodeManager {
                 accounting.limit_epoch,
                 accounting.capacity,
             )?;
+            let client_partition_bytes = usize::try_from(request.output.client_state_bytes)
+                .map_err(|_| "selected copy client partition overflows")?;
             let app_bytes = usize::try_from(request.application_owner_bytes)
                 .map_err(|_| "selected copy application charge overflows")?;
             // All JSON interpretation, command construction and hard-vector
@@ -2657,7 +2658,29 @@ impl TranscodeManager {
             let app = owner
                 .take_application_lease(app_bytes)
                 .map_err(|error| format!("retaining selected copy application owner: {error}"))?;
-            Some((owner, app, selected_session_metadata_bytes))
+            // Slice the already charged client partition; no new allowance.
+            let owner_bytes = crate::playback_control::RollingActorAccounting::owner_bytes()
+                .ok_or("selected copy actor budget layout overflows")?;
+            let client_limit = client_partition_bytes
+                .checked_sub(owner_bytes)
+                .ok_or("selected copy actor budget exceeds client partition")?;
+            // queue_copy_vod already retained this SAME preparation before
+            // returning owner. Cancellation drops owner, setting its original
+            // cleanup_requested flag; ordinary maintain_failed_copy_admissions
+            // selects that book entry through retained_preparations(). No
+            // detached registration race or lost local selector is introduced.
+            let output = owner.output();
+            let (metadata, client) = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                output.reserve_metadata_partitions(owner_bytes, client_limit),
+            )
+            .await
+            .map_err(|_| "selected copy client partition deadline expired")?
+            .map_err(|error| format!("reserving selected copy client ownership: {error}"))?;
+            drop(output);
+            let accounting = crate::playback_control::RollingActorAccounting::new(metadata, client)
+                .map_err(|_| "reserving initial selected copy actor payload")?;
+            Some((owner, (app, accounting), selected_session_metadata_bytes))
         } else {
             None
         };
@@ -2808,8 +2831,8 @@ impl TranscodeManager {
         };
         #[cfg(target_os = "linux")]
         let (control, mut executor_registration) = match selected_core_app {
-            Some(application) => crate::playback_control::RollingControlHandle::spawn_prepublication_producer_with_application(
-                "copy-session-start", application,
+            Some((application, accounting)) => crate::playback_control::RollingControlHandle::spawn_prepublication_producer_with_application(
+                "copy-session-start", application, accounting,
             ),
             None => crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
                 "copy-session-start",

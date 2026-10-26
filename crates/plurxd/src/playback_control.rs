@@ -21,6 +21,10 @@ use crate::transcode::{HlsSessionInfo, SessionKind};
 #[cfg(any(target_os = "linux", test))]
 #[path = "playback_control/finite_memory.rs"]
 mod finite_memory;
+#[cfg(target_os = "linux")]
+pub(crate) use finite_memory::arc_requested_layout;
+#[cfg(target_os = "linux")]
+use finite_memory::PreparedFiniteControl;
 
 pub(crate) const PROTOCOL_V1: &str = "plurx-playback-control-v1";
 pub(crate) const MAX_REQUEST_BYTES: usize = 16 * 1024;
@@ -2582,6 +2586,40 @@ pub(crate) struct LocalControlResult {
     #[cfg(target_os = "linux")]
     pub finite_client_slot:
         Option<Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>>,
+}
+
+impl LocalControlResult {
+    pub(crate) fn try_clone_owned(&self) -> Result<Self, ControlStateError> {
+        #[cfg(target_os = "linux")]
+        let finite_client_slot = self
+            .finite_client_slot
+            .as_ref()
+            .map(|source| {
+                let bytes = self
+                    .requested_clone_heap_bytes()
+                    .ok_or(ControlStateError::Unavailable)?;
+                source
+                    .reserve_related(bytes)
+                    .map_err(|_| ControlStateError::Unavailable)
+            })
+            .transpose()?;
+        let result = self.clone();
+        #[cfg(target_os = "linux")]
+        let result = {
+            let mut result = result;
+            if let Some(slot) = finite_client_slot.as_ref() {
+                slot.validate_actual(
+                    result
+                        .requested_clone_heap_bytes()
+                        .ok_or(ControlStateError::Unavailable)?,
+                )
+                .expect("owned result clone exceeded its pre-reserved field projection");
+            }
+            result.finite_client_slot = finite_client_slot;
+            result
+        };
+        Ok(result)
+    }
 }
 
 #[derive(Clone)]
@@ -7418,6 +7456,23 @@ pub(crate) struct RollingControlOutcome {
     /// on the first accepted exchange: a session that has just been created
     /// from an intent has not since departed from it.
     pub selection: SelectionObservation,
+    // Process-only role accounting; never a request/receipt capability.
+    pub(crate) allocation: Option<ActorPayloadAllocation>,
+}
+
+impl RollingControlOutcome {
+    fn clone_with_allocation(
+        &self,
+        allocation: Option<ActorPayloadAllocation>,
+    ) -> Result<Self, ()> {
+        #[cfg(target_os = "linux")]
+        if let Some(allocation) = allocation.as_ref() {
+            allocation.validate_actual(self.requested_clone_heap_bytes().ok_or(())?)?;
+        }
+        let mut cloned = self.clone();
+        cloned.allocation = allocation;
+        Ok(cloned)
+    }
 }
 
 /// The immutable control facts transferred to the durable preparation owner.
@@ -7439,16 +7494,36 @@ pub(crate) struct PreparationControlOutcome {
     pub lease_timeout_ms: u32,
     pub lease_state: &'static str,
     pub selection: SelectionObservation,
+    // Process-only role accounting; never a request/receipt capability.
+    pub(crate) _allocation: Option<ActorPayloadAllocation>,
 }
 
 impl PreparationControlOutcome {
-    fn from_rolling(outcome: &RollingControlOutcome) -> Option<Self> {
-        Some(Self {
+    fn from_rolling(
+        outcome: &RollingControlOutcome,
+        allocation: Option<ActorPayloadAllocation>,
+    ) -> Result<Option<Self>, ()> {
+        let Some(directive) = outcome.preparation_directive.as_ref() else {
+            return Ok(None);
+        };
+        #[cfg(target_os = "linux")]
+        if let Some(allocation) = allocation.as_ref() {
+            let bytes = std::mem::size_of::<Self>()
+                .checked_add(outcome.action.requested_heap_bytes().ok_or(())?)
+                .ok_or(())?
+                .checked_add(directive.requested_finite_heap_bytes())
+                .ok_or(())?
+                .checked_add(outcome.selection.requested_heap_bytes().ok_or(())?)
+                .ok_or(())?;
+            allocation.validate_actual(bytes)?;
+        }
+        Ok(Some(Self {
+            _allocation: allocation,
             disposition: outcome.disposition,
             accepted_sequence: outcome.accepted_sequence,
             action: outcome.action.clone(),
             action_suppressed: outcome.action_suppressed,
-            preparation_directive: outcome.preparation_directive.clone()?,
+            preparation_directive: directive.clone(),
             platform: outcome.platform,
             lease_expires_at_unix_ms: outcome.lease.expires_at_unix_ms(),
             lease_timeout_ms: outcome.lease.timeout_ms(),
@@ -7457,7 +7532,7 @@ impl PreparationControlOutcome {
                 .terminal
                 .map_or("active", RollingTerminalCause::status),
             selection: outcome.selection.clone(),
-        })
+        }))
     }
 }
 
@@ -8561,11 +8636,16 @@ pub(crate) struct RollingControlHandle {
         )
     )]
     original_actor: Arc<rolling_lifetime::OriginalRollingActorTask>,
+    #[cfg(target_os = "linux")]
+    reply_budget: Option<Arc<rolling_lifetime::ActorReplyBudget>>,
 }
 
 mod rolling_ingress;
 mod rolling_lifetime;
 use rolling_ingress::RollingProducerIngressBlocks;
+pub(crate) use rolling_lifetime::ActorPayloadAllocation;
+#[cfg(target_os = "linux")]
+pub(crate) use rolling_lifetime::RollingActorAccounting;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) use rolling_lifetime::RollingControlActorJoin;
 
@@ -8576,6 +8656,8 @@ struct OwnedLocalControlRequest {
     sequence: u64,
     snapshot: PlaybackDemandSnapshot,
     prepared_successor: PreparedSuccessorObservation,
+    // Last: queued cancellation destroys payload before its original slot.
+    _allocation: Option<ActorPayloadAllocation>,
 }
 
 enum RollingControlCommand {
@@ -9586,6 +9668,12 @@ impl PrepublicationProducerControl {
 
 struct RollingControlActor {
     control: ControlState,
+    #[cfg(target_os = "linux")]
+    reply_budget: Option<Arc<rolling_lifetime::ActorReplyBudget>>,
+    #[cfg(target_os = "linux")]
+    prepared_control: Option<PreparedFiniteControl>,
+    #[cfg(target_os = "linux")]
+    adopted_prepared_control: bool,
     last_renewal: Instant,
     last_renewal_kind: &'static str,
     mode: RollingLeaseMode,
@@ -9642,6 +9730,8 @@ struct RollingControlActor {
     executor_loss_cutoff_pending: bool,
     last_flow_ticket: u64,
     hooks: Arc<dyn RollingControlHooks>,
+    #[cfg(target_os = "linux")]
+    control_allocation: Option<ActorPayloadAllocation>,
 }
 
 impl RollingControlActor {
@@ -9691,6 +9781,14 @@ impl RollingControlActor {
         } = runtime;
         Self {
             control: ControlState::default(),
+            #[cfg(target_os = "linux")]
+            reply_budget: None,
+            #[cfg(target_os = "linux")]
+            prepared_control: None,
+            #[cfg(target_os = "linux")]
+            adopted_prepared_control: false,
+            #[cfg(target_os = "linux")]
+            control_allocation: None,
             last_renewal: now,
             last_renewal_kind: initial_kind,
             mode: RollingLeaseMode::Legacy,
@@ -10348,6 +10446,12 @@ impl RollingControlActor {
         now: Instant,
         request: OwnedLocalControlRequest,
     ) -> Result<RollingControlOutcome, ControlStateError> {
+        #[cfg(target_os = "linux")]
+        let prepared = self.prepared_control.take();
+        #[cfg(target_os = "linux")]
+        {
+            self.adopted_prepared_control = false;
+        }
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
             let replay = (self.terminal == Some(RollingTerminalCause::End)
                 && self.demand.as_ref().is_some_and(|snapshot| {
@@ -10372,6 +10476,7 @@ impl RollingControlActor {
                 ));
             };
             return Ok(RollingControlOutcome {
+                allocation: None,
                 disposition,
                 accepted_sequence,
                 action,
@@ -10384,38 +10489,63 @@ impl RollingControlActor {
                 selection: SelectionObservation::default(),
             });
         }
-        let (disposition, accepted_sequence, action, platform, action_suppressed) =
-            self.control.accept_at(
-                now,
-                &request.generation,
-                request.owner_epoch,
-                &request.client_instance_id,
-                request.sequence,
-                ControlAcceptance::observed(
-                    request.snapshot.platform(),
-                    &request.prepared_successor,
-                    request.snapshot.acknowledgement.as_ref(),
-                    request.snapshot.request_fingerprint.as_deref(),
-                    &request.snapshot.selection,
-                    request.snapshot.capabilities.as_ref(),
-                ),
-            )?;
-        let preparation_directive = self.control.preparation_directive();
+        #[cfg(target_os = "linux")]
+        let precomputed = prepared.map(|plan| {
+            self.adopted_prepared_control = true;
+            plan.adopt(&mut self.control)
+        });
+        #[cfg(not(target_os = "linux"))]
+        let precomputed = None;
+        let (result, selection, preparation_directive) = match precomputed {
+            Some(step) => step,
+            None => {
+                let (disposition, accepted_sequence, action, platform, action_suppressed) =
+                    self.control.accept_at(
+                        now,
+                        &request.generation,
+                        request.owner_epoch,
+                        &request.client_instance_id,
+                        request.sequence,
+                        ControlAcceptance::observed(
+                            request.snapshot.platform(),
+                            &request.prepared_successor,
+                            request.snapshot.acknowledgement.as_ref(),
+                            request.snapshot.request_fingerprint.as_deref(),
+                            &request.snapshot.selection,
+                            request.snapshot.capabilities.as_ref(),
+                        ),
+                    )?;
+                let preparation_directive = self.control.preparation_directive();
+                // Delegated to `ControlState` rather than compared against
+                // `self.demand`, because both delivery engines hold a `ControlState`
+                // and only this one has an actor — see `ControlState::last_selection`.
+                // Only for an accepted exchange: a replay is the same exchange
+                // arriving twice.
+                let selection = if disposition == ControlDisposition::Accepted {
+                    self.control.observe(
+                        &request.snapshot.selection,
+                        request.snapshot.capabilities.as_ref(),
+                    )
+                } else {
+                    SelectionObservation::default()
+                };
+
+                (
+                    Ok::<_, ControlStateError>((
+                        disposition,
+                        accepted_sequence,
+                        action,
+                        platform,
+                        action_suppressed,
+                    )),
+                    selection,
+                    preparation_directive,
+                )
+            }
+        };
+        let (disposition, accepted_sequence, action, platform, action_suppressed) = result?;
         let accepted_end = disposition == ControlDisposition::Accepted
             && request.snapshot.demand == PlaybackDemand::End;
-        // Delegated to `ControlState` rather than compared against
-        // `self.demand`, because both delivery engines hold a `ControlState`
-        // and only this one has an actor — see `ControlState::last_selection`.
-        // Only for an accepted exchange: a replay is the same exchange
-        // arriving twice.
-        let selection = if disposition == ControlDisposition::Accepted {
-            self.control.observe(
-                &request.snapshot.selection,
-                request.snapshot.capabilities.as_ref(),
-            )
-        } else {
-            SelectionObservation::default()
-        };
         if disposition == ControlDisposition::Accepted {
             self.mode = RollingLeaseMode::Explicit;
             self.startup.observe_control(
@@ -10475,6 +10605,7 @@ impl RollingControlActor {
             self.last_flow_ticket
         };
         Ok(RollingControlOutcome {
+            allocation: None,
             disposition,
             accepted_sequence,
             action,
@@ -12656,11 +12787,52 @@ impl RollingControlActor {
                         // Cancellation before actor application consumes the
                         // ordered barrier but must not mutate control state.
                     } else {
-                        let outcome = if crate::media_sessions::unix_ms() >= deadline_unix_ms {
+                        #[cfg(target_os = "linux")]
+                        let accounting = if crate::media_sessions::unix_ms() < deadline_unix_ms {
+                            self.prepare_finite_actor_accounting(
+                                published_at,
+                                &request,
+                                terminal_admission.is_some(),
+                                preparation_admission.is_some(),
+                            )
+                        } else {
+                            Err(())
+                        };
+                        #[cfg(not(target_os = "linux"))]
+                        let accounting: Result<Option<()>, ()> = Ok(None);
+                        let outcome = if accounting.is_err()
+                            || crate::media_sessions::unix_ms() >= deadline_unix_ms
+                        {
+                            #[cfg(target_os = "linux")]
+                            {
+                                self.prepared_control.take();
+                            }
                             Err(ControlStateError::Unavailable)
                         } else {
                             self.control_at(published_at, *request)
                         };
+                        #[cfg(target_os = "linux")]
+                        let mut outcome = outcome;
+                        #[cfg(target_os = "linux")]
+                        let mut accounting = accounting.ok().flatten();
+                        #[cfg(target_os = "linux")]
+                        if let Some(accounting) = accounting.as_mut() {
+                            if self.adopted_prepared_control {
+                                self.control_allocation = Some(accounting.state.clone());
+                            }
+                            if let Ok(outcome) = outcome.as_mut() {
+                                accounting
+                                    .reply
+                                    .validate_actual(
+                                        outcome
+                                            .requested_clone_heap_bytes()
+                                            .expect("finite control output projection"),
+                                    )
+                                    .expect("pre-reserved source control output bound");
+                                outcome.allocation = Some(accounting.reply.clone());
+                            }
+                        }
+
                         if outcome.as_ref().is_ok_and(|outcome| {
                             outcome.disposition == ControlDisposition::Accepted
                                 && !outcome.lease.retired
@@ -12672,13 +12844,30 @@ impl RollingControlActor {
                         {
                             if outcome.lease.terminal == Some(RollingTerminalCause::End) {
                                 // Transfer ownership before the fallible reply send.
-                                admission.accepted(outcome.clone());
+                                #[cfg(target_os = "linux")]
+                                let allocation =
+                                    accounting.as_mut().and_then(|value| value.terminal.take());
+                                #[cfg(not(target_os = "linux"))]
+                                let allocation = None;
+                                admission.accepted(
+                                    outcome
+                                        .clone_with_allocation(allocation)
+                                        .expect("pre-reserved terminal control clone bound"),
+                                );
                             }
                         }
                         if let (Some(admission), Ok(outcome)) =
                             (preparation_admission, outcome.as_ref())
                         {
-                            if let Some(outcome) = PreparationControlOutcome::from_rolling(outcome)
+                            #[cfg(target_os = "linux")]
+                            let allocation = accounting
+                                .as_mut()
+                                .and_then(|value| value.preparation.take());
+                            #[cfg(not(target_os = "linux"))]
+                            let allocation = None;
+                            if let Some(outcome) =
+                                PreparationControlOutcome::from_rolling(outcome, allocation)
+                                    .expect("pre-reserved preparation control clone bound")
                             {
                                 // Transfer ownership before the fallible reply send.
                                 admission.accepted(outcome);
@@ -13294,6 +13483,34 @@ impl RollingControlHandle {
         .await
     }
 
+    async fn request_allocated_control<R>(
+        &self,
+        #[cfg(target_os = "linux")] payload_bytes: Option<usize>,
+        build: impl FnOnce(
+            tokio::sync::oneshot::Sender<R>,
+            Option<ActorPayloadAllocation>,
+        ) -> RollingControlCommand,
+    ) -> Result<tokio::sync::oneshot::Receiver<R>, ()> {
+        let permit = self.sender.reserve().await.map_err(|_| ())?;
+        let transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        let allocation = match self.reply_budget.as_ref() {
+            Some(budget) => Some(budget.reserve(payload_bytes.ok_or(())?)?),
+            None => None,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let allocation = None;
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let command = build(reply, allocation);
+        let envelope = self.producer_events.seal_command(command);
+        permit.send(envelope);
+        drop(transition);
+        Ok(response)
+    }
+
     async fn request_command_before<R>(
         &self,
         build: impl FnOnce(tokio::sync::oneshot::Sender<R>) -> RollingControlCommand,
@@ -13418,6 +13635,7 @@ impl RollingControlHandle {
         prepublication_transcode: bool,
         hooks: Arc<dyn RollingControlHooks>,
         application: Option<rolling_lifetime::ActorApplication>,
+        #[cfg(target_os = "linux")] accounting: Option<RollingActorAccounting>,
     ) -> (Self, RollingSessionExecutorInbox, Arc<tokio::sync::Notify>) {
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
         let retired = Arc::new(AtomicBool::new(false));
@@ -13460,6 +13678,14 @@ impl RollingControlHandle {
                 hooks: Arc::clone(&hooks),
             },
         );
+        #[cfg(target_os = "linux")]
+        let mut actor = actor;
+        #[cfg(target_os = "linux")]
+        let reply_budget = accounting.map(|accounting| {
+            actor.control_allocation = Some(accounting.initial_state);
+            actor.reply_budget = Some(Arc::clone(&accounting.budget));
+            accounting.budget
+        });
         let (start, registered) = tokio::sync::oneshot::channel();
         let actor_task = tokio::spawn(rolling_lifetime::run_original_actor(
             Some(registered),
@@ -13486,6 +13712,8 @@ impl RollingControlHandle {
             producer_events,
             decision_transport,
             original_actor,
+            #[cfg(target_os = "linux")]
+            reply_budget,
         };
         // The original join handle is retained before the actor first polls.
         let _ = start.send(());
@@ -13500,8 +13728,14 @@ impl RollingControlHandle {
     }
 
     fn spawn_with_hooks(initial_kind: &'static str, hooks: Arc<dyn RollingControlHooks>) -> Self {
-        let (handle, executor_inbox, decision_notify) =
-            Self::spawn_unbound(initial_kind, false, hooks, None);
+        let (handle, executor_inbox, decision_notify) = Self::spawn_unbound(
+            initial_kind,
+            false,
+            hooks,
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        );
         let _ = handle.decision_transport.executor_observation.register();
         let executor_task = handle.decision_transport.spawn_executor(
             Arc::downgrade(&handle.decision_transport),
@@ -13562,18 +13796,26 @@ impl RollingControlHandle {
         initial_kind: &'static str,
         hooks: Arc<dyn RollingControlHooks>,
     ) -> (Self, RollingProducerExecutorRegistration) {
-        Self::spawn_prepublication_producer_with_application_owner(initial_kind, hooks, None)
+        Self::spawn_prepublication_producer_with_application_owner(
+            initial_kind,
+            hooks,
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        )
     }
 
     #[cfg(target_os = "linux")]
     pub(crate) fn spawn_prepublication_producer_with_application(
         initial_kind: &'static str,
         application: rolling_lifetime::ActorApplication,
+        accounting: RollingActorAccounting,
     ) -> (Self, RollingProducerExecutorRegistration) {
         Self::spawn_prepublication_producer_with_application_owner(
             initial_kind,
             Arc::new(NoopRollingControlHooks),
             Some(application),
+            Some(accounting),
         )
     }
 
@@ -13581,9 +13823,16 @@ impl RollingControlHandle {
         initial_kind: &'static str,
         hooks: Arc<dyn RollingControlHooks>,
         application: Option<rolling_lifetime::ActorApplication>,
+        #[cfg(target_os = "linux")] accounting: Option<RollingActorAccounting>,
     ) -> (Self, RollingProducerExecutorRegistration) {
-        let (handle, inbox, _decision_notify) =
-            Self::spawn_unbound(initial_kind, true, hooks, application);
+        let (handle, inbox, _decision_notify) = Self::spawn_unbound(
+            initial_kind,
+            true,
+            hooks,
+            application,
+            #[cfg(target_os = "linux")]
+            accounting,
+        );
         let registration = RollingProducerExecutorRegistration {
             transport: Arc::downgrade(&handle.decision_transport),
             terminal_projection: Arc::clone(&handle.decision_transport.terminal_projection),
@@ -13626,6 +13875,8 @@ impl RollingControlHandle {
             producer_events,
             decision_transport,
             original_actor: rolling_lifetime::OriginalRollingActorTask::unavailable(),
+            #[cfg(target_os = "linux")]
+            reply_budget: None,
         }
     }
 
@@ -14298,20 +14549,25 @@ impl RollingControlHandle {
         preparation_admission: Option<Arc<dyn PreparationSettlementAdmission>>,
     ) -> Result<RollingControlOutcome, ControlStateError> {
         let response = self
-            .request_command(|reply| RollingControlCommand::Control {
-                request: Box::new(OwnedLocalControlRequest {
-                    generation: request.generation.to_owned(),
-                    owner_epoch: request.owner_epoch,
-                    client_instance_id: request.client_instance_id.to_owned(),
-                    sequence: request.sequence,
-                    snapshot: request.snapshot,
-                    prepared_successor: request.prepared_successor,
-                }),
-                deadline_unix_ms,
-                terminal_admission,
-                preparation_admission,
-                reply,
-            })
+            .request_allocated_control(
+                #[cfg(target_os = "linux")]
+                OwnedLocalControlRequest::projected_borrowed_bytes(&request),
+                |reply, allocation| RollingControlCommand::Control {
+                    request: Box::new(OwnedLocalControlRequest {
+                        generation: request.generation.to_owned(),
+                        owner_epoch: request.owner_epoch,
+                        client_instance_id: request.client_instance_id.to_owned(),
+                        sequence: request.sequence,
+                        snapshot: request.snapshot,
+                        prepared_successor: request.prepared_successor,
+                        _allocation: allocation,
+                    }),
+                    deadline_unix_ms,
+                    terminal_admission,
+                    preparation_admission,
+                    reply,
+                },
+            )
             .await
             .map_err(|_| ControlStateError::Unavailable)?;
         response.await.map_err(|_| ControlStateError::Unavailable)?

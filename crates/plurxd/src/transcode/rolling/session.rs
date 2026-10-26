@@ -1961,24 +1961,7 @@ impl Session {
         >,
     ) -> Option<
         Result<
-            (
-                crate::playback_control::ControlDisposition,
-                u64,
-                crate::playback_control::ControlAction,
-                bool,
-                Option<crate::playback_control::PreparationDirective>,
-                crate::playback_control::ClientPlatform,
-                // What the viewer changed and what the device can do about
-                // it. A distinct type rather than a bare `bool`, which also
-                // removes any chance of transposing it with
-                // `acknowledged_end` at the tail of this tuple.
-                crate::playback_control::SelectionObservation,
-                i64,
-                u32,
-                u64,
-                &'static str,
-                bool,
-            ),
+            (crate::playback_control::RollingControlOutcome, bool),
             crate::playback_control::ControlStateError,
         >,
     > {
@@ -2000,24 +1983,9 @@ impl Session {
             && outcome.lease.demand.as_ref().is_some_and(|demand| {
                 demand.demand == crate::playback_control::PlaybackDemand::End
             });
-        let lease_state = outcome.lease.terminal.map_or(
-            "active",
-            crate::playback_control::RollingTerminalCause::status,
-        );
-        Some(Ok((
-            outcome.disposition,
-            outcome.accepted_sequence,
-            outcome.action,
-            outcome.action_suppressed,
-            outcome.preparation_directive,
-            outcome.platform,
-            outcome.selection,
-            outcome.lease.expires_at_unix_ms(),
-            outcome.lease.timeout_ms(),
-            outcome.flow_ticket,
-            lease_state,
-            acknowledged_end,
-        )))
+        // Move the WHOLE payload owner across this await boundary. A bare
+        // tuple of heap fields and a separately dropped guard loses ordering.
+        Some(Ok((outcome, acknowledged_end)))
     }
 
     /// Where this generation's session-relative zero sits on the durable
@@ -2609,7 +2577,7 @@ impl Session {
             parse_playlist(&String::from_utf8_lossy(raw))
         };
         #[cfg(not(target_os = "linux"))]
-        let parsed = parse_playlist(&String::from_utf8_lossy(&raw));
+        let parsed = parse_playlist(&String::from_utf8_lossy(raw));
         let mut observed = SegmentIndex {
             segs: parsed,
             revision: 0,
@@ -2853,6 +2821,48 @@ pub(super) async fn session_info(
     global_live_bytes: i64,
     global_ahead_bytes: i64,
 ) -> SessionInfo {
+    let owned = session_info_owned(
+        id,
+        s,
+        limits,
+        global_live_bytes,
+        global_ahead_bytes,
+        None,
+        0,
+    )
+    .await
+    .expect("legacy status construction has no finite reservation to refuse");
+    debug_assert!(
+        owned.allocation.is_none(),
+        "legacy status must not discard a finite allocation"
+    );
+    owned.status
+}
+
+/// The status and its original role reservation move together. The slot is
+/// last so all owned strings are destroyed before its quota is returned.
+pub(super) struct OwnedSessionInfo {
+    pub(super) status: SessionInfo,
+    pub(super) allocation: Option<crate::playback_control::ActorPayloadAllocation>,
+}
+
+struct OwnedStatusSegments {
+    values: Vec<(i64, i64)>,
+    _allocation: Option<crate::playback_control::ActorPayloadAllocation>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn session_info_owned(
+    id: &str,
+    s: &Session,
+    limits: AheadLimits,
+    global_live_bytes: i64,
+    global_ahead_bytes: i64,
+    allocation_source: Option<&crate::playback_control::ActorPayloadAllocation>,
+    moved_result_bytes: usize,
+) -> Result<OwnedSessionInfo, crate::playback_control::ControlStateError> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = (allocation_source, moved_result_bytes);
     let observed_at = Instant::now();
     let lease = s.control.snapshot().await;
     let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
@@ -2871,6 +2881,40 @@ pub(super) async fn session_info(
         produced_segments,
     ) = {
         let index = s.segments.lock().await;
+        // Reserve from the original role before collect allocates. This is
+        // the actual number of retained index records, not mailbox capacity.
+        #[cfg(target_os = "linux")]
+        let allocation = allocation_source
+            .map(|source| {
+                let bytes = index
+                    .segs
+                    .len()
+                    .checked_mul(std::mem::size_of::<(i64, i64)>())
+                    .ok_or(())?;
+                source.reserve_related(bytes)
+            })
+            .transpose()
+            .map_err(|_| crate::playback_control::ControlStateError::Unavailable)?;
+        #[cfg(not(target_os = "linux"))]
+        let allocation = None;
+        let values = index
+            .segs
+            .iter()
+            .map(|segment| (segment.start_ms, segment.bytes))
+            .collect::<Vec<_>>();
+        #[cfg(target_os = "linux")]
+        if let Some(allocation) = allocation.as_ref() {
+            allocation
+                .validate_actual(
+                    values
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<(i64, i64)>())
+                        .ok_or(crate::playback_control::ControlStateError::Unavailable)?,
+                )
+                .expect(
+                    "slice-map collect exceeded its pre-reserved source-backed segment projection",
+                );
+        }
         (
             ahead_of(&index, fetched_end_ms.max(0)),
             index.first_retained_index(),
@@ -2880,11 +2924,10 @@ pub(super) async fn session_info(
             index.produced_playable_end_ms(),
             index.advertised_bytes(),
             index.grace_bytes(),
-            index
-                .segs
-                .iter()
-                .map(|segment| (segment.start_ms, segment.bytes))
-                .collect::<Vec<_>>(),
+            OwnedStatusSegments {
+                values,
+                _allocation: allocation,
+            },
         )
     };
     let (
@@ -2902,6 +2945,7 @@ pub(super) async fn session_info(
         let publication = s.publication.lock().await;
         let served_end_ms = publication.served.as_ref().map(|served| served.end_ms);
         let staged_bytes = produced_segments
+            .values
             .iter()
             .filter(|(start_ms, _)| *start_ms >= served_end_ms.unwrap_or(0))
             .map(|(_, bytes)| *bytes)
@@ -3050,7 +3094,31 @@ pub(super) async fn session_info(
     } else {
         "waiting"
     };
-    SessionInfo {
+    #[cfg(target_os = "linux")]
+    let allocation = allocation_source
+        .map(|source| {
+            // Every heap field below is a clone of these exact retained sources.
+            // Include the moved actor result so its old slot can end after the
+            // complete final response carrier has been assembled.
+            let bytes = std::mem::size_of::<SessionInfo>()
+                .checked_add(moved_result_bytes)
+                .and_then(|value| value.checked_add(id.len()))
+                .and_then(|value| value.checked_add(s.item_title.capacity()))
+                .and_then(|value| value.checked_add(s.user_name.capacity()))
+                .ok_or(())?;
+            let producer = lease
+                .as_ref()
+                .map_or(Some(0), |lease| {
+                    lease.producer_control.requested_heap_bytes()
+                })
+                .ok_or(())?;
+            source.reserve_related(bytes.checked_add(producer).ok_or(())?)
+        })
+        .transpose()
+        .map_err(|_| crate::playback_control::ControlStateError::Unavailable)?;
+    #[cfg(not(target_os = "linux"))]
+    let allocation = None;
+    let status = SessionInfo {
         vod_observation: None,
         id: id.to_owned(),
         presentation: "live-recovery",
@@ -3177,7 +3245,17 @@ pub(super) async fn session_info(
         readrate: s.readrate,
         suspended,
         suspend_count: s.suspend_count.load(Relaxed),
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(allocation) = allocation.as_ref() {
+        let actual = std::mem::size_of::<SessionInfo>()
+            .checked_add(moved_result_bytes)
+            .and_then(|value| value.checked_add(status.requested_heap_bytes()?));
+        allocation
+            .validate_actual(actual.ok_or(crate::playback_control::ControlStateError::Unavailable)?)
+            .expect("constructed Live status exceeded its exact source projection");
     }
+    Ok(OwnedSessionInfo { status, allocation })
 }
 
 pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionInfo {

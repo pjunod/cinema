@@ -41,8 +41,11 @@ impl RollingTerminalResultReceipt {
     > {
         let mut result = self.result.clone();
         loop {
-            if let Some(outcome) = result.borrow().clone() {
-                return outcome;
+            if let Some(outcome) = result.borrow().as_ref() {
+                return match outcome {
+                    Ok(outcome) => outcome.try_clone_owned(),
+                    Err(error) => Err(*error),
+                };
             }
             result
                 .changed()
