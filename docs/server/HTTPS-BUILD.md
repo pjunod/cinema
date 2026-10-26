@@ -61,18 +61,33 @@ and worker-refinement governed bytes remain unchanged. Earlier scoped proof
 is retained only for identical inputs. Source `477eef81b` passed the affected
 operation-progress smoke and corrective-history audit. The subsequent conflict-free
 `e02fb1283` merge changes no governed formal inputs or HTTPS source. Its five
-float32 precision regressions pass; the embedded header requires fresh exact-source
-Linux compilation and denied-warning Clippy before pushing. Fresh CI binding
-remains required.
+float32 precision regressions pass. Source `c65622134` passed pinned Rust 1.97.1
+Linux daemon all-target compilation and denied-warning Clippy, including the
+cluster integration feature. All three formal mappings retain zero source drift;
+earlier scoped smokes are reused only for identical governed inputs. Fresh CI
+binding remains required.
 
 The prior full run exposed two Android test failures. The processed-DV selector
 regression now accepts the documented SDR grade while preserving rejection of
 invalid grades and unsustainable or unsupported candidates. The library dialog
 regression waits for the asynchronously projected row before retaining its display
-assertion. Production Android behavior is unchanged; focused runtime proof is pending.
+assertion. Production Android behavior is unchanged. Exact source `c65622134`
+passes all 25 focused JVM cases and all three library-row instrumentation cases
+on an API 36 Android TV emulator with KVM; infrastructure retries are recorded
+separately from those passing test results.
 
-Authenticated full qualification, the Main promotion gate and physical
-acceptance are still pending. Nothing has been deployed or enabled live.
+The topology run exposed duplicate heartbeat-start requests in follower removal
+and healthy leader leave. Source `b2aa9be45` removes only the second requests,
+preserving the strict owner guard, restart ownership and removal assertions. Its
+all-target compiler/Clippy checks, existing single-owner integration case and real
+`membership` and `leader-leave` CLI scenarios pass, including degraded four-voter
+leave. The guard test covers ownership refusal; the CLI scenarios directly cover
+the repaired duplicate starts. Its corrective-history audit also passes.
+
+Exact-head full qualification, the Main promotion gate, their receipts and the
+merge outcome are tracked on [promotion PR #1134](http://forge.lan:3000/noirr/plurx/pulls/1134).
+Physical trust/playback acceptance remains open. Nothing has been deployed or
+enabled live.
 
 ## 1. Isolation and compiler prerequisite
 

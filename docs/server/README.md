@@ -11,7 +11,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 | File | Answers | |
 |---|---|---|
 | [HTTPS-IMPLEMENTATION.md](HTTPS-IMPLEMENTATION.md) | Optional public HTTPS, certificate ownership and administration contract; physical acceptance open. | built |
-| [HTTPS-BUILD.md](HTTPS-BUILD.md) | HTTPS implementation built, physical acceptance open; qualification tracked by task/promotion PR receipts. | built |
+| [HTTPS-BUILD.md](HTTPS-BUILD.md) | HTTPS implementation built, physical acceptance open; qualification receipts and merge outcome tracked by [promotion PR #1134](http://forge.lan:3000/noirr/plurx/pulls/1134). | built |
 | [HTTPS-EVIDENCE-LEDGER.md](HTTPS-EVIDENCE-LEDGER.md) | The HTTPS build's checkpoint-by-checkpoint evidence ledger (section 5 of HTTPS-BUILD). | built |
 | [HTTPS-REVIEW.md](HTTPS-REVIEW.md) | Adversarial HTTPS design findings, the single-task workflow amendment, and the final implementation review with correction dispositions. | done |
 | [DESKTOP-CONTROL.md](DESKTOP-CONTROL.md) | How to install and use native tray controls, choose server/tray startup independently, inspect local JSON status and recover signed-release upgrades. | open |
