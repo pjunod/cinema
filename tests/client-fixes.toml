@@ -7638,7 +7638,8 @@ test_anchor = "@Test fun sharedReadsUseOnlyClosedOpaqueGetResourcesAndNeverEnque
 
 [[fixes]]
 id = "apple.subtitle-continuous-traversal"
-commits = ["ec8dc68b3ff24ce680c799127417387fa9b9f3e0"]
+commits = []
+supplements = "android.subtitle-pending-producer-handoff"
 source = "clients/apple/Sources/ProgressiveCaptionSession.swift"
 source_anchor = "func mediaChanged(seek: Bool = false, positionMs: Int? = nil) {"
 test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
@@ -7654,7 +7655,8 @@ test_anchor = "fun heldCreateReplacementSettlesExactBodyBeforeSuccessorMutationA
 
 [[fixes]]
 id = "web.subtitle-seek-continuity-replay"
-commits = ["ec8dc68b3ff24ce680c799127417387fa9b9f3e0"]
+commits = []
+supplements = "android.subtitle-pending-producer-handoff"
 source = "crates/plurxd/src/web/player/subtitle-translation.js"
 source_anchor = "function translationRotateContinuity(state){state.continuityId=translationUuid();return state.continuityId;}"
 test = "tests/web/subtitle-translation.test.js"
