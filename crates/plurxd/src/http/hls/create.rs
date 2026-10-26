@@ -1528,13 +1528,20 @@ pub(super) fn session_enhancement(
         .dolby_vision
         .profile
         .and_then(|profile| u8::try_from(profile).ok());
-    let has_el = file.dolby_vision.el_present != Some(false);
     let (delivered, _) =
         session_delivered_processing_shape(source, kind, grade, processed_dv_profile);
     let (_, preserve, convert) = session_delivery_shape(kind);
     let route = if processed_dv_profile == Some(8) {
+        // FEL is claimed only from processing truth: the current served-window
+        // receipt when one is published, else the selected plan (which admits
+        // a reconstructed 8.1 only for a composed FEL picture). Never from the
+        // source's tags.
         EnhancementRoute::ReconstructedProfile81 {
-            fel_contributed: processed_fel.unwrap_or(profile == Some(7) && has_el),
+            fel_contributed: effective
+                .filter(|report| report.profile81_reconstructed())
+                .map(|report| report.fel_contributed())
+                .or(processed_fel)
+                .unwrap_or(false),
         }
     } else {
         match delivered {

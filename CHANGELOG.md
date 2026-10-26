@@ -73,6 +73,23 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A Dolby Vision client playing a Profile 7 FEL title now receives the
+  reconstructed Profile 8.1 (FEL composed into the picture, re-encoded, an
+  8.1 RPU per frame) on a 12-thread worker. The renderer was debited eight
+  software decoder threads it does not run when the GPU decodes, so every
+  FEL graph (10 + 5 threads against a budget of 11) was refused there. Its
+  debit now follows a proved VA-API HEVC Main10 decode; a window that
+  decodes in software anyway is refused rather than served over budget. One
+  live FEL reconstruction runs per worker; the next play gets the plain
+  conversion and its FEL row names why. The Developer tab's FEL rows are
+  read from the node (helper, conversion permission, CPU debit against the
+  budget, the slot) instead of a fixed "not yet available".
+- The reconstructed Profile 8.1 says "FEL used" only from its served-window
+  receipt or selected plan, never from the source's tags, and publishes an
+  `effective_processing` report (`profile81_reconstructed`) that existing
+  clients ignore. Activity names a processed stream's delivered picture, GPU
+  work and reason beside its Stop.
+
 - Display-targeted playback reads mastering metadata carried on decoded frames
   when stream metadata omits it. The bounded probe stays bound to the held source
   and selected stream; HDR primaries and unknown-title SDR black levels resolve
