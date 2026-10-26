@@ -938,6 +938,7 @@ paths = [
   "crates/plurxd/Cargo.toml",
   "crates/plurxd/src/availability.rs",
   "crates/plurxd/src/subtitle_models/*.rs",
+  "crates/plurxd/src/subtitle_models/admitted_work/**",
   "crates/plurxd/src/http/tests/subtitle_generation.rs",
   "tests/fixtures/subtitle-recognition/{base-film.raw.vtt,base-film.provenance.json}",
   "crates/plurxd/src/{cachekeep,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
