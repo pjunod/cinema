@@ -404,6 +404,10 @@ async fn expired_or_stale_planning_prepare_cannot_generically_refund_p_before_m(
 }
 
 mod joined;
+mod resumption;
+// Test-only per-original-operation barriers; production has neither registry
+// state nor extra awaits/owner fields.
+pub(in crate::adaptive_resources::runtime::operations) mod stages;
 
 #[tokio::test]
 async fn never_entered_book_conflict_holds_ledger_and_journal_without_refund() {

@@ -30,12 +30,17 @@ fn native_tool(variable: &str, default: &str) -> PathBuf {
     path
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn joined_planning_native_settles_seven_members_once_and_keeps_m_until_last_alias() {
-    let root = tempfile::tempdir().expect("durable test scratch");
+pub(super) async fn actual_owner(
+    root: &std::path::Path,
+) -> (
+    Arc<NodeResourceRuntime>,
+    crate::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner,
+    OwnedPreparation,
+    Instant,
+) {
     let ffmpeg = native_tool("PLURX_TEST_FFMPEG", "/usr/bin/ffmpeg");
     let ffprobe = native_tool("PLURX_TEST_FFPROBE", "/usr/bin/ffprobe");
-    let source = root.path().join("never-opened.mp4");
+    let source = root.join("never-opened.mp4");
     // Fixture creation precedes the admitted operation. Every planning source,
     // probe root and engine/dependency root below uses its real original owner.
     let fixture = tokio::process::Command::new(&ffmpeg)
@@ -68,24 +73,31 @@ async fn joined_planning_native_settles_seven_members_once_and_keeps_m_until_las
         String::from_utf8_lossy(&fixture.stderr)
     );
     drop(fixture);
-    let runtime = fixture_runtime(root.path());
+    let runtime = fixture_runtime(root);
     let request = fixture_request(
-        root.path(),
+        root,
         ffprobe.to_string_lossy().into_owned(),
         ffmpeg.to_string_lossy().into_owned(),
     );
     let native_deadline = Instant::now() + Duration::from_secs(120);
-    let mut owner = runtime
+    let owner = runtime
         .prepare_fixed_planning_probe(request, native_deadline)
         .expect("prepare the original P/M graph");
+    let mut selections = runtime
+        .retained_preparations()
+        .expect("original owner book");
+    assert_eq!(selections.len(), 1);
+    let selection = selections.pop().expect("one original selection");
+    (runtime, owner, selection, native_deadline)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joined_planning_native_settles_seven_members_once_and_keeps_m_until_last_alias() {
+    let root = tempfile::tempdir().expect("durable test scratch");
+    let (runtime, mut owner, selection, native_deadline) = actual_owner(root.path()).await;
     let application = owner
         .take_application_lease(4096)
         .expect("original coordinator application lease");
-    let selections = runtime
-        .retained_preparations()
-        .expect("same original owner book");
-    assert_eq!(selections.len(), 1);
-    let selection = selections.into_iter().next().unwrap();
     let settlement_operation = {
         let bundle = selection.state.lock().await;
         assert_eq!(bundle.roles[0].typed_members.as_ref().unwrap().len(), 7);

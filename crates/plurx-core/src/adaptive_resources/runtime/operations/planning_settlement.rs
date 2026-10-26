@@ -115,6 +115,34 @@ fn mark_committed(tasks: &mut PlanningTasks, operation: Uuid) {
 }
 
 impl NodeResourceRuntime {
+    /// Bound only this borrowed wait. JournalOperation::resolve awaits its
+    /// PendingOperation receiver in place and clears it only after receipt;
+    /// finish_transition has no further await after resolve. A timeout thus
+    /// leaves the exact command, receiver, proof and original role retained,
+    /// without interrupting synchronous acknowledgment/refund application.
+    async fn finish_planning_transition(
+        &self,
+        bundle_id: Uuid,
+        role: &mut OwnedRole,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        tokio::time::timeout_at(deadline.into(), async {
+            #[cfg(test)]
+            {
+                let operation = role
+                    .transition
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .operation
+                    .id;
+                super::planning_tasks::tests::stages::before_enrichment_ack(operation).await;
+            }
+            self.finish_transition(bundle_id, role).await
+        })
+        .await
+        .map_err(lock_error)?
+    }
+
     pub(in crate::adaptive_resources::runtime) async fn finish_planning_native(
         &self,
         owner: &OwnedPreparation,
@@ -211,7 +239,9 @@ impl NodeResourceRuntime {
             }
         };
         if needs_seal {
-            self.seal_role(owner, 0, deadline).await?;
+            tokio::time::timeout_at(deadline.into(), self.seal_role(owner, 0, deadline))
+                .await
+                .map_err(lock_error)??;
         }
         let mut bundle = tokio::time::timeout_at(deadline.into(), owner.state.lock())
             .await
@@ -267,7 +297,8 @@ impl NodeResourceRuntime {
             {
                 transition.operation.retry(&self.journal, deadline)?;
             }
-            self.finish_transition(bundle_id, role).await?;
+            self.finish_planning_transition(bundle_id, role, deadline)
+                .await?;
         }
         self.close_retained_entry(role.binding)?;
         if let Some(graph) = role.graph.take() {
@@ -346,7 +377,8 @@ impl NodeResourceRuntime {
             // A deterministic rejection re-rejects; P stays charged.
             transition.operation.retry(&self.journal, deadline)?;
         }
-        self.finish_transition(bundle_id, role).await?;
+        self.finish_planning_transition(bundle_id, role, deadline)
+            .await?;
         if !role.refunded {
             return Err(OperationError::State);
         }
@@ -372,7 +404,8 @@ impl NodeResourceRuntime {
             {
                 return Err(OperationError::State);
             }
-            self.finish_transition(bundle_id, role).await?;
+            self.finish_planning_transition(bundle_id, role, deadline)
+                .await?;
         }
         if role.phase == Phase::UnknownHeld {
             return Ok(());
@@ -389,7 +422,8 @@ impl NodeResourceRuntime {
             Effect::Hold,
             deadline,
         )?;
-        self.finish_transition(bundle_id, role).await
+        self.finish_planning_transition(bundle_id, role, deadline)
+            .await
     }
 
     /// Steps d-h: resume any enrichment in flight, then durably observe the
@@ -422,7 +456,8 @@ impl NodeResourceRuntime {
             {
                 transition.operation.retry(&self.journal, deadline)?;
             }
-            self.finish_transition(bundle_id, role).await?;
+            self.finish_planning_transition(bundle_id, role, deadline)
+                .await?;
             mark_committed(
                 role.planning_tasks.as_mut().ok_or(OperationError::State)?,
                 operation,
@@ -459,7 +494,8 @@ impl NodeResourceRuntime {
                     Effect::SourceRoot(source_member),
                     deadline,
                 )?;
-                self.finish_transition(bundle_id, role).await?;
+                self.finish_planning_transition(bundle_id, role, deadline)
+                    .await?;
             }
         }
 
@@ -518,7 +554,8 @@ impl NodeResourceRuntime {
                 Effect::Enrich,
                 deadline,
             )?;
-            self.finish_transition(bundle_id, role).await?;
+            self.finish_planning_transition(bundle_id, role, deadline)
+                .await?;
             role.planning_tasks
                 .as_mut()
                 .ok_or(OperationError::State)?
@@ -574,7 +611,8 @@ impl NodeResourceRuntime {
                 Effect::Enrich,
                 deadline,
             )?;
-            self.finish_transition(bundle_id, role).await?;
+            self.finish_planning_transition(bundle_id, role, deadline)
+                .await?;
             mark_committed(
                 role.planning_tasks.as_mut().ok_or(OperationError::State)?,
                 observation.operation_id,
@@ -874,7 +912,8 @@ impl NodeResourceRuntime {
             deadline,
         )?;
         // n. The committed acknowledgement refunds P; M is untouched.
-        self.finish_transition(bundle_id, role).await?;
+        self.finish_planning_transition(bundle_id, role, deadline)
+            .await?;
         if !role.refunded {
             return Err(OperationError::State);
         }
