@@ -144,6 +144,11 @@ Producer eligibility precedes source compatibility: an authenticated terminal
 failed or cancelled web job with a complete artifact listing containing no
 cohort artifact offers no accepted whole-cohort result. Its execution remains
 unknown; this classification claims neither zero execution nor passing cases.
+Its negative-only identity check permits a typed task ID of zero for an
+unassigned terminal job, while requiring stable positive job/repository/run
+identities and exactly attempt 1. Current and successful producer checks still
+require a positive assigned task; booleans, negative and noninteger task IDs
+refuse. Artifact-bearing or ambiguous jobs cannot use the negative predicate.
 It permits inspection of older eligible evidence without requiring a failed
 nonproducer's old adapter to match the current one. Success with missing
 evidence, malformed or artifact-bearing producers, ambiguous metadata and

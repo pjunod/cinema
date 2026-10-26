@@ -405,6 +405,18 @@ def check_job(job,scope,rid,successful=True):
     if successful: require(job.get('status') == 'success','Web prior job did not succeed')
 
 
+def check_nonproducer_job(job,scope,rid):
+    # Negative eligibility may include a cancelled job never assigned a task.
+    # This never authenticates a completed cohort or current execution.
+    require(type(job.get('id')) is int and job['id'] > 0 and job.get('name') == JOB
+        and type(job.get('repo_id')) is int and job['repo_id'] == scope['repository']
+        and type(job.get('run_id')) is int and job['run_id'] == rid
+        and type(job.get('attempt')) is int and job['attempt'] == 1
+        and type(job.get('task_id')) is int and job['task_id'] >= 0
+        and job.get('status') in ('failure','cancelled'),
+        'Web nonproducer job repository/run/task/attempt/status differs')
+
+
 def checkout(raw,commit,job):
     require(len(raw) <= MAX_LOG,'Web historical log exceeds bound')
     lines = main_receipts.log_lines(raw)
@@ -584,7 +596,7 @@ def matching_result(api,scope,workspace,current,current_run,key):
         # Its individual execution history remains unknown; claim no zero/pass.
         if not possible_artifacts and len(jobs) == 1 and jobs[0].get('status') in ('failure','cancelled'):
             adoption.bind_event(run,scope)
-            check_job(jobs[0],scope,rid,False)
+            check_nonproducer_job(jobs[0],scope,rid)
             print('Web history: no accepted whole-cohort result; execution unknown',flush=True)
             continue
         workflow = git(workspace,'show',run['commit_sha']+':'+WORKFLOW,limit=128*1024)

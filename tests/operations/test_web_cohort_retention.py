@@ -186,7 +186,7 @@ class WebCohortRetentionTests(unittest.TestCase):
             with mock.patch.dict(os.environ,env),mock.patch.object(web.receipts,'API',return_value=api), \
                  mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:(COMMIT+'\n').encode() if args[0]=='rev-parse' else b''):
                 self.assertEqual(web.current_context(ROOT)[4],job)
-                for change in ({'attempt':2},{'attempt':True},{'status':'success'},{'repo_id':2},{'task_id':0}):
+                for change in ({'attempt':2},{'attempt':True},{'status':'success'},{'repo_id':2},{'task_id':0},{'task_id':-1},{'task_id':True},{'task_id':1.0},{'task_id':'1'}):
                     saved=job.copy();job.update(change)
                     with self.subTest(change=change),self.assertRaises(receipts.ReceiptError):web.current_context(ROOT)
                     job.clear();job.update(saved)
@@ -438,15 +438,39 @@ class WebCohortRetentionTests(unittest.TestCase):
              mock.patch.object(web,'manifest') as manifest,mock.patch.object(web,'v1_result') as result, \
              mock.patch.object(web.subprocess,'run') as launch,mock.patch('builtins.print') as report:
             for status in ('failure','cancelled'):
-                job.update(status=status,attempt=1)
-                self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key'))
-                report.assert_called_with('Web history: no accepted whole-cohort result; execution unknown',flush=True)
+                for task in (0,6002):
+                    job.update(status=status,attempt=1,task_id=task)
+                    self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key'))
+                    report.assert_called_with('Web history: no accepted whole-cohort result; execution unknown',flush=True)
             source.assert_not_called();manifest.assert_not_called();result.assert_not_called();launch.assert_not_called()
-            for change in ({'attempt':0},{'attempt':2},{'attempt':True},{'task_id':0},{'repo_id':2},{'run_id':1},{'id':0}):
+            # Walk both candidates in one invocation: an earlier assigned
+            # failure must not hide a later pre-v1 unassigned cancellation.
+            later=copy.deepcopy(run);later.update(id=6003,commit_sha='d'*40)
+            event=json.loads(later['event_payload']);event['pull_request']['head']['sha']='d'*40
+            later['event_payload']=json.dumps(event)
+            unassigned={**job,'id':6004,'run_id':6003,'task_id':0,'status':'cancelled'}
+            saved_job=job.copy();job.update(status='failure',task_id=6002)
+            original_get,original_pages=api.get,api.pages
+            api.get=lambda path:later if path=='/actions/runs/6003' else original_get(path)
+            api.pages=lambda path,query=None,field=None:([unassigned] if path=='/actions/runs/6003/jobs'
+                else [run,later] if path=='/actions/runs' else original_pages(path,query,field))
+            source.return_value=('jobs:\n'+web.LEGACY_JOB).encode()
+            report.reset_mock()
+            self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key'))
+            self.assertEqual(report.call_count,2);source.assert_not_called()
+            api.get,api.pages=original_get,original_pages;job.clear();job.update(saved_job)
+            source.return_value=b'validation.web_cohort_retention unsupported old wrapper/adapter'
+            for change in ({'attempt':0},{'attempt':2},{'attempt':True},{'task_id':-1},{'task_id':True},{'task_id':0.0},{'task_id':'0'},{'task_id':None},{'repo_id':2},{'repo_id':True},{'run_id':1},{'run_id':True},{'id':0},{'id':True}):
                 saved=job.copy();job.update(change)
                 with self.subTest(change=change),self.assertRaisesRegex(receipts.ReceiptError,'repository/run/task/attempt'):
                     web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key')
                 job.clear();job.update(saved)
+            task=job.pop('task_id')
+            with self.assertRaisesRegex(receipts.ReceiptError,'Web nonproducer job repository/run/task/attempt/status differs'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key')
+            job['task_id']=task
+            with self.assertRaisesRegex(receipts.ReceiptError,'Web nonproducer job repository/run/task/attempt/status differs'):
+                web.check_nonproducer_job({**job,'name':'other job'},SCOPE,run['id'])
             for status in ('success','running','queued'):
                 job['status']=status
                 with self.subTest(status=status),self.assertRaisesRegex(receipts.ReceiptError,'Web job shape missing/ambiguous'):
@@ -462,6 +486,19 @@ class WebCohortRetentionTests(unittest.TestCase):
             state['artifacts']=[];state['jobs']=[job,job.copy()]
             with self.assertRaisesRegex(receipts.ReceiptError,'Web job shape missing/ambiguous'):
                 web.matching_result(api,SCOPE,ROOT,COMMIT,7000,'new key')
+            # Even a recognized artifact-bearing producer may not use the
+            # negative task-zero predicate to authenticate positive evidence.
+            state['jobs']=[job];job.update(status='failure',task_id=0)
+            state['artifacts']=[{'name':'web-cohort-6000-1','run_id':6000,'expired':False}]
+            inputs={'files':[]};manifest.return_value=inputs
+            with mock.patch.object(web,'workflow_identity',return_value={'kind':'v1'}), \
+                 mock.patch.object(web,'check_nonproducer_job') as negative:
+                with self.assertRaisesRegex(receipts.ReceiptError,'Matching web history is incomplete/ambiguous'):
+                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,web.execution_key(inputs))
+                negative.assert_not_called()
+            job['status']='success'
+            with self.assertRaisesRegex(receipts.ReceiptError,'Web job repository/run/task/attempt differs'):
+                web.authenticate_job(api,SCOPE,ROOT,run['id'],job['id'])
             launch.assert_not_called();result.assert_not_called()
 
     def test_history_excludes_pre_v1_but_missing_matching_v1_never_becomes_fresh(self):
