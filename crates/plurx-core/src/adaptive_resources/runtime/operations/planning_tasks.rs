@@ -206,7 +206,18 @@ async fn original_engine_task(
         .map_err(|_| std::io::Error::other("original engine start dropped"))?;
     #[cfg(test)]
     tests::stages::before_engine_native(plan.member_id.uuid()).await;
-    planning_collector::run_fixed_engine(plan, boot, deadline).await
+    #[cfg(any(test, feature = "fixtures"))]
+    let original_version_close = plan.version_close_operation_id.uuid();
+    let result = planning_collector::run_fixed_engine(plan, boot, deadline).await;
+    // A genuine JoinError/lost result AFTER the actual collector returns.
+    // This does not inject a kernel wait failure or construct any close proof.
+    #[cfg(any(test, feature = "fixtures"))]
+    if result.is_ok() {
+        crate::process::fixed_planning_engine::fixtures::panic_after_native_return(
+            original_version_close,
+        );
+    }
+    result
 }
 
 pub(in crate::adaptive_resources::runtime) fn planning_task_frame_bytes() -> Option<usize> {
@@ -395,6 +406,37 @@ impl NodeResourceRuntime {
         }
         self.acquire_prepared_source(owner, 0, member, deadline)
             .await
+    }
+
+    #[cfg(any(test, feature = "fixtures"))]
+    pub(in crate::adaptive_resources::runtime) async fn fixture_planning_native_gate(
+        &self,
+        owner: &OwnedPreparation,
+        panic_after_native_return: bool,
+    ) -> Result<
+        crate::process::fixed_planning_engine::fixtures::FixedPlanningNativeGate,
+        OperationError,
+    > {
+        self.validate_preparation(owner)?;
+        let bundle = owner.state.lock().await;
+        // Registration alone is sufficient for this diagnostic hook. Durable
+        // preparation/source entry still occurs through the original APIs.
+        if bundle.roles.len() != 2 || bundle.roles[0].refunded {
+            return Err(OperationError::State);
+        }
+        let task = bundle.roles[0]
+            .planning_tasks
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        if task.entered || task.unknown || task.never_entered.is_some() {
+            return Err(OperationError::State);
+        }
+        crate::process::fixed_planning_engine::fixtures::FixedPlanningNativeGate::install(
+            task.engine_plan.version_close_operation_id.uuid(),
+            task.engine_plan.member_id.uuid(),
+            panic_after_native_return,
+        )
+        .ok_or(OperationError::State)
     }
 
     pub(in crate::adaptive_resources::runtime) async fn collect_planning_tasks(

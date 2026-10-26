@@ -521,7 +521,24 @@ impl Drop for FixedPlanningProbeOwner {
         self.cleanup_requested.store(true, Ordering::Release);
     }
 }
+#[cfg(any(test, feature = "fixtures"))]
+pub use crate::process::fixed_planning_engine::fixtures::{
+    FixedPlanningNativeGate, FixedPlanningNativeStarted,
+};
+
 impl FixedPlanningProbeOwner {
+    /// Fixture-only observation of this SAME original engine command. This
+    /// returns no native owner, liveness guarantee, receipt or release right.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub async fn fixture_native_gate(
+        &self,
+        panic_after_native_return: bool,
+    ) -> Result<FixedPlanningNativeGate, FixedPlanningProbeError> {
+        self.runtime
+            .fixture_planning_native_gate(self.selection()?, panic_after_native_return)
+            .await
+            .map_err(Into::into)
+    }
     fn selection(&self) -> Result<&OwnedPreparation, FixedPlanningProbeError> {
         self.preparation
             .as_ref()
