@@ -254,9 +254,15 @@ static const char dv_dm_glsl_common[] =
   "const mat3 HL2R_T = mat3(vec3(3.045750856,-2.183078002,0.1372280312), vec3(-0.6405521273,1.799714833,-0.1590451327), vec3(0.01694860895,-0.04761932969,1.03047173));\n"
   "const mat3 IPT_T = mat3(vec3(0.4,0.4,0.2), vec3(4.455,-4.851,0.396), vec3(0.8056,0.3572,-1.1628));\n"
   "const mat3 IPTI_T = mat3(vec3(1.0,0.09756893051,0.2052264332), vec3(1.0,-0.1138764855,0.1332171584), vec3(1.0,0.03261510992,-0.6768871831));\n"
-  "float pq_eotf(float e){ e=clamp(e,0.0,1.0); float p=pow(e,1.0/78.84375); return 10000.0*pow(max(p-0.8359375,0.0)/(18.8515625-18.6875*p),1.0/0.1593017578125); }\n"
-  "float pq_eotf_ext(float e){ e=max(e,0.0); float p=pow(e,1.0/78.84375); return 10000.0*pow(max(p-0.8359375,0.0)/max(18.8515625-18.6875*p,1e-12),1.0/0.1593017578125); }\n"
-  "float pq_oetf(float y){ y=clamp(y/10000.0,0.0,1.0); float p=pow(y,0.1593017578125); return pow((0.8359375+18.8515625*p)/(1.0+18.6875*p),78.84375); }\n"
+  // ST 2084 in float32: avoid subtracting c1 from pow(e,1/m2), and avoid
+  // raising a rounded ratio near 1 to m2. These are the same PQ equations as
+  // the double reference, with compensated log1p/expm1 (GLSL has neither).
+  // c1-1 = -(c2-c3) = -0.1640625; c2-c3*c1 = 3.22998046875 exactly.
+  "float pq_log1p(float x){ float u=1.0+x,d=u-1.0; return d==0.0 ? x : log(u)*x/d; }\n"
+  "float pq_expm1(float x){ float u=exp(x),l=log(u); return u==1.0 || l==0.0 ? x : (u-1.0)*x/l; }\n"
+  "float pq_eotf_ext(float e){ e=max(e,0.0); float x=log(max(e/7.309559025783966e-7,1.0))/78.84375; float d=0.8359375*pq_expm1(x); return 10000.0*pow(d/max(3.22998046875-18.6875*d,1e-12),1.0/0.1593017578125); }\n"
+  "float pq_eotf(float e){ return pq_eotf_ext(clamp(e,0.0,1.0)); }\n"
+  "float pq_oetf(float y){ y=clamp(y/10000.0,0.0,1.0); float t=pow(y,0.1593017578125); return exp(78.84375*pq_log1p(-0.1640625*(1.0-t)/(1.0+18.6875*t))); }\n"
   "vec3 pq_eotf3(vec3 e){ return vec3(pq_eotf(e.x),pq_eotf(e.y),pq_eotf(e.z)); }\n"
   "vec3 pq_oetf3(vec3 y){ return vec3(pq_oetf(y.x),pq_oetf(y.y),pq_oetf(y.z)); }\n"
   "vec3 mrow(vec4 r0, vec4 r1, vec4 r2, vec3 v){ return vec3(dot(r0.xyz,v),dot(r1.xyz,v),dot(r2.xyz,v)); }\n"
