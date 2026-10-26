@@ -878,6 +878,10 @@ impl NodeResourceRuntime {
             self.eligible(&bundle)
         };
         if let Err(error) = eligibility {
+            #[cfg(unix)]
+            if bundle.roles.iter().any(|role| role.finite_app.is_some()) {
+                return Err(error);
+            }
             #[cfg(target_os = "linux")]
             if bundle
                 .roles
@@ -896,6 +900,37 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         Ok(())
+    }
+
+    /// A finite cleanup wait acknowledges only its original preparation.
+    /// `false` preserves a definitely rejected/rolled-back original prepare;
+    /// it is not authority for generic refund or any native entry.
+    #[cfg(unix)]
+    pub(in crate::adaptive_resources::runtime) async fn acknowledge_finite_preparation_for_cleanup(
+        &self,
+        owner: &OwnedPreparation,
+    ) -> Result<bool, OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if bundle.roles.len() != 1
+            || bundle.roles[0].finite_app.is_none()
+            || (bundle.roles[0].finite_vod.is_none()
+                && bundle.roles[0].receipt.is_none()
+                && bundle.roles[0].pending_finite_close.is_none()
+                && bundle.roles[0].transition.is_none())
+        {
+            return Err(OperationError::State);
+        }
+        match self.acknowledge_preparation_bundle(&mut bundle).await {
+            Ok(()) => Ok(true),
+            Err(OperationError::Custody(error))
+                if finite_prepare_definitely_unaccepted(&bundle)
+                    && error.certainty != CommitCertainty::Unknown =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Resolve/acknowledge the original accepted prepare for cleanup only.
@@ -928,6 +963,14 @@ impl NodeResourceRuntime {
                 Err(OperationError::Custody(error))
                     if error.certainty != CommitCertainty::Unknown =>
                 {
+                    // An initialized finite application may still own its
+                    // original pump, output and daemon selectors. Preserve
+                    // every family role before any generic refund is tried.
+                    #[cfg(unix)]
+                    if bundle.roles.iter().any(|role| role.finite_app.is_some()) {
+                        bundle.prepare.acknowledge(&self.journal)?;
+                        return Err(error.into());
+                    }
                     // Original planning inputs/application allocations still
                     // exist even when journal preparation rolled back. Never
                     // partially refund P before discovering M's owner.
@@ -1228,6 +1271,12 @@ impl NodeResourceRuntime {
         bundle: &mut Bundle,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        // Native non-entry alone cannot release rich finite application
+        // owners. Preflight all roles before refunding any family member.
+        #[cfg(unix)]
+        if bundle.roles.iter().any(|role| role.finite_app.is_some()) {
+            return Err(OperationError::State);
+        }
         // Preflight the entire bundle before touching P. Both original task
         // inputs and M application owners require their own close boundary.
         #[cfg(target_os = "linux")]
@@ -1605,6 +1654,18 @@ impl NodeResourceRuntime {
     }
 }
 
+/// The original retained preparation command itself proves known non-entry
+/// into durable custody. This classification grants no native/app close fact.
+#[cfg(unix)]
+fn finite_prepare_definitely_unaccepted(bundle: &Bundle) -> bool {
+    !bundle.installed
+        && bundle.prepare.pending.is_none()
+        && bundle.prepare.acknowledged
+        && matches!(&bundle.prepare.result,
+            Some(Err(error)) if error.certainty != CommitCertainty::Unknown
+                && error.operation_id == Some(bundle.prepare.id))
+}
+
 /// Only an actual legacy adapter can enrich its matching slot inside a typed
 /// envelope. Source/output/scratch observations need their concrete adapters;
 /// this helper cannot coerce a legacy observation into one of those variants.
@@ -1671,6 +1732,12 @@ fn refund(
 ) -> Result<(), OperationError> {
     if role.refunded {
         return Ok(());
+    }
+    #[cfg(unix)]
+    if role.finite_app.is_some() {
+        // Only the finite application boundary drops its rich original
+        // bundle and all aliases before releasing this ledger entry.
+        return Err(OperationError::State);
     }
     #[cfg(target_os = "linux")]
     if role.planning_tasks.is_some() || role.planning_metadata.is_some() {

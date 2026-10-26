@@ -5,6 +5,8 @@ use crate::resource_custody::{InstallationContext, MemberKind, RecoveryMethod};
 use std::time::Duration;
 mod admission_provenance;
 mod binding;
+#[cfg(unix)]
+mod finite_application;
 mod live_typed_settlement;
 mod native_entry;
 mod typed;

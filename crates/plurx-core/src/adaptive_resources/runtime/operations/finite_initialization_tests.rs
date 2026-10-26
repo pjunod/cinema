@@ -84,7 +84,8 @@ fn prepare<T>(
 }
 
 #[tokio::test]
-async fn initialized_setup_survives_dropped_selector_until_original_cancel_and_capacity_reuse() {
+async fn initialized_setup_survives_dropped_selector_and_cannot_use_generic_cancel_after_app_release(
+) {
     let directory = tempfile::tempdir().expect("durable task scratch");
     let runtime = runtime(directory.path());
     let application = super::super::finite_lifetime::FiniteAppState::with_application_limit(128);
@@ -129,35 +130,34 @@ async fn initialized_setup_survives_dropped_selector_until_original_cancel_and_c
         .resolve_preparation(&owner, deadline())
         .await
         .expect("original accepted result");
-    runtime
-        .cancel_preparation(&owner, deadline())
-        .await
-        .expect("known unentered cancellation");
-    runtime
-        .cancel_preparation(&owner, deadline())
-        .await
-        .expect("same cancellation cannot refund twice");
-    assert_eq!(
-        runtime.accounting().expect("known refund").used,
-        ResourceVector::default()
+    assert!(
+        runtime
+            .cancel_preparation(&owner, deadline())
+            .await
+            .is_err(),
+        "generic cancellation has no finite physical/application terminal receipt"
     );
-    runtime
-        .forget_preparation(owner)
-        .await
-        .expect("original owner closed");
-    let (next, ()) = prepare(&runtime, |_| ()).expect("returned capacity is reusable");
-    runtime
-        .resolve_preparation(&next, deadline())
-        .await
-        .expect("next original prepare");
-    runtime
-        .cancel_preparation(&next, deadline())
-        .await
-        .expect("next known cancel");
-    runtime
-        .forget_preparation(next)
-        .await
-        .expect("next owner closed");
+    assert!(
+        runtime
+            .cancel_preparation(&owner, deadline())
+            .await
+            .is_err(),
+        "retry cannot mint a missing finite receipt"
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("original setup remains charged")
+            .used,
+        vector()
+    );
+    assert!(
+        runtime.forget_preparation(owner).await.is_err(),
+        "dropped application lease alone is no refund or forgotten-owner authority"
+    );
+    // This setup-only fixture deliberately registered no concrete finite
+    // producer/no-root witness. It therefore retains charge until runtime
+    // destruction. The real fixed-owner tests exercise dedicated final close.
     runtime.drain().expect("join journal");
 }
 

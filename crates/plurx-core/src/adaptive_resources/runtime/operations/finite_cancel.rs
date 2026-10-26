@@ -32,6 +32,98 @@ impl FiniteCancellationClosure {
 }
 
 impl NodeResourceRuntime {
+    /// A definitely unaccepted original prepare has no journal obligation to
+    /// settle. Preserve its actual no-root receipt until rich app owners drop;
+    /// the known prepare result alone never authorizes early ledger release.
+    pub(in crate::adaptive_resources::runtime) async fn prepare_unaccepted_finite_close(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        {
+            let mut bundle = owner.state.lock().await;
+            if !finite_prepare_definitely_unaccepted(&bundle)
+                || bundle.roles.len() != 1
+                || index != 0
+            {
+                return Err(OperationError::State);
+            }
+            let role = &mut bundle.roles[0];
+            if role.refunded
+                || role.handle.is_some()
+                || role.transition.is_some()
+                || role.pending_finite_close.is_some()
+                || !role.armed.is_empty()
+                || !role.invoked.is_empty()
+                || !role.sources.is_empty()
+                || !role.bootstrap.is_empty()
+                || !role.scratch.is_empty()
+                || !role.roots.is_empty()
+                || !role.drains.is_empty()
+                || !role.closed_drains.is_empty()
+                || role.retirement.is_some()
+                || !role.finite_app.as_ref().is_some_and(|state| state.seal())
+            {
+                return Err(OperationError::State);
+            }
+            if role.receipt.is_some() && role.finite_vod.is_none() {
+                return Ok(());
+            }
+            let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
+            if !finite.prepared_payload_disposable() || !finite.registered_source_members.is_empty()
+            {
+                return Err(OperationError::State);
+            }
+        }
+        if !self.close_finite_never_root(owner, index).await? {
+            return Err(OperationError::State);
+        }
+        let mut bundle = owner.state.lock().await;
+        if !finite_prepare_definitely_unaccepted(&bundle) {
+            return Err(OperationError::State);
+        }
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+        let absent = finite
+            .never_root_closure
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        if role.receipt.is_some()
+            || !absent.matches(role.sealed.as_ref().ok_or(OperationError::State)?)
+            || absent.root_member() != finite.root_member
+            || absent.task_member() != finite.task_member
+            || absent.acquisition_id() != finite.acquisition_id
+            || !finite.prepared_payload_disposable()
+        {
+            return Err(OperationError::State);
+        }
+        role.response_budget
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .begin_close_if_empty()?;
+        let closure = FiniteCancellationClosure {
+            binding: role.binding,
+            _process: FiniteCancelProcess::NeverRoot {
+                _proof: finite
+                    .never_root_closure
+                    .take()
+                    .expect("validated original no-root closure"),
+            },
+            _output: FiniteCancelOutput::NeverAcquired,
+        };
+        role.receipt = Some(PhysicalCloseReceipt::from_finite_cancel(closure));
+        // Drop the never-started pump's output/preparation aliases while its
+        // full R charge remains held. External app selectors still gate final
+        // destruction; no fictitious settled phase or journal command exists.
+        role.finite_vod = None;
+        role.response_budget = None;
+        role.members.clear();
+        role.typed_members = None;
+        role.sealed = None;
+        Ok(())
+    }
+
     /// A pre-root path retains the original source cells and at most one
     /// original bootstrap cell. The graph proves absence of root/task entry;
     /// the bootstrap arm separately proves whether its native open entered.

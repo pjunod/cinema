@@ -1034,12 +1034,22 @@ impl SoftwareVodOwner {
         deadline: Instant,
     ) -> Result<FiniteCloseTicket, FiniteVodError> {
         self.request_stop()?;
-        self.runtime
-            .resolve_preparation(&self.preparation, deadline)
-            .await?;
-        self.runtime
-            .prepare_failed_finite_vod_close(&self.preparation, 0, deadline)
-            .await?;
+        let accepted = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.runtime
+                .acknowledge_finite_preparation_for_cleanup(&self.preparation),
+        )
+        .await
+        .map_err(|_| OperationError::Deadline)??;
+        if accepted {
+            self.runtime
+                .prepare_failed_finite_vod_close(&self.preparation, 0, deadline)
+                .await?;
+        } else {
+            self.runtime
+                .prepare_unaccepted_finite_close(&self.preparation, 0)
+                .await?;
+        }
         let app_state = self.runtime.finite_app_state(&self.preparation, 0)?;
         Ok(FiniteCloseTicket {
             runtime: Arc::clone(&self.runtime),
@@ -1643,3 +1653,7 @@ mod control_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+#[path = "finite_vod/tests/cleanup.rs"]
+pub(super) mod cleanup_tests;

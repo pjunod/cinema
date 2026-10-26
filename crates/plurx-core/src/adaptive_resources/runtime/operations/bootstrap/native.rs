@@ -547,7 +547,12 @@ impl NodeResourceRuntime {
         if !bundle.installed {
             return Err(OperationError::State);
         }
-        self.eligible(&bundle)?;
+        // Only fresh native entry requires current admission eligibility.
+        // Finite cancellation joins the original root or drops a newly
+        // registered latch to obtain NeverEntered; it never sends entry.
+        if allow_entry {
+            self.eligible(&bundle)?;
+        }
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded

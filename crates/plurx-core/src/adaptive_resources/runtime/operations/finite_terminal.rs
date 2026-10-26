@@ -53,7 +53,12 @@ impl NodeResourceRuntime {
     ) -> Result<(), OperationError> {
         let owner = selection.as_ref().ok_or(OperationError::State)?;
         self.validate_preparation(owner)?;
-        {
+        let unaccepted = {
+            let bundle = owner.state.lock().await;
+            matches!(kind, FinalApplicationRole::Finite)
+                && finite_prepare_definitely_unaccepted(&bundle)
+        };
+        if !unaccepted {
             let mut bundle = owner.state.lock().await;
             if !bundle.installed || !kind.matches(&bundle, index) {
                 return Err(OperationError::State);
@@ -114,7 +119,9 @@ impl NodeResourceRuntime {
         // An adopted S has one extra internal preparation alias, never an
         // application lease. Release it only after known terminal COMMIT.
         #[cfg(target_os = "linux")]
-        self.release_settled_recovered_preparation(owner.id)?;
+        if !unaccepted {
+            self.release_settled_recovered_preparation(owner.id)?;
+        }
 
         // All validation and arithmetic precede the one-shot drop of the
         // rich original bundle. Hold book→ledger locks in their usual order.
@@ -129,30 +136,44 @@ impl NodeResourceRuntime {
         if !Arc::ptr_eq(selected, &owner.state) {
             return Err(OperationError::State);
         }
-        let (binding, durable, effect) = {
+        let (binding, durable, cancel_without_unknown) = {
             let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
             let role = bundle.roles.get(index).ok_or(OperationError::State)?;
-            let transition = role.transition.as_ref().ok_or(OperationError::State)?;
             if bundle.id != owner.id
                 || !bundle.prepare.acknowledged
                 || !kind.matches(&bundle, index)
                 || role.refunded
-                || role.phase != Phase::Settled
                 || role.pending_finite_close.is_some()
                 || role
                     .finite_app
                     .as_ref()
                     .is_none_or(|state| !state.released())
-                || !matches!(transition.effect, Effect::Settle | Effect::Cancel)
-                || (transition.effect == Effect::Settle
-                    && role
-                        .receipt
-                        .as_ref()
-                        .is_none_or(|receipt| receipt.custody_binding() != role.binding))
             {
                 return Err(OperationError::State);
             }
-            (role.binding, role.durable_tag, transition.effect)
+            let cancel_without_unknown = if unaccepted {
+                if !finite_prepare_definitely_unaccepted(&bundle)
+                    || !finite_unaccepted_payload_closed(role)
+                {
+                    return Err(OperationError::State);
+                }
+                true
+            } else {
+                let transition = role.transition.as_ref().ok_or(OperationError::State)?;
+                if !bundle.installed
+                    || role.phase != Phase::Settled
+                    || !matches!(transition.effect, Effect::Settle | Effect::Cancel)
+                    || (transition.effect == Effect::Settle
+                        && role
+                            .receipt
+                            .as_ref()
+                            .is_none_or(|receipt| receipt.custody_binding() != role.binding))
+                {
+                    return Err(OperationError::State);
+                }
+                transition.effect == Effect::Cancel
+            };
+            (role.binding, role.durable_tag, cancel_without_unknown)
         };
         let entry = ledger
             .entries
@@ -161,7 +182,7 @@ impl NodeResourceRuntime {
         if entry.binding != binding
             || entry.durable != Some(durable)
             || ledger.used.checked_sub(entry.resources).is_none()
-            || (effect == Effect::Cancel && entry.state == ReservationState::UnknownHeld)
+            || (cancel_without_unknown && entry.state == ReservationState::UnknownHeld)
         {
             return Err(OperationError::State);
         }
@@ -220,6 +241,33 @@ impl NodeResourceRuntime {
         ledger.release(binding.reservation)?;
         Ok(())
     }
+}
+
+/// The existing no-root receipt is kept, not inferred from these empty
+/// containers. Its original known-unaccepted preparation is checked separately.
+fn finite_unaccepted_payload_closed(role: &OwnedRole) -> bool {
+    role.phase == Phase::Prepared
+        && role.handle.is_none()
+        && role.transition.is_none()
+        && role.finite_vod.is_none()
+        && role.response_budget.is_none()
+        && role.graph.is_none()
+        && role.sealed.is_none()
+        && role.sources.is_empty()
+        && role.roots.is_empty()
+        && role.bootstrap.is_empty()
+        && role.scratch.is_empty()
+        && role.drains.is_empty()
+        && role.closed_drains.is_empty()
+        && role.armed.is_empty()
+        && role.invoked.is_empty()
+        && role.retirement.is_none()
+        && role.members.is_empty()
+        && role.typed_members.is_none()
+        && role
+            .receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.custody_binding() == role.binding)
 }
 
 #[derive(Clone, Copy)]
