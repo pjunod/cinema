@@ -62,13 +62,23 @@ The source-reconstructed closure contains every tracked regular path/mode/blob
 and SHA-256 under the audited test, playback, daemon-source and fixture roots,
 plus their external contract data, helpers, Make/Cargo parse inputs and locked
 TypeScript configuration. The reviewed executable/helper/member-set aggregate
-is pinned. Unknown code, dependencies, alternate case-folded Make selectors,
-unsupported workflow shape or untracked closure inputs require closure review;
+is pinned. The exact fbbf and observed-main 087 shape families both include
+Acorn and the transitively invoked startup-lab helper. These are raw supported
+families, with no applicability normalization: changed tests or production
+assets still produce a genuinely different key. Unknown code, dependencies,
+alternate case-folded Make selectors, unsupported workflow shape or untracked closure inputs require closure review;
 they never become a silent first-run escape. Ordinary supported production,
 resource or baseline input changes produce a different execution key. The
 key includes event base, resolved merge-base and baseline bytes. Only the
 semantic web job recipe is bound; unrelated Rust workflow edits do not change
 this cohort's applicability.
+
+The bounded scripts-level resolver inventory binds names, types and modes,
+not unrelated script bodies. New Python file/package shadows, including
+transitive `socket` imports, and Node's extensionless `playback-frame-clock`
+selector require closure review. Live guards apply too; a normal generated
+`scripts/__pycache__` directory is ignored without deletion. Tracked source and
+live selectors are rechecked before the final cohort receipt.
 
 The bootstrap origin is the successful web job in run 5964, job 57771, task
 23006, attempt 1 at `fbbf4078`. Overall Rust failure does not erase that web
@@ -82,15 +92,22 @@ recorded Node 22.23.4, npm 10.9.9, Git 2.55.0 and locked TypeScript 6.0.3.
 Python stdlib orchestration and Make's fixed dispatch use an explicit
 compatibility contract. Historical distro/kernel, Python/Make versions and
 immutable host/image identity were not recorded and remain unknown. Current
-Python/Make versions are diagnostics. Retention identifies the current
-declared/locked TypeScript without claiming it executed; fresh qualification
+Python implementation/version and Make version are recorded diagnostically;
+version-1 adoption requires the declared stdlib planning/summary/loopback HTTP
+policy, with no fabricated historical Python identity. Retention identifies
+the current declared/locked TypeScript without claiming it executed; fresh qualification
 checks the installed compiler's actual version after the existing installer.
-Optional browser, FFmpeg and host-proc helper modes are outside the audited
-executed calls; adding such a call requires a new closure review.
+The selected startup tests also execute the pinned Python stdlib planning and
+local HTTP fixture paths. Browser, FFmpeg generation and host-proc helper modes
+remain outside the audited calls; adding such a call requires closure review.
 
 Version-1 archives bind fresh or retained receipts and the original cohort
 log to the authenticated upload. A retained receipt points directly to the
 legacy execution or an authenticated version-1 fresh execution; retained
-chains and cycles refuse. Raw source manifests and log bytes remain original.
+chains and cycles refuse. Pre-v1 heads without eligible cohort evidence are
+outside this protocol, not proven passes or input differences; they do not
+poison new-key execution through current-family parsing. A matching v1
+producer with missing, invalid or ambiguous evidence still refuses. Raw source
+manifests and log bytes remain original.
 The receipt reports current applicability, policy/adapter identity and origin
 provenance. It does not fabricate current build products or test events.

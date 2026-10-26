@@ -9,7 +9,7 @@
 #include <libplacebo/shaders/custom.h>
 #include "dv_dm.h"
 
-#define DV_TARGET_METHOD "dolby-closed-form-cm4-cm29-v4"
+#define DV_TARGET_METHOD "dolby-closed-form-cm4-cm29-v5"
 // Creative trims applied to served output, per family. Both CM v4 (L8) and CM v2.9 (L2) trims are
 // accepted by pixel comparison against the reference renderer on real titles (BUILD.md). Rust
 // mirrors these as DISPLAY_TARGET_CREATIVE_TRIMS_CM4 / _CM29; changing either needs a new method

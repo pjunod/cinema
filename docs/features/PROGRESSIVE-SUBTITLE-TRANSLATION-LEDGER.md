@@ -2,6 +2,29 @@
 
 **Status:** built — first route accepted on 2026-10-17; follow-ups are listed at the end of §2.
 
+**Setup repair — 2026-10-25; [implementation, qualification and landing](SUBTITLE-SETUP-REPAIR-STATUS.md).**
+The live web setup accepted an Install request, then displayed
+`Invalid model operation response`: the version 2 server response omitted
+`purpose: "translation"`, which the shipped client requires before it follows
+jobs. A later status refresh showed the model cached; Activity showed its test
+queued with `waiting_for_playback_capacity`. This reproduces a setup failure,
+not a broken download URL or successful model qualification. A separate earlier
+model operation on another worker failed with `output_invalid`; its cause remains
+unresolved. No translation enablement was saved and no application was deployed.
+
+The repair returns the missing response discriminator and tests the real HTTP
+Install/Test routes, their queued job payloads and receipt replay. Setup suggests
+the sole active profile without saving it, labels installation **Download and
+test**, shows trusted failure/wait reasons, prevents duplicate requests while a
+job is active, and recovers model/language choices after a failed catalog load.
+An old setup clock is refreshed before a new action; ambiguous retries retain
+their existing request identity. Model tests also retain a FIFO turn on the existing
+heavy-background semaphore and publish `waiting_for_capacity`; CPU resources
+are reserved after the shared gate, with foreground checks and cancellation
+intact. The current background job still finishes before the test starts. These changes do not add native playback,
+additional audio streams, remux/encode delivery or progressive same-language
+transcription. The earlier first-route acceptance retains its original limits.
+
 Companion to [the plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md): its review ledger, the
 integration checkpoints and the completion record with the packaged acceptance evidence,
 moved here so the plan stays readable.

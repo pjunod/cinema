@@ -56,8 +56,11 @@ class WebCohortRetentionTests(unittest.TestCase):
                 'sha256':web.digest(raw)} for path,raw in contents.items()],key=lambda row:row['path'])
         original_shape = web.digest(web.canonical([row for row in rows() if web.shape_row(row)]))
         roots = [b'100644 blob '+b'a'*40+b'\tMakefile']
+        resolver_rows=[{'name':'unrelated-tool','mode':'100755','kind':'blob'}]
         def git(workspace,*args,**kwargs):
             if args[0]=='ls-tree':
+                if args[-1].endswith(':scripts'):
+                    return b'\0'.join((row['mode']+' '+row['kind']+' '+('a'*40)+'\t'+row['name']).encode() for row in resolver_rows)+b'\0'
                 if '-r' not in args:return b'\0'.join(roots)+b'\0'
                 return b'\0'.join((row['mode']+' blob '+row['blob']+'\t'+row['path']).encode() for row in rows())+b'\0'
             if args[0]=='cat-file':
@@ -66,11 +69,13 @@ class WebCohortRetentionTests(unittest.TestCase):
             if args[0]=='merge-base':return (BASE+'\n').encode()
             if args[0]=='show':return b'# historical baseline\n'
             raise AssertionError(args)
+        git.resolver_rows=resolver_rows
+        git.resolver_layout_sha256=web.digest(web.canonical(resolver_rows))
         return contents,roots,git,original_shape
 
     def test_complete_shape_guard_refuses_added_executable_helper_and_alternate_make(self):
         contents,roots,git,shape = self.source()
-        with mock.patch.object(web,'git',side_effect=git),mock.patch.object(web,'SHAPE_SHA256',shape):
+        with mock.patch.object(web,'git',side_effect=git),mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}),mock.patch.object(web,'SHAPE_FAMILIES',{'fixture':shape}):
             web.manifest(ROOT,COMMIT,BASE)
             for path in ('tests/web/new.test.js','scripts/web-types'):
                 original = contents.get(path);contents[path]=b'require("outside-root")\n'
@@ -86,7 +91,7 @@ class WebCohortRetentionTests(unittest.TestCase):
 
     def test_supported_asset_and_baseline_inputs_change_key_without_forging_old_manifest(self):
         contents,roots,git,shape = self.source()
-        with mock.patch.object(web,'git',side_effect=git),mock.patch.object(web,'SHAPE_SHA256',shape):
+        with mock.patch.object(web,'git',side_effect=git),mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}),mock.patch.object(web,'SHAPE_FAMILIES',{'fixture':shape}):
             before = web.manifest(ROOT,COMMIT,BASE); frozen = copy.deepcopy(before)
             contents['crates/plurxd/src/web/player.js'] += b'// changed\n'
             after = web.manifest(ROOT,COMMIT,BASE)
@@ -182,15 +187,15 @@ class WebCohortRetentionTests(unittest.TestCase):
         scratch=ROOT/'target/web-retention-fixtures';scratch.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory, \
              mock.patch.object(web,'workflow_identity',return_value={'kind':'v1','sha256':'a'*64}), \
-             mock.patch.object(web,'live_inputs'),mock.patch.object(web,'manifest',return_value=inputs), \
+             mock.patch.object(web,'live_inputs'),mock.patch.object(web,'live_script_resolvers'),mock.patch.object(web,'manifest',return_value=inputs), \
              mock.patch.object(web,'matching_result',return_value=None),mock.patch.object(web,'current_context',return_value=context), \
-             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:b'' if args[0]=='diff' else b'd'*40), \
+             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:b'' if args[0]=='diff' else COMMIT.encode() if args[0]=='rev-parse' and args[1]=='HEAD' else b'd'*40), \
              mock.patch.object(web.subprocess,'run',return_value=mock.Mock(returncode=0)) as launch, \
              mock.patch.object(web.subprocess,'check_output',return_value='Version 6.0.3\n'), \
              mock.patch.dict(os.environ,{'GITHUB_TOKEN':'secret','GH_TOKEN':'secret','ACTIONS_RUNTIME_TOKEN':'secret','PATH':'/tools','TMPDIR':'/scratch'}):
             # Different policy/input key selects explicit fresh, never a legacy re-run.
             out=Path(directory)/'fresh';out.mkdir()
-            with mock.patch.object(web,'manifest',side_effect=[inputs,{**inputs,'different':True},inputs]):
+            with mock.patch.object(web,'manifest',side_effect=[inputs,{**inputs,'different':True},inputs,inputs]):
                 result=web.run_gate(ROOT,context,out,{'typescript':{'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}},True)
             self.assertTrue(result['current_test_events']);self.assertIsNone(result['origin'])
             self.assertEqual([call.args[0][-1] for call in launch.call_args_list],list(web.COMMANDS))
@@ -203,7 +208,7 @@ class WebCohortRetentionTests(unittest.TestCase):
             self.assertEqual(launch.call_args_list[-1].kwargs['env']['TMPDIR'],'/tmp')
             launch.reset_mock();launch.return_value=mock.Mock(returncode=1)
             out=Path(directory)/'failed';out.mkdir()
-            with mock.patch.object(web,'manifest',side_effect=[inputs,{**inputs,'different':True},inputs]):
+            with mock.patch.object(web,'manifest',side_effect=[inputs,{**inputs,'different':True},inputs,inputs]):
                 with self.assertRaisesRegex(receipts.ReceiptError,'failed; no retention/fallback'):
                     web.run_gate(ROOT,context,out,{'typescript':{'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}},True)
             self.assertEqual(launch.call_count,1)
@@ -216,10 +221,10 @@ class WebCohortRetentionTests(unittest.TestCase):
         scratch=ROOT/'target/web-retention-fixtures';scratch.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory, \
              mock.patch.object(web,'workflow_identity',return_value={'kind':'v1','sha256':'a'*64}), \
-             mock.patch.object(web,'live_inputs'),mock.patch.object(web,'manifest',return_value=inputs), \
+             mock.patch.object(web,'live_inputs'),mock.patch.object(web,'live_script_resolvers'),mock.patch.object(web,'manifest',return_value=inputs), \
              mock.patch.object(web,'legacy_result',return_value=(original,raw)), \
              mock.patch.object(web,'current_context',return_value=context), \
-             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:b'' if args[0]=='diff' else b'd'*40), \
+             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:b'' if args[0]=='diff' else COMMIT.encode() if args[0]=='rev-parse' and args[1]=='HEAD' else b'd'*40), \
              mock.patch.object(web.subprocess,'run') as launch:
             result=web.run_gate(ROOT,context,Path(directory),{'typescript':{'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}},True)
             self.assertEqual(result['mode'],'retained_prior_execution');self.assertFalse(result['current_test_events'])
@@ -237,6 +242,8 @@ class WebCohortRetentionTests(unittest.TestCase):
             'attempt':1,'scope':SCOPE,'inputs':inputs,'input_key':key,'policy_sha256':web.policy_fingerprint(),
             'adapter_sha256':web.digest(adapter),'web_job':{'kind':'v1','sha256':'a'*64},
             'runtime':{'job_recorded':{k:v for k,v in web.RUNTIME.items() if k!='typescript_lock'},
+                'policy_compatible':{'python':web.PYTHON_POLICY},
+                'current_diagnostics':{'python':{'implementation':'CPython','version':'3.12.3'}},
                 'typescript':{'declared_locked':'6.0.3','current_binary_observed':'Version 6.0.3','current_qualification_execution':True}},
             'origin':None,'log_sha256':web.digest(log),'current_test_events':True}
         envelope={'id':7000,'name':'web-cohort-6000-1','run_id':6000,'expired':False}
@@ -339,3 +346,95 @@ class WebCohortRetentionTests(unittest.TestCase):
                         [line for line in lines if line != '⭐ Run Post '+action]):
             with self.assertRaisesRegex(receipts.ReceiptError,'runtime section|Git runtime sections'):
                 web.checkout(raw(changed),COMMIT,job)
+
+    def test_reviewed_raw_shape_families_keep_distinct_keys_and_pin_imported_helpers(self):
+        contents,roots,git,shape=self.source()
+        with mock.patch.object(web,'git',side_effect=git),mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}),mock.patch.object(web,'SHAPE_FAMILIES',{'old':shape}):
+            original=web.manifest(ROOT,COMMIT,BASE)
+        frozen=copy.deepcopy(original);raw=contents['tests/web/check.test.js']+b'// reviewed new body\n'
+        shaped=[row.copy() for row in original['files'] if web.shape_row(row)]
+        for row in shaped:
+            if row['path']=='tests/web/check.test.js':
+                row.update(blob=hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest(),sha256=web.digest(raw))
+        newer=web.digest(web.canonical(shaped))
+        with mock.patch.object(web,'git',side_effect=git),mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}),mock.patch.object(web,'SHAPE_FAMILIES',{'old':shape,'new':newer}):
+            old=web.manifest(ROOT,COMMIT,BASE)
+            contents['tests/web/check.test.js']=raw
+            current=web.manifest(ROOT,COMMIT,BASE)
+            self.assertNotEqual(web.execution_key(old),web.execution_key(current))
+            self.assertEqual(original,frozen)
+            self.assertNotEqual(old['files'],current['files'])
+            for helper in ('tests/vendor/acorn.js','scripts/playback-startup-lab'):
+                original_helper=contents[helper];contents[helper] += b'require("outside-closure")\n'
+                with self.subTest(helper=helper),self.assertRaisesRegex(receipts.ReceiptError,'executable/recipe/dependency shape'):
+                    web.manifest(ROOT,COMMIT,BASE)
+                contents[helper]=original_helper
+
+    def test_history_excludes_pre_v1_but_missing_matching_v1_never_becomes_fresh(self):
+        api,pull,event,run,job=self.context();job['status']='success'
+        inputs={'files':[]};key=web.execution_key(inputs)
+        state={'workflow':('jobs:\n'+web.LEGACY_JOB).encode(),'artifacts':[]}
+        def pages(path,query=None,field=None):
+            if path.endswith('/artifacts'):return state['artifacts']
+            if path.endswith('/jobs'):return [job]
+            return [run]
+        api.pages=pages
+        def git(workspace,*args,**kwargs):
+            return state['workflow'] if args[-1].endswith(':'+web.WORKFLOW) else b'reviewed adapter'
+        with mock.patch.object(web,'git',side_effect=git),mock.patch.object(web,'manifest',return_value=inputs) as manifest, \
+             mock.patch.object(web,'v1_result',return_value=({'kind':'v1_fresh'},b'original log')) as result:
+            self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,key))
+            manifest.assert_not_called();result.assert_not_called()
+            state['workflow']=('jobs:\n'+web.adapted_job()).encode()
+            with self.assertRaisesRegex(receipts.ReceiptError,'artifact missing/invalid/ambiguous'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,key)
+            artifact={'id':7001,'name':'web-cohort-6000-1','run_id':6000,'expired':False}
+            for artifacts in ([{**artifact,'expired':True}],[artifact,artifact]):
+                state['artifacts']=artifacts
+                with self.subTest(artifacts=artifacts),self.assertRaisesRegex(receipts.ReceiptError,'artifact missing/invalid/ambiguous'):
+                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,key)
+            state['artifacts']=[artifact]
+            self.assertEqual(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,key),({'kind':'v1_fresh'},b'original log'))
+            state['workflow']=state['workflow'].replace(b'node-version: "22"',b'node-version: "24"')
+            with self.assertRaisesRegex(receipts.ReceiptError,'job/command/environment shape'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,key)
+
+    def test_script_resolver_namespace_refuses_socket_packages_and_node_precedence_but_allows_cache(self):
+        contents,roots,git,shape=self.source()
+        with mock.patch.object(web,'git',side_effect=git), \
+             mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}):
+            self.assertEqual(web.script_resolver_layout(ROOT,COMMIT),git.resolver_rows)
+            for name,mode,kind in (('socket.py','100644','blob'),('socket','040000','tree'),
+                                   ('playback-frame-clock','100644','blob')):
+                git.resolver_rows.append({'name':name,'mode':mode,'kind':kind})
+                with self.subTest(tracked=name),self.assertRaisesRegex(receipts.ReceiptError,'script resolver namespace'):
+                    web.script_resolver_layout(ROOT,COMMIT)
+                git.resolver_rows.pop()
+            scratch=ROOT/'target/web-retention-fixtures';scratch.mkdir(parents=True,exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=scratch) as directory:
+                workspace=Path(directory);scripts=workspace/'scripts';scripts.mkdir()
+                unrelated=scripts/'unrelated-tool';unrelated.write_text('#!/bin/sh\n');unrelated.chmod(0o755)
+                web.live_script_resolvers(workspace,COMMIT)
+                unrelated.write_text('#!/bin/sh\n# changed unrelated body\n')
+                web.live_script_resolvers(workspace,COMMIT)
+                cache=scripts/'__pycache__';cache.mkdir();(cache/'generated.pyc').write_bytes(b'generated cache fixture')
+                web.live_script_resolvers(workspace,COMMIT)
+                for name in ('socket.py','playback-frame-clock'):
+                    selected=scripts/name;selected.write_text('untracked selector\n')
+                    with self.subTest(live=name),self.assertRaisesRegex(receipts.ReceiptError,'live web script resolver namespace'):
+                        web.live_script_resolvers(workspace,COMMIT)
+                    selected.unlink()
+                package=scripts/'socket';package.mkdir();(package/'__init__.py').write_text('# shadow\n')
+                with self.assertRaisesRegex(receipts.ReceiptError,'live web script resolver namespace'):
+                    web.live_script_resolvers(workspace,COMMIT)
+        for name in ('tests/playback/socket.py','tests/playback/socket/__init__.py'):
+            contents[name]=b'# unsupported local resolver\n'
+            with mock.patch.object(web,'git',side_effect=git), \
+                 mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}), \
+                 mock.patch.object(web,'SHAPE_FAMILIES',{'fixture':shape}):
+                with self.subTest(playback=name),self.assertRaisesRegex(receipts.ReceiptError,'executable/recipe/dependency shape'):
+                    web.manifest(ROOT,COMMIT,BASE)
+            del contents[name]
+            with mock.patch.object(web,'selectors'),mock.patch.object(web,'git',return_value=(name+'\0').encode()):
+                with self.assertRaisesRegex(receipts.ReceiptError,'Untracked/ignored web closure'):
+                    web.live_inputs(ROOT)

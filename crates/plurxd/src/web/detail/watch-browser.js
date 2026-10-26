@@ -39,7 +39,7 @@ function watchMetaLine(page){
 function watchTitleHtml(){
   const page=WATCH.page;
   const next=page.item.kind==="episode"?`<div class="watch-actions"><button type="button" class="ghost watch-play-next" onclick="playNextEpisode()">Play next</button></div>`:"";
-  return `<span class="watch-np-kicker">${WATCH.accepted?"Now playing":"Starting"}</span><h2>${esc(page.item.title)}</h2><p class="watch-meta">${watchMetaLine(page)}</p><div class="vbadges">${WATCH.accepted?playerFactBadges():""}</div><p class="watch-synopsis">${esc(page.meta.overview||"")}</p>${next}`;
+  return `<span class="watch-np-kicker">${WATCH.accepted?"Now playing":"Starting"}</span><h2>${esc(page.item.title)}</h2><p class="watch-meta">${watchMetaLine(page)}</p><div class="vbadges" data-watch-facts>${WATCH.accepted?playerFactBadges():""}</div><p class="watch-synopsis">${esc(page.meta.overview||"")}</p>${next}`;
 }
 // The heading is the item page's breadcrumb. It is re-rendered with the
 // title, because playing another episode from the grid changes the last
@@ -51,6 +51,15 @@ function watchHeadHtml(){
     .concat((page.ancestors||[]).map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title})))
     .concat([{label:page.item.title}]);
   return pageHead(trail);
+}
+// Refresh only the facts. Replacing the title or ledger here would detach
+// focused track controls, subtitle forms or the open title-info dialog.
+function watchRefreshFactBadges(){
+  if(!WATCH?.page)return;
+  const html=WATCH.accepted?playerFactBadges():"";
+  for(const node of document.querySelectorAll("#watch-title [data-watch-facts], #watch-band-title [data-watch-facts], #watch-details [data-watch-facts]")){
+    if(node.innerHTML!==html)node.innerHTML=html;
+  }
 }
 function watchRenderTitle(){
   if(!WATCH?.page)return;

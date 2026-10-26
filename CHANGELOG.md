@@ -36,6 +36,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- Reconstruct CM v2.9 near-black color from analytic IPT gamut interpolation
+  and colorfulness compensation, replacing fitted target gain tables. Preserve
+  the stock SDR cube black separately from the resolved output black, and
+  advance targeted-render identity to v5 so cached older mappings are rebuilt.
+
 - Display-targeted HDR10-E and SDR now map each shot with closed-form Dolby
   display management instead of the ST 2094-10 Annex B.2 curve: CM v4 (L1+L3,
   L8 trims interpolated to the target, colour trims across gamuts) for CM v4.0
@@ -72,6 +77,9 @@ bump may break compatibility and a **patch** bump never does.
   Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v4`.
 
 ### Fixed
+
+- Apple TV physical focus updates no longer invalidate the app shell and every
+  registered control; focus bookmarks and remote-command freshness remain intact.
 
 - Display-targeted playback reads mastering metadata carried on decoded frames
   when stream metadata omits it. The bounded probe stays bound to the held source
@@ -121,6 +129,11 @@ bump may break compatibility and a **patch** bump never does.
   without claiming FEL was discarded or the base picture copied before the
   session selects its processing. Session enhancement details distinguish
   FEL reconstruction from basic Profile 8.1 conversion.
+
+- English subtitle translation setup follows accepted model downloads and tests,
+  explains failures and capacity waits, and recovers model choices after a
+  failed status load without losing unsaved settings. Model tests keep a FIFO
+  place for background capacity so repeated library work cannot skip them.
 
 - All playback caches share one disk budget with reader-safe global eviction,
   pre-write capacity reservations and a filesystem free-space reserve, preventing
@@ -227,6 +240,10 @@ bump may break compatibility and a **patch** bump never does.
 
 - Non-Dolby-Vision clients that support HLS are offered a segmented HDR10-base copy when Developer → DV processing is enabled, so the HLS processing path can apply HDR10-E instead of silently bypassing it with a progressive remux. Setting-off and progressive-only delivery remain unchanged; actual processing and any decline are reported by the HLS session.
 - Continuous AVC fallback catalogs exclude rows outside H.264 High@5.0 at the source's measured cadence, including 2160p, instead of offering a family that fails at session creation. An unknown or nominal-only cadence offers no continuous family.
+
+- Web playback title badges refresh when Dolby Vision processing evidence arrives
+  or clears; HDR10-E and the FEL, RPU and DYN pills reflect the current applied
+  operations, including per-shot metadata mapped into HDR10 by the server.
 
 ### Added
 

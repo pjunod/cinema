@@ -33,7 +33,9 @@ ORIGIN_RUN, ORIGIN_JOB, ORIGIN_TASK = 5964, 57771, 23006
 ORIGIN_LOG_SHA256 = '5c99fda5f1b086222032888286cef6f9463a3c067fc63a8044037691395fe6b8'
 BASELINE = 'tests/web/tsc-baseline.tsv'
 RUNTIME = {'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','typescript_lock':'6.0.3'}
-POLICY_VERSION = 1
+POLICY_VERSION = 2
+SCRIPTS_RESOLVER_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '48743b916c2a75d4e0e9531a52abff0b9f318d726be407f84d5fe1cc760e3a99', '087e836d369eb2b8f94ec1d0454ea6c157612df9': '72f0accba4f82129287fb12cb8b53c5739cf49f4dff530eb6d64bc464be6ec61'}
+PYTHON_POLICY = 'python3 stdlib planning, summary and loopback HTTP fixtures v1'
 MAX_FILES, MAX_BLOB, MAX_SOURCE = 1500, 32*1024*1024, 128*1024*1024
 MAX_LOG, MAX_ZIP, MAX_JSON = 4*1024*1024, 4*1024*1024, 1024*1024
 ROOTS = ('Makefile','Cargo.toml','tests/web','tests/playback','crates/plurxd/src',
@@ -92,8 +94,8 @@ LEGACY_JOB = '''  web_compile:
         run: make web-unit-check
 
 '''
-SHAPE_SHA256 = '25bd584f154683d6ca9c255fc53c845d83cb2dfb44c8178badd14f1ee2fb09ce'
-HELPERS = ('scripts/js-check', 'scripts/web-types', 'scripts/web-jsconfig', 'scripts/playback-lab', 'scripts/playback-frame-clock.js', 'scripts/continuous-quality-qualification', 'scripts/player-contract-table', 'scripts/ui-baseline', 'scripts/subtitle-readiness-browser-check', 'scripts/cq-native-shipping/check-evidence.js')
+SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '25edd3b640253bafa72154e1964132306dc55eb435da96cb628346ea3429f364', '087e836d369eb2b8f94ec1d0454ea6c157612df9': 'e7aeb40c4d124799231c120944bc510f46f87b1a7c595a111a722d057c3f58c7'}
+HELPERS = ('scripts/js-check', 'scripts/web-types', 'scripts/web-jsconfig', 'scripts/playback-lab', 'scripts/playback-frame-clock.js', 'scripts/continuous-quality-qualification', 'scripts/player-contract-table', 'scripts/ui-baseline', 'scripts/subtitle-readiness-browser-check', 'scripts/cq-native-shipping/check-evidence.js', 'tests/vendor/acorn.js', 'scripts/playback-startup-lab')
 WRAPPER = '''      - name: Retain or execute the reviewed whole web cohort
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -177,6 +179,39 @@ def live_inputs(workspace):
         'Unsupported web interpreter configuration; closure review required')
 
 
+def script_resolver_layout(workspace,commit):
+    """Only top-level selector names/types/modes; unrelated bodies stay free."""
+    raw = git(workspace,'ls-tree','-z',commit+':scripts',limit=64*1024)
+    rows = []
+    for record in raw.split(b'\0'):
+        if not record:continue
+        header,name = record.split(b'\t',1);mode,kind,_ = header.decode().split()
+        rows.append({'name':name.decode('utf-8'),'mode':mode,'kind':kind})
+    require(len(rows) <= 512,'Web script resolver namespace exceeds bound')
+    rows.sort(key=lambda row:row['name'])
+    require(digest(canonical(rows)) in SCRIPTS_RESOLVER_FAMILIES.values(),
+        'Unsupported web script resolver namespace; closure review required')
+    return rows
+
+
+def live_script_resolvers(workspace,commit):
+    expected = script_resolver_layout(workspace,commit);rows=[]
+    directory = workspace/'scripts'
+    require(not directory.is_symlink(),'Web script resolver directory is a symlink')
+    with os.scandir(directory) as children:
+        for index,child in enumerate(children):
+            require(index < 513,'Live web script resolver namespace exceeds bound')
+            mode = child.stat(follow_symlinks=False).st_mode
+            # A normal cache directory is not itself an import selector. The
+            # pinned sources never import __pycache__; do not delete its files.
+            if child.name == '__pycache__' and stat.S_ISDIR(mode):continue
+            require(stat.S_ISDIR(mode) or stat.S_ISREG(mode),'Unsupported live web script resolver type')
+            rows.append({'name':child.name,'mode':'040000' if stat.S_ISDIR(mode) else ('100755' if mode & 0o111 else '100644'),
+                'kind':'tree' if stat.S_ISDIR(mode) else 'blob'})
+    require(sorted(rows,key=lambda row:row['name']) == expected,
+        'Unsupported live web script resolver namespace; closure review required')
+
+
 def shape_row(row):
     path = row['path']
     return path in ('Makefile','Cargo.toml',*HELPERS,'tools/web-types/package.json','tools/web-types/package-lock.json') or (
@@ -186,6 +221,7 @@ def shape_row(row):
 def manifest(workspace,commit,base):
     receipts.sha(commit); receipts.sha(base)
     selectors(workspace,commit)
+    resolver = script_resolver_layout(workspace,commit)
     rows, contents, total = [], {}, 0
     raw = git(workspace,'ls-tree','-r','-z',commit,'--',*ROOTS,*HELPERS,limit=512*1024)
     for record in raw.split(b'\0'):
@@ -203,19 +239,19 @@ def manifest(workspace,commit,base):
         rows.append({'path':path,'mode':mode,'blob':blob,'sha256':digest(data)})
     rows.sort(key=lambda row:row['path'])
     require(set(HELPERS) <= set(contents) and BASELINE in contents and 'Makefile' in contents,'Incomplete web closure')
-    require(digest(canonical([row for row in rows if shape_row(row)])) == SHAPE_SHA256,
+    require(digest(canonical([row for row in rows if shape_row(row)])) in SHAPE_FAMILIES.values(),
         'Unsupported web executable/recipe/dependency shape; closure review required')
     lock = receipts.bounded_json(contents['tools/web-types/package-lock.json'])
     require(lock['packages']['node_modules/typescript']['version'] == RUNTIME['typescript_lock'], 'Web locked TypeScript differs')
     merge = git(workspace,'merge-base',commit,base,limit=64).decode().strip(); receipts.sha(merge)
     baseline = git(workspace,'show',merge+':'+BASELINE,limit=MAX_JSON)
     return {'files':rows,'baseline':{'event_base':base,'merge_base':merge,'sha256':digest(baseline)},
-        'runtime_contract':RUNTIME,'policy_sha256':policy_fingerprint()}
+        'runtime_contract':RUNTIME,'script_resolver_sha256':digest(canonical(resolver)),'policy_sha256':policy_fingerprint()}
 
 
 def policy_fingerprint():
-    return digest(canonical({'version':POLICY_VERSION,'roots':ROOTS,'helpers':HELPERS,'shape':SHAPE_SHA256,
-        'runtime':RUNTIME,'commands':COMMANDS,'legacy_job':digest(LEGACY_JOB.encode()),
+    return digest(canonical({'version':POLICY_VERSION,'roots':ROOTS,'helpers':HELPERS,'shape_families':SHAPE_FAMILIES,
+        'runtime':RUNTIME,'python_policy':PYTHON_POLICY,'script_resolver_families':SCRIPTS_RESOLVER_FAMILIES,'commands':COMMANDS,'legacy_job':digest(LEGACY_JOB.encode()),
         'adapter_job':digest(adapted_job().encode()),'baseline':'event-base+merge-base+bytes',
         'host':'Linux/X64 host; python3 stdlib and fixed Make recipe compatibility v1'}))
 
@@ -230,8 +266,8 @@ def runtime():
         for name,command in (('node',['node','--version']),('npm',['npm','--version']),('git',['git','--version']))}
     require(actual == {k:v for k,v in RUNTIME.items() if k != 'typescript_lock'},'Unsupported web concrete runtime family')
     return {'job_recorded':actual,'typescript':{'declared_locked':RUNTIME['typescript_lock'],'current_binary_observed':None,'current_qualification_execution':False},
-        'policy_compatible':{'host':'Linux/X64 host executor','python':'python3 stdlib','make':'fixed reviewed recipe'},
-        'current_diagnostics':{'python':platform.python_version(),'make':subprocess.check_output(['make','--version'],
+        'policy_compatible':{'host':'Linux/X64 host executor','python':PYTHON_POLICY,'make':'fixed reviewed recipe'},
+        'current_diagnostics':{'python':{'implementation':platform.python_implementation(),'version':platform.python_version()},'make':subprocess.check_output(['make','--version'],
             text=True,env=child_environment(),timeout=10).splitlines()[0]},
         'historical_not_recorded':['OS distribution','kernel','Python version','Make version','immutable host/image identity']}
 
@@ -390,6 +426,10 @@ def v1_result(api,scope,workspace,rid,jid,current,*,root_only=False):
     require(type(receipt['schema_version']) is int and receipt['schema_version'] == 1
         and type(receipt['run']) is int and type(receipt['job']) is int
         and receipt['runtime']['job_recorded'] == {k:v for k,v in RUNTIME.items() if k != 'typescript_lock'}
+        and receipt['runtime']['policy_compatible']['python'] == PYTHON_POLICY
+        and isinstance(receipt['runtime']['current_diagnostics']['python']['implementation'],str)
+        and receipt['runtime']['current_diagnostics']['python']['implementation']
+        and re.fullmatch(r'3\.[0-9]+\.[0-9]+',receipt['runtime']['current_diagnostics']['python']['version']) is not None
         and receipt['runtime']['typescript'] == ({'declared_locked':'6.0.3','current_binary_observed':'Version 6.0.3','current_qualification_execution':True}
             if receipt['mode'] == 'fresh_execution' else {'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False})
         and receipt['commit'] == run['commit_sha'] and receipt['tree'] ==
@@ -418,8 +458,9 @@ def v1_result(api,scope,workspace,rid,jid,current,*,root_only=False):
 
 
 def matching_result(api,scope,workspace,current,current_run,key):
-    # Bounded complete pagination; malformed matching evidence never becomes a rerun.
-    # Overall status does not erase a successfully completed web job.
+    # This protocol recognizes the explicit legacy origin and v1 producers.
+    # Older heads without cohort evidence are outside it, not proven passes
+    # or source inequalities. Never parse them with today's closure family.
     runs = api.pages('/actions/runs',{'workflow_id':'main-fast-lane.yml',
         'ref':f"refs/pull/{scope['pr']}/head"},'workflow_runs')
     seen = set()
@@ -427,12 +468,32 @@ def matching_result(api,scope,workspace,current,current_run,key):
         rid = receipts.positive(listed['id'])
         if rid in seen or rid == current_run or rid == ORIGIN_RUN or listed.get('prettyref') != '#'+str(scope['pr']): continue
         seen.add(rid)
-        run = api.get('/actions/runs/'+str(rid)); event = adoption.bind_event(run,scope)
+        run = api.get('/actions/runs/'+str(rid)); event = adoption.bind_event(run,scope,ready=False)
         require(run.get('id') == rid and run.get('commit_sha') == listed.get('commit_sha'),'Web history metadata changed')
+        artifacts = [item for item in api.pages('/actions/runs/'+str(rid)+'/artifacts')
+            if re.fullmatch(r'web-cohort-'+str(rid)+r'-[1-9][0-9]*',str(item.get('name','')))]
+        workflow = git(workspace,'show',run['commit_sha']+':'+WORKFLOW,limit=128*1024)
+        if not artifacts and b'validation.web_cohort_retention' not in workflow:
+            continue
+        require(workflow_identity(workspace,run['commit_sha'])['kind'] == 'v1',
+            'Eligible web producer has unsupported recipe; closure review required')
+        require(git(workspace,'show',run['commit_sha']+':'+ADAPTER,limit=256*1024) ==
+            git(workspace,'show',current+':'+ADAPTER,limit=256*1024),
+            'Eligible web producer adapter compatibility unknown; closure review required')
+        jobs = [j for j in api.pages('/actions/runs/'+str(rid)+'/jobs') if j.get('name') == JOB]
+        if not artifacts and len(jobs) == 1 and jobs[0].get('status') == 'skipped' and type(jobs[0].get('task_id')) is int and jobs[0]['task_id'] == 0:
+            require(jobs[0].get('repo_id') == scope['repository'] and jobs[0].get('run_id') == rid,
+                'Never-started web producer identity differs')
+            continue
+        adoption.bind_event(run,scope)
         inputs = manifest(workspace,run['commit_sha'],event['pull_request']['base']['sha'])
         if execution_key(inputs) != key: continue
-        jobs = [j for j in api.pages('/actions/runs/'+str(rid)+'/jobs') if j.get('name') == JOB and j.get('status') == 'success']
-        require(len(jobs) == 1,'Matching web history is incomplete/ambiguous; no fallback execution')
+        require(len(jobs) == 1 and jobs[0].get('status') == 'success',
+            'Matching web history is incomplete/ambiguous; no fallback execution')
+        require(len(artifacts) == 1 and artifacts[0].get('name') == f'web-cohort-{rid}-1'
+            and type(artifacts[0].get('run_id')) is int and artifacts[0]['run_id'] == rid
+            and artifacts[0].get('expired') is False,
+            'Matching web cohort artifact missing/invalid/ambiguous; no fallback execution')
         return v1_result(api,scope,workspace,rid,jobs[0]['id'],current)
     return None
 
@@ -445,7 +506,7 @@ def write_receipt(output,receipt):
 def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
     api,scope,current,run,job,base = context
     require(workflow_identity(workspace,current)['kind'] == 'v1','Current web job lacks reviewed adapter')
-    live_inputs(workspace)
+    live_inputs(workspace);live_script_resolvers(workspace,current)
     inputs = manifest(workspace,current,base); key = execution_key(inputs)
     origin_inputs = manifest(workspace,PRODUCER,'9bcfa9ca1f792d214122762981c84c85ba5b3e64')
     original = legacy_result(api,scope,workspace) if scope['repository'] == 1 and scope['pr'] == 1263 and key == execution_key(origin_inputs) else matching_result(api,scope,workspace,current,run['id'],key)
@@ -459,7 +520,7 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
     again = current_context(workspace)
     require(again[2] == current and again[3]['id'] == run['id'] and again[4]['id'] == job['id']
         and again[4]['task_id'] == job['task_id'] and again[5] == base,'Current web API/source drifted')
-    live_inputs(workspace)
+    live_inputs(workspace);live_script_resolvers(workspace,current)
     require(manifest(workspace,current,base) == inputs and not git(workspace,'diff','--name-only','HEAD'),'Current web source changed before decision')
     if original:
         receipt['origin'],raw = original
@@ -490,6 +551,10 @@ def run_gate(workspace,context,output,actual_runtime,fresh_on_new_inputs=False):
             receipt['runtime']['typescript'] = {'declared_locked':'6.0.3','current_binary_observed':version,'current_qualification_execution':True}
             marker('WEB-COHORT-FINISH '+key+' 0')
         raw = path.read_bytes(); fresh_log(raw,key)
+    live_inputs(workspace);live_script_resolvers(workspace,current)
+    require(git(workspace,'rev-parse','HEAD',limit=64).decode().strip() == current
+        and not git(workspace,'diff','--name-only','HEAD') and manifest(workspace,current,base) == inputs,
+        'Web source changed during cohort; no receipt acceptance')
     receipt['log_sha256'] = digest(raw)
     write_receipt(output,receipt)
     print('Web cohort '+receipt['mode']+'; original provenance preserved; current test events='+str(receipt['current_test_events']),flush=True)
