@@ -29,6 +29,39 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Adaptive effort source binding and cleanup limits — 2026-10-26
+
+Source inspected: `22630e27a7bb96fb99a6bd43bdb157fcca563569`.
+All mapped source inputs are inherited unchanged from task base `647e4bb68`;
+this refresh repairs their drift in the continuing adaptive effort.
+
+The original heartbeat is now registered before entry and joined through its
+retained handle. Its mutex stays held across the original join, then releases
+before retirement. Retirement holds the token-state mutex across Store waits
+and retains the same token on ambiguous/error outcomes. Failed heartbeat join
+skips retirement. These facts differ from unconditional modeled `FinishRetire`
+claim/token removal: correspondence is restricted to acknowledged or resolved
+normal outcomes, with failed join and ambiguous settlement explicitly excluded.
+
+Worker correspondence records those guards and weakens the affected claims to
+explicit descriptive abstractions. It establishes no lock-order theorem,
+deadlock freedom, fairness, successful cleanup or native closure. Driver event
+schedules do not directly observe positive heartbeat join. Local admission
+`Arc` destruction can leave original worker/result aliases alive; last-owner
+release and persistent Unknown remain outside the modeled local-drop fact.
+
+Other inspected changes preserve selected library authority, claim/renewal and
+publication SQL predicates. Store additions concern adaptive/settings APIs;
+scanner/process changes retain original admissions; lockfile additions leave
+pinned Tokio/Hiqlite versions unchanged. The formal-publication fixture change
+relocates an import. Anchors and whole-file bindings are refreshed after that
+source review, rather than treating new hashes as semantic proof.
+
+Models, configurations, test inventory and validators are unchanged. Historical
+qualification retains its original source and scope. This source-binding audit
+runs no model or behavioral tests and grants no Fable approval. Complete
+adaptive-candidate review/fixes still precede behavioral qualification.
+
 ## Selected source binding refresh — 2026-10-22
 
 The 16 `background_jobs.rs` bindings were compared from their exact prior

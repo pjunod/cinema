@@ -49,7 +49,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -65,7 +65,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
+        "sha256": "804f0ac91289fe95b18e1399274246ae506cf128888878660e6e4a583f076d05"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -97,7 +97,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -114,7 +114,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -131,7 +131,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -148,7 +148,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -165,7 +165,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -182,7 +182,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -199,7 +199,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -233,7 +233,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -250,7 +250,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
+        "sha256": "804f0ac91289fe95b18e1399274246ae506cf128888878660e6e4a583f076d05"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -269,7 +269,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -286,7 +286,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -303,7 +303,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
+        "sha256": "804f0ac91289fe95b18e1399274246ae506cf128888878660e6e4a583f076d05"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -319,7 +319,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -336,7 +336,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -353,7 +353,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -369,7 +369,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -385,7 +385,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -401,7 +401,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -417,7 +417,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -433,7 +433,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -450,7 +450,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -467,7 +467,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -484,7 +484,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -501,7 +501,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -518,7 +518,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -534,7 +534,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -680,7 +680,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -696,7 +696,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -712,7 +712,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -728,7 +728,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -744,7 +744,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -760,7 +760,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -776,7 +776,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -857,7 +857,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -870,34 +870,44 @@
       "action": "FinishJoin",
       "worker": "both",
       "source": {
-        "file": "crates/plurxd/src/library_work.rs",
-        "symbol": "work_library_queue",
-        "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "JobFence::finish_original_controller",
+        "anchor": "pub(crate) async fn finish_original_controller(&self) -> BackgroundControllerClosed {",
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
-      "held_across_await": [],
+      "held_across_await": [
+        {
+          "lock": "original_heartbeat_handle_mutex",
+          "holder_task": "worker task"
+        }
+      ],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The retained original heartbeat handle is borrowed across join. A cancelled waiter preserves it; a failed join skips retirement. Existing driver event schedules do not directly observe positive heartbeat join. The handle mutex releases before retirement acquires the token mutex. Guard fields disclose selected source lifetimes only: no lock-order theorem, deadlock freedom, fairness, successful join/settlement, unconditional progress, last-alias release or native closure is established."
     },
     {
       "kind": "action",
       "action": "FinishRetire",
       "worker": "both",
       "source": {
-        "file": "crates/plurxd/src/library_work.rs",
-        "symbol": "work_library_queue",
-        "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "file": "crates/plurxd/src/background_jobs.rs",
+        "symbol": "JobFence::retire",
+        "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
-      "held_across_await": [],
+      "held_across_await": [
+        {
+          "lock": "queue_token_mutex",
+          "holder_task": "worker task"
+        }
+      ],
       "completed_by": "worker task",
-      "trust": "code-fact",
+      "trust": "abstraction",
       "schedules": [
         "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
-      ]
+      ],
+      "gap": "The token-state guard spans initial settle, resolve and possible final settle awaits. Only acknowledged settlement or authoritative Settled clears the original token; ambiguous/error outcomes retain it, and failed controller joins do not call this method. Model FinishRetire is a bounded known-outcome abstraction, not an unconditional source postcondition. Named schedules are bounded driver observations, not coverage of these uncertain outcomes. This lock boundary inventories the selected retirement guard, not every token-mutex user. Guard fields disclose selected source lifetimes only: no lock-order theorem, deadlock freedom, fairness, successful join/settlement, unconditional progress, last-alias release or native closure is established."
     },
     {
       "kind": "action",
@@ -915,7 +925,7 @@
       "schedules": [
         "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete"
       ],
-      "gap": "The production controller emits ordered DropAdmission; the daemon executes the real guard drop. Controller local safety does not prove complete driver trace refinement or asynchronous progress."
+      "gap": "The production controller emits ordered DropAdmission; the daemon executes the real guard drop. Controller local safety does not prove complete driver trace refinement or asynchronous progress. The controller/local driver Arc drop does not establish last-alias release: original queued/native/FS work and unclaimed results may retain the same admission. It proves neither native closure nor absence of persistent Unknown; full driver-trace refinement and asynchronous progress remain unproved."
     },
     {
       "kind": "action",
@@ -925,7 +935,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -943,7 +953,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -960,7 +970,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -977,7 +987,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -993,7 +1003,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1010,7 +1020,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1027,7 +1037,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1044,7 +1054,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1059,15 +1069,20 @@
       "worker": "both",
       "source": {
         "file": "crates/plurxd/src/background_jobs.rs",
-        "symbol": "claim_library",
-        "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "symbol": "JobFence::retire",
+        "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
-      "held_across_await": [],
+      "held_across_await": [
+        {
+          "lock": "queue_token_mutex",
+          "holder_task": "worker task"
+        }
+      ],
       "completed_by": "worker task",
       "trust": "abstraction",
       "schedules": "unchecked",
-      "gap": "Boundary is inventoried from source but not controlled or asserted by current schedules."
+      "gap": "The token-state guard spans initial settle, resolve and possible final settle awaits. Only acknowledged settlement or authoritative Settled clears the original token; ambiguous/error outcomes retain it, and failed controller joins do not call this method. Model FinishRetire is a bounded known-outcome abstraction, not an unconditional source postcondition. Named schedules are bounded driver observations, not coverage of these uncertain outcomes. This lock boundary inventories the selected retirement guard, not every token-mutex user. Guard fields disclose selected source lifetimes only: no lock-order theorem, deadlock freedom, fairness, successful join/settlement, unconditional progress, last-alias release or native closure is established."
     },
     {
       "kind": "boundary",
@@ -1075,15 +1090,20 @@
       "worker": "both",
       "source": {
         "file": "crates/plurxd/src/background_jobs.rs",
-        "symbol": "ActiveBackgroundJob::finish",
-        "anchor": "pub(crate) async fn finish(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "symbol": "JobFence::retire",
+        "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
-      "held_across_await": [],
+      "held_across_await": [
+        {
+          "lock": "queue_token_mutex",
+          "holder_task": "worker task"
+        }
+      ],
       "completed_by": "worker task",
       "trust": "abstraction",
       "schedules": "unchecked",
-      "gap": "Boundary is inventoried from source but not controlled or asserted by current schedules."
+      "gap": "The token-state guard spans initial settle, resolve and possible final settle awaits. Only acknowledged settlement or authoritative Settled clears the original token; ambiguous/error outcomes retain it, and failed controller joins do not call this method. Model FinishRetire is a bounded known-outcome abstraction, not an unconditional source postcondition. Named schedules are bounded driver observations, not coverage of these uncertain outcomes. This lock boundary inventories the selected retirement guard, not every token-mutex user. Guard fields disclose selected source lifetimes only: no lock-order theorem, deadlock freedom, fairness, successful join/settlement, unconditional progress, last-alias release or native closure is established."
     },
     {
       "kind": "boundary",
@@ -1093,7 +1113,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1125,15 +1145,15 @@
       "worker": "both",
       "source": {
         "file": "crates/plurxd/src/background_jobs.rs",
-        "symbol": "ActiveBackgroundJob::claim",
-        "anchor": "let heartbeat = tokio::spawn(async move {",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "symbol": "ActiveBackgroundJob::start",
+        "anchor": "let heartbeat_future = async move {",
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
       "held_across_await": [],
       "completed_by": "worker task",
       "trust": "abstraction",
       "schedules": "unchecked",
-      "gap": "Spawned heartbeat timing/stop/join are outside task-local control; the path is inventoried only."
+      "gap": "The actual heartbeat future starts after its original handle is registered. Timing, renewal drain, stop and positive join are outside task-local control; this is a source inventory, not a controlled conformance schedule."
     },
     {
       "kind": "boundary",
@@ -1157,15 +1177,20 @@
       "worker": "both",
       "source": {
         "file": "crates/plurxd/src/background_jobs.rs",
-        "symbol": "ActiveBackgroundJob::finish",
-        "anchor": "pub(crate) async fn finish(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "symbol": "JobFence::finish_original_controller",
+        "anchor": "pub(crate) async fn finish_original_controller(&self) -> BackgroundControllerClosed {",
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
-      "held_across_await": [],
+      "held_across_await": [
+        {
+          "lock": "original_heartbeat_handle_mutex",
+          "holder_task": "worker task"
+        }
+      ],
       "completed_by": "worker task",
       "trust": "abstraction",
       "schedules": "unchecked",
-      "gap": "Spawned heartbeat timing/stop/join are outside task-local control; the path is inventoried only."
+      "gap": "The retained original heartbeat handle is borrowed across join. A cancelled waiter preserves it; a failed join skips retirement. Existing driver event schedules do not directly observe positive heartbeat join. The handle mutex releases before retirement acquires the token mutex. Guard fields disclose selected source lifetimes only: no lock-order theorem, deadlock freedom, fairness, successful join/settlement, unconditional progress, last-alias release or native closure is established."
     },
     {
       "kind": "boundary",
@@ -1238,16 +1263,22 @@
       "worker": "both",
       "source": {
         "file": "crates/plurxd/src/background_jobs.rs",
-        "symbol": "ActiveBackgroundJob::finish",
-        "anchor": "pub(crate) async fn finish(",
-        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
+        "symbol": "JobFence::retire",
+        "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
+        "sha256": "ceb51ff45024fbedec75adaba16a66e5aba3bb38a5da668f55deef31f02e206f"
       },
-      "held_across_await": [],
+      "held_across_await": [
+        {
+          "lock": "queue_token_mutex",
+          "holder_task": "worker task"
+        }
+      ],
       "completed_by": "worker task",
-      "trust": "code-fact",
+      "trust": "abstraction",
       "schedules": [
         "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
-      ]
+      ],
+      "gap": "The token-state guard spans initial settle, resolve and possible final settle awaits. Only acknowledged settlement or authoritative Settled clears the original token; ambiguous/error outcomes retain it, and failed controller joins do not call this method. Model FinishRetire is a bounded known-outcome abstraction, not an unconditional source postcondition. Named schedules are bounded driver observations, not coverage of these uncertain outcomes. This lock boundary inventories the selected retirement guard, not every token-mutex user. Guard fields disclose selected source lifetimes only: no lock-order theorem, deadlock freedom, fairness, successful join/settlement, unconditional progress, last-alias release or native closure is established."
     },
     {
       "kind": "boundary",
@@ -1257,14 +1288,15 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "1fba83f2c55e4e649bd3cdd8db28e9419e88d3c75064fe13a78b50dd65abd08e"
       },
       "held_across_await": [],
       "completed_by": "worker task",
       "trust": "code-fact",
       "schedules": [
         "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      ],
+      "gap": " The controller/local driver Arc drop does not establish last-alias release: original queued/native/FS work and unclaimed results may retain the same admission. It proves neither native closure nor absence of persistent Unknown; full driver-trace refinement and asynchronous progress remain unproved."
     },
     {
       "kind": "boundary",
@@ -1274,7 +1306,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_completion_after_release_and_rebind_is_rejected",
         "anchor": "async fn formal_publication_library_completion_after_release_and_rebind_is_rejected()",
-        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
+        "sha256": "804f0ac91289fe95b18e1399274246ae506cf128888878660e6e4a583f076d05"
       },
       "held_across_await": [],
       "completed_by": "store trigger",
