@@ -128,15 +128,41 @@ def rgb48_frames(path, frames, raster, matrix=None):
         process.wait(timeout=60)
 
 
-def psnr(reference, candidate, frames, matrix=None):
-    """FFmpeg's PSNR over every pixel of every frame, on 16-bit PQ R'G'B'."""
-    graph = (f'[0:v]format=gbrp16le[r];[1:v]{rgb48_filter(matrix)},format=gbrp16le[c];'
-             '[r][c]psnr')
+def psnr(reference, candidate, frames, matrix=None, region=None):
+    """FFmpeg's PSNR over every pixel of every frame, on 16-bit PQ R'G'B'.
+
+    Both inputs are restamped to their frame index first. The psnr filter
+    pairs frames by timestamp, and a 23.976 fps window in a millisecond time
+    base (41.708 ms stored as 42) is otherwise paired with the previous
+    reference frame two times in three.
+    """
+    index = 'settb=expr=1,setpts=N'
+    crop = ''
+    if region:
+        x0, y0, x1, y1 = region
+        crop = f',crop={x1 - x0}:{y1 - y0}:{x0}:{y0}'
+    graph = (f'[0:v]{index},format=gbrp16le{crop}[r];[1:v]{index},{rgb48_filter(matrix)},'
+             f'format=gbrp16le{crop}[c];[r][c]psnr')
     stderr = run([FFMPEG, '-nostdin', '-hide_banner', '-i', str(reference), '-i', str(candidate),
                   '-frames:v', str(frames), '-lavfi', graph, '-f', 'null', '-']).stderr.decode()
     line = [line for line in stderr.splitlines() if 'PSNR' in line and 'average:' in line][-1]
     value = line.split('average:')[1].split()[0]
     return math.inf if value == 'inf' else float(value)
+
+
+def active_region(reference, raster, threshold=1024):
+    """The picture inside any letterbox/pillarbox, from the reference's first
+    frame: rows and columns holding a sample above `threshold` (16-bit PQ,
+    about 0.03 nits). Bars carry no picture, and Delta E ITP near 0 nits is
+    so steep that a bar at 0.00001 vs 0.004 nits scores 10 on every pixel."""
+    width, height = raster
+    frame = next(rgb48_frames(reference, 1, raster))
+    rows = [y for y in range(height)
+            if max(frame[y * width * 3:(y + 1) * width * 3]) > threshold]
+    cols = [x for x in range(0, width) if any(
+        max(frame[(y * width + x) * 3:(y * width + x) * 3 + 3]) > threshold
+        for y in range(rows[0], rows[-1] + 1, 8))]
+    return (cols[0] & ~1, rows[0] & ~1, (cols[-1] + 2) & ~1, (rows[-1] + 2) & ~1)
 
 
 def bl_digest(path, frames):
@@ -146,9 +172,16 @@ def bl_digest(path, frames):
     return hashlib.sha256(data).hexdigest(), len(data)
 
 
-def compare(reference, candidate, frames, raster, matrix=None):
+def summary(deltas):
+    deltas.sort()
+    return round(sum(deltas) / len(deltas), 4), round(deltas[int(0.99 * (len(deltas) - 1))], 4)
+
+
+def compare(reference, candidate, frames, raster, matrix=None, region=None):
+    """Whole frame, and (with `region`) the active picture inside the bars."""
     width, height = raster
-    deltas = []
+    x0, y0, x1, y1 = region or (0, 0, width, height)
+    deltas, active = [], []
     pairs = zip(rgb48_frames(reference, frames, raster), rgb48_frames(candidate, frames, raster, matrix))
     for ref_frame, cand_frame in pairs:
         for y in range(STRIDE // 2, height, STRIDE):
@@ -157,15 +190,24 @@ def compare(reference, candidate, frames, raster, matrix=None):
                 at = row + 3 * x
                 ref = [metrics.pq_eotf(ref_frame[at + c] / 65535) for c in range(3)]
                 cand = [metrics.pq_eotf(cand_frame[at + c] / 65535) for c in range(3)]
-                deltas.append(metrics.delta_e_itp(metrics.rgb_nits_to_ictcp(ref),
-                                                  metrics.rgb_nits_to_ictcp(cand)))
-    deltas.sort()
-    return {
+                delta = metrics.delta_e_itp(metrics.rgb_nits_to_ictcp(ref),
+                                            metrics.rgb_nits_to_ictcp(cand))
+                deltas.append(delta)
+                if x0 <= x < x1 and y0 <= y < y1:
+                    active.append(delta)
+    mean, p99 = summary(deltas)
+    result = {
         'psnr_db': psnr(reference, candidate, frames, matrix),
-        'delta_e_itp_mean': round(sum(deltas) / len(deltas), 4),
-        'delta_e_itp_p99': round(deltas[int(0.99 * (len(deltas) - 1))], 4),
+        'delta_e_itp_mean': mean,
+        'delta_e_itp_p99': p99,
         'delta_e_itp_samples': len(deltas),
     }
+    if region:
+        mean, p99 = summary(active)
+        result['active'] = {'psnr_db': psnr(reference, candidate, frames, matrix, region),
+                            'delta_e_itp_mean': mean, 'delta_e_itp_p99': p99,
+                            'delta_e_itp_samples': len(active)}
+    return result
 
 
 def main():
@@ -219,10 +261,11 @@ def main():
     bl_source = bl_digest(source_cut, frames)
     bl_converted = bl_digest(converted, frames)
 
-    composed = compare(reference_nut, served, frames, raster, matrix='bt2020')
-    el_dropped = compare(reference_nut, dropped_nut, frames, raster)
-    composed_420 = compare(reference_nut, composed_yuv, frames, raster, matrix='bt2020')
-    el_dropped_420 = compare(reference_nut, dropped_yuv, frames, raster, matrix='bt2020')
+    region = active_region(reference_nut, raster)
+    composed = compare(reference_nut, served, frames, raster, 'bt2020', region)
+    el_dropped = compare(reference_nut, dropped_nut, frames, raster, None, region)
+    composed_420 = compare(reference_nut, composed_yuv, frames, raster, 'bt2020', region)
+    el_dropped_420 = compare(reference_nut, dropped_yuv, frames, raster, 'bt2020', region)
     result = {
         'source': {'raster': raster, 'frames': frames, 'start': str(start), 'end': str(end)},
         'served_window': {'bytes': served.stat().st_size, 'renderer_decode': meta.get('renderer_decode'),
@@ -236,6 +279,7 @@ def main():
         'pre_encode_420': {'composed_vs_fel_reference': composed_420,
                            'el_dropped_vs_fel_reference': el_dropped_420},
         'stride': STRIDE,
+        'active_region': region,
     }
     # Composition: the same pictures through the same 4:2:0 path, the only
     # difference being whether the enhancement layer was composed.
