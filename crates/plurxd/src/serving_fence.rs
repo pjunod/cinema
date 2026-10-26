@@ -203,6 +203,34 @@ impl ServingAuthority {
         })
     }
 
+    // Shared original outage ownership. No metrics/name/path clone is needed
+    // to inspect the exact fence or retain its original operation mutex.
+    pub(crate) async fn current_planned_outage(&self) -> Option<PlannedOutageFenceToken> {
+        let mut state = self.restart_drain.state.lock().await;
+        expire_restart_drain(&mut state);
+        state.token.or_else(|| {
+            self.restart_drain
+                .unresolved_releases
+                .lock()
+                .expect("planned-outage release set")
+                .iter()
+                .copied()
+                .max_by_key(|token| token.generation)
+        })
+    }
+
+    pub(crate) async fn planned_outage_is_current(&self, token: PlannedOutageFenceToken) -> bool {
+        self.current_planned_outage().await == Some(token)
+    }
+
+    pub(crate) fn try_planned_outage_operation_guard(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, &'static str> {
+        Arc::clone(&self.restart_drain.operation_gate)
+            .try_lock_owned()
+            .map_err(|_| "planned-outage operation already in progress")
+    }
+
     pub(crate) fn state(&self) -> ServingState {
         loop {
             let before = self.loss_generation.load(Ordering::Acquire);
@@ -560,21 +588,11 @@ impl ServingFence {
     /// owner is still live. Existing playback control uses this as relocation
     /// intent; it never treats a quorum-authority loss as a planned handoff.
     pub(crate) async fn current_planned_outage(&self) -> Option<PlannedOutageFenceToken> {
-        let mut state = self.restart_drain.state.lock().await;
-        expire_restart_drain(&mut state);
-        state.token.or_else(|| {
-            self.restart_drain
-                .unresolved_releases
-                .lock()
-                .expect("planned-outage release set")
-                .iter()
-                .copied()
-                .max_by_key(|token| token.generation)
-        })
+        self.authority().current_planned_outage().await
     }
 
     pub(crate) async fn planned_outage_is_current(&self, token: PlannedOutageFenceToken) -> bool {
-        self.current_planned_outage().await == Some(token)
+        self.authority().planned_outage_is_current(token).await
     }
 
     /// Read-only placement predicate. Unlike `try_restart_admission`, it does
@@ -590,9 +608,7 @@ impl ServingFence {
     pub(crate) fn try_planned_outage_operation_guard(
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, &'static str> {
-        Arc::clone(&self.restart_drain.operation_gate)
-            .try_lock_owned()
-            .map_err(|_| "planned-outage operation already in progress")
+        self.authority().try_planned_outage_operation_guard()
     }
 
     /// Cleanup created by an already-admitted owner may wait behind that one
@@ -1231,6 +1247,27 @@ impl Drop for PendingLossTransition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shared_authority_observes_and_guards_the_same_original_outage() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let authority = fence.authority();
+        let token = fence
+            .begin_restart_preparation_until(unix_ms() + 60_000)
+            .await
+            .expect("original outage");
+        assert_eq!(authority.current_planned_outage().await, Some(token));
+        assert!(authority.planned_outage_is_current(token).await);
+        let original_guard = authority
+            .try_planned_outage_operation_guard()
+            .expect("original operation mutex");
+        assert!(fence.try_planned_outage_operation_guard().is_err());
+        drop(original_guard);
+        assert!(fence.try_planned_outage_operation_guard().is_ok());
+        fence.cancel_planned_outage_preparation(token, 0).await;
+        assert_eq!(authority.current_planned_outage().await, None);
+        assert!(!authority.planned_outage_is_current(token).await);
+    }
 
     #[tokio::test]
     async fn original_work_snapshot_follows_zero_admissions_and_blocks_on_unknown() {
