@@ -878,6 +878,11 @@
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
     padding:10px 16px;border-radius:10px;z-index:60;opacity:0;transition:opacity .2s;pointer-events:none}
   .toast.show{opacity:1}
+  /* plurx Player handoff (docs/clients/LINUX-PLAYER-PLAN.md §4.1): actionable, so not a toast. */
+  .handoff-notice{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
+    padding:12px 16px;border-radius:10px;z-index:61;max-width:min(480px,calc(100vw - 32px))}
+  .handoff-notice p{margin:0 0 6px}
+  .handoff-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
   .err{color:var(--bad);font-size:13px;min-height:18px;margin-top:8px}
   /* minmax(0,1fr), not 1fr: a plain 1fr track has an implicit min-content
      minimum, so a wide child (the libraries table with its path chips + action

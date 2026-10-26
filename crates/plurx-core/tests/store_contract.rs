@@ -35,6 +35,8 @@ mod jellyfin_identity;
 mod jellyfin_login;
 #[path = "store_contract/jellyfin_play.rs"]
 mod jellyfin_play;
+#[path = "store_contract/playback_handoffs.rs"]
+mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
 mod remote;
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -589,6 +591,11 @@ const SHARED_CACHE_METHODS: &[&str] = &[
 const BACKGROUND_JOB_METHODS: &[&str] = &[
     // Both-backend title publication/cancellation/reprobe and priority
     // contracts in store_contract/dv_title_jobs.rs exercise these five.
+    // The source-fenced FEL verdict/requalification contract exercises these
+    // three methods on every backend in store_contract/dv_title_jobs.rs.
+    "put_dv_fel_verdict",
+    "request_dv_fel_requalification",
+    "dv_fel_verdict_counts",
     "dv_title_readiness",
     "dv_title_demands",
     "bind_dv_title_demand",
@@ -18712,6 +18719,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
     // v102–v103).
     // Plus the item ratings and per-person lists (SQLite v113).
+    // Plus the playback handoff codes and tokens (SQLite v115).
     let mut imported_tables = report
         .tables
         .iter()
@@ -18785,6 +18793,8 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "media_sessions",
             "offline_package_leases",
             "offline_packages",
+            "playback_handoffs",
+            "playback_handoffs_tokens",
             "pretranscode_jobs",
             "quality_cancellation_receipts",
             "quality_preparation_owners",
@@ -20821,7 +20831,8 @@ fn contract_inventory_matches_every_store_method() {
     // `annotation_contract_runs_through_dyn_store`.
     // +5: source-revision title demand/readiness, binding, fenced publication
     // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
-    assert_eq!(declared.len(), 508, "review the Store method count");
+    // +3: source-fenced FEL verdict write, requalification and verdict counts.
+    assert_eq!(declared.len(), 511, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-25, plurx has 388 routes declared by the ordinary listener's
+As of 2026-10-25, plurx has 390 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 additional HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 388 routes across the registered routers.
+plurx has 390 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -110,6 +110,7 @@ prefix, not by the carrier:
 |---|---|---|---|
 | Login token | 64 hex chars (32 random bytes) | `POST /api/v1/auth/login`, `POST /api/v1/setup` | SHA-256 of the secret, in `tokens` |
 | API key | `plx_` + 32 hex chars (16 random bytes) | `POST /api/v1/keys` | SHA-256 of the secret, in `api_keys` |
+| Playback handoff token | 64 hex chars, like a login token | `POST /api/v1/playback-handoffs/redeem` (§13.2) | SHA-256 in `playback_handoffs_tokens` — never in `tokens` |
 
 The `plx_` prefix says which table to look in *before* any lookup, so a key
 and a token are never tried against each other's store and "not found" keeps
@@ -127,6 +128,21 @@ exactly once, at creation.
 
 Admin-ness is re-read from the store on **every** request, so demoting a user
 takes effect on their next request without revoking their token.
+
+**Token audiences.** A login-token-shaped bearer authenticates for exactly one
+audience (`TokenAudience` in `crates/plurx-core/src/store/mod.rs`):
+
+| Audience | Row | Accepted by |
+|---|---|---|
+| `Native` | a `tokens` row with no Jellyfin marker | `AuthUser` and every extractor built on it |
+| `JellyfinCompatibility` | a `tokens` row with a `jellyfin_login_tokens` marker | the Jellyfin façade only (§22) |
+| `PlaybackHandoff` | a `playback_handoffs_tokens` row (not in `tokens`), unexpired, whose minting token still exists | `PlaybackPrincipal` (the decision, HLS create, direct play, text subtitle, item progress and client-log routes, for one file) and `HandoffToken` (`DELETE /api/v1/playback-handoffs/self`) — §13.2 |
+
+`AuthUser` asks for the native audience, so a Jellyfin login or a playback
+handoff token is an unknown bearer there: 401, exactly as for a token that was
+never minted. A handoff token is kept out of `tokens` on purpose: every native
+lookup reads only that table, so even a binary older than the handoff tables,
+still serving during a rolling upgrade, finds nothing and answers 401.
 
 `ScopedKey` returns 401 rather than 403 for a login token because the
 credential is the wrong *kind*, and 403 would suggest the right token could
@@ -238,6 +254,12 @@ Otherwise a token stops working only when its row is deleted:
 | `PUT /api/v1/users/{id}` with a `password` | every token of that user |
 | `DELETE /api/v1/users/{id}` | every token of that user, by cascade |
 | `DELETE /api/v1/keys/{id}` | that API key |
+| `DELETE /api/v1/playback-handoffs/self` | that playback handoff token |
+
+A playback handoff token also stops working, with no delete, six hours after
+redemption or as soon as the token that minted it is deleted by any row above
+(§13.2). It leaves the devices list at that moment and is pruned within the
+hour.
 
 Demotion (`is_admin: false`) deletes no tokens and does not need to, because
 `AdminUser` re-reads the flag per request. Every revoking handler wraps its
@@ -2621,6 +2643,64 @@ resume into a stale locator. A **recency** conflict between two devices is
 resolved by the same policy watch progress uses: a live write (no
 `recorded_at`) always wins, and a dated offline write older than the stored
 row updates nothing and returns the existing winning row.
+
+### 13.2 Playback handoffs — one title, handed to another app
+
+| Method | Path | Auth | What it does |
+|---|---|---|---|
+| POST | `/api/v1/playback-handoffs` | bearer (native) | Mint a one-time code for one file. Body `{file_id, start_ms?, audio?, subtitle?}` (`audio` and `subtitle` are the stream indexes HLS create takes; `subtitle: -1` is Off, as the decision route reads it); 201 `{id, code, expires_in: 120}`. Unknown file 404; a negative `start_ms` or `audio`, or a `subtitle` below -1, 400 |
+| POST | `/api/v1/playback-handoffs/redeem` | **none** — the code is the credential | Body `{code, device?}`; 200 `{token, handoff_id, file_id, item_id, start_ms, audio, subtitle, user, origin, expires_at}` (`item_id` is the file's item, for progress). A code never minted (or not code-shaped) 404; a code already redeemed, past its 120 s, or minted by a token since revoked 410 `handoff_gone` |
+| GET | `/api/v1/playback-handoffs/{id}` | the minting bearer | `{redeemed: bool}`. Any other bearer, even the same user's, 404 |
+| DELETE | `/api/v1/playback-handoffs/self` | playback handoff token only | Revoke the presented handoff token; 204. A native bearer 401 |
+
+**Why.** A web session sometimes has to give another local app — the Linux
+player ([LINUX-PLAYER-PLAN.md](clients/LINUX-PLAYER-PLAN.md) §3.1) — playback
+of one title. A bearer in a `plurx-player://` URL would land in shell
+history, `ps` and desktop logs, and any program can register that scheme. So
+the URL carries only a code: 32 random bytes as unpadded base64url (43
+characters), stored as its SHA-256, single use, and dead after 120 s. The code
+is minted against the bearer that asked, and the status read answers only that
+bearer, which is how the web app tells "the player opened" from "the player is
+not installed".
+
+**The token.** Redemption mints a 64-hex token whose audience is
+`PlaybackHandoff` (§2.2), stored as its SHA-256 in `playback_handoffs_tokens`
+with its file, expiry, minting token and `device` label (default `Playback
+handoff`, at most 256 bytes). It is never a row in `tokens`, so no native
+lookup can accept it (§2.2). `GET /api/v1/me/devices` unions the table in, so
+the token is listed there and `DELETE /api/v1/me/devices/{prefix}` revokes it.
+The code's claim and the token are written in one transaction on both stores.
+It lives six hours from redemption and dies
+with the token that minted it — logout, a password change, revoking that
+device — so signing out of the web app stops the player too.
+
+It is accepted only here, and only for the handed-off file:
+
+| Route | Scope check |
+|---|---|
+| `GET`, `POST /api/v1/files/{id}/decision` | `id` is the handed-off file |
+| `POST /api/v1/files/{id}/hls/sessions` | `id` is the handed-off file |
+| `GET /api/v1/files/{id}/direct` | `id` is the handed-off file |
+| `GET /api/v1/files/{id}/subs/{subtitle}` | `id` is the handed-off file |
+| `POST /api/v1/items/{id}/progress` | `id` is the handed-off file's item |
+| `POST /api/v1/client-log` | none: reports are attributed to the user |
+| `DELETE /api/v1/playback-handoffs/self` | itself |
+
+A route above for another file or item answers 403 `handoff_scope`. Every other
+user route answers 401, because the token is not a native bearer. HLS control,
+status, playlists and teardown (`/api/v1/hls/{session}/…`) read no bearer at
+all: the session id is their capability (§2.4), so the player uses them with
+the session it created.
+
+**`origin`.** plurx has no configured canonical origin. The redeem response
+carries the `Origin` header of the mint request when it was a plain
+`http(s)://host[:port]` — the origin the minting web app was served from,
+which is the `server` it puts in the player URL — and `null` otherwise.
+
+Codes and tokens live in the `playback_handoffs*` extension (SQLite v115; the
+replicated store installs the same objects from its current-schema arm) and
+are imported with `tokens` by a SQLite-to-cluster import, so an imported token
+keeps its audience.
 
 ---
 

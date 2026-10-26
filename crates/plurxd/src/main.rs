@@ -3022,6 +3022,16 @@ async fn probe_system(
     for (codec, backend, decoder) in measured_decoders.measured_paths() {
         tracing::info!(%codec, backend = backend.name(), %decoder, "measured the decoder this ffmpeg selects");
     }
+    // The Dolby Vision renderer's CPU debit reads this. Warm it off the boot
+    // path: until it is proved, a play is debited the software shape, and a
+    // failure is retried on later need (`has_hevc_main10_vaapi_decode`).
+    drop(tokio::spawn(async {
+        let hevc_main10_vaapi_decode = crate::ffmpeg::has_hevc_main10_vaapi_decode().await;
+        tracing::info!(
+            hevc_main10_vaapi_decode,
+            "measured VA-API HEVC Main10 decode"
+        );
+    }));
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
     let hwaccel_override = store
@@ -3420,6 +3430,10 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(http::file_grants::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(http::playback_handoffs::prune_loop(
         state.clone(),
         background_shutdown.clone(),
     ));

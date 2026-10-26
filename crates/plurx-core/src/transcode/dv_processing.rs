@@ -90,6 +90,10 @@ pub struct DvEffectiveProcessingReport {
     hdr10_enhanced: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sdr_processed: bool,
+    /// The served picture is the reconstructed Profile 8.1: the composed
+    /// picture re-encoded with a rewritten 8.1 RPU. Neither HDR10-E nor SDR.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    profile81_reconstructed: bool,
     creative_trims_applied: bool,
     /// Some, but not every, served frame's display mapping applied creative trims.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -105,6 +109,10 @@ impl DvEffectiveProcessingReport {
     /// Whether the full enhancement layer's residual is in the served picture.
     pub fn sdr_processed(&self) -> bool {
         self.sdr_processed
+    }
+    /// Whether the served picture is the reconstructed Profile 8.1.
+    pub fn profile81_reconstructed(&self) -> bool {
+        self.profile81_reconstructed
     }
     pub fn fel_contributed(&self) -> bool {
         self.fel_contributed
@@ -150,6 +158,8 @@ impl DvEffectiveProcessingReport {
             #[serde(default)]
             sdr_processed: bool,
             #[serde(default)]
+            profile81_reconstructed: bool,
+            #[serde(default)]
             creative_trims_applied: bool,
             #[serde(default)]
             creative_trims_partial: bool,
@@ -159,7 +169,7 @@ impl DvEffectiveProcessingReport {
             gpu_decoded: bool,
         }
         if bytes.len() > 4096
-            || !matches!(delivered, Some("hdr10" | "sdr"))
+            || !matches!(delivered, Some("hdr10" | "sdr" | "dolby_vision"))
             || dv_playback_generation_digest(generation).is_err()
         {
             return None;
@@ -173,6 +183,10 @@ impl DvEffectiveProcessingReport {
             || wire.creative_trims_applied && wire.creative_trims_partial
             || wire.hdr10_enhanced != (delivered == Some("hdr10"))
             || wire.sdr_processed != (delivered == Some("sdr"))
+            || wire.profile81_reconstructed != (delivered == Some("dolby_vision"))
+            // A Dolby Vision carrier is never display targeted.
+            || wire.profile81_reconstructed
+                && operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { .. }))
             || wire.sdr_processed && (!operations.contains(&DvOperation::Bt709Gamma24Conversion) || !operations.contains(&DvOperation::DisplayTargetMapping { nits: 100 }))
             || wire.applied_operations.len() > 16
             || operations.len() != wire.applied_operations.len()
@@ -188,6 +202,7 @@ impl DvEffectiveProcessingReport {
             generation: wire.generation,
             hdr10_enhanced: wire.hdr10_enhanced,
             sdr_processed: wire.sdr_processed,
+            profile81_reconstructed: wire.profile81_reconstructed,
             creative_trims_applied: wire.creative_trims_applied,
             creative_trims_partial: wire.creative_trims_partial,
             fel_contributed: wire.fel_contributed,
@@ -2752,6 +2767,7 @@ impl DvProcessingReceipt {
             generation: active_playback_generation.to_owned(),
             hdr10_enhanced: plan.destination == DvDestination::Hdr10,
             sdr_processed: plan.destination == DvDestination::Sdr,
+            profile81_reconstructed: plan.destination == DvDestination::Profile81,
             // Only when every served frame's display mapping applied creative trims; "partial"
             // when some did.
             creative_trims_applied: common.contains(&DvOperation::CreativeTrimApplication),
@@ -2802,7 +2818,6 @@ impl DvProcessingReceipt {
             && self.observation_complete
             && self.terminal_failure.is_none()
             && !self.served_frames.is_empty()
-            && matches!(plan.destination, DvDestination::Hdr10 | DvDestination::Sdr)
     }
 }
 

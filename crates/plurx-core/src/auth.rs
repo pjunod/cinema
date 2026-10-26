@@ -34,6 +34,27 @@ pub fn verify_password(password: &str, phc: &str) -> bool {
     }
 }
 
+/// Length of a playback handoff code: 32 random bytes as unpadded base64url.
+pub const HANDOFF_CODE_LEN: usize = 43;
+
+/// Generate a one-time playback handoff code: 32 random bytes, unpadded
+/// base64url, so it travels in a URL query without escaping. Store only
+/// [`hash_token`] of it.
+pub fn generate_handoff_code() -> Result<String, AuthError> {
+    use base64::Engine as _;
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|e| AuthError::Rng(e.to_string()))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Whether `code` has the exact shape [`generate_handoff_code`] produces.
+pub fn is_handoff_code(code: &str) -> bool {
+    code.len() == HANDOFF_CODE_LEN
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 /// Generate a fresh opaque login token (hex-encoded 256-bit random value).
 /// Hand this to the client; store only [`hash_token`] of it.
 pub fn generate_token() -> Result<String, AuthError> {
@@ -156,6 +177,21 @@ pub fn hash_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_codes_are_32_random_bytes_in_base64url() {
+        use base64::Engine as _;
+        let code = generate_handoff_code().expect("code");
+        assert!(is_handoff_code(&code), "{code}");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&code)
+            .expect("base64url");
+        assert_eq!(bytes.len(), 32);
+        assert_ne!(code, generate_handoff_code().expect("second code"));
+        assert!(!is_handoff_code(&code[1..]));
+        assert!(!is_handoff_code(&format!("{}=", &code[1..])));
+        assert!(!is_handoff_code(&generate_token().expect("login token")));
+    }
 
     #[test]
     fn password_roundtrip() {

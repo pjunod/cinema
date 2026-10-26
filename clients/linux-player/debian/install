@@ -1,0 +1,3 @@
+plurx_player/*.py usr/lib/plurx-player/plurx_player/
+plurx-player usr/bin/
+plurx-player.desktop usr/share/applications/

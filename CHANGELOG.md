@@ -14,6 +14,20 @@ bump may break compatibility and a **patch** bump never does.
   persistent generated self-signed identity or supplied PEM certificate/key
   files. Enable it in Settings → Developer; saved changes apply after restart.
   Physical trust and playback acceptance remain open.
+- plurx Player (Linux) maps Dolby Vision profile 5 and 8 itself, with the
+  server's closed-form CM v4.0 and CM v2.9 display management compiled into
+  its private mpv, for the compositor's reported luminance and the largest
+  standard gamut inside the panel's primaries. Each playback logs which
+  mapper ran and for what target. Profile 7 FEL titles play from the
+  original stream with their full enhancement layer composed on the laptop's
+  GPU, so nothing is re-encoded. Package 0.3.0 (libplacebo 7.387.0, linked
+  into mpv master e59d90c84).
+
+- Server playback handoff for the Linux player: a signed-in client mints a
+  one-time code (`POST /api/v1/playback-handoffs`, single use, 120 s) that
+  another local app redeems for a token limited to one title's decision, HLS
+  create, direct play, text subtitles, progress and client log. The token lives six hours, shows in the
+  account's devices list, and is revoked with the session that minted it.
 
 - Optional display-targeted HDR10-E selects a supported downward bucket from
   the viewer's reported peak, with platform/viewer provenance, complete-title
@@ -40,6 +54,13 @@ bump may break compatibility and a **patch** bump never does.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
 
 ### Changed
+
+- The closed-form CM v2.9 display management (`tools/dv_processing/dv_dm.h`)
+  evaluates its output lattice once per frame instead of eight vertices per
+  pixel, and CM v4.0 and CM v2.9 compile as separate shaders. The output is
+  the same (the shader parity controls pass unchanged); a 4K CM v2.9 frame
+  takes about 19 ms instead of 34 ms on an Intel Arc iGPU, and the server's
+  display-targeted renders spend less GPU time.
 
 - Reconstruct CM v2.9 near-black color from analytic IPT gamut interpolation
   and colorfulness compensation, replacing fitted target gain tables. Preserve
@@ -87,6 +108,40 @@ bump may break compatibility and a **patch** bump never does.
   the same owner's custody ledger. Actual driver closure and authority fences
   remain required.
 
+- A Dolby Vision client playing a Profile 7 FEL title now receives the
+  reconstructed Profile 8.1 (FEL composed into the picture, re-encoded, an
+  8.1 RPU per frame) on a 12-thread worker. The renderer was debited eight
+  software decoder threads it does not run when the GPU decodes, so every
+  FEL graph (10 + 5 threads against a budget of 11) was refused there. Its
+  debit now follows a proved VA-API HEVC Main10 decode; a window that
+  decodes in software anyway is refused rather than served over budget. One
+  live FEL reconstruction runs per worker; the next play gets the plain
+  conversion and its FEL row names why. The Developer tab's FEL rows are
+  read from the node (helper, conversion permission, CPU debit against the
+  budget, the slot) instead of a fixed "not yet available".
+- The reconstructed Profile 8.1 says "FEL used" only from its served-window
+  receipt or selected plan, never from the source's tags, and publishes an
+  `effective_processing` report (`profile81_reconstructed`) that existing
+  clients ignore. Activity names a processed stream's delivered picture, GPU
+  work and reason beside its Stop.
+- The reconstructed Profile 8.1 is served only for a title whose enhancement
+  layer adds more to the picture than re-encoding loses. Each Profile 7 FEL
+  title is measured once, in its Dolby Vision title scan, on the server's GPU
+  (eight 2 s windows, Delta E ITP against the FEL master inside the
+  letterbox): the reconstruction must beat the plain conversion by at least
+  10% on the mean and be no worse at the 99th percentile. Until a title is
+  measured, or when it fails, plays get the plain conversion and their FEL row
+  says why. The verdict is kept with the title's Dolby Vision facts and is
+  measured again when the helper, the route's recipe, the FFmpeg build, the
+  VA driver or the GPU changes. The measurement runs as a claim on its title
+  job's own admission (so it is not cancelled by its own GPU step), yields
+  the reconstruction slot to a live play, is charged the threads its
+  children run, and replaces dark sample windows with alternates. The route
+  encodes at the source's average rate up to 60 Mb/s with VBAQ off on
+  radeonsi, and its HLS peak is advertised from that rate; other encodes keep
+  their policy. One live reconstruction per worker applies to the Profile 8.1
+  route only. The VA-API Main10 decode check runs off the boot path, decodes
+  a shipped clip, and retries a failure with backoff.
 - Apple TV physical focus updates no longer invalidate the app shell and every
   registered control; focus bookmarks and remote-command freshness remain intact.
 

@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc"
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc"
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc"
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d"
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12"
       },
       {
         "table": "31 authority implementation",
@@ -249,7 +249,7 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "96f3038cd2f6e474af66e4c09e240233e15915fffca351db41f799313654b597"
+        "sha256": "ca38c481f36b6c09c82ffaa95ce679e81e3a47a1c0bea16d0cf123cc97ccf827"
       },
       {
         "table": "42 daemon schedule loop no token",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "684cfd988b9313546b1560464f6c8f0f2aa7f6f1cadd45f60fc7711c4083949a"
+        "sha256": "44ebf717c9f9a772375968fed3c292aeb43eba2ccf565e6058c297487975cb80"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -288,7 +288,7 @@
         "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
       }
     ],
-    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes. Codex and the parent coordinator reviewed completion source 5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9 on 2026-10-25. Only identity-repair result classification changes in the shared publication file: the optional guarded annotation set-copy accepts zero-to-many rows, while complete-vector and all other exact-one checks remain. Identity repair is outside the selected library-worker progress model and is not proved here. atomic_publication renewal, authority binding, wait/lock order, selected publication SQL/anchors and worker cancellation/settlement are unchanged. Two whole-file pins are refreshed for source correspondence only. Model/configuration/source-anchor/validator/scope bytes are unchanged; this adds no liveness, runtime, theorem, physical or qualification guarantee."
+    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes. Codex and the parent coordinator reviewed completion source 5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9 on 2026-10-25. Only identity-repair result classification changes in the shared publication file: the optional guarded annotation set-copy accepts zero-to-many rows, while complete-vector and all other exact-one checks remain. Identity repair is outside the selected library-worker progress model and is not proved here. atomic_publication renewal, authority binding, wait/lock order, selected publication SQL/anchors and worker cancellation/settlement are unchanged. Two whole-file pins are refreshed for source correspondence only. Model/configuration/source-anchor/validator/scope bytes are unchanged; this adds no liveness, runtime, theorem, physical or qualification guarantee. Integration of HTTPS 67b09d29c with main 167af4616 preserves the selected library-worker protocol. Upstream adds three FEL trait/delegation methods outside the selected library scope and an off-boot VAAPI probe plus independent handoff-pruning loop; HTTPS retains fragment-only receipt fencing, publication result classification and TLS ownership. The Store parent composes strict historical fixtures and source-backed inventory; formal_publication remains unchanged. Only reviewed whole-file correspondence pins change; no model, configuration, exact anchor, validator or governed scope changes. FEL, handoffs, identity repair, historical migrations and public TLS remain excluded; no new theorem or qualification is claimed."
   },
   "configs": {
     "progress.cfg": {

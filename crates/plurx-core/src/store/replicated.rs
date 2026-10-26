@@ -266,6 +266,16 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
     },
+    // Handoff redemption: the claim and the token it mints, the insert
+    // conditional on this batch's claim. The replicated twin sends the same
+    // two statements as one transaction.
+    SqliteTransactionSite {
+        module: "playback_handoffs.rs",
+        method: "redeem_playback_handoff",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
     // The password-matched mint admits both replacement writes; a collision
     // or later statement failure rolls the whole scoped replacement back.
     SqliteTransactionSite {
@@ -1204,6 +1214,10 @@ mod tests {
         ("offline.rs", include_str!("sqlite/offline.rs")),
         ("outbox.rs", include_str!("sqlite/outbox.rs")),
         (
+            "playback_handoffs.rs",
+            include_str!("sqlite/playback_handoffs.rs"),
+        ),
+        (
             "background_jobs.rs",
             include_str!("sqlite/background_jobs.rs"),
         ),
@@ -1416,7 +1430,8 @@ mod tests {
         // invitation admission/cleanup boundaries, registered above.
         // Root removal adds one guarded delete/prune boundary, named once.
         // v113 adds the atomic annotation rating replacement/fetch marker.
-        assert_eq!(methods.len(), 115);
+        // Playback handoff redemption adds one fixed claim/mint batch.
+        assert_eq!(methods.len(), 116);
     }
 
     mod source_inventory {

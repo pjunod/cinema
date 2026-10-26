@@ -36,12 +36,12 @@ use super::placeholder_census::STORE_SOURCES;
 
 /// Consistent-read call sites per replicated slice, production code only.
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
-    // Translation, annotations and title jobs each check the committed extension
-    // shape and singleton marker before migration/admission: six authority reads.
-    ("hiqlite.rs", 54),
+    // Translation, annotations, title jobs and handoffs validate committed
+    // extension shape and singleton authority: eight consistent reads.
+    ("hiqlite.rs", 56),
     // Two rating-cache reads and three person-owned list membership/page reads.
     ("hiqlite_annotations.rs", 5),
-    // Managed-schema bootstrap validates committed shape and the singleton marker.
+    // Managed bootstrap validates committed shape and the singleton marker.
     ("hiqlite_background_jobs.rs", 4),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
@@ -60,6 +60,10 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
     ("hiqlite_media.rs", 72),
+    // Handoff status, the redemption verdict, handoff-audience authentication
+    // and the token scope each read committed authority; see the
+    // `authority:` reasons at the sites.
+    ("hiqlite_playback_handoffs.rs", 4),
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 7),
     ("hiqlite_reading.rs", 2),

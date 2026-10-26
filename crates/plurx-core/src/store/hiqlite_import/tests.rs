@@ -452,7 +452,12 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
         assert!(names.contains(&table), "durable annotation table: {table}");
     }
     assert!(!names.contains(&"library_annotations_schema"));
-    assert_eq!(names.len(), 95, "review every imported durable table");
+    // Playback handoff codes and tokens are durable account state.
+    assert!(names.contains(&"playback_handoffs"));
+    assert!(names.contains(&"playback_handoffs_tokens"));
+    // 95 with the three item-annotation tables (SQLite v113), 97 with the
+    // two playback handoff tables (SQLite v115).
+    assert_eq!(names.len(), 97, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its

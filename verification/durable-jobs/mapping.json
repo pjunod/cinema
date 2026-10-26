@@ -61,61 +61,61 @@
       },
       {
         "anchor": "pub trait BackgroundJobStore: Send + Sync {",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue protocol trait"
       },
       {
         "anchor": "pub struct JobToken {",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue token schema"
       },
       {
         "anchor": "impl<T: QueueSql> BackgroundJobStore for T {",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 shared queue adapter"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:1495"
       },
       {
         "anchor": "        if request.fence.is_none()",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3465"
       },
       {
         "anchor": "            if token.lease_expires_ms <= request.now_ms {",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3497"
       },
       {
         "anchor": "  AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:532"
       },
       {
         "anchor": "    AND job.lease_expires_ms > now_ms AND job.state = 'running'",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:630"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:636"
       },
       {
         "anchor": "pub const MAX_RETAINED_JOBS: usize = 10_000;",
-        "sha256": "22a0451a3eefb8f7797377aa5ca6260a175b42ffab20e42c8e2d7ef0e8aab15d",
+        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs.rs:50"
       },
@@ -241,13 +241,13 @@
       },
       {
         "anchor": "pub(super) const REPLICATED_STORE_TIMEOUT: &str = \"replicated store operation timed out\";",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc",
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "M2 Hiqlite replicated timeout classification"
       },
       {
         "anchor": "                        super::background_jobs::RETENTION_SCHEMA",
-        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc",
+        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585"
       },
@@ -409,37 +409,37 @@
       },
       {
         "anchor": "async fn with_fenced_conn<T, F>",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "proposal \u00a74.1 SQLite fenced transaction"
       },
       {
         "anchor": "            let execution_time_ms = std::time::SystemTime::now()",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1973"
       },
       {
         "anchor": "                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1984"
       },
       {
         "anchor": "                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1996"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:2008"
       },
       {
         "anchor": "    super::background_jobs::RETENTION_SCHEMA,",
-        "sha256": "770fc55e769a4606be8acade73fadeff0fe42cf94021266df820494d36b2052a",
+        "sha256": "c897f013a366dbe3beb79b215866835bf8c9250184b6e0a89203b2a71f0079bb",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255"
       },
@@ -451,7 +451,7 @@
       },
       {
         "anchor": "#[path = \"store_contract/formal_publication.rs\"]\nmod formal_publication;",
-        "sha256": "0586d6d8cc5336f3df8382e843c16b68c93d6cdcefb0f57c199f004e861dd092",
+        "sha256": "81bcd8a6f099bc76cf16b028bd60de5e9f69ac31e266f72fc7ad499360812bdb",
         "source": "crates/plurx-core/tests/store_contract.rs",
         "table": "M2 conformance parent module registration"
       },
@@ -595,7 +595,7 @@
       },
       {
         "anchor": " job.state='running' AND job.kind='dv_title_scan' AND job.payload_version=1",
-        "sha256": "19be04dbdf64b7c63febc13af44065527ce4b8d27b4e8e504dbc2919e8b92891",
+        "sha256": "91020a0695986d46b622b6428955b57d3d1c1e05808306a218d364b77c6527ce",
         "source": "crates/plurx-core/src/store/dv_title_jobs.rs",
         "table": "DV extension exclusion: publication remains kind-specific"
       },
@@ -613,18 +613,18 @@
       },
       {
         "anchor": "async fn title_publication_is_atomic_idempotent_and_never_self_enqueues() {",
-        "sha256": "dc7a6b0f7f2dbc53335f9c4056dc35e19219ad8c440cbf806ce18c860c1df8bd",
+        "sha256": "61df9834fa69fc36c9e6eb03a28e6d6741b69b4c462534a6f919f3675de054f2",
         "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
         "table": "DV excluded runtime example: atomic idempotent publication"
       },
       {
         "anchor": "async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yield() {",
-        "sha256": "dc7a6b0f7f2dbc53335f9c4056dc35e19219ad8c440cbf806ce18c860c1df8bd",
+        "sha256": "61df9834fa69fc36c9e6eb03a28e6d6741b69b4c462534a6f919f3675de054f2",
         "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
         "table": "DV excluded runtime example: cancellation rejects stale publication"
       }
     ],
-    "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem. Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: budget registration, fragment-index pins and capacity checks preserve selected library bind-before-work and fenced publication. Budgeted artifact uploads preserve domain-only producer publication classification. All seven affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence or a refinement theorem. Codex reviewed the DV-title integration at 4b359f7923c47a1e8715e826a9b6581a08f60e05 against 1f30b4791476acb5d290c2f8e6ed38d07051f31d; all six drifted files matched the previously recorded hashes at that base. The selected library_scan/metadata_refresh claim CAS, stable binding, exact renewal/cancellation, fence/revision counters, reservation/receipt transitions and insert_item_fenced transaction guards are unchanged. New enqueue/claim predicates apply only to dv_title_scan. Added title SQL triggers and schema installation were reviewed for isolation: title job/waiter invalidation is kind-scoped, ordinary file publication creates or invalidates title demand within its existing transaction, and title publication has its own kind guard. New dependency anchors record that isolation and existing runtime-example definitions, not modeled DV guarantees. Title source generations, JSON attachment, scheduling/preemption, replay/retry and publication through publish_dv_title_job are outside this finite model. See CONTRACT.md for the scoped review; no model/config changes or new execution/qualification evidence are claimed. Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes. Codex and the parent coordinator reviewed completion source 5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9 on 2026-10-25. The identity-repair result classifier now permits zero-to-many rows only for its existing guarded annotation set-copy, requires the complete result vector, and keeps every other mutation/guard/postcondition/ack count exactly one. Identity repair is outside this selected library-worker model and is not proved by it. The shared atomic_publication renewal, authority binding, wait/lock order and selected insert_item_fenced SQL/anchors are unchanged. Store-contract edits name existing title methods, validate historical empty-extension rewinds, and require rejection of a consumed fragment-analysis claim; general fragment admission, historical migrations and title jobs remain outside this model. The exact formal_publication parent registration and selected conformance examples are unchanged. Fourteen publication whole-file pins and one parent-module pin are refreshed only for source correspondence. No model/configuration/anchor/validator/scope changes or new runtime, theorem, physical-acceptance or qualification claim are made."
+    "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem. Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: budget registration, fragment-index pins and capacity checks preserve selected library bind-before-work and fenced publication. Budgeted artifact uploads preserve domain-only producer publication classification. All seven affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence or a refinement theorem. Codex reviewed the DV-title integration at 4b359f7923c47a1e8715e826a9b6581a08f60e05 against 1f30b4791476acb5d290c2f8e6ed38d07051f31d; all six drifted files matched the previously recorded hashes at that base. The selected library_scan/metadata_refresh claim CAS, stable binding, exact renewal/cancellation, fence/revision counters, reservation/receipt transitions and insert_item_fenced transaction guards are unchanged. New enqueue/claim predicates apply only to dv_title_scan. Added title SQL triggers and schema installation were reviewed for isolation: title job/waiter invalidation is kind-scoped, ordinary file publication creates or invalidates title demand within its existing transaction, and title publication has its own kind guard. New dependency anchors record that isolation and existing runtime-example definitions, not modeled DV guarantees. Title source generations, JSON attachment, scheduling/preemption, replay/retry and publication through publish_dv_title_job are outside this finite model. See CONTRACT.md for the scoped review; no model/config changes or new execution/qualification evidence are claimed. Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes. Codex and the parent coordinator reviewed completion source 5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9 on 2026-10-25. The identity-repair result classifier now permits zero-to-many rows only for its existing guarded annotation set-copy, requires the complete result vector, and keeps every other mutation/guard/postcondition/ack count exactly one. Identity repair is outside this selected library-worker model and is not proved by it. The shared atomic_publication renewal, authority binding, wait/lock order and selected insert_item_fenced SQL/anchors are unchanged. Store-contract edits name existing title methods, validate historical empty-extension rewinds, and require rejection of a consumed fragment-analysis claim; general fragment admission, historical migrations and title jobs remain outside this model. The exact formal_publication parent registration and selected conformance examples are unchanged. Fourteen publication whole-file pins and one parent-module pin are refreshed only for source correspondence. No model/configuration/anchor/validator/scope changes or new runtime, theorem, physical-acceptance or qualification claim are made. Integration of HTTPS 67b09d29c with main 167af4616 preserves the selected library-worker protocol. Upstream adds three FEL trait/delegation methods outside the selected library scope and an off-boot VAAPI probe plus independent handoff-pruning loop; HTTPS retains fragment-only receipt fencing, publication result classification and TLS ownership. The Store parent composes strict historical fixtures and source-backed inventory; formal_publication remains unchanged. Only reviewed whole-file correspondence pins change; no model, configuration, exact anchor, validator or governed scope changes. FEL, handoffs, identity repair, historical migrations and public TLS remain excluded; no new theorem or qualification is claimed."
   },
   "configs": {
     "baseline.cfg": {

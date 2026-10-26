@@ -4,6 +4,20 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## HTTPS and Linux-player integration — 2026-10-26
+
+The merge of HTTPS `67b09d29c` with main `167af4616` retains both scoped
+source reviews below. The new FEL trait/delegation methods, off-boot VA-API
+probe and independent handoff-pruning loop do not alter selected library
+claim, renewal, binding, wait/lock, settlement or fenced-publication paths.
+The Store parent retains strict historical fixtures and inventories; its
+`formal_publication` module is unchanged. Reviewed whole-file pins follow
+the composed source; models, configurations, anchors and scope do not change.
+FEL, handoff lifecycle, identity repair, historical migrations and public TLS
+remain outside these guarantees. This is source correspondence, not new
+execution, physical acceptance or qualification. Other historical explanatory
+anchors in `source-anchors.json` retain their recorded historical identity.
+
 ## Completion identity-result correspondence — 2026-10-25
 
 Source `5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9` changes identity-repair result classification
@@ -44,6 +58,33 @@ trait method and delegation to the core background-job store. Table30's
 whole-file mapping hash is refreshed; exact anchors, executable source-anchor
 records, model/configurations and worker correspondence are unchanged. The
 readiness API's completion and latency acquire no liveness or qualification claim.
+
+## FEL qualification review fixes — scoped refresh on 2026-10-26 (2)
+
+`construct.rs` now lets a background job extend its own `FragmentAdmission`
+with a second bundle (`extend_fragment_admission`), and
+`fragment_worker_idle` compares the node's hardware and software use with
+what the admission claims, extension included. The selected library worker
+never extends its admission, so for it `claimed()` is `(0, threads)` and the
+predicate is exactly the old one (`in_use() <= 0` is `in_use() == 0`);
+`admit_fragment` (Table 41) is byte-identical. `main.rs` warms the VA-API
+HEVC Main10 probe in a spawned task instead of awaiting it during
+`probe_system`; the Table 44 spawn line is byte-identical and the worker
+loops start as before. Hashes refreshed; anchors, model, configurations and
+worker correspondence unchanged.
+
+## FEL qualification additions — scoped refresh on 2026-10-26
+
+The `claude/lp-fel-p81` delta against `origin/effort/linux-player` adds three
+DV-title store methods to the core background-job store (Table 30's
+`LibraryScan` / `MetadataRefresh` arm is byte-identical), two
+`TranscodeManager` field initializers in `construct.rs` (the live
+reconstruction slot and a per-title re-qualification throttle;
+`admit_fragment` is byte-identical), and a startup measurement of VA-API HEVC
+Main10 decode in `main.rs`'s `probe_system`, before the worker loops are
+spawned (Table 44's spawn line is byte-identical). None of it is on the
+selected library worker's path. Only whole-file hashes are refreshed; anchors,
+model, configurations and worker correspondence are unchanged.
 
 ## Physical admission correspondence refresh — 2026-10-25
 

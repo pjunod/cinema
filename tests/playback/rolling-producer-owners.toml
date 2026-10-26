@@ -636,7 +636,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
 # raised this count independently; the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
-expected_occurrences = 118
+# +1 with the FEL qualification review fixes (claude/lp-fel-p81): the test-only
+# releaser in `a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_one`
+# stands in for a qualification that lets go of the slot when told; the test
+# awaits its JoinHandle before asserting.
+expected_occurrences = 119
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -777,7 +781,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # branch polls every 50 ms, inside a 30 s `tokio::time::timeout`, for the
 # session's first served snapshot before its playlist request. Test-only; it
 # owns no producer and decides nothing.
-expected_occurrences = 80
+# +1 in the same releaser: a 50 ms stand-in for the qualification's kill and
+# reap before it drops the slot. Test-only, joined.
+expected_occurrences = 81
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -3198,7 +3204,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # The task owns its Arc manager and physical admission while awaiting the
 # cancellable bounded child. The test cancels it and consumes its JoinHandle
 # before asserting released credit; timeout is failure, never reap evidence.
-expected_occurrences = 1009
+# +2 with the FEL qualification review fixes (claude/lp-fel-p81): the joined
+# test releaser above, and the boot warm-up of the VA-API HEVC Main10 decode
+# probe in `main.rs`, moved off the boot path. The warm-up owns one bounded
+# probe child (`status_job_owned`, kill-on-drop, 5 s deadline), logs, and
+# exits; it holds no session, permit or lock past that.
+# Main's 999 plus 13 retained HTTPS owners: listener supervision (4),
+# finite admin tests (2), transport tests (5), startup/drain tests (2).
+# The driver/serve relocation is net zero; their existing joins remain.
+expected_occurrences = 1012
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4868,13 +4882,22 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # observation deadlines grants reap, publication or admission-release evidence.
 # Frame-MDCV repair: +1 awaited creation-budget timeout around held-source
 # metadata resolution; expiry refuses preparation and creates no recovery owner.
-# HTTPS font-attestation split: +1 test-only 60-second timeout in
-# fontenv_tests::a_capture_whose_frozen_faces_diverge_is_refused. The original
-# corruption bound remains with the renamed font-link replacement case. The
-# new bound awaits capture and owned selection mutation together; expiry fails
-# the test and drops the capture/directory guard, never proving settlement or
-# introducing a spawned task, production timer, or recovery owner.
-expected_occurrences = 1864
+# +2 with the FEL P8.1 qualification (claude/lp-fel-p81): the 20 s deadline
+# around each child of `ffmpeg::has_hevc_main10_vaapi_decode` (spawned once
+# per process at startup through `status_job_owned`, kill-on-drop, so the
+# deadline drops and kills it), and `STAGE_DEADLINE` in
+# `source_probe/fel_qualification.rs::supervised`, which bounds one window
+# stage; on expiry or cancel the stage kills and reaps its children.
+# +5 with the FEL qualification review fixes (claude/lp-fel-p81): the bounded
+# wait (`QUALIFICATION_SLOT_YIELD`, 5 s) a live reconstructed 8.1 gives a FEL
+# qualification it asked to yield the slot (on expiry the play declines with
+# its own reason; nothing is spawned); the 50 ms test releaser sleep; and in
+# the qualification fixture tests the 250 ms measurement beats, the 5 s bound
+# on waiting for the fixture to take the slot, and its 10 ms poll.
+# Main's 1859 plus 13 retained HTTPS/font fixture bounds: font refusal (2),
+# admin (3), transport (7), startup (1). Each bounds its already owned work;
+# expiry remains refusal, never a shutdown or settlement acknowledgement.
+expected_occurrences = 1872
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5341,7 +5364,22 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # vodencode_manager_tests.rs:610, assert_native_sdr_window. Its output future
 # is directly awaited with kill-on-drop; no separate timeout/group-reap claim
 # or production launcher is added by this ignored physical qualification helper.
-expected_occurrences = 297
+# +6 with the FEL P8.1 qualification (claude/lp-fel-p81). Two startup probe
+# children in `ffmpeg::has_hevc_main10_vaapi_decode` (clip encode, VA-API
+# decode): spawned by `status_job_owned` as background ChildWork, kill-on-drop,
+# awaited under a 20 s deadline. Three in `source_probe/fel_qualification.rs`
+# (helper render, its FFmpeg consumer/encoder, the served-window decoder):
+# spawned with `spawn_job_owned` as background ChildWork (listed and
+# stoppable in Activity Processes) inside the `dv_title_scan` job; the stage
+# owns and waits them; a deadline, the job's cancel or foreground preemption
+# makes the stage `start_kill` and `wait` each one before returning, and
+# kill-on-drop backs that up. One test-only ffprobe in the ignored physical
+# qualification test, run through `output_job_owned`.
+# -2 with the FEL qualification review fixes (claude/lp-fel-p81): the VA-API
+# Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
+# is gone; the store-less physical qualification test and its ffprobe child
+# are replaced by the real title-job physical test.
+expected_occurrences = 301
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6272,7 +6310,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # the existing supervisor result, not an OS process. The other five are the
 # two test helper children's actual wait/start_kill sites (three in the shared
 # capture fixture, two in the backpressure fixture); each child is awaited.
-expected_occurrences = 348
+# +4 with the FEL P8.1 qualification (claude/lp-fel-p81), all in
+# `source_probe/fel_qualification.rs`: the helper's `wait` and the consumer's
+# `wait` in `finish` (normal reaping), and `start_kill` + `wait` in `reap`,
+# which a failed, expired or cancelled stage runs on each of its children.
+# The integrated HTTPS fixture retains its separate owned wait boundary.
+expected_occurrences = 352
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6490,7 +6533,13 @@ pattern = "kill_on_drop\\s*\\("
 # vodencode_manager_tests.rs:613, assert_native_sdr_window. The test directly
 # awaits the output future. Dropping requests a kill; the guard alone proves
 # neither confirmed reap nor process-group cleanup. No shipped owner is added.
-expected_occurrences = 112
+# +4 with the FEL P8.1 qualification (claude/lp-fel-p81): the two startup
+# probe children of `ffmpeg::has_hevc_main10_vaapi_decode` (one shared
+# `run` closure) and the three window-stage children in
+# `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
+# counts once). Each is also explicitly waited, or killed and waited, by its
+# owner; kill-on-drop is the backstop, not the settlement.
+expected_occurrences = 116
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

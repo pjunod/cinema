@@ -161,8 +161,21 @@ history-check: ## Verify every corrective commit has current regression evidence
 operations-check: ## Verify deploy, CI, container, and client shipping contracts
 	@python3 -m unittest discover -s tests/operations -p 'test_*.py'
 
+.PHONY: linux-player-check
+linux-player-check: ## Test the plurx Player launcher against a fake server and a fake mpv (LINUX-PLAYER-PLAN M4); a skipped test fails
+	@python3 -B clients/linux-player/packaging/run-tests clients/linux-player/tests
+
+# Not in CI: it pulls ubuntu:26.10, installs from the pinned apt snapshot,
+# downloads the pinned upstream sources, compiles libplacebo and mpv twice
+# (the second build must be byte-identical) and verifies the package. Output
+# goes to target/linux-player-deb/, or to PLURX_DEB_OUT;
+# clients/linux-player/README.md explains what is bundled.
+.PHONY: linux-player-deb
+linux-player-deb: ## Build and verify the plurx Player .deb with its private mpv/libplacebo in disposable Ubuntu 26.10 containers (LINUX-PLAYER-PLAN M5)
+	@clients/linux-player/packaging/build-deb.sh
+
 .PHONY: check
-check: validation-lint history-check operations-check benchmark-check rust-check ## History + operations + catalog + benchmark + Rust baseline
+check: validation-lint history-check operations-check linux-player-check benchmark-check rust-check ## History + operations + launcher + catalog + benchmark + Rust baseline
 
 .PHONY: spike-lock-check
 spike-lock-check: ## Prove the isolated spike's lockfile still resolves
@@ -1596,6 +1609,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/hdr-display-peak.test.js
 	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
 	@node --test tests/web/hdr-display-change.test.js
+	# Settings → Playback → Open titles in, and the plurx Player handoff (LINUX-PLAYER-PLAN M3).
+	@node --test tests/web/linux-player-handoff.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js
