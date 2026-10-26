@@ -103,7 +103,10 @@ meson setup "$out/mpv" "$src/mpv" \
   -Dcaca=disabled -Dsixel=disabled -Dvdpau=disabled -Dxv=disabled \
   -Dshaderc=disabled -Dspirv-cross=disabled \
   -Dmanpage-build=disabled -Dhtml-build=disabled -Dpdf-build=disabled
-ninja -C "$out/mpv" -j "$jobs"
+# mpv runs the binary it just linked (--list-protocols, for its .desktop
+# file); point that build-time run at the staged libplacebo. The installed
+# binary finds it through DT_RPATH, checked below.
+LD_LIBRARY_PATH="$stage$prefix/lib" ninja -C "$out/mpv" -j "$jobs"
 DESTDIR="$stage" meson install -C "$out/mpv" --no-rebuild --quiet
 
 mpv=$stage$prefix/bin/mpv

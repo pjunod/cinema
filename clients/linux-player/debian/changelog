@@ -1,3 +1,20 @@
+plurx-player (0.3.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Profile 7 FEL titles play with their full enhancement layer, composed
+    on the laptop's GPU before the closed-form mapping: plurx sends the
+    original stream (the caps claim Dolby Vision profile 7), so nothing is
+    re-encoded.
+  * Private libplacebo 7.387.0 and mpv master e59d90c84 (2026-10-26),
+    the first with FEL composition, plus a split of the enhancement layer
+    that works with Ubuntu's FFmpeg 8.1, and no zero MaxCLL/MaxFALL in the
+    Wayland image description.
+  * dv-brightness=relative|absolute (mpv.conf): follow the desktop's HDR
+    brightness setting (default), or map for the panel's real luminance.
+  * Closed-form equations: tools/dv_processing dm f75c936be1de (sha256 of
+    dm_closed_form.h then dv_dm.h, first 12 hex digits).
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 18:00:00 +0000
+
 plurx-player (0.2.0+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
 
   * mpv maps Dolby Vision profile 5 and 8 with plurx's closed-form CM v4.0

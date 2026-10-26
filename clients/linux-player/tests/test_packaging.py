@@ -85,7 +85,14 @@ class PrivateBuild(unittest.TestCase):
         for name, (version, sha256, url) in rows.items():
             self.assertRegex(sha256, r"^[0-9a-f]{64}$", name)
             self.assertTrue(url.startswith("https://"), url)
-            self.assertIn(version, url, name)
+            if "+git" in version:
+                # A commit pin: <release>+git<date>.<short commit>, and the URL
+                # names the full commit.
+                short = version.rsplit(".", 1)[1]
+                commit = re.search(r"/([0-9a-f]{40})\.tar\.gz$", url)
+                self.assertTrue(commit and commit.group(1).startswith(short), (name, version, url))
+            else:
+                self.assertIn(version, url, name)
 
     def test_the_build_environment_is_a_pinned_apt_snapshot(self):
         rows = [line.split() for line in read("packaging/upstream.lock").splitlines()
@@ -152,7 +159,7 @@ class ClosedFormMapping(unittest.TestCase):
 
     def test_the_mpv_series_maps_dolby_vision_with_plurx_headers(self):
         series = read("packaging/patches/mpv/series")
-        patch = "0001-vo_gpu_next-map-Dolby-Vision-with-plurx-s-closed-for.patch"
+        patch = "0003-vo_gpu_next-map-Dolby-Vision-with-plurx-s-closed-for.patch"
         self.assertIn(patch, series)
         text = read(f"packaging/patches/mpv/{patch}")
         self.assertIn('#include "plurx/dv_dm.h"', text)
@@ -187,6 +194,21 @@ class ClosedFormMapping(unittest.TestCase):
             with open(helper, encoding="utf-8") as handle:
                 self.assertIn(LIBDOVI_HEADER_SHA256, handle.read())
         self.assertIn("libdovi-dev", read("debian/control"))
+        # The header's struct layouts are proven against libdovi3 3.3.
+        self.assertIn("libdovi3 (<< 3.4~)", read("debian/control"))
+
+    def test_the_changelog_names_the_equations_it_ships(self):
+        # dm/ is copied from tools/dv_processing at build time, so a change to
+        # the equations must come with a new package version: the newest
+        # changelog entry records their hash.
+        tools = os.path.join(ROOT, "..", "..", "tools", "dv_processing")
+        base = tools if os.path.isdir(tools) else os.path.join(ROOT, "dm")
+        digest = hashlib.sha256()
+        for header in DM_HEADERS:
+            with open(os.path.join(base, header), "rb") as handle:
+                digest.update(handle.read())
+        newest = read("debian/changelog").split("\n -- ", 1)[0]
+        self.assertIn(f"dm {digest.hexdigest()[:12]}", newest)
 
 
 GIT_AM_PATCH = """From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001

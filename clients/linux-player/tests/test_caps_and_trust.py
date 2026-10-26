@@ -43,9 +43,9 @@ class CapsTests(unittest.TestCase):
         self.assertEqual(caps["v"], 2)
         hevc = next(v for v in caps["video"] if v["codec"] == "hevc")
         self.assertEqual(hevc, {"codec": "hevc", "profiles": ["main", "main10"], "max_height": 2160,
-                                "present": ["sdr", "pq", "hlg"], "dv_profiles": [5, 8]})
+                                "present": ["sdr", "pq", "hlg"], "dv_profiles": [5, 7, 8]})
         self.assertEqual({v["codec"] for v in caps["video"]}, {"hevc", "h264", "av1"})
-        self.assertNotIn(7, hevc["dv_profiles"], "P7 is reached through the server's P8.1 routes")
+        self.assertIn(7, hevc["dv_profiles"], "P7 FEL is composed in the player, so the original stream is wanted")
         self.assertEqual(caps["display"], {"hdr": True, "dolby_vision": True}, "no max_nits: Unknown")
         self.assertEqual(caps["hls_hevc_sample_entries"], ["hvc1", "hev1"])
         self.assertEqual(caps["dv_transport"], "hls")

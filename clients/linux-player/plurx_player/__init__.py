@@ -7,5 +7,5 @@ keeps the server informed until mpv closes. See
 docs/clients/LINUX-PLAYER-PLAN.md section 4.2 and this folder's README.
 """
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 DEVICE_NAME = "plurx Player (Linux)"

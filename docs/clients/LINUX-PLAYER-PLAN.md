@@ -1,6 +1,6 @@
 # Linux player — Dolby Vision on Linux through plurx
 
-**Status:** M1–M5 built on `effort/linux-player` (M6, acceptance on the ROG, is next); plan owner-approved, Fable review folded in (2026-10-25) · **Owner:** Claude
+**Status:** plan, owner-approved direction; M1–M5 in progress on `effort/linux-player`, M6 (acceptance on the ROG) next; Fable review folded in (2026-10-25) · **Owner:** Claude
 (Opus 5.5, Linux Dolby Vision session) · **Written:** 2026-10-25
 
 Companion to [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) (the browser half) and
@@ -16,8 +16,9 @@ Make Dolby Vision on Linux work as well as it does on the Apple TV:
 - P5 and P8 titles reach the machine as their original Dolby Vision stream;
 - the player maps each one locally with plurx's closed-form display
   management, at the screen's real target from the compositor;
-- Profile 7 FEL titles keep their enhancement layer, composed on the server
-  and re-encoded as P8.1 (§3.3). For those the stream is not the original.
+- Profile 7 FEL titles reach it as their original dual-layer stream, and the
+  player composes the enhancement layer on the GPU before mapping (§3.3), so
+  nothing is re-encoded.
 
 A browser cannot do this, for three reasons:
 
@@ -112,7 +113,7 @@ this table says otherwise.
 
 | Field | Value | Why |
 |---|---|---|
-| `video[]` HEVC | `profiles:["main","main10"]`, `max_height:2160`, `present:["sdr","pq","hlg"]`, `dv_profiles:[5,8]` | mpv/libplacebo reconstruct P5 and P8 from the RPU. P7 is not claimed, because the server's P7 → P8.1 routes (§3.3) are what make it playable. |
+| `video[]` HEVC | `profiles:["main","main10"]`, `max_height:2160`, `present:["sdr","pq","hlg"]`, `dv_profiles:[5,7,8]` | mpv/libplacebo reconstruct P5 and P8 from the RPU, and P7 with its full enhancement layer (§3.3). Claiming 7 makes the server deliver the original stream (`dolby_vision_converts_to_p81` is false for a client that lists 7). |
 | `video[]` AV1, H.264 | as decoded by the bundled FFmpeg | mpv decodes them in software or with VA-API. |
 | `display` | `{hdr:true, dolby_vision:true}`, no `max_nits` | On the preserved route the player maps locally, so the server never needs the peak. Sending none means Unknown, so the server never display-targets this client. Sending a guess would be the over-claim the peak contract forbids. |
 | `hls_hevc_sample_entries` | `["hvc1","hev1"]` | The P8.1 route uses `hvc1` plus `dvvC`, and mpv's demuxer reads `dvvC`. |
@@ -120,7 +121,29 @@ this table says otherwise.
 | audio / sinks | every codec mpv decodes, `passthrough:false`, `max_channels:8` | mpv decodes and downmixes to the real sink. Reading the PipeWire channel count needs more than the standard library, and passthrough is out of scope. |
 | `subtitle_overlays` | `[]` in v1 | Text subtitles load as sidecar tracks. PGS is in §6. |
 
-### 3.3 Profile 7 FEL in v1 — reconstructed P8.1 from the server
+### 3.3 Profile 7 FEL in v1 — composed in the player
+
+**Changed 2026-10-26 (owner's call).** The server route below re-encodes the
+composed picture, and on lab6 and media1 that loses more than the EL adds
+for both measured titles (FEL-P81-RECONSTRUCTION.md §7;
+`claude/fel-quality-risk-2026-10-26.md` in the project). Players that do
+FEL well compose it on the device. plurx Player now does too:
+
+- the caps list Dolby Vision profile 7, so the server delivers the original
+  dual-layer stream, by direct play or a copy;
+- mpv (master, with libplacebo 7.387's `pl_frame.enhancement_layer`) splits
+  the EL out of the HEVC stream, decodes both layers, pairs them by PTS, and
+  libplacebo composes the NLQ residual during reconstruction, before the
+  closed-form mapping (§5);
+- on *Michael*, the player's FEL output matches an independent reference
+  (FFmpeg decode of both layers, libplacebo composition,
+  `dv_dm_cpu_render`) to ΔE_ITP mean 0.008, max 0.052. Turning the EL off
+  moves the picture by ΔE mean 3.4.
+
+The server route remains for clients that cannot compose (Apple, Android,
+web), gated per title by M2's qualification.
+
+#### The server route (M2), for clients that cannot compose
 
 The server already holds every piece:
 
@@ -277,11 +300,15 @@ Owner direction (2026-10-25):
 - libplacebo's built-in DV tone mapping is not also applied;
 - the mapper that ran is visible.
 
-**Built as one mpv patch on stock mpv 0.41.0** (2026-10-26, owner's call:
-it replaced the rog_hdr_dv port, which sat on about 9,000 lines of
-research code). `clients/linux-player/packaging/patches/mpv/0001-…`
-adds `video/out/placebo/plurx_dv.{c,h}` and about 180 lines in
-`vo_gpu_next.c`:
+**Built as one mpv patch** (2026-10-26, owner's call: it replaced the
+rog_hdr_dv port, which sat on about 9,000 lines of research code).
+`clients/linux-player/packaging/patches/mpv/0003-…` adds
+`video/out/placebo/plurx_dv.{c,h}` and about 200 lines in `vo_gpu_next.c`.
+The private build is libplacebo 7.387.0 and mpv master `e59d90c84`
+(2026-10-26), the first with FEL composition (§3.3), with two upstreamable
+fixes before it: 0001 sends no zero MaxCLL/MaxFALL in the Wayland image
+description (Weston 16 ends the connection on one), and 0002 splits the EL
+without FFmpeg 9's `dovi_split` BSF (Ubuntu ships FFmpeg 8.1).
 
 1. **The equations are the server's.** The package build copies
    `tools/dv_processing/dv_dm.h` and `dm_closed_form.h` into mpv's tree, so
@@ -296,25 +323,45 @@ adds `video/out/placebo/plurx_dv.{c,h}` and about 180 lines in
    conversion to BT.2020/PQ with the helper's own render parameters
    (identical 0.005–10000-nit volumes, clip tone and gamut mapping), so no
    tone mapping happens there. Chroma is upsampled bilinearly.
-4. **Target.** The compositor's preferred description (mpv's `target_csp`):
-   its luminance range, and the largest of BT.2020, P3-D65 and BT.709
-   inside the panel's primaries, within half a step of the precision the
-   primaries were reported in (EDID 10-bit, DisplayID 12-bit). The ROG
-   selects P3-D65 at 616 nits; the compositor finishes P3 to the panel.
-5. **Presentation.** The mapped frame (16-bit UNORM) and the swapchain hint
-   both carry the target's volume (BT.2020/PQ container, the named gamut as
-   mastering primaries, peak = MaxCLL = MaxFALL), so the final render has
-   nothing to map and the compositor does not tone map it again.
+4. **Target.** The compositor's preferred description (mpv's `target_csp`,
+   with `--target-peak` applied if set): its luminance range, and the
+   largest of BT.2020, P3-D65 and BT.709 inside the panel's primaries,
+   within one step of the precision the six primary coordinates were
+   reported in (DisplayID 12-bit, else EDID 10-bit; rounding x and y can
+   move a vertex by up to √2/2 of a step, and some encoders truncate). The
+   ROG selects P3-D65 at 616 nits; the compositor finishes P3 to the panel.
+   - **Brightness is an option** (owner, 2026-10-26), `dv-brightness` in
+     plurx Player's `mpv.conf`:
+     - `relative` (default) maps on mpv's reference-white scale (the
+       compositor's values rescaled to a 203-nit reference), so the desktop's
+       HDR brightness setting applies.
+     - `absolute` maps for the panel's real peak, using the compositor's
+       reference luminance (which the patch makes `wayland_common` keep), and
+       scales the result by 203/reference, which the compositor undoes:
+       Dolby's absolute rendering.
+     - Checked on Weston with a 300-nit reference: relative targets 416.8
+       nits; absolute targets 616 and matches the reference mapping at 616
+       scaled by 203/300, ΔE_ITP mean 0.007.
+     - The mapper line names the mode and the reference.
+5. **Presentation.** The mapped frame (16-bit UNORM) and the one swapchain
+   hint per frame both carry the target's volume (BT.2020/PQ container, the
+   named gamut as mastering primaries, peak = MaxCLL = MaxFALL), so the
+   final render has nothing to map and the compositor does not tone map it
+   again. The reconstruction is 16-bit UNORM too, half the memory traffic
+   of float.
 6. **Visible.** One line per configuration, `plurx mapper: closed-form CM
    v4.0 target=<min>-<max> nits gamut=P3-D65 (trim …, primaries …,
    tolerance …)`, which the launcher posts to Activity. When the display is
    not in HDR mode, the frame has no RPU, or a frame cannot be mapped, the
-   line says `none (<reason>)` and libplacebo's own handling renders it.
+   line says `none (<reason>)` and libplacebo's own handling renders it,
+   with the display's own hint. A mapping failure holds for the rest of
+   that configuration, so playback never alternates between mappers; the
+   GPU formats the mapping needs are checked once.
 7. **Switches.** `--dv-cm4-trims` and `--dv-cm29-trims` (default yes), as
    `DV_TARGET_TRIMS_CM4/_CM29` on the server. Screenshots of a DV frame use
    the same mapping.
 
-**Evidence** (2026-10-26, nuc3, Ubuntu 26.10 container, libplacebo 7.360.1,
+**Evidence** (2026-10-26, lab3, Ubuntu 26.10 container, libplacebo 7.360.1,
 lavapipe):
 
 - plurx's `controls/test_dv_dm.c` passes against Ubuntu's libdovi 3.3.2
@@ -348,8 +395,6 @@ libplacebo needs that field dropped.
 
 - **No browsing UI in the player.** The web app is the browser, and a second
   library UI would drift from it.
-- **No client-side FEL.** The server composes FEL (§3.3), so one
-  implementation serves every client.
 - **No HDMI passthrough or bitstreaming,** of either audio or DV. The laptop
   panel is the target, and compositor-managed HDR is the only correct
   output path.
@@ -369,10 +414,10 @@ libplacebo needs that field dropped.
 |---|---|---|
 | M1 | Server playback handoff (§3.1) | Rust tests: mint/redeem, single use, 120 s code expiry, 6 h token expiry, revoked with the minting token and by `/self`. Every other user route refuses the handoff token, and so do routes for another `file_id`. The 410 cases, `{redeemed}` status, the device name in sessions. `Regression-Test` lines. |
 | M2a | Measure reconstruction on a worker GPU | Frames per second for 4K FEL compose plus Main10 encode on two E2 P7 titles. The result picks the live or cache design (§3.3). |
-| M2 | Reconstructed P8.1 serving (§3.3) | A test client claiming `[5,8]` gets `ReconstructedProfile81` for a P7 FEL fixture. ffprobe shows a P8.1 `dvvC` and an RPU on every AU, with L1/L2/L8 equal to the source. **Composition is proved:** ΔE_ITP/PSNR of the output BL against an offline FEL reference on the E2 frames beats the EL-dropped output. The session `enhancement` reports FEL used. The Activity row names the work and stops it. The Developer tab line is updated. |
+| M2 | Reconstructed P8.1 serving (§3.3, for clients that cannot compose) | A test client claiming `[5,8]` gets `ReconstructedProfile81` for a P7 FEL fixture. ffprobe shows a P8.1 `dvvC` and an RPU on every AU, with L1/L2/L8 equal to the source. **Composition is proved:** ΔE_ITP/PSNR of the output BL against an offline FEL reference on the E2 frames beats the EL-dropped output. The session `enhancement` reports FEL used. The Activity row names the work and stops it. The Developer tab line is updated. |
 | M3 | Web setting + handoff action (§4.1) | `tests/web` covers the setting, the code mint, the scheme URL, and the redeem-status poll for both opened and not-installed. |
 | M4 | Launcher (§4.2) | Python tests against a fake server: the call sequence, caps, heartbeat/progress cadence, progress = mpv time + origin, seek outside the range re-creates the session, 404/410 control stops playback, teardown and token revoke on exit and on crash, an unknown origin is not redeemed without confirmation, a malformed URL is refused, no token on disk. |
-| M5 | Private mpv/libplacebo with the closed form (§5) + `.deb` | The §5 evidence: the shader parity controls, and the patched mpv's output against the double-precision reference on real CM v4.0 and CM v2.9 frames. The `.deb` installs on Ubuntu 26.10, coexists with the system mpv, registers the scheme through the desktop database, and uninstalls cleanly. |
+| M5 | Private mpv/libplacebo with the closed form (§5) and FEL composition (§3.3) + `.deb` | The §5 evidence: the shader parity controls, and the patched mpv's output against the double-precision reference on real CM v4.0, CM v2.9 and P7 FEL frames. The `.deb` installs on Ubuntu 26.10, coexists with the system mpv, registers the scheme through the desktop database, and uninstalls cleanly. |
 | M6 | Acceptance on the ROG | One P5, one P8 CM v4, one P8 CM v2.9 and one P7 FEL title, each opened from the web app. Checks: HDR presented, the mapper line, the target 616, seek inside and outside the window, track switching, progress saved, the session torn down on close, and Stop in Activity ends playback within one heartbeat. **No double mapping:** the surface description mpv commits equals the compositor's preferred one, checked with 616-nit and 1000-nit PQ patches. The owner's visual check is last. |
 
 M1, M2a, M3 and M4 are independent. M2 follows M2a, and M6 waits on all

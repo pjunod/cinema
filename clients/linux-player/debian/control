@@ -55,7 +55,7 @@ Rules-Requires-Root: no
 
 Package: plurx-player
 Architecture: amd64
-Depends: ${misc:Depends}, ${python3:Depends}, ${shlibs:Depends}, python3 (>= 3.10), zenity
+Depends: ${misc:Depends}, ${python3:Depends}, ${shlibs:Depends}, libdovi3 (<< 3.4~), python3 (>= 3.10), zenity
 Recommends: desktop-file-utils, mesa-vulkan-drivers | vulkan-icd
 Built-Using: ${plurx:Built-Using}
 Description: Dolby Vision playback of plurx titles on Linux

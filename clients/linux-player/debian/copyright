@@ -25,17 +25,18 @@ Comment: The built libplacebo.so.360 also statically embeds glslang and
 Files: mpv/*
 Copyright: 2000-2025 the MPlayer, mplayer2 and mpv contributors
 License: GPL-2+
-Comment: mpv is built with -Dgpl=true, so /usr/lib/plurx-player/bin/mpv as
- a whole is GPL-2.0-or-later. Some of its source files are also available
- under LGPL-2.1-or-later; see upstream's Copyright file.
+Comment: mpv is built with -Dgpl=true and compiles plurx's Apache-2.0
+ display management (dm/*), so /usr/lib/plurx-player/bin/mpv as a whole is
+ distributed under GPL-3.0-or-later (mpv's GPL-2.0-or-later allows that, and
+ Apache-2.0 is compatible with GPL-3.0). Some of its source files are also
+ available under LGPL-2.1-or-later; see upstream's Copyright file.
 
 Files: dm/*
-Copyright: 2026 plurx contributors
+Copyright: 2026 Paul Junod
 License: Apache-2.0
 Comment: plurx's closed-form Dolby Vision display management
- (tools/dv_processing in the plurx repository), compiled into the private
- mpv. Apache-2.0 code combined with GPL-2.0-or-later mpv makes the mpv
- binary distributable under GPL-3.0-or-later.
+ (tools/dv_processing in the plurx repository; see its LICENSE and NOTICE),
+ compiled into the private mpv.
 
 Files: packaging/libdovi/rpu_parser.h
 Copyright: 2021-2026 quietvoid and the dovi_tool contributors

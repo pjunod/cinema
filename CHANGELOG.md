@@ -14,7 +14,10 @@ bump may break compatibility and a **patch** bump never does.
   server's closed-form CM v4.0 and CM v2.9 display management compiled into
   its private mpv, for the compositor's reported luminance and the largest
   standard gamut inside the panel's primaries. Each playback logs which
-  mapper ran and for what target. Package 0.2.0.
+  mapper ran and for what target. Profile 7 FEL titles play from the
+  original stream with their full enhancement layer composed on the laptop's
+  GPU, so nothing is re-encoded. Package 0.3.0 (libplacebo 7.387.0, mpv
+  master e59d90c84).
 
 - Server playback handoff for the Linux player: a signed-in client mints a
   one-time code (`POST /api/v1/playback-handoffs`, single use, 120 s) that

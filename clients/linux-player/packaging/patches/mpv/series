@@ -2,8 +2,13 @@
 # One file name per line. Every *.patch in this directory must be listed
 # here, and each must apply exactly.
 #
-# 0001 maps Dolby Vision with plurx's closed-form display management. It
-# compiles against packaging/build-private.sh's copies of plurx's
+# 0001 and 0002 are upstreamable fixes: no zero MaxCLL/MaxFALL in the
+# Wayland image description (Weston refuses it), and the Profile 7
+# enhancement-layer split without FFmpeg 9's dovi_split BSF (Ubuntu ships
+# FFmpeg 8.1). 0003 maps Dolby Vision with plurx's closed-form display
+# management; it compiles against build-private.sh's copies of plurx's
 # tools/dv_processing/dv_dm.h and dm_closed_form.h and the pinned libdovi
 # header (packaging/libdovi/rpu_parser.h), in video/out/placebo/plurx/.
-0001-vo_gpu_next-map-Dolby-Vision-with-plurx-s-closed-for.patch
+0001-wayland-don-t-send-an-unknown-MaxCLL-or-MaxFALL.patch
+0002-demux-dovi_split-split-the-enhancement-layer-without.patch
+0003-vo_gpu_next-map-Dolby-Vision-with-plurx-s-closed-for.patch
