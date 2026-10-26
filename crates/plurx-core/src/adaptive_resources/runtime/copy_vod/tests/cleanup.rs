@@ -22,7 +22,10 @@ fn executable_path() -> PathBuf {
     std::fs::canonicalize(selected).expect("canonical actual executable")
 }
 
-async fn actual_request(root: &Path, rejected: bool) -> (Arc<NodeResourceRuntime>, CopyVodRequest) {
+pub(super) async fn actual_request(
+    root: &Path,
+    rejected: bool,
+) -> (Arc<NodeResourceRuntime>, CopyVodRequest) {
     crate::testfixtures::require_ffmpeg();
     let source =
         std::fs::canonicalize(crate::testfixtures::source("h264")).expect("actual media source");

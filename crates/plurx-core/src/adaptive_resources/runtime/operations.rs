@@ -1189,6 +1189,11 @@ impl NodeResourceRuntime {
             }
             self.finish_transition(id, role).await?;
         }
+        #[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+        if matches!(named_adapter, Some(NamedAdapter::Copy)) {
+            self.fixture_copy_stage(copy_vod::CopyStartFixtureStage::RootArmed)
+                .await;
+        }
         if Instant::now() >= deadline {
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());

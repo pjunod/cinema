@@ -3,11 +3,25 @@
 //! result may authorize source/scratch settlement.
 use super::*;
 use crate::adaptive_resources::physical_graph::copy_vod::{
-    CopyFixedImage, CopyProcessClosure, CopyTaskSummary, CopyWork, GraphCopyTask,
+    CopyFixedImage, CopyProcessClosure, CopyRootOnlyClosure, CopyTaskSummary, CopyTaskTerminal,
+    CopyWork, GraphCopyTask,
 };
 use crate::adaptive_resources::physical_graph::finite_vod::FiniteVodNeverRootClosure;
-use crate::adaptive_resources::runtime::copy_vod::CopyPipeCommand;
+use crate::adaptive_resources::runtime::copy_vod::{
+    CopyCleanupHoldDiagnostic, CopyCleanupHoldReason, CopyPipeCommand,
+};
 use std::process::Stdio;
+#[cfg(all(test, feature = "fixtures"))]
+#[path = "copy_vod/stage_fixture.rs"]
+mod stage_fixture;
+#[cfg(all(test, feature = "fixtures"))]
+pub(in crate::adaptive_resources::runtime) use stage_fixture::CopyStartFixtureStage;
+#[cfg(all(test, feature = "fixtures"))]
+#[path = "copy_vod/physical_tests.rs"]
+mod physical_tests;
+#[cfg(all(test, feature = "fixtures"))]
+#[path = "copy_vod/runtime_tests.rs"]
+mod runtime_tests;
 
 pub(super) struct CopyLaunch {
     pub(super) root_member: Uuid,
@@ -17,6 +31,7 @@ pub(super) struct CopyLaunch {
     pub(super) command: CopyPipeCommand,
     pub(super) work: Option<CopyWork>,
     pub(super) entered: bool,
+    pub(super) root_observed_committed: bool,
     pub(super) task: Option<GraphCopyTask>,
     pub(super) task_observation: Uuid,
     pub(super) task_observed_committed: bool,
@@ -25,14 +40,66 @@ pub(super) struct CopyLaunch {
     start_released: bool,
     pub(super) fixed_image: Option<CopyFixedImage>,
     pub(super) process_closure: Option<CopyProcessClosure>,
+    pub(super) root_only_closure: Option<CopyRootOnlyClosure>,
     pub(super) never_root_closure: Option<FiniteVodNeverRootClosure>,
-    pub(super) terminal: Option<CopyTaskSummary>,
+    pub(super) terminal: Option<CopyTaskTerminal>,
+    pub(super) permanent_hold: Option<CopyCleanupHoldReason>,
+    pub(super) retryable_hold: Option<CopyCleanupHoldReason>,
     pub(super) source_drifted: bool,
     pub(super) cleanup_requested: Arc<std::sync::atomic::AtomicBool>,
     pub(super) progress: Arc<tokio::sync::Notify>,
 }
 
 impl NodeResourceRuntime {
+    pub(in crate::adaptive_resources::runtime) fn copy_launch_structural_bytes() -> usize {
+        std::mem::size_of::<CopyLaunch>()
+    }
+
+    pub(in crate::adaptive_resources::runtime) fn copy_cleanup_holds_inner(
+        &self,
+    ) -> Option<Vec<CopyCleanupHoldDiagnostic>> {
+        let book = self.operations.try_lock().ok()?;
+        let mut selected = Vec::new();
+        for state in book.bundles.values() {
+            let bundle = state.try_lock().ok()?;
+            for role in &bundle.roles {
+                if role.refunded {
+                    continue;
+                }
+                let Some(reason) = role
+                    .copy_vod
+                    .as_ref()
+                    .and_then(|copy| copy.permanent_hold.or(copy.retryable_hold))
+                else {
+                    continue;
+                };
+                selected.push((
+                    bundle.id,
+                    role.handle.as_ref().map(|handle| handle.graph_id()),
+                    role.binding,
+                    reason,
+                ));
+            }
+        }
+        drop(book);
+        let ledger = self.ledger.inner.lock().ok()?;
+        selected
+            .into_iter()
+            .map(|(preparation_id, graph_id, binding, reason)| {
+                let entry = ledger.entries.get(&binding.reservation)?;
+                if entry.binding != binding {
+                    return None;
+                }
+                Some(CopyCleanupHoldDiagnostic {
+                    preparation_id,
+                    graph_id,
+                    reason,
+                    held_resources: entry.resources,
+                })
+            })
+            .collect()
+    }
+
     pub(in crate::adaptive_resources::runtime) async fn copy_produced_segment_lengths(
         &self,
         owner: &OwnedPreparation,
@@ -98,7 +165,7 @@ impl NodeResourceRuntime {
         owner: &OwnedPreparation,
         index: usize,
         deadline: Instant,
-    ) -> Result<CopyTaskSummary, OperationError> {
+    ) -> Result<CopyTaskTerminal, OperationError> {
         self.validate_preparation(owner)?;
         let waiter = {
             let bundle = owner.state.lock().await;
@@ -196,14 +263,18 @@ impl NodeResourceRuntime {
             command,
             work,
             entered: false,
+            root_observed_committed: false,
             task: None,
             task_observation: Uuid::new_v4(),
             task_observed_committed: false,
             start_released: false,
             fixed_image: None,
             process_closure: None,
+            root_only_closure: None,
             never_root_closure: None,
             terminal: None,
+            permanent_hold: None,
+            retryable_hold: None,
             source_drifted: false,
             cleanup_requested,
             progress,
@@ -330,7 +401,14 @@ impl NodeResourceRuntime {
             {
                 return Err(OperationError::State);
             }
+            let root_observation = transition.effect == Effect::Enrich;
             self.finish_transition(bundle_id, role).await?;
+            if root_observation {
+                role.copy_vod
+                    .as_mut()
+                    .ok_or(OperationError::State)?
+                    .root_observed_committed = true;
+            }
         }
         let root = if let Some(root) = role.roots.get(&root_member) {
             *root
@@ -413,18 +491,37 @@ impl NodeResourceRuntime {
                 &descriptors,
                 None,
             );
-            self.launch_root_role(
-                bundle_id,
-                role,
-                root_member,
-                &mut command,
-                crate::process::ChildWork::realtime("rolling copy"),
-                deadline,
-                Some(acquisition_id),
-            )
-            .await?
+            let root = self
+                .launch_root_role(
+                    bundle_id,
+                    role,
+                    root_member,
+                    &mut command,
+                    crate::process::ChildWork::realtime("rolling copy"),
+                    deadline,
+                    Some(acquisition_id),
+                )
+                .await?;
+            // Only launch_root_role's known original Enrich acknowledgment
+            // binds identity/domain; a retained child alone cannot do so.
+            role.copy_vod
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .root_observed_committed = true;
+            root
         };
-        role.copy_vod.as_mut().ok_or(OperationError::State)?.entered = true;
+        debug_assert!(role.copy_vod.as_ref().ok_or(OperationError::State)?.entered);
+        if !role
+            .copy_vod
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .root_observed_committed
+        {
+            return Err(OperationError::State);
+        }
+        #[cfg(all(test, feature = "fixtures"))]
+        self.fixture_copy_stage(CopyStartFixtureStage::RootRegistered)
+            .await;
         for member in source_members {
             let source = role
                 .sources
@@ -502,6 +599,9 @@ impl NodeResourceRuntime {
                 )?;
                 self.finish_transition(bundle_id, role).await?;
             }
+            #[cfg(all(test, feature = "fixtures"))]
+            self.fixture_copy_stage(CopyStartFixtureStage::TaskArmed)
+                .await;
             if Instant::now() >= deadline {
                 return Err(OperationError::Deadline);
             }
@@ -524,6 +624,9 @@ impl NodeResourceRuntime {
                 .await?;
             copy.task = Some(task);
             role.invoked.insert(member);
+            #[cfg(all(test, feature = "fixtures"))]
+            self.fixture_copy_stage(CopyStartFixtureStage::TaskRegistered)
+                .await;
         }
         let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
         let v2::MemberPlan::VodOutputTaskV1 { task, .. } = &plan else {
@@ -542,11 +645,17 @@ impl NodeResourceRuntime {
             Effect::CopyTask(member),
             deadline,
         )?;
+        #[cfg(all(test, feature = "fixtures"))]
+        self.fixture_copy_stage(CopyStartFixtureStage::TaskObservationQueued)
+            .await;
         self.finish_transition(bundle_id, role).await?;
         role.copy_vod
             .as_mut()
             .ok_or(OperationError::State)?
             .task_observed_committed = true;
+        #[cfg(all(test, feature = "fixtures"))]
+        self.fixture_copy_stage(CopyStartFixtureStage::TaskObserved)
+            .await;
         self.release_copy_task(role).await
     }
 
@@ -572,6 +681,115 @@ impl NodeResourceRuntime {
         Ok(())
     }
 
+    /// Replay only captured original acquisition commands before any source
+    /// acknowledgment input, latch or physical owner can be destroyed. A
+    /// registered parser's observation is always committed under its ORIGINAL
+    /// named ID, even when its start sender was never delivered.
+    pub(super) async fn reconcile_copy_acquisition_for_cleanup(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        output_member: Uuid,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        let bundle_id = bundle.id;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+        if let Some(transition) = role.transition.as_mut() {
+            let captured = match transition.effect {
+                Effect::Enrich | Effect::Hold | Effect::Seal => true,
+                Effect::Arm(member) => {
+                    member == copy.root_member
+                        || member == copy.task_member
+                        || member == output_member
+                        || copy.source_members.contains(&member)
+                }
+                Effect::Source(member) | Effect::SourceRoot(member) => {
+                    copy.source_members.contains(&member)
+                }
+                Effect::CopyTask(member) => member == copy.task_member,
+                Effect::Bootstrap(member) => member == output_member,
+                _ => false,
+            };
+            if !captured {
+                return Err(OperationError::State);
+            }
+            if transition.operation.pending.is_none()
+                && !matches!(transition.operation.result, Some(Ok(_)))
+            {
+                transition.operation.retry(&self.journal, deadline)?;
+            }
+            let root_observation = transition.effect == Effect::Enrich;
+            self.finish_transition(bundle_id, role).await?;
+            if root_observation {
+                role.copy_vod
+                    .as_mut()
+                    .ok_or(OperationError::State)?
+                    .root_observed_committed = true;
+            }
+        }
+        let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+        let root_member = copy.root_member;
+        let acquisition_id = copy.acquisition_id;
+        let source_members = copy.source_members;
+        if role.roots.contains_key(&root_member) {
+            for member in source_members {
+                let source = role
+                    .sources
+                    .get_mut(&member)
+                    .ok_or(OperationError::State)?
+                    .inherited_source(root_member)?;
+                if source.acquisition_id.uuid() != acquisition_id {
+                    return Err(OperationError::State);
+                }
+                if !source.acknowledged {
+                    start_named_transition(
+                        &self.journal,
+                        role,
+                        source.observation_id,
+                        Mutation::RecordTypedAcquired {
+                            envelope: source.envelope,
+                        },
+                        Effect::SourceRoot(member),
+                        deadline,
+                    )?;
+                    self.finish_transition(bundle_id, role).await?;
+                }
+            }
+        }
+        let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+        if copy.task.is_some() && !copy.task_observed_committed {
+            let plan = role
+                .typed_members
+                .as_ref()
+                .and_then(|members| members.iter().find(|p| p.member_id() == copy.task_member))
+                .cloned()
+                .ok_or(OperationError::State)?;
+            let v2::MemberPlan::VodOutputTaskV1 { task, .. } = &plan else {
+                return Err(OperationError::State);
+            };
+            let envelope = v2::Envelope {
+                version: 2,
+                planned: plan.clone(),
+                observed: Some(v2::Observed::VodOutputTaskV1 { task: task.clone() }),
+            };
+            let observation = copy.task_observation;
+            let member = copy.task_member;
+            start_named_transition(
+                &self.journal,
+                role,
+                observation,
+                Mutation::RecordTypedAcquired { envelope },
+                Effect::CopyTask(member),
+                deadline,
+            )?;
+            self.finish_transition(bundle_id, role).await?;
+        }
+        Ok(())
+    }
+
     /// Join the original registered parser, root and source parents. A
     /// cancelled waiter leaves each original handle in the runtime book; no
     /// parser outcome or root status by itself authorizes output settlement.
@@ -580,16 +798,20 @@ impl NodeResourceRuntime {
         owner: &OwnedPreparation,
         index: usize,
         abort: bool,
-    ) -> Result<CopyTaskSummary, OperationError> {
+    ) -> Result<CopyTaskTerminal, OperationError> {
         self.validate_preparation(owner)?;
-        let (graph, task, root) = {
+        let (graph, task, root, start_released) = {
             let mut bundle = owner.state.lock().await;
             if !bundle.installed {
                 return Err(OperationError::State);
             }
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
             let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
-            if role.refunded || !copy.entered || !copy.task_observed_committed {
+            if role.refunded
+                || !copy.entered
+                || !copy.task_observed_committed
+                || copy.permanent_hold.is_some()
+            {
                 return Err(OperationError::State);
             }
             if let Some(terminal) = copy.terminal {
@@ -601,6 +823,7 @@ impl NodeResourceRuntime {
                 .get(&copy.root_member)
                 .copied()
                 .ok_or(OperationError::State)?;
+            let start_released = copy.start_released;
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());
             }
@@ -609,16 +832,66 @@ impl NodeResourceRuntime {
                 .as_ref()
                 .ok_or(OperationError::State)?
                 .select_same();
-            (graph, task, root)
+            (graph, task, root, start_released)
         };
-        if abort {
-            graph.start_kill_root(root).await?;
+        // Never hold the bundle while the original parser joins: its sink
+        // needs that bundle and must never acquire the graph members lock.
+        // S3 has an undelivered latch and must kill before joining, regardless
+        // of the caller's requested natural-close policy.
+        if abort || !start_released {
+            self.request_copy_kill_or_observe_exit(owner, index, &graph, root)
+                .await?;
         }
-        let parser_terminal = graph.join_copy_vod(task, false).await?;
+        let parser_terminal = match graph.join_copy_vod(task).await {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let reason = graph.copy_task_hold_reason(task).await;
+                if let Some(reason) = reason {
+                    // Publish the typed sticky reason before another borrowed
+                    // wait can be cancelled. These best-effort same-owner
+                    // operations do not mint a physical settlement receipt.
+                    self.hold_copy_for_reconciliation(owner, index, map_copy_task_hold(reason))
+                        .await?;
+                    let _ = self
+                        .request_copy_kill_or_observe_exit(owner, index, &graph, root)
+                        .await;
+                    let _ = graph.wait_root(root).await;
+                }
+                return Err(error.into());
+            }
+        };
+        use crate::adaptive_resources::physical_graph::copy_vod::CopyStartDisposition;
+        let expected_start = match parser_terminal {
+            CopyTaskTerminal::NeverEntered => !start_released,
+            CopyTaskTerminal::Entered(_) => start_released,
+        };
+        if !expected_start {
+            self.hold_copy_for_reconciliation(
+                owner,
+                index,
+                CopyCleanupHoldReason::TerminalIdentityMismatch,
+            )
+            .await?;
+            let _ = self
+                .request_copy_kill_or_observe_exit(owner, index, &graph, root)
+                .await;
+            let _ = graph.wait_root(root).await;
+            return Err(OperationError::State);
+        }
+        // Failure kill also happens inside the SAME original parser task
+        // before diagnostic draining. This post-join request is an idempotent
+        // backstop, never a substitute for that required pre-join signal.
+        if !matches!(parser_terminal, CopyTaskTerminal::Entered(summary) if summary.completed) {
+            self.request_copy_kill_or_observe_exit(owner, index, &graph, root)
+                .await?;
+        }
         let root_status = graph.wait_root(root).await?;
-        let terminal = CopyTaskSummary {
-            completed: parser_terminal.completed && root_status.success(),
-            segments: parser_terminal.segments,
+        let terminal = match parser_terminal {
+            CopyTaskTerminal::NeverEntered => CopyTaskTerminal::NeverEntered,
+            CopyTaskTerminal::Entered(summary) => CopyTaskTerminal::Entered(CopyTaskSummary {
+                completed: summary.completed && root_status.success(),
+                segments: summary.segments,
+            }),
         };
         let mut bundle = owner.state.lock().await;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
@@ -635,6 +908,16 @@ impl NodeResourceRuntime {
             }
         }
         if let Some(error) = first_error {
+            if role
+                .sources
+                .values()
+                .any(|source| source.copy_cleanup_permanently_unknown())
+            {
+                set_copy_hold(
+                    role.copy_vod.as_mut().ok_or(OperationError::State)?,
+                    CopyCleanupHoldReason::FailedSourceClose,
+                );
+            }
             return Err(error);
         }
         for source in role.sources.values_mut() {
@@ -643,11 +926,29 @@ impl NodeResourceRuntime {
             }
         }
         if let Some(error) = first_error {
+            if role
+                .sources
+                .values()
+                .any(|source| source.copy_cleanup_permanently_unknown())
+            {
+                set_copy_hold(
+                    role.copy_vod.as_mut().ok_or(OperationError::State)?,
+                    CopyCleanupHoldReason::FailedSourceClose,
+                );
+            }
             return Err(error);
         }
         let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
         if copy.process_closure.is_none() {
-            copy.process_closure = Some(graph.try_copy_process_closure(task).await?);
+            match graph.try_copy_process_closure(task).await {
+                Ok(closure) => copy.process_closure = Some(closure),
+                Err(error) => {
+                    if let Some(reason) = graph.copy_task_hold_reason(task).await {
+                        set_copy_hold(copy, map_copy_task_hold(reason));
+                    }
+                    return Err(error.into());
+                }
+            }
         }
         let closure = copy.process_closure.as_ref().ok_or(OperationError::State)?;
         if !closure.matches(&graph)
@@ -657,16 +958,80 @@ impl NodeResourceRuntime {
             || closure.acquisition_id() != copy.acquisition_id
             || closure.executable_identity() != copy.command.executable().source_identity()
             || closure.executable_sha256() != copy.command.executable().sha256()
-            || closure.summary().completed != parser_terminal.completed
-            || closure.summary().segments != parser_terminal.segments
+            || closure.terminal() != parser_terminal
+            || (matches!(parser_terminal, CopyTaskTerminal::Entered(_))
+                && closure.start_disposition() != CopyStartDisposition::TakenBeforeSeal)
         {
+            copy.permanent_hold = Some(CopyCleanupHoldReason::TerminalIdentityMismatch);
             return Err(OperationError::State);
         }
         for source in role.sources.values() {
             let _ = source.copy_closed_fact(closure)?;
         }
         copy.terminal = Some(terminal);
+        copy.retryable_hold = None;
         Ok(terminal)
+    }
+
+    pub(super) async fn hold_copy_for_reconciliation(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        reason: CopyCleanupHoldReason,
+    ) -> Result<(), OperationError> {
+        let mut bundle = owner.state.lock().await;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
+        set_copy_hold(copy, reason);
+        Ok(())
+    }
+
+    /// A failed signal (including an already-exited race) is never treated as
+    /// successful termination. Observe the SAME actual Child wait instead;
+    /// the final closure still needs task join, checked pipe closes and job.
+    pub(super) async fn request_copy_kill_or_observe_exit(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        graph: &SealedPhysicalGraph,
+        root: GraphRoot,
+    ) -> Result<(), OperationError> {
+        if graph.start_kill_root(root).await.is_err() {
+            self.hold_copy_for_reconciliation(
+                owner,
+                index,
+                CopyCleanupHoldReason::FailedParserKill,
+            )
+            .await?;
+            graph.wait_root(root).await?;
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn set_copy_hold(copy: &mut CopyLaunch, reason: CopyCleanupHoldReason) {
+    if reason == CopyCleanupHoldReason::FailedParserKill {
+        copy.retryable_hold = Some(reason);
+    } else {
+        copy.permanent_hold.get_or_insert(reason);
+    }
+}
+
+pub(super) fn map_copy_task_hold(
+    reason: crate::adaptive_resources::physical_graph::copy_vod::CopyTaskHoldReason,
+) -> CopyCleanupHoldReason {
+    use crate::adaptive_resources::physical_graph::copy_vod::CopyTaskHoldReason;
+    match reason {
+        CopyTaskHoldReason::TaskAbandoned => CopyCleanupHoldReason::AbandonedTask,
+        CopyTaskHoldReason::TerminalPoisoned => CopyCleanupHoldReason::PoisonedTerminal,
+        CopyTaskHoldReason::TerminalMissing => CopyCleanupHoldReason::LostTaskTerminal,
+        CopyTaskHoldReason::StartDispositionMismatch => {
+            CopyCleanupHoldReason::TerminalIdentityMismatch
+        }
+        CopyTaskHoldReason::PipeCloseFailed => CopyCleanupHoldReason::FailedPipeClose,
+        CopyTaskHoldReason::FailureKillUnavailable | CopyTaskHoldReason::FailureKillFailed => {
+            CopyCleanupHoldReason::FailedParserKill
+        }
     }
 }
 

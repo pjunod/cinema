@@ -547,3 +547,5 @@ fn typed_unknown_producer_cannot_join_an_active_legacy_prepare() {
         1
     );
 }
+
+mod copy_task_settlement;

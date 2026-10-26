@@ -30,6 +30,8 @@ pub(in crate::adaptive_resources) struct CopySink {
     playlist_capacity: usize,
     published_seconds: f64,
     started: bool,
+    #[cfg(all(test, feature = "fixtures"))]
+    fixture_panic_next_publication: bool,
 }
 
 /// Allocated only after the exact typed R is admitted. Binding moves these
@@ -187,7 +189,17 @@ impl CopySink {
         Arc::clone(&self.publication_gate)
     }
 
+    #[cfg(all(test, feature = "fixtures"))]
+    pub(in crate::adaptive_resources::runtime) fn fixture_panic_next_publication(&mut self) {
+        self.fixture_panic_next_publication = true;
+    }
+
     async fn publish(&self, output: OutputKey, bytes: Vec<u8>) -> io::Result<()> {
+        #[cfg(all(test, feature = "fixtures"))]
+        assert!(
+            !self.fixture_panic_next_publication,
+            "fixture panic in ORIGINAL copy publication sink"
+        );
         if bytes.is_empty() || bytes.len() > self.max_payload_bytes {
             return Err(io::Error::other(
                 "copy output exceeds admitted native payload",
@@ -310,6 +322,8 @@ impl PreparedCopySink {
             playlist_capacity: self.playlist_capacity,
             published_seconds: 0.0,
             started: false,
+            #[cfg(all(test, feature = "fixtures"))]
+            fixture_panic_next_publication: false,
         }
     }
 }
