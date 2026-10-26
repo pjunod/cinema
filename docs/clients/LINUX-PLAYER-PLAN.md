@@ -1,6 +1,6 @@
 # Linux player — Dolby Vision on Linux through plurx
 
-**Status:** plan, owner-approved direction; Fable review folded in (2026-10-25) · **Owner:** Claude
+**Status:** M1–M5 built on `effort/linux-player` (M6, acceptance on the ROG, is next); plan owner-approved, Fable review folded in (2026-10-25) · **Owner:** Claude
 (Opus 5.5, Linux Dolby Vision session) · **Written:** 2026-10-25
 
 Companion to [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) (the browser half) and
@@ -53,7 +53,7 @@ Owner decisions (2026-10-25):
    │   every 5 s: POST /hls/{s}/control (lease) · every 10 s: POST /items/{id}/progress
    │   on exit:   DELETE /hls/{s}
    ▼
- mpv (private build) ── libplacebo (private build: closed-form DM)
+ mpv (private build: closed-form DM, plurx/dv_dm.h) ── libplacebo (private build)
    └── vo=gpu-next, Wayland wp_color_manager_v1 → GNOME HDR (target from surface feedback)
 ```
 
@@ -267,11 +267,9 @@ Its work, in order:
 - The package description says this, because "HDR on Ubuntu" without it
   would be an untruthful claim.
 
-## 5. Closed-form mapping in mpv/libplacebo
+## 5. Closed-form mapping in mpv
 
-The rog_hdr_dv card `t_d4b5c4f8` ports `dm_closed_form.h` (plurx main,
-byte-identical in #1275/#1276) into a libplacebo/mpv stage. Owner direction,
-recorded on that card on 2026-10-25:
+Owner direction (2026-10-25):
 
 - ordinary `vo=gpu-next` playback of DV P5/P8 with an RPU uses the closed
   form, CM v4.0 and v2.9, trims included;
@@ -279,10 +277,72 @@ recorded on that card on 2026-10-25:
 - libplacebo's built-in DV tone mapping is not also applied;
 - the mapper that ran is visible.
 
-Acceptance is ΔE_ITP against `cm_offline` on the E2 real-title frames, at
-least matching plurx (CM v4 about 0.005–0.011, CM v2.9 about 0.14–0.46).
-The remaining equation outliers belong to the HDR10-E session. Their fixes
-reach the player through plurx main's `dm_closed_form.h`.
+**Built as one mpv patch on stock mpv 0.41.0** (2026-10-26, owner's call:
+it replaced the rog_hdr_dv port, which sat on about 9,000 lines of
+research code). `clients/linux-player/packaging/patches/mpv/0001-…`
+adds `video/out/placebo/plurx_dv.{c,h}` and about 180 lines in
+`vo_gpu_next.c`:
+
+1. **The equations are the server's.** The package build copies
+   `tools/dv_processing/dv_dm.h` and `dm_closed_form.h` into mpv's tree, so
+   the player compiles exactly the code the plurx helper renders with, and
+   every equation fix on main reaches the player at its next package build.
+   The patch carries no copy of them.
+2. **RPU.** libdovi (Ubuntu's `libdovi3`) parses the frame's raw RPU, as the
+   helper does. Ubuntu's `libdovi-dev` ships an empty C header, so the
+   package carries the one the helper pins
+   (`packaging/libdovi/rpu_parser.h`, sha256-checked by a test).
+3. **Reconstruction.** libplacebo applies the RPU's reshaping and colour
+   conversion to BT.2020/PQ with the helper's own render parameters
+   (identical 0.005–10000-nit volumes, clip tone and gamut mapping), so no
+   tone mapping happens there. Chroma is upsampled bilinearly.
+4. **Target.** The compositor's preferred description (mpv's `target_csp`):
+   its luminance range, and the largest of BT.2020, P3-D65 and BT.709
+   inside the panel's primaries, within half a step of the precision the
+   primaries were reported in (EDID 10-bit, DisplayID 12-bit). The ROG
+   selects P3-D65 at 616 nits; the compositor finishes P3 to the panel.
+5. **Presentation.** The mapped frame (16-bit UNORM) and the swapchain hint
+   both carry the target's volume (BT.2020/PQ container, the named gamut as
+   mastering primaries, peak = MaxCLL = MaxFALL), so the final render has
+   nothing to map and the compositor does not tone map it again.
+6. **Visible.** One line per configuration, `plurx mapper: closed-form CM
+   v4.0 target=<min>-<max> nits gamut=P3-D65 (trim …, primaries …,
+   tolerance …)`, which the launcher posts to Activity. When the display is
+   not in HDR mode, the frame has no RPU, or a frame cannot be mapped, the
+   line says `none (<reason>)` and libplacebo's own handling renders it.
+7. **Switches.** `--dv-cm4-trims` and `--dv-cm29-trims` (default yes), as
+   `DV_TARGET_TRIMS_CM4/_CM29` on the server. Screenshots of a DV frame use
+   the same mapping.
+
+**Evidence** (2026-10-26, nuc3, Ubuntu 26.10 container, libplacebo 7.360.1,
+lavapipe):
+
+- plurx's `controls/test_dv_dm.c` passes against Ubuntu's libdovi 3.3.2
+  with the pinned header (real RPU fixtures and pinned golden values), so
+  the parser ABI is the helper's;
+- `controls/run_dm_parity.py` passes: the shader against the CPU reference,
+  every case inside its tolerance;
+- end to end, the patched mpv on a headless HDR Weston 16 with the ROG's
+  DisplayID primaries and 616 nits logs `closed-form CM v4.0 … gamut=P3-D65
+  (… primaries displayid-12bit …)` and the CM v2.9 equivalent. Its unscaled
+  16-bit PQ screenshot of a real frame against an independent reference
+  (FFmpeg decode, the same reconstruction, `dv_dm_cpu_render` in double
+  precision): Companion (CM v4.0) ΔE_ITP mean 0.008, p99 0.021, max 0.053;
+  Dumb Money (CM v2.9) mean 0.006, p99 0.016, max 0.073;
+- an SDR desktop logs `none (the display is not in HDR (BT.2020/PQ) mode)`
+  and an HDR10 file `none (no Dolby Vision RPU)`.
+
+So the player reproduces plurx's own closed form, whose agreement with
+`cm_offline` on the E2 frames is the server's (CM v4 about 0.005–0.011, CM
+v2.9 about 0.14–0.46). The remaining equation outliers belong to the
+HDR10-E session; their fixes reach the player through
+`tools/dv_processing`.
+
+**Found on the way:** a float render target with `.bits.color_depth = 32`
+is scaled as 32-bit integer samples by libplacebo 7.360.1 (values around
+1e7 instead of PQ). The helper's `base_dv_renderer.h` sets that on its
+libplacebo `0d043c7`, where its controls pass; moving the helper to a newer
+libplacebo needs that field dropped.
 
 ## 6. Non-goals for v1
 
@@ -312,11 +372,11 @@ reach the player through plurx main's `dm_closed_form.h`.
 | M2 | Reconstructed P8.1 serving (§3.3) | A test client claiming `[5,8]` gets `ReconstructedProfile81` for a P7 FEL fixture. ffprobe shows a P8.1 `dvvC` and an RPU on every AU, with L1/L2/L8 equal to the source. **Composition is proved:** ΔE_ITP/PSNR of the output BL against an offline FEL reference on the E2 frames beats the EL-dropped output. The session `enhancement` reports FEL used. The Activity row names the work and stops it. The Developer tab line is updated. |
 | M3 | Web setting + handoff action (§4.1) | `tests/web` covers the setting, the code mint, the scheme URL, and the redeem-status poll for both opened and not-installed. |
 | M4 | Launcher (§4.2) | Python tests against a fake server: the call sequence, caps, heartbeat/progress cadence, progress = mpv time + origin, seek outside the range re-creates the session, 404/410 control stops playback, teardown and token revoke on exit and on crash, an unknown origin is not redeemed without confirmation, a malformed URL is refused, no token on disk. |
-| M5 | Private mpv/libplacebo with the closed form (§5) + `.deb` | `t_d4b5c4f8` acceptance. The `.deb` installs on Ubuntu 26.10, coexists with the system mpv, registers the scheme through the desktop database, and uninstalls cleanly. |
+| M5 | Private mpv/libplacebo with the closed form (§5) + `.deb` | The §5 evidence: the shader parity controls, and the patched mpv's output against the double-precision reference on real CM v4.0 and CM v2.9 frames. The `.deb` installs on Ubuntu 26.10, coexists with the system mpv, registers the scheme through the desktop database, and uninstalls cleanly. |
 | M6 | Acceptance on the ROG | One P5, one P8 CM v4, one P8 CM v2.9 and one P7 FEL title, each opened from the web app. Checks: HDR presented, the mapper line, the target 616, seek inside and outside the window, track switching, progress saved, the session torn down on close, and Stop in Activity ends playback within one heartbeat. **No double mapping:** the surface description mpv commits equals the compositor's preferred one, checked with 616-nit and 1000-nit PQ patches. The owner's visual check is last. |
 
-M1, M2a, M3 and M4 are independent. M2 follows M2a, M5 waits on
-`t_d4b5c4f8`, and M6 waits on all of them. PRs:
+M1, M2a, M3 and M4 are independent. M2 follows M2a, and M6 waits on all
+of them. PRs:
 
 - one for M1+M3 (handoff and web);
 - one for M2;

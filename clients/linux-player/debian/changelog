@@ -1,3 +1,15 @@
+plurx-player (0.2.0+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
+
+  * mpv maps Dolby Vision profile 5 and 8 with plurx's closed-form CM v4.0
+    and CM v2.9 display management (tools/dv_processing/dv_dm.h, the
+    server's own code), for the compositor's preferred luminance and the
+    largest named gamut inside the panel's primaries, and logs one
+    "plurx mapper:" line per configuration.
+  * Build-Depends on libdovi-dev for the RPU parser; its C API header is
+    the pinned copy in packaging/libdovi.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 12:00:00 +0000
+
 plurx-player (0.1.1+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
 
   * Launcher (milestone M4): redeem, decide, play in mpv, heartbeat,

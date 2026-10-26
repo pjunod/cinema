@@ -13,6 +13,7 @@ Build-Depends: debhelper-compat (= 13),
                libavformat-dev (>= 7:8),
                libavutil-dev (>= 7:8),
                libdisplay-info-dev,
+               libdovi-dev,
                libdrm-dev,
                libegl-dev,
                libffmpeg-nvenc-dev,
@@ -61,6 +62,11 @@ Description: Dolby Vision playback of plurx titles on Linux
  plurx Player plays titles handed over from the plurx web app ("Open titles
  in: plurx Player") in mpv, keeping the original Dolby Vision stream for
  profile 5 and 8 titles and receiving profile 7 FEL titles as profile 8.1.
+ .
+ Dolby Vision is mapped for the screen with plurx's closed-form CM v4.0 and
+ CM v2.9 display management, the same equations the plurx server uses,
+ targeting the compositor's reported luminance and the largest standard
+ gamut inside the panel's primaries.
  .
  It carries its own build of mpv and libplacebo in /usr/lib/plurx-player.
  The distribution's mpv and libplacebo, and every program linked against

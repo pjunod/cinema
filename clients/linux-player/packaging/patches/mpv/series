@@ -1,4 +1,9 @@
 # The mpv patch series, applied in this order by packaging/apply-series.sh.
 # One file name per line. Every *.patch in this directory must be listed
-# here, and each must apply exactly. Empty until the closed-form display
-# management from the rog_hdr_dv work lands.
+# here, and each must apply exactly.
+#
+# 0001 maps Dolby Vision with plurx's closed-form display management. It
+# compiles against packaging/build-private.sh's copies of plurx's
+# tools/dv_processing/dv_dm.h and dm_closed_form.h and the pinned libdovi
+# header (packaging/libdovi/rpu_parser.h), in video/out/placebo/plurx/.
+0001-vo_gpu_next-map-Dolby-Vision-with-plurx-s-closed-for.patch

@@ -58,6 +58,16 @@ for name in libplacebo mpv; do
   "$player/packaging/apply-series.sh" "$src/$name" "$player/packaging/patches/$name" "${pinned[$name]}" "$epoch"
 done
 
+# The mpv series compiles against plurx's closed-form display management
+# (dm/, from tools/dv_processing) and the pinned libdovi C API header:
+# Ubuntu's libdovi-dev ships an empty rpu_parser.h, so only its library is used.
+headers=$src/mpv/video/out/placebo/plurx
+mkdir -p "$headers"
+for file in dm/dm_closed_form.h dm/dv_dm.h packaging/libdovi/rpu_parser.h; do
+  [ -f "$player/$file" ] || fail "$player/$file is missing"
+  cp "$player/$file" "$headers/"
+done
+
 meson setup "$out/libplacebo" "$src/libplacebo" \
   --prefix="$prefix" --libdir=lib --buildtype=plain --wrap-mode=nodownload \
   -Dvulkan=enabled -Dopengl=enabled -Dglslang=enabled -Dshaderc=disabled \
@@ -124,6 +134,10 @@ builtusing=$(dpkg-query -W -f '${source:Package} ${source:Version}\n' glslang-de
     echo "  git describe: $(git -C "$src/$name" describe --tags)"
     git -C "$src/$name" log --reverse --format='  patch: %s' "v$ver-plurx..HEAD"
   done < "$lock"
+  echo "closed-form display management (compiled into mpv):"
+  for file in dm/dm_closed_form.h dm/dv_dm.h packaging/libdovi/rpu_parser.h; do
+    echo "  $(basename "$file") sha256 $(sha256sum < "$player/$file" | cut -d' ' -f1)"
+  done
   echo
   echo "Installed under $prefix: bin/mpv (DT_RPATH $rpath) and lib/$soname."
   echo "libplacebo statically embeds glslang and SPIRV-Tools from the build environment:"

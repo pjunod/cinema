@@ -4,6 +4,7 @@ the package version expect it."""
 
 import configparser
 import glob
+import hashlib
 import os
 import re
 import shutil
@@ -138,6 +139,54 @@ class PrivateBuild(unittest.TestCase):
         self.assertNotIn("Recommends: mpv", control)
         self.assertIn("Recommends: desktop-file-utils, mesa-vulkan-drivers | vulkan-icd", control)
         self.assertIn("Built-Using: ${plurx:Built-Using}", control)
+
+
+# The libdovi C API header plurx's processing helper pins
+# (tools/dv_quality/backends/parsed-rpu/fetch_parser.py).
+LIBDOVI_HEADER_SHA256 = "77e130d174a285ec4d141a88245f12b068606174a745f39f7aca54a2c1439f82"
+DM_HEADERS = ("dm_closed_form.h", "dv_dm.h")
+
+
+class ClosedFormMapping(unittest.TestCase):
+    """mpv compiles plurx's own display management, not a copy of it."""
+
+    def test_the_mpv_series_maps_dolby_vision_with_plurx_headers(self):
+        series = read("packaging/patches/mpv/series")
+        patch = "0001-vo_gpu_next-map-Dolby-Vision-with-plurx-s-closed-for.patch"
+        self.assertIn(patch, series)
+        text = read(f"packaging/patches/mpv/{patch}")
+        self.assertIn('#include "plurx/dv_dm.h"', text)
+        self.assertIn('#include "plurx/rpu_parser.h"', text)
+        self.assertIn("plurx mapper: %s", text)
+        # The equations are never carried in the patch itself.
+        self.assertNotIn("+++ b/video/out/placebo/plurx/", text)
+
+    def test_the_build_installs_the_headers_the_patch_includes(self):
+        build = read("packaging/build-private.sh")
+        for file in ("dm/dm_closed_form.h", "dm/dv_dm.h", "packaging/libdovi/rpu_parser.h"):
+            self.assertIn(file, build)
+        self.assertIn("video/out/placebo/plurx", build)
+        container = read("packaging/build-in-container.sh")
+        for header in DM_HEADERS:
+            self.assertIn(f"/repo/tools/dv_processing/{header}", container)
+            self.assertIn(header, read("packaging/fetch-sources.sh"))
+
+    def test_the_display_management_headers_exist(self):
+        # In the plurx tree they are tools/dv_processing's; in the unpacked
+        # source package, the dm/ copies build-in-container.sh made.
+        tools = os.path.join(ROOT, "..", "..", "tools", "dv_processing")
+        for header in DM_HEADERS:
+            self.assertTrue(os.path.isfile(os.path.join(tools, header)) or
+                            os.path.isfile(os.path.join(ROOT, "dm", header)), header)
+
+    def test_the_libdovi_header_is_the_pinned_one(self):
+        with open(os.path.join(ROOT, "packaging/libdovi/rpu_parser.h"), "rb") as handle:
+            self.assertEqual(hashlib.sha256(handle.read()).hexdigest(), LIBDOVI_HEADER_SHA256)
+        helper = os.path.join(ROOT, "..", "..", "tools/dv_quality/backends/parsed-rpu/fetch_parser.py")
+        if os.path.isfile(helper):
+            with open(helper, encoding="utf-8") as handle:
+                self.assertIn(LIBDOVI_HEADER_SHA256, handle.read())
+        self.assertIn("libdovi-dev", read("debian/control"))
 
 
 GIT_AM_PATCH = """From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001

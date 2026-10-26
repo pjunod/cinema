@@ -10,6 +10,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- plurx Player (Linux) maps Dolby Vision profile 5 and 8 itself, with the
+  server's closed-form CM v4.0 and CM v2.9 display management compiled into
+  its private mpv, for the compositor's reported luminance and the largest
+  standard gamut inside the panel's primaries. Each playback logs which
+  mapper ran and for what target. Package 0.2.0.
+
 - Server playback handoff for the Linux player: a signed-in client mints a
   one-time code (`POST /api/v1/playback-handoffs`, single use, 120 s) that
   another local app redeems for a token limited to one title's decision, HLS
