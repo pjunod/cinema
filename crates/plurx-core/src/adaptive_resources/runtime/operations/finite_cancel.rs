@@ -273,6 +273,15 @@ impl NodeResourceRuntime {
                 return Err(OperationError::State);
             }
         }
+        // A cancelled launch can leave its exact Arm/Observe result pending.
+        // SourceRoot acknowledgment needs the same retained parent File, so
+        // reconcile before process join and source close can consume it.
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.reconcile_finite_acquisition_for_cleanup(owner, index, deadline),
+        )
+        .await
+        .map_err(|_| OperationError::Deadline)??;
         // Join a check abandoned by a cancelled prelaunch or publication
         // waiter before deciding that no native work remains. Unknown close
         // or panic retains the original full R and refuses typed settlement.

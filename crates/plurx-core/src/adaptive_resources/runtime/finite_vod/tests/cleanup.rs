@@ -5,8 +5,60 @@ use crate::domain::MediaFile;
 use crate::resource_custody::InstallationContext;
 use crate::transcode::*;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+use tokio::sync::{Notify, Semaphore};
 
+struct Barrier {
+    entered: Notify,
+    release: Semaphore,
+}
+fn gates() -> &'static Mutex<BTreeMap<Uuid, Arc<Barrier>>> {
+    static GATES: OnceLock<Mutex<BTreeMap<Uuid, Arc<Barrier>>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+struct Gate {
+    member: Uuid,
+    barrier: Arc<Barrier>,
+}
+impl Gate {
+    fn install(member: Uuid) -> Self {
+        let barrier = Arc::new(Barrier {
+            entered: Notify::new(),
+            release: Semaphore::new(0),
+        });
+        assert!(gates()
+            .lock()
+            .expect("fixture gates")
+            .insert(member, Arc::clone(&barrier))
+            .is_none());
+        Self { member, barrier }
+    }
+    async fn entered(&self) {
+        self.barrier.entered.notified().await;
+    }
+}
+impl Drop for Gate {
+    fn drop(&mut self) {
+        gates().lock().expect("fixture gates").remove(&self.member);
+        self.barrier.release.add_permits(1);
+    }
+}
+/// Scheduling only: the original SourceRoot command is already queued. This
+/// hook cannot manufacture a journal error, native result or close witness.
+pub(in crate::adaptive_resources::runtime) async fn before_source_root_ack(member: Uuid) {
+    let barrier = gates().lock().expect("fixture gates").get(&member).cloned();
+    if let Some(barrier) = barrier {
+        barrier.entered.notify_one();
+        barrier
+            .release
+            .acquire()
+            .await
+            .expect("fixture release")
+            .forget();
+    }
+}
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(60)
 }
@@ -331,5 +383,43 @@ async fn definitely_unaccepted_finite_prepare_keeps_charge_until_same_no_root_ti
         .prepare_cancel(deadline())
         .await
         .expect("original known-unaccepted/no-root receipt");
+    finish_same_ticket(runtime, owner, ticket).await;
+}
+
+#[tokio::test]
+async fn cancelled_original_source_root_observation_resumes_before_parent_file_close_without_relaunch(
+) {
+    let root = tempfile::tempdir().expect("durable actual native fixture");
+    let (runtime, mut owner) = original_owner(root.path(), false);
+    owner
+        .prepare_inputs(deadline())
+        .await
+        .expect("same actual source/executable Files");
+    owner
+        .open_output(deadline())
+        .await
+        .expect("actual original output prefix");
+    let gate = Gate::install(owner.source_members[0]);
+    {
+        let start = owner.start(deadline());
+        tokio::pin!(start);
+        tokio::select! { _ = gate.entered() => {}, result = &mut start => panic!("must reach original SourceRoot wait: {result:?}") }
+    }
+    // Dropped borrowed start retains the same queued SourceRoot receiver,
+    // original Child/Job and original source Files. Cleanup must acknowledge
+    // that receiver before it consumes a parent's actual close inputs.
+    drop(gate);
+    let charge = runtime.accounting().expect("whole original R held").used;
+    let ticket = owner
+        .prepare_cancel(deadline())
+        .await
+        .expect("resume original observation before native close");
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("native close alone does not refund app")
+            .used,
+        charge
+    );
     finish_same_ticket(runtime, owner, ticket).await;
 }

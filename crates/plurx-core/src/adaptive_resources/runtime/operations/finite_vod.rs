@@ -518,6 +518,8 @@ impl NodeResourceRuntime {
                     Effect::SourceRoot(*member),
                     deadline,
                 )?;
+                #[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+                crate::adaptive_resources::runtime::finite_vod::cleanup_tests::before_source_root_ack(*member).await;
                 self.finish_transition(bundle_id, role).await?;
             }
         }
@@ -667,6 +669,43 @@ pub(super) fn acknowledge_task(
 }
 
 impl NodeResourceRuntime {
+    /// Complete only the captured acquisition command before cancellation
+    /// destroys any of its original source/task acknowledgment inputs. This
+    /// never enters a root, releases a start latch, or replaces an operation.
+    pub(in crate::adaptive_resources::runtime) async fn reconcile_finite_acquisition_for_cleanup(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        let bundle_id = bundle.id;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
+        let Some(transition) = role.transition.as_mut() else {
+            return Ok(());
+        };
+        let captured_acquisition = match transition.effect {
+            Effect::Enrich => true,
+            Effect::SourceRoot(member) => finite.source_members.contains(&member),
+            Effect::FiniteTask(member) => member == finite.task_member,
+            Effect::Arm(member) => member == finite.root_member || member == finite.task_member,
+            // Bootstrap and pre-root source-prefix commands retain their own
+            // cleanup reconciler; this helper cannot change their evidence.
+            _ => false,
+        };
+        if !captured_acquisition {
+            return Ok(());
+        }
+        if transition.operation.pending.is_none()
+            && !matches!(transition.operation.result, Some(Ok(_)))
+        {
+            transition.operation.retry(&self.journal, deadline)?;
+        }
+        self.finish_transition(bundle_id, role).await
+    }
+
     /// Join the original fixed producer and retain its process-only closure.
     /// Source and output disposition, journal settlement and refund are separate.
     pub(in crate::adaptive_resources::runtime) async fn join_finite_producer(
