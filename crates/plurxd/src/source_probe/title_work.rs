@@ -260,6 +260,9 @@ async fn execute(
     active: ActiveBackgroundJob,
     shutdown: CancellationToken,
 ) -> bool {
+    // One new Arc allocation shares this SAME moved original admission with
+    // its native/pipe cleanup. This lifetime carrier is no finite peak bound.
+    let admission = Arc::new(admission);
     let fence = active.fence();
     let cancel = fence.loss_token().child_token();
     let result = super::run_admitted_probe(

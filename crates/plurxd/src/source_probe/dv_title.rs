@@ -72,10 +72,12 @@ pub(crate) async fn publish_title_for_control(
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
-    let admission = transcode
-        .admit_dv_title()
-        .await
-        .ok_or("title probe admission unavailable")?;
+    let admission = Arc::new(
+        transcode
+            .admit_dv_title()
+            .await
+            .ok_or("title probe admission unavailable")?,
+    );
     let tools = ToolSet::capture()
         .await?
         .ok_or("title scanner unavailable")?;

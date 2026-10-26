@@ -1,12 +1,14 @@
 //! Bounded ownership for short-lived media inspection processes.
 //!
 //! Startup probes are evidence, not services. They receive a small explicit
-//! environment, bounded output and wall time, and one owner that kills and
-//! reaps the complete process group when the future is cancelled.
+//! environment, bounded output and wall time, and one owner that kills its
+//! process group and joins the original leader and pipe tasks. These joins
+//! alone do not prove complete native-group absence.
 
 use std::ffi::OsStr;
 use std::io;
 use std::process::ExitStatus;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -15,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 tokio::task_local! {
     static WORK_CANCELLATION: CancellationToken;
+    static ORIGINAL_WORK_KEEPER: Arc<dyn OriginalWorkKeeper>;
 }
 
 /// Give a directly awaited operation cooperative cancellation. The caller must
@@ -25,6 +28,58 @@ pub async fn cancellable<T>(
     operation: impl std::future::Future<Output = T>,
 ) -> T {
     WORK_CANCELLATION.scope(cancellation, operation).await
+}
+
+/// Diagnostic uncertainty only; none of these values grants native closure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OriginalWorkUncertainty {
+    CollectorDropped,
+    LeaderReapFailed,
+    PipeDrainFailed,
+    RuntimeUnavailable,
+}
+
+/// An opt-in caller retains its SAME admitted owner through original child
+/// reaping and original pipe tasks. The callback must remain fail closed;
+/// success of a leader wait cannot clear an earlier uncertainty.
+pub trait OriginalWorkKeeper: Send + Sync {
+    fn retain_uncertainty(&self, reason: OriginalWorkUncertainty);
+}
+
+/// Directly awaited bounded work inherits this original keeper. Spawned work
+/// does not inherit task locals; this module explicitly carries the keeper to
+/// its own reaper and pipe tasks. This scope grants no native absence proof.
+pub async fn with_original_work_keeper<T>(
+    keeper: Arc<dyn OriginalWorkKeeper>,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    ORIGINAL_WORK_KEEPER.scope(keeper, operation).await
+}
+
+fn original_keeper() -> Option<Arc<dyn OriginalWorkKeeper>> {
+    ORIGINAL_WORK_KEEPER.try_with(Arc::clone).ok()
+}
+
+fn retain_uncertainty(
+    keeper: &Option<Arc<dyn OriginalWorkKeeper>>,
+    reason: OriginalWorkUncertainty,
+) {
+    if let Some(keeper) = keeper {
+        keeper.retain_uncertainty(reason);
+    }
+}
+
+struct CollectorKeeper {
+    keeper: Option<Arc<dyn OriginalWorkKeeper>>,
+    completed: bool,
+}
+
+impl Drop for CollectorKeeper {
+    fn drop(&mut self) {
+        if !self.completed {
+            retain_uncertainty(&self.keeper, OriginalWorkUncertainty::CollectorDropped);
+        }
+    }
 }
 
 pub(crate) fn cancellation() -> Option<CancellationToken> {
@@ -51,7 +106,8 @@ pub struct Output {
 
 struct OwnedChild {
     child: Option<Child>,
-    _job: super::ChildJob,
+    job: Option<super::ChildJob>,
+    keeper: Option<Arc<dyn OriginalWorkKeeper>>,
     #[cfg(unix)]
     process_group: Option<i32>,
 }
@@ -59,7 +115,8 @@ struct OwnedChild {
 impl OwnedChild {
     fn new(child: Child, job: super::ChildJob) -> Self {
         Self {
-            _job: job,
+            job: Some(job),
+            keeper: original_keeper(),
             #[cfg(unix)]
             process_group: child.id().and_then(|pid| i32::try_from(pid).ok()),
             child: Some(child),
@@ -79,9 +136,17 @@ impl OwnedChild {
 
     async fn kill_and_reap(&mut self) {
         self.kill_process_group();
-        if let Some(mut child) = self.child.take() {
+        // Borrow the SAME original child across await. If this cleanup waiter
+        // is dropped, OwnedChild::Drop still owns child + Job + keeper and can
+        // transfer them together to its original reaper.
+        if let Some(child) = self.child.as_mut() {
             let _ = child.start_kill();
-            let _ = child.wait().await;
+            match child.wait().await {
+                Ok(_) => self.child = None,
+                Err(_) => {
+                    retain_uncertainty(&self.keeper, OriginalWorkUncertainty::LeaderReapFailed)
+                }
+            }
         }
     }
 
@@ -105,11 +170,27 @@ impl Drop for OwnedChild {
         let Some(mut child) = self.child.take() else {
             return;
         };
+        retain_uncertainty(&self.keeper, OriginalWorkUncertainty::CollectorDropped);
         let _ = child.start_kill();
+        let job = self.job.take();
+        let keeper = self.keeper.take();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = child.wait().await;
+                // Keep the actual original Job and admitted owner through the
+                // leader wait. This wait alone does not prove group absence.
+                let original_job = job;
+                if child.wait().await.is_err() {
+                    retain_uncertainty(&keeper, OriginalWorkUncertainty::LeaderReapFailed);
+                }
+                drop(child);
+                drop(original_job);
+                drop(keeper);
             });
+        } else {
+            retain_uncertainty(&keeper, OriginalWorkUncertainty::RuntimeUnavailable);
+            drop(child);
+            drop(job);
+            drop(keeper);
         }
     }
 }
@@ -194,18 +275,38 @@ async fn output_command_environment(
     #[cfg(unix)]
     command.process_group(0);
 
-    let (mut child, job) = super::spawn_job_owned(command, work)?;
+    let (child, job) = super::spawn_job_owned(command, work)?;
+    // Install ownership before any fallible pipe extraction. Even early
+    // errors now retain the original Job/keeper in the original reaper.
+    let mut child = OwnedChild::new(child, job);
+    let mut collector = CollectorKeeper {
+        keeper: original_keeper(),
+        completed: false,
+    };
     let stdout = child
+        .child
+        .as_mut()
+        .expect("owned child")
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("probe stdout was not piped"))?;
     let stderr = child
+        .child
+        .as_mut()
+        .expect("owned child")
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("probe stderr was not piped"))?;
-    let mut stdout = tokio::spawn(drain_capped(stdout, max_output_bytes));
-    let mut stderr = tokio::spawn(drain_capped(stderr, max_output_bytes));
-    let mut child = OwnedChild::new(child, job);
+    let mut stdout = Some(tokio::spawn(drain_capped_owned(
+        stdout,
+        max_output_bytes,
+        original_keeper(),
+    )));
+    let mut stderr = Some(tokio::spawn(drain_capped_owned(
+        stderr,
+        max_output_bytes,
+        original_keeper(),
+    )));
 
     let completed = tokio::select! {
         biased;
@@ -216,12 +317,8 @@ async fn output_command_environment(
         // A short-lived probe may not daemonize. Once its leader exits, kill
         // any descendant left in the owned group before waiting for pipe EOF.
         child.kill_process_group();
-        let stdout = (&mut stdout)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))??;
-        let stderr = (&mut stderr)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))??;
+        let stdout = join_original_pipe(&mut stdout, &collector.keeper).await?;
+        let stderr = join_original_pipe(&mut stderr, &collector.keeper).await?;
         Ok::<_, io::Error>(Output {
             status,
             stdout,
@@ -229,31 +326,77 @@ async fn output_command_environment(
         })
         }) => result,
     };
-    match completed {
+    let result = match completed {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => {
             child.kill_and_reap().await;
-            if !stdout.is_finished() {
-                stdout.abort();
-                let _ = stdout.await;
-            }
-            if !stderr.is_finished() {
-                stderr.abort();
-                let _ = stderr.await;
-            }
+            abort_and_join_original_pipe(&mut stdout, &collector.keeper).await;
+            abort_and_join_original_pipe(&mut stderr, &collector.keeper).await;
             Err(error)
         }
         Err(_) => {
             child.kill_and_reap().await;
-            if !stdout.is_finished() {
-                stdout.abort();
-                let _ = stdout.await;
-            }
-            if !stderr.is_finished() {
-                stderr.abort();
-                let _ = stderr.await;
-            }
+            abort_and_join_original_pipe(&mut stdout, &collector.keeper).await;
+            abort_and_join_original_pipe(&mut stderr, &collector.keeper).await;
             Err(io::Error::new(io::ErrorKind::TimedOut, "probe timed out"))
+        }
+    };
+    collector.completed = true;
+    result
+}
+
+// The reader field drops before the original keeper, including task abort or
+// panic. No replacement reader or native authority is constructed.
+struct OriginalPipe<R> {
+    reader: R,
+    keeper: Option<Arc<dyn OriginalWorkKeeper>>,
+}
+
+async fn drain_capped_owned<R: AsyncRead + Unpin>(
+    reader: R,
+    cap: usize,
+    keeper: Option<Arc<dyn OriginalWorkKeeper>>,
+) -> io::Result<Vec<u8>> {
+    let mut original = OriginalPipe { reader, keeper };
+    let result = drain_capped(&mut original.reader, cap).await;
+    if result.is_err() {
+        retain_uncertainty(&original.keeper, OriginalWorkUncertainty::PipeDrainFailed);
+    }
+    result
+}
+
+type OriginalPipeTask = Option<tokio::task::JoinHandle<io::Result<Vec<u8>>>>;
+
+async fn join_original_pipe(
+    task: &mut OriginalPipeTask,
+    keeper: &Option<Arc<dyn OriginalWorkKeeper>>,
+) -> io::Result<Vec<u8>> {
+    // Borrow the SAME handle across await; cancellation leaves it in its slot.
+    let result = task.as_mut().expect("original pipe task").await;
+    task.take();
+    match result {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(error)) => {
+            retain_uncertainty(keeper, OriginalWorkUncertainty::PipeDrainFailed);
+            Err(error)
+        }
+        Err(error) => {
+            retain_uncertainty(keeper, OriginalWorkUncertainty::PipeDrainFailed);
+            Err(io::Error::other(error.to_string()))
+        }
+    }
+}
+
+async fn abort_and_join_original_pipe(
+    task: &mut OriginalPipeTask,
+    keeper: &Option<Arc<dyn OriginalWorkKeeper>>,
+) {
+    if let Some(task) = task.take() {
+        task.abort();
+        match task.await {
+            Ok(Ok(_)) => {}
+            Err(error) if error.is_cancelled() => {}
+            _ => retain_uncertainty(keeper, OriginalWorkUncertainty::PipeDrainFailed),
         }
     }
 }

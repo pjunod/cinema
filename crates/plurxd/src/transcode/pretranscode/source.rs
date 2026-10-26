@@ -650,6 +650,13 @@ pub(crate) struct FragmentAdmission {
     pub(super) _restart_admission: crate::serving_fence::RestartAdmission,
 }
 
+impl plurx_core::process::bounded::OriginalWorkKeeper for FragmentAdmission {
+    fn retain_uncertainty(&self, reason: plurx_core::process::bounded::OriginalWorkUncertainty) {
+        self._restart_admission
+            .retain_native_cleanup_uncertainty(reason);
+    }
+}
+
 impl FragmentAdmission {
     /// A batch shares the already-reserved CPU budget and heavy permit.
     pub(crate) fn probe_parallelism(&self) -> usize {

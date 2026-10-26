@@ -368,10 +368,12 @@ async fn execute(
 }
 
 /// Cancellation is observed while awaiting the child, never by dropping its
-/// collector. bounded::cancellable returns only after the process is reaped.
+/// collector. Cooperative completion joins the original child and pipes.
+/// Abrupt Drop retains the original admission in their actual cleanup tasks
+/// and persistently fences readiness as Unknown; it proves no native absence.
 async fn run_admitted_probe<F, T, E>(
     transcode: &crate::transcode::TranscodeManager,
-    admission: &crate::transcode::FragmentAdmission,
+    admission: &Arc<crate::transcode::FragmentAdmission>,
     cancel: &CancellationToken,
     shutdown: &CancellationToken,
     progress: Option<&crate::state::AnalysisProgressGuard>,
@@ -383,7 +385,12 @@ where
     if shutdown.is_cancelled() || !transcode.fragment_worker_idle(admission) {
         cancel.cancel();
     }
-    let work = plurx_core::process::bounded::cancellable(cancel.clone(), work);
+    // Coercion shares the SAME admitted Arc; it creates no replacement owner.
+    let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> = admission.clone();
+    let work = plurx_core::process::bounded::with_original_work_keeper(
+        keeper,
+        plurx_core::process::bounded::cancellable(cancel.clone(), work),
+    );
     tokio::pin!(work);
     loop {
         tokio::select! {
@@ -401,6 +408,118 @@ mod tests {
     use super::*;
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn abruptly_dropped_probe_keeps_original_admission_then_stays_unknown() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+            .await
+            .expect("budget");
+        let dir = crate::test_tempdir().expect("scratch");
+        let monitor = plurx_core::cluster::migration::status::ReplicationMonitor::sqlite();
+        let serving = crate::serving_fence::ServingFence::new(monitor.metrics_handle());
+        let manager = Arc::new(
+            crate::transcode::TranscodeManager::new(
+                store,
+                dir.path().into(),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(serving.authority()),
+        );
+        let admission = Arc::new(manager.admit_fragment().await.expect("original admission"));
+        let weak = Arc::downgrade(&admission);
+        let marker = dir.path().join("original-probe.pid");
+        let original = {
+            let manager = Arc::clone(&manager);
+            let admission = Arc::clone(&admission);
+            let marker = marker.clone();
+            tokio::spawn(async move {
+                run_admitted_probe(
+                    &manager,
+                    &admission,
+                    &CancellationToken::new(),
+                    &CancellationToken::new(),
+                    None,
+                    async {
+                        plurx_core::process::bounded::output(
+                            "/bin/sh",
+                            &[
+                                "-c".into(),
+                                "echo $$ > \"$1\"; exec sleep 60".into(),
+                                "probe".into(),
+                                marker.into_os_string(),
+                            ],
+                            Duration::from_secs(65),
+                            1024,
+                            plurx_core::process::ChildWork::background(
+                                "original probe keeper regression",
+                            ),
+                        )
+                        .await
+                        .map_err(|error| plurx_core::error::ProbeError::Spawn(error.to_string()))?;
+                        Ok::<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError>(
+                            Default::default(),
+                        )
+                    },
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("actual original child entered");
+        // Original caller + task caller + task-local scope + collector + child
+        // and both pipes share this exact allocation. No replacement admission.
+        assert!(Arc::strong_count(&admission) >= 7);
+        drop(admission);
+        original.abort();
+        assert!(original
+            .await
+            .expect_err("original collector cancelled")
+            .is_cancelled());
+        // The last native/pipe keeper may disappear only after its original
+        // task closes its descriptor or completes its original reaper wait.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while weak.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("all original keeper tasks completed");
+        assert!(
+            !manager.original_legacy_drain_counts().1,
+            "actual heavy permit released"
+        );
+        let (_, inventory, status) = serving
+            .restart_drain_status_with_owned_work(0, || async {
+                panic!("abrupt cleanup uncertainty cannot be cleared by an empty inventory")
+            })
+            .await;
+        assert!(matches!(
+            inventory,
+            crate::serving_fence::OwnedWorkInventory::Unknown {
+                reason: crate::serving_fence::OwnedWorkUnknown::NativeCleanupUncertain {
+                    collector_dropped: true,
+                    ..
+                }
+            }
+        ));
+        assert!(!status.drained);
+        assert!(status.new_admissions_blocked);
+        assert!(
+            manager.admit_fragment().await.is_none(),
+            "no replacement native work"
+        );
+        // No assertion here treats leader reap, Arc count, or the public DTO
+        // as a complete native-group absence or finite-accounting proof.
+    }
 
     #[tokio::test]
     async fn probe_capacity_refusal_preserves_a_nonfinal_candidate_cursor() {
