@@ -42,6 +42,10 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         .expect("Linux runtime");
     let dirs = crate::create_dirs_for_config(&config).expect("managed directories");
     let store = Arc::clone(&selected_store.store);
+    let playback_cache = crate::playback_cache::PlaybackCacheBudget::new(
+        Arc::clone(&store),
+        vec![dirs.renditions.clone()],
+    );
     let node = selected_store.identity.node_id.clone();
     let library = store
         .create_library(&plurx_core::domain::NewLibrary {
@@ -102,6 +106,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     )
     .await
     .expect("actual bound fixture FFprobe identity");
+    serve.register_playback_cache(&playback_cache);
     let manager = crate::transcode::TranscodeManager::new(
         Arc::clone(&store),
         base.path().join("work"),

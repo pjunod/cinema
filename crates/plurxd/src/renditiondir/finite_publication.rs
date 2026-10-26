@@ -196,10 +196,11 @@ impl RenditionDir {
     #[cfg(target_os = "linux")]
     pub(crate) fn from_finite_producer(
         owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
+        cache_grant: crate::playback_cache::FiniteCacheReservation,
     ) -> Self {
         let output = owner.output();
         let producer = std::sync::Arc::new(
-            crate::vodserve::finite_software::FiniteSoftwareProducer::new(owner),
+            crate::vodserve::finite_software::FiniteSoftwareProducer::new(owner, cache_grant),
         );
         Self {
             dir: output.path().to_owned(),

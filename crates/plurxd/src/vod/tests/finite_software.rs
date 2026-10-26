@@ -62,6 +62,10 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         .expect("Linux finite custody runtime");
     let dirs = crate::create_dirs_for_config(&config).expect("production managed directories");
     let store = Arc::clone(&selected_store.store);
+    let playback_cache = crate::playback_cache::PlaybackCacheBudget::new(
+        Arc::clone(&store),
+        vec![dirs.renditions.clone()],
+    );
     let library = store
         .create_library(&plurx_core::domain::NewLibrary {
             name: "finite software".into(),
@@ -107,6 +111,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         None,
         Some(Arc::clone(&runtime)),
     );
+    serve.register_playback_cache(&playback_cache);
     let manager = crate::transcode::TranscodeManager::new(
         Arc::clone(&store),
         dirs.transcode.clone(),
@@ -237,11 +242,17 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         Duration::from_secs(90),
         || async {
             let snapshot = runtime.accounting().expect("retirement accounting");
-            snapshot.unknown_peak_producers == 0 && snapshot.held == 1
+            snapshot.unknown_peak_producers == 0
+                && snapshot.held == 1
+                && !crate::playback_cache::is_pinned(output.path())
         },
     )
     .await;
     let retained = runtime.accounting().expect("known retained S accounting");
+    assert!(
+        !crate::playback_cache::is_pinned(output.path()),
+        "known original R-to-S commits and unpins the same conservative hard-bound quota grant"
+    );
     let status = serve
         .status("finite-software-client")
         .await
@@ -500,6 +511,10 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     );
     drop(second);
     drop(second_producer);
+    assert!(
+        crate::playback_cache::is_pinned(&serve.shared.base.join(&second_key)),
+        "compact original close retains quota while an actual output alias escapes"
+    );
     assert_eq!(
         runtime
             .accounting()
@@ -518,10 +533,15 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
                 .expect("actual finite accounting")
                 .unknown_peak_producers
                 == 0
+                && !crate::playback_cache::is_pinned(&serve.shared.base.join(&second_key))
         },
     )
     .await;
     assert_eq!(runtime.accounting().expect("S retained").held, 1);
+    assert!(
+        !crate::playback_cache::is_pinned(&serve.shared.base.join(&second_key)),
+        "only known original terminal close releases the second R quota pin"
+    );
 
     serve.end("finite-software-client", Terminal::Deleted).await;
     let final_key = rendition.key.clone();
@@ -574,6 +594,7 @@ struct FiniteCancellationFixture {
     settings: VodSettings,
     serve: Arc<VodServe>,
     runtime: Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
+    _playback_cache: Arc<crate::playback_cache::PlaybackCacheBudget>,
     _selected_store: plurx_core::cluster::migration::SelectedStore,
     _base: tempfile::TempDir,
 }
@@ -633,6 +654,10 @@ async fn finite_cancellation_fixture() -> FiniteCancellationFixture {
         .expect("Linux finite custody runtime");
     let dirs = crate::create_dirs_for_config(&config).expect("production managed directories");
     let store = Arc::clone(&selected_store.store);
+    let playback_cache = crate::playback_cache::PlaybackCacheBudget::new(
+        Arc::clone(&store),
+        vec![dirs.renditions.clone()],
+    );
     let library = store
         .create_library(&plurx_core::domain::NewLibrary {
             name: "finite software".into(),
@@ -678,6 +703,7 @@ async fn finite_cancellation_fixture() -> FiniteCancellationFixture {
         None,
         Some(Arc::clone(&runtime)),
     );
+    serve.register_playback_cache(&playback_cache);
     let manager = crate::transcode::TranscodeManager::new(
         Arc::clone(&store),
         dirs.transcode.clone(),
@@ -721,6 +747,7 @@ async fn finite_cancellation_fixture() -> FiniteCancellationFixture {
         settings: vod_settings,
         serve,
         runtime,
+        _playback_cache: playback_cache,
         _selected_store: selected_store,
         _base: base,
     }
@@ -880,6 +907,10 @@ async fn finite_metadata_wait_abandonment(exhaust_deadline: bool) {
         || async { cleanup.known_closed() },
     )
     .await;
+    assert!(
+        !crate::playback_cache::is_pinned(&fixture.serve.shared.base.join(&key)),
+        "original closing owner releases the same quota grant after known close"
+    );
     let final_accounting = fixture.runtime.accounting().expect("known original refund");
     assert_eq!(final_accounting.unknown_peak_producers, 0);
     assert_eq!(final_accounting.used, baseline.used);
@@ -941,6 +972,10 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
         .await
         .contains_key(&key));
     assert!(!cleanup.known_closed());
+    assert!(
+        crate::playback_cache::is_pinned(&fixture.serve.shared.base.join(&key)),
+        "unpublished original R is globally reserved before its first post-R await"
+    );
     drop(rendition);
     drop(build_gate);
     assert!(
@@ -987,3 +1022,44 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
 
 #[path = "finite_software/actor_application.rs"]
 mod actor_application;
+
+#[tokio::test]
+async fn finite_operator_zero_cache_budget_refuses_before_original_r_entry() {
+    let fixture = finite_cancellation_fixture().await;
+    let before = fixture.runtime.accounting().expect("before quota refusal");
+    fixture
+        .serve
+        .shared
+        .store
+        .put_setting(plurx_core::store::keys::CACHE_MAX_GB, "0")
+        .await
+        .expect("operator cache disabled");
+    let key = "7".repeat(64);
+    let result = finite_software::build(
+        &fixture.serve.shared,
+        &key,
+        None,
+        fixture.recipe.clone(),
+        fixture.plan.clone(),
+        &fixture.settings,
+    )
+    .await;
+    let error = result
+        .err()
+        .expect("zero global budget refuses actual finite builder");
+    assert!(error.contains("cache quota"));
+    assert!(!fixture
+        .serve
+        .shared
+        .finite_closing
+        .lock()
+        .await
+        .contains_key(&key));
+    assert!(!fixture.serve.shared.base.join(&key).exists());
+    let after = fixture
+        .runtime
+        .accounting()
+        .expect("quota refusal accounting");
+    assert_eq!(after.used, before.used);
+    assert_eq!(after.unknown_peak_producers, before.unknown_peak_producers);
+}

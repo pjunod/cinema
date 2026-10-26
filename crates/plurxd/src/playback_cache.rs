@@ -240,6 +240,58 @@ pub(crate) async fn reserve(path: &Path, bytes: u64) -> io::Result<Option<CacheR
     budget.reserve_owned(path, bytes).await.map(Some)
 }
 
+/// Require an authentic operator-budget grant before finite R admission.
+/// Existing global HashMap/PathBuf allocator peaks remain Unknown; this
+/// fixed token layout is not a proof of those shared allocations.
+#[cfg(target_os = "linux")]
+pub(crate) async fn reserve_finite(path: &Path, bytes: u64) -> io::Result<CacheReservation> {
+    reserve(path, bytes)
+        .await?
+        .ok_or_else(|| io::Error::other("finite output global playback budget is not registered"))
+}
+
+/// The SAME move-only quota grant after possible R/native entry. Only known
+/// original R-to-S or terminal completion settles it. Unexpected owner loss
+/// keeps the original pending quota/pin until process restart, rather than
+/// treating a dropped daemon selector as proof that native writes stopped.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) struct FiniteCacheReservation(Option<CacheReservation>);
+#[cfg(target_os = "linux")]
+impl FiniteCacheReservation {
+    pub(crate) fn enter(grant: CacheReservation) -> Self {
+        Self(Some(grant))
+    }
+    pub(crate) fn retained(mut self) {
+        if let Some(grant) = self.0.take() {
+            let bytes = grant
+                .budget
+                .lock()
+                .pending
+                .get(&grant.id)
+                .map(|pending| pending.bytes);
+            if let Some(bytes) = bytes {
+                grant.commit(bytes);
+            }
+        }
+    }
+    /// Called only after exact core pre-reservation provenance or successful
+    /// completion of the original typed close ticket, never a timeout/path.
+    pub(crate) fn known_closed(mut self) {
+        drop(self.0.take());
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for FiniteCacheReservation {
+    fn drop(&mut self) {
+        if let Some(grant) = self.0.take() {
+            // Preserve the exact grant and its shared budget. No replacement
+            // cleanup capability or detached watchdog is manufactured.
+            std::mem::forget(grant);
+        }
+    }
+}
+
 pub(crate) fn pin(path: &Path) -> io::Result<Option<CachePin>> {
     let Some(budget) = lookup(path) else {
         return Ok(None);
@@ -1761,5 +1813,39 @@ mod tests {
         });
         fixture.budget.sweep().await.expect("refresh minimum floor");
         assert!(reserve(&first, 8192).await.is_err());
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn finite_unresolved_drop_retains_the_exact_pending_global_grant() {
+        let fixture = Fixture::new();
+        let path = fixture.roots[0].join("original-finite-r");
+        let grant = reserve_finite(&path, 4096)
+            .await
+            .expect("authentic global grant");
+        let original_id = grant.id;
+        let before = fixture
+            .budget
+            .lock()
+            .pending
+            .get(&original_id)
+            .expect("same pending entry")
+            .bytes;
+        drop(FiniteCacheReservation::enter(grant));
+        assert!(
+            is_pinned(&path),
+            "daemon/frame destruction is not native close authority"
+        );
+        assert_eq!(
+            fixture
+                .budget
+                .lock()
+                .pending
+                .get(&original_id)
+                .expect("same grant retained")
+                .bytes,
+            before
+        );
+        // No fabricated close or replacement token cleans this unknown state.
+        // The real-owner regressions release via the original typed ticket.
     }
 }

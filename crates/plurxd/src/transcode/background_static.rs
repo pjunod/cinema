@@ -51,14 +51,19 @@ pub(super) enum StaticFinite {
     Planned(crate::vodserve::StaticArtifactAdmission),
     /// Core admission consumed the request without returning an original R
     /// selector. Do not repeat the claim or infer a release from this DTO.
-    AdmissionUnknown,
+    AdmissionUnknown {
+        _cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
+    },
     Running(crate::vodserve::StaticArtifactRun),
     Retained(Arc<crate::vodserve::retained::RetainedVodArtifact>),
     PublishedPendingExposure(Arc<crate::vodserve::retained::RetainedVodArtifact>),
     /// A definite logical refusal is sticky. Only original typed S cleanup
     /// may turn this into Closed; a later setting change cannot re-expose it.
     Refused(Arc<crate::vodserve::retained::RetainedVodArtifact>),
-    Closing(FiniteCloseTicket),
+    Closing {
+        ticket: FiniteCloseTicket,
+        cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
+    },
     Exposed,
     Closed,
 }
@@ -464,12 +469,25 @@ impl TranscodeManager {
             StaticFinite::Running(run) => {
                 let _ = run.request_stop();
                 if let Ok(ticket) = run.prepare_cancel(deadline).await {
-                    let old = std::mem::replace(&mut *finite, StaticFinite::Closing(ticket));
+                    let cache_grant = run.take_cache_grant();
+                    let old = std::mem::replace(
+                        &mut *finite,
+                        StaticFinite::Closing {
+                            ticket,
+                            cache_grant,
+                        },
+                    );
                     drop(old); // rich R owner/lease precede compact final settlement
                 }
             }
-            StaticFinite::Closing(ticket) => {
+            StaticFinite::Closing {
+                ticket,
+                cache_grant,
+            } => {
                 if ticket.finish_retirement(deadline).await.is_ok() {
+                    if let Some(grant) = cache_grant.take() {
+                        grant.known_closed();
+                    }
                     *finite = StaticFinite::Closed;
                 }
             }
@@ -513,12 +531,18 @@ impl TranscodeManager {
                     .prepare_static_artifact_eviction(artifact, deadline)
                     .await
                 {
-                    let old = std::mem::replace(&mut *finite, StaticFinite::Closing(ticket));
+                    let old = std::mem::replace(
+                        &mut *finite,
+                        StaticFinite::Closing {
+                            ticket,
+                            cache_grant: None,
+                        },
+                    );
                     drop(old); // original rich S aliases must precede its final refund
                 }
             }
             StaticFinite::Empty
-            | StaticFinite::AdmissionUnknown
+            | StaticFinite::AdmissionUnknown { .. }
             | StaticFinite::Exposed
             | StaticFinite::Closed => {}
         }
@@ -832,14 +856,16 @@ impl TranscodeManager {
                 match self.vod.admit_static_artifact(planned, deadline) {
                     Ok(run) => *finite = StaticFinite::Running(run),
                     Err(error) => {
-                        let (message, definitely_unreserved) = error.into_parts();
+                        let (message, definitely_unreserved, cache_grant) = error.into_parts();
                         // Only core's exact pre-reservation provenance proves
                         // no original R escaped. Generic admission/rollback
                         // errors remain unknown; never replay this request.
                         *finite = if definitely_unreserved {
                             StaticFinite::Closed
                         } else {
-                            StaticFinite::AdmissionUnknown
+                            StaticFinite::AdmissionUnknown {
+                                _cache_grant: cache_grant,
+                            }
                         };
                         return Err(PreparationError::Retry(message));
                     }

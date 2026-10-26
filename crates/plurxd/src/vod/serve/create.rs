@@ -5,11 +5,18 @@ use super::*;
 pub(crate) struct StaticArtifactAdmissionError {
     message: String,
     definitely_unreserved: bool,
+    cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
 }
 #[cfg(target_os = "linux")]
 impl StaticArtifactAdmissionError {
-    pub(crate) fn into_parts(self) -> (String, bool) {
-        (self.message, self.definitely_unreserved)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        String,
+        bool,
+        Option<crate::playback_cache::FiniteCacheReservation>,
+    ) {
+        (self.message, self.definitely_unreserved, self.cache_grant)
     }
 }
 
@@ -903,8 +910,19 @@ impl VodServe {
             .map_err(|error| format!("charging the static run owner: {error}"))?;
         let mut publication = publication;
         publication.set_epoch(epoch);
+        let cache_grant = tokio::time::timeout_at(
+            deadline.into(),
+            crate::playback_cache::reserve_finite(
+                &self.shared.base.join(&request.rendition_id),
+                request.output.reserved_storage_bytes,
+            ),
+        )
+        .await
+        .map_err(|_| "static operator cache quota deadline elapsed".to_owned())?
+        .map_err(|error| format!("reserving static operator cache quota: {error}"))?;
         let admission = super::background_artifact::StaticArtifactAdmission {
             request,
+            cache_grant,
             policy,
             workspace,
             publication,
@@ -936,9 +954,11 @@ impl VodServe {
                 .ok_or_else(|| StaticArtifactAdmissionError {
                     message: "static artifact resource runtime is unavailable".into(),
                     definitely_unreserved: true,
+                    cache_grant: None,
                 })?;
         let super::background_artifact::StaticArtifactAdmission {
             request,
+            cache_grant,
             policy,
             workspace,
             publication,
@@ -947,14 +967,32 @@ impl VodServe {
         } = planned;
         // Core takes the original application lease before accepted R and
         // installs its complete cleanup owner before exposing the preparation.
-        let (owner, application_lease) = runtime
-            .prepare_static_software_artifact(request, workspace, application_owner_bytes, deadline)
-            .map_err(|error| StaticArtifactAdmissionError {
-                definitely_unreserved: error.definitely_before_reservation(),
-                message: format!("admitting the static artifact graph: {error}"),
-            })?;
+        let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
+        let (owner, application_lease) = match runtime.prepare_static_software_artifact(
+            request,
+            workspace,
+            application_owner_bytes,
+            deadline,
+        ) {
+            Ok(owners) => owners,
+            Err(error) => {
+                let definitely_unreserved = error.definitely_before_reservation();
+                let cache_grant = if definitely_unreserved {
+                    cache_grant.known_closed();
+                    None
+                } else {
+                    Some(cache_grant)
+                };
+                return Err(StaticArtifactAdmissionError {
+                    definitely_unreserved,
+                    cache_grant,
+                    message: format!("admitting the static artifact graph: {error}"),
+                });
+            }
+        };
         Ok(super::background_artifact::StaticArtifactRun::new(
             owner,
+            cache_grant,
             publication,
             logical,
             application_lease,

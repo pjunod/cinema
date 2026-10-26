@@ -78,6 +78,7 @@ pub(crate) enum StaticArtifactExposure {
 /// After its native close, R admission consumes this object synchronously.
 pub(crate) struct StaticArtifactAdmission {
     pub(super) request: SoftwareVodRequest,
+    pub(super) cache_grant: crate::playback_cache::CacheReservation,
     pub(super) policy: StaticArtifactPolicy,
     pub(super) workspace: u64,
     pub(super) publication: StaticArtifactPublication,
@@ -274,6 +275,7 @@ impl StaticArtifactPublication {
 /// before `start` enters native work and keeps it until a known S handoff or
 /// its original cancellation ticket has settled.
 pub(crate) struct StaticArtifactRun {
+    cache_grant: Option<crate::playback_cache::FiniteCacheReservation>,
     policy: StaticArtifactPolicy,
     owner: SoftwareVodOwner,
     output: FiniteOutput,
@@ -290,6 +292,7 @@ pub(crate) struct StaticArtifactRun {
 impl StaticArtifactRun {
     pub(super) fn new(
         mut owner: SoftwareVodOwner,
+        cache_grant: crate::playback_cache::FiniteCacheReservation,
         publication: StaticArtifactPublication,
         logical: retained_manifest::LogicalOutput,
         application_lease: FiniteApplicationLease,
@@ -298,6 +301,7 @@ impl StaticArtifactRun {
         let events = owner.take_events();
         let output = owner.output();
         Self {
+            cache_grant: Some(cache_grant),
             policy,
             owner,
             output,
@@ -309,6 +313,12 @@ impl StaticArtifactRun {
             started: false,
             _application_lease: application_lease,
         }
+    }
+
+    pub(crate) fn take_cache_grant(
+        &mut self,
+    ) -> Option<crate::playback_cache::FiniteCacheReservation> {
+        self.cache_grant.take()
     }
 
     pub(crate) fn request_stop(&self) -> io::Result<()> {
@@ -389,6 +399,9 @@ impl StaticArtifactRun {
             .retire_output(deadline)
             .await
             .map_err(|error| error.into_io_error())?;
+        if let Some(grant) = self.cache_grant.take() {
+            grant.retained();
+        }
         let manifest = self
             .manifest
             .as_ref()

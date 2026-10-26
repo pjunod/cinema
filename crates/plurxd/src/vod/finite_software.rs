@@ -27,6 +27,7 @@ const ENCODED_MARKER_BYTES: u64 = 4 * 1024;
 /// only core's original receipts and known journal commits release resources.
 pub(crate) struct FiniteSoftwareProducer {
     owner: Mutex<SoftwareVodOwner>,
+    cache_grant: std::sync::Mutex<Option<crate::playback_cache::FiniteCacheReservation>>,
     // Captured before publication. Source-spec paths are only removed and
     // source Vec capacities never grow; no live owner lock is needed while
     // the original driver holds it through production and retirement.
@@ -70,11 +71,15 @@ impl std::fmt::Debug for FiniteSoftwareProducer {
     }
 }
 impl FiniteSoftwareProducer {
-    pub(crate) fn new(owner: SoftwareVodOwner) -> Self {
+    pub(crate) fn new(
+        owner: SoftwareVodOwner,
+        cache_grant: crate::playback_cache::FiniteCacheReservation,
+    ) -> Self {
         Self {
             control: owner.control(),
             owner_heap_bound: owner.requested_heap_bytes(),
             owner: Mutex::new(owner),
+            cache_grant: std::sync::Mutex::new(Some(cache_grant)),
             stage: AtomicU8::new(PREPARED),
             produced_through: AtomicU64::new(0),
             suspended: AtomicBool::new(false),
@@ -82,6 +87,18 @@ impl FiniteSoftwareProducer {
             driver_change: Notify::new(),
         }
     }
+    pub(super) fn take_cache_grant(&self) -> Option<crate::playback_cache::FiniteCacheReservation> {
+        self.cache_grant
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+    fn commit_retained_cache(&self) {
+        if let Some(grant) = self.take_cache_grant() {
+            grant.retained();
+        }
+    }
+
     /// Dynamic application heap retained by the one Arc producer. Its owner
     /// helper excludes the path allocation shared with FiniteOutput; the
     /// directory counts that allocation exactly once.
@@ -184,6 +201,7 @@ impl FiniteSoftwareProducer {
                             .retire_output(deadline)
                             .await
                             .map_err(io::Error::other)?;
+                        self.commit_retained_cache();
                         self.stage.store(RETAINED, Release);
                     }
                     _ => {
@@ -627,6 +645,18 @@ async fn build_inner(
             .charge_application_owner_bytes(bytes)
             .map_err(|error| format!("charging adaptive attempt owner: {error}"))?;
     }
+    // Reserve before the cleanup-map lock: global pressure calls back into
+    // owners. No R/output IO exists while this borrowed await is pending.
+    let cache_grant = tokio::time::timeout_at(
+        admission_deadline.into(),
+        crate::playback_cache::reserve_finite(
+            &shared.base.join(&request.rendition_id),
+            request.output.reserved_storage_bytes,
+        ),
+    )
+    .await
+    .map_err(|_| "finite operator cache quota deadline elapsed".to_owned())?
+    .map_err(|error| format!("reserving finite operator cache quota: {error}"))?;
     // No selected source/root/marker has been opened. Core synchronously
     // reserves the complete role and retains its prepare operation before return.
     // Acquire the original cleanup slot before R acceptance. The synchronous
@@ -638,18 +668,23 @@ async fn build_inner(
     )
     .await
     .map_err(|_| "finite build cleanup slot deadline elapsed".to_owned())??;
-    let owner = runtime
-        .prepare_software_vod(request, admission_deadline)
-        .map_err(|error| {
-            if let Some(refusal) = error.admission_refusal() {
+    let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
+    let owner = match runtime.prepare_software_vod(request, admission_deadline) {
+        Ok(owner) => owner,
+        Err(error) => {
+            if error.definitely_before_reservation() {
+                cache_grant.known_closed();
+            }
+            return Err(if let Some(refusal) = error.admission_refusal() {
                 crate::transcode::vod_refusal_error(
                     "vod_family_capacity",
                     format!("finite software admission refused: {refusal:?}"),
                 )
             } else {
                 format!("preparing finite software VOD: {error}")
-            }
-        })?;
+            });
+        }
+    };
     if let Some(hint) = owner.history_hint() {
         use plurx_core::resource_policy::{assess_finite_observed_service, FiniteObservedService};
         let observed = assess_finite_observed_service(
@@ -679,7 +714,7 @@ async fn build_inner(
     let application_lease = application_owner_bytes
         .map(|bytes| owner.take_application_lease(bytes))
         .transpose();
-    let dir = build_slot.install(owner);
+    let dir = build_slot.install(owner, cache_grant);
     let output = dir
         .finite_output()
         .expect("installed original finite output");
@@ -871,6 +906,7 @@ async fn run_body(
     .await;
     match retired {
         Ok(_) => {
+            producer.commit_retained_cache();
             producer.stage.store(RETAINED, Release);
             let mut manifest = rendition.manifest.lock().await;
             shared.try_admit(&rendition, &mut manifest).await;

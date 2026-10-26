@@ -7,7 +7,9 @@ pub(super) struct FiniteClosingOwner {
     output: Mutex<Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput>>,
     producer: Mutex<Option<Arc<super::finite_software::FiniteSoftwareProducer>>>,
     ticket: Mutex<Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteCloseTicket>>,
+    cache_grant: std::sync::Mutex<Option<crate::playback_cache::FiniteCacheReservation>>,
     claimed_bytes: AtomicU64,
+    claimed_admitted: AtomicBool,
     known_closed: AtomicBool,
     running: AtomicBool,
     // False while a build/publication arm still owns the dormant output.
@@ -95,8 +97,9 @@ impl FiniteBuildSlot<'_> {
     pub(super) fn install(
         mut self,
         owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
+        cache_grant: crate::playback_cache::FiniteCacheReservation,
     ) -> RenditionDir {
-        let mut dir = RenditionDir::from_finite_producer(owner);
+        let mut dir = RenditionDir::from_finite_producer(owner, cache_grant);
         let output = dir.finite_output().expect("fresh finite output");
         let producer = dir
             .finite_producer()
@@ -106,7 +109,9 @@ impl FiniteBuildSlot<'_> {
             output: Mutex::new(Some(output)),
             producer: Mutex::new(Some(producer)),
             ticket: Mutex::new(None),
+            cache_grant: std::sync::Mutex::new(None),
             claimed_bytes: AtomicU64::new(0),
+            claimed_admitted: AtomicBool::new(false),
             known_closed: AtomicBool::new(false),
             running: AtomicBool::new(false),
             cleanup_ready: AtomicBool::new(false),
@@ -1908,7 +1913,9 @@ impl Shared {
                 output: Mutex::new(Some(output)),
                 producer: Mutex::new(rendition.dir.finite_producer()),
                 ticket: Mutex::new(None),
+                cache_grant: std::sync::Mutex::new(None),
                 claimed_bytes: AtomicU64::new(0),
+                claimed_admitted: AtomicBool::new(false),
                 known_closed: AtomicBool::new(false),
                 running: AtomicBool::new(false),
                 cleanup_ready: AtomicBool::new(true),
@@ -2198,7 +2205,9 @@ impl Shared {
             output: Mutex::new(Some(output)),
             producer: Mutex::new(Some(producer)),
             ticket: Mutex::new(None),
+            cache_grant: std::sync::Mutex::new(None),
             claimed_bytes: AtomicU64::new(0),
+            claimed_admitted: AtomicBool::new(false),
             known_closed: AtomicBool::new(false),
             running: AtomicBool::new(false),
             cleanup_ready: AtomicBool::new(true),
@@ -2254,8 +2263,14 @@ impl Shared {
             // final manifest count is stable even if its early stop raced a
             // last queued event. The metadata lease remains in the rendition
             // until every other real Arc (request, session, generation) ends.
-            let claimed = rendition.manifest.lock().await.materialized_bytes();
-            closing.claimed_bytes.store(claimed, Release);
+            let manifest = rendition.manifest.lock().await;
+            closing
+                .claimed_bytes
+                .store(manifest.materialized_bytes(), Release);
+            closing
+                .claimed_admitted
+                .store(manifest.is_admitted(), Release);
+            drop(manifest);
             closing.rich.lock().await.take();
             drop(rendition);
             drop(producer);
@@ -2296,6 +2311,14 @@ impl Shared {
                 // Install the exact original close selector before discarding
                 // the last rich closing owner. Other selectors retain their
                 // own final-drop guard and will delay final refund.
+                if let Some(producer) = producer.as_ref() {
+                    if let Some(grant) = producer.take_cache_grant() {
+                        *closing
+                            .cache_grant
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(grant);
+                    }
+                }
                 *closing.ticket.lock().await = Some(ticket);
                 drop(producer);
                 drop(output);
@@ -2332,6 +2355,14 @@ impl Shared {
                     %error, "finite terminal close remains charged for retry");
                 return;
             }
+            if let Some(grant) = closing
+                .cache_grant
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                grant.known_closed();
+            }
             closing.known_closed.store(true, Release);
             held.take();
         }
@@ -2353,7 +2384,14 @@ impl Shared {
             }
         };
         if removed {
-            sub_saturating(&self.working_set, closing.claimed_bytes.load(Acquire));
+            sub_saturating(
+                if closing.claimed_admitted.load(Acquire) {
+                    &self.completed_cache
+                } else {
+                    &self.working_set
+                },
+                closing.claimed_bytes.load(Acquire),
+            );
             self.kick_all();
         }
     }
