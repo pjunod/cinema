@@ -87,6 +87,7 @@ final class PlayerController: ObservableObject {
     private let reportPlaybackIntent: @MainActor (PlaybackControlSession) async -> UInt64?
     private let mediaSelectionPreparation: MediaSelectionPreparation
     private let itemPreparation: ItemPreparation
+    private let makePlayerItem: @MainActor (URL) -> AVPlayerItem
     private let prepareGrowingPlaylist: @MainActor (URL) async throws -> Void
     private let nativeSeek: @MainActor (AVPlayer, Int) async -> Bool
     private let waitNativeSeekDeadline: @MainActor () async throws -> Void
@@ -106,6 +107,7 @@ final class PlayerController: ObservableObject {
 
     init(
         player: AVPlayer = AVPlayer(),
+        makePlayerItem: @escaping @MainActor (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
         requestPlaybackDecision: (@MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps))? = nil,
         mediaSelectionPreparation: MediaSelectionPreparation = MediaSelectionPreparation(),
         itemPreparation: ItemPreparation = ItemPreparation(),
@@ -150,6 +152,7 @@ final class PlayerController: ObservableObject {
         displayWakeOwner: DisplayWakeOwner? = nil
     ) {
         self.player = player
+        self.makePlayerItem = makePlayerItem
         displayWake = PlaybackDisplayWake(owner: displayWakeOwner)
         self.requestPlaybackDecision = { model, context, selection, quality in
             let id = try context.localID()
@@ -4338,7 +4341,7 @@ final class PlayerController: ObservableObject {
             // preparation. Its completed playlist cannot resurrect the item.
             guard !isSuperseded(generation), started, !Task.isCancelled else { return }
         }
-        let item = AVPlayerItem(url: url)
+        let item = makePlayerItem(url)
         Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
         installSeekVideoOutput(on: item)
         #if os(iOS)

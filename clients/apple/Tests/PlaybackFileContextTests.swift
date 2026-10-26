@@ -200,17 +200,21 @@ final class PlaybackFileContextTests: XCTestCase {
             FileContextHTTP.body=data(manifest)
         }
         let owner=SharedCaptionReadSession();defer { owner.retire() }
-        owner.configure(client:client,context:context,audio:2,clock:{65000},current:{true})
+        var sourcePosition=65000
+        owner.configure(client:client,context:context,audio:2,clock:{sourcePosition},current:{true})
         for _ in 0..<100 where owner.assets.isEmpty { try await Task.sleep(for:.milliseconds(10)) }
         let published=try XCTUnwrap(owner.eligibleAssets.first);owner.choose(published)
         for _ in 0..<100 where owner.window?.cues.isEmpty != false { try await Task.sleep(for:.milliseconds(10)) }
         XCTAssertEqual(owner.window?.cues.first?.text,"Shared literal <caption>")
-        owner.mediaChanged(seekTo:95000)
-        XCTAssertNil(owner.window,"seek clears the old window before a fresh grant read")
+        sourcePosition=95000;owner.mediaChanged(seekTo:sourcePosition)
+        XCTAssertTrue(owner.window?.cues.isEmpty ?? true,"seek removes old text before a fresh grant read; an empty window is a valid clear")
         for _ in 0..<100 where !requests.contains(where:{ $0.url?.query?.contains("position_ms=95000")==true }) { try await Task.sleep(for:.milliseconds(10)) }
         XCTAssertTrue(requests.contains{ $0.url?.query?.contains("position_ms=95000")==true })
-        for _ in 0..<100 where owner.window==nil { try await Task.sleep(for:.milliseconds(10)) }
-        XCTAssertNotNil(owner.window)
+        for _ in 0..<100 where owner.window?.cues.isEmpty != false { try await Task.sleep(for:.milliseconds(10)) }
+        XCTAssertFalse(owner.window?.cues.isEmpty ?? true,"a fresh authorized snapshot completed after the seek")
+        XCTAssertFalse((owner.window?.cues ?? []).contains { cue in
+            CaptionRenderWindow.itemInterval(cue,baseMs:0,offsetMs:0)?.contains(sourcePosition) == true
+        },"retained neighboring cues cannot render at the new source position")
         corrupt=true;owner.refresh()
         for _ in 0..<100 where owner.window != nil { try await Task.sleep(for:.milliseconds(10)) }
         XCTAssertNil(owner.window,"mixed immutable digest never publishes cached text")

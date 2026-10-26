@@ -378,6 +378,15 @@ async fn claim(
     kind: JobKind,
     now: i64,
 ) -> plurx_core::store::background_jobs::BackgroundJob {
+    claim_on_boot(store, id, kind, now, "00000000-0000-4000-8000-000000000002").await
+}
+async fn claim_on_boot(
+    store: &SqliteStore,
+    id: &str,
+    kind: JobKind,
+    now: i64,
+    boot_id: &str,
+) -> plurx_core::store::background_jobs::BackgroundJob {
     let job = store
         .background_job(id)
         .await
@@ -388,7 +397,7 @@ async fn claim(
             job_id: id.into(),
             expected_revision: job.revision,
             node_id: "worker".into(),
-            boot_id: "00000000-0000-4000-8000-000000000002".into(),
+            boot_id: boot_id.into(),
             claim_id: uuid::Uuid::new_v4().to_string(),
             kind,
             payload_version: 1,
@@ -576,12 +585,31 @@ async fn range(
     label: &str,
     now: i64,
 ) -> plurx_core::store::background_jobs::BackgroundJob {
+    range_for_consumer(store, recipe, label, now, "subtitle_translation").await
+}
+async fn range_for_consumer(
+    store: &SqliteStore,
+    recipe: &plurx_core::store::subtitle_translation::RangeRecipe,
+    label: &str,
+    now: i64,
+    consumer_kind: &str,
+) -> plurx_core::store::background_jobs::BackgroundJob {
     use plurx_core::store::background_jobs::{EnqueueJob, EnqueueOutcome, JobPayload, JobRequest};
     let id = uuid::Uuid::new_v4().to_string();
+    let operations = store.read_subtitle_translation(plurx_core::store::subtitle_translation_read::TranslationRead {
+        user_id:0,now_ms:now,query:plurx_core::store::subtitle_translation_read::TranslationQuery::WorkerOperations {node_id:"worker".into(),after:None}
+    }).await.expect("current producer operations");
+    let producer = operations
+        .iter()
+        .find(|op| op["operation_id"] == recipe.operation_id)
+        .and_then(|op| op["preparation_job_id"].as_str())
+        .expect("current producer preparation")
+        .to_owned();
     let payload = JobPayload::SubtitleTranslationRange {
         file_id: 1,
         recipe: recipe.clone(),
         target_node_id: "worker".into(),
+        producer_preparation_job_id: producer,
     };
     let outcome = store
         .enqueue_job(EnqueueJob {
@@ -595,7 +623,7 @@ async fn range(
                 scope: "translation-contract".into(),
                 request_id: uuid::Uuid::new_v4().to_string(),
                 request_digest: "e".repeat(64),
-                consumer_kind: "subtitle_translation".into(),
+                consumer_kind: consumer_kind.into(),
                 consumer_ref: recipe.operation_id.clone(),
                 target_node_id: Some("worker".into()),
                 deadline_ms: None,
@@ -854,10 +882,26 @@ async fn expired_preparation_and_existing_asset_can_acquire_fresh_owned_preparat
         18100,
     )
     .await;
-    // A completed preparation on a bound asset is equally re-created on fresh
-    // explicit Translate; this is the boot-time full-source verification seam.
+    // A second viewer joins the incumbent producer; boot reconciliation must
+    // explicitly replace its incarnation before making a fresh source proof.
+    use plurx_core::store::{
+        subtitle_translation_publication::BindTranslationSource,
+        subtitle_translation_read::{TranslationQuery, TranslationRead},
+    };
     let (_dir2, store2, _conn2) = fixture();
     let recipe = prepared(&store2).await;
+    let observation = |now_ms| TranslationRead {
+        user_id: 1,
+        now_ms,
+        query: TranslationQuery::Operation {
+            operation_id: recipe.operation_id.clone(),
+        },
+    };
+    let incumbent = store2
+        .read_subtitle_translation(observation(1400))
+        .await
+        .expect("incumbent")
+        .remove(0);
     let mut fresh = create(1500);
     if let TranslationAction::Create { playback_id, .. } = &mut fresh.action {
         *playback_id = uuid::Uuid::new_v4().to_string();
@@ -867,8 +911,42 @@ async fn expired_preparation_and_existing_asset_can_acquire_fresh_owned_preparat
         .await
         .expect("fresh Translate");
     assert_eq!(receipt["operation_id"], recipe.operation_id);
+    assert_eq!(receipt["state"], "partial");
+    let joined = store2
+        .read_subtitle_translation(observation(1550))
+        .await
+        .expect("joined producer")
+        .remove(0);
+    assert_eq!(
+        joined["preparation_job_id"], incumbent["preparation_job_id"],
+        "joining must not fence active ranges"
+    );
+    let replacement = store2
+        .mutate_subtitle_translation(mutate(
+            TranslationAction::Retarget {
+                operation_id: recipe.operation_id.clone(),
+                expected_operation_epoch: 1,
+                expected_view_revision: joined["view_revision"]
+                    .as_str()
+                    .expect("view")
+                    .parse()
+                    .expect("number"),
+                expected_preparation_job_id: joined["preparation_job_id"]
+                    .as_str()
+                    .expect("producer")
+                    .into(),
+                expected_target_node_id: "worker".into(),
+                target_node_id: "worker".into(),
+            },
+            1600,
+        ))
+        .await
+        .expect("boot reconciliation");
+    assert_eq!(replacement["outcome"], "accepted");
+    assert_eq!(replacement["operation_epoch"], "1");
+    assert_ne!(replacement["job_id"], joined["preparation_job_id"]);
     let job = store2
-        .background_job(receipt["job_id"].as_str().expect("boot prep"))
+        .background_job(replacement["job_id"].as_str().expect("boot prep"))
         .await
         .expect("lookup")
         .expect("job");
@@ -877,6 +955,57 @@ async fn expired_preparation_and_existing_asset_can_acquire_fresh_owned_preparat
         JobKind::SubtitleTranslationPrepare
     );
     assert_eq!(format!("{:?}", job.state), "Queued");
+    let new_boot = uuid::Uuid::new_v4().to_string();
+    let old_binding = store2
+        .read_subtitle_translation(TranslationRead {
+            user_id: 0,
+            now_ms: 1650,
+            query: TranslationQuery::SourceBinding {
+                asset_id: recipe.asset_id.clone(),
+                node_id: "worker".into(),
+            },
+        })
+        .await
+        .expect("unready old binding")
+        .remove(0);
+    assert_ne!(old_binding["boot_id"], new_boot);
+    assert_eq!(
+        old_binding["preparation_ready"], false,
+        "new incarnation cannot borrow the old boot's source verification"
+    );
+    let owned = claim_on_boot(
+        &store2,
+        &job.id,
+        JobKind::SubtitleTranslationPrepare,
+        1700,
+        &new_boot,
+    )
+    .await;
+    assert!(store2
+        .bind_translation_source(BindTranslationSource {
+            token: owned.token.clone().expect("new boot claim"),
+            source: owned.supported_payload().expect("owned payload"),
+            source_sha256: recipe.source_sha256.clone(),
+            local_identity: "new-boot-held-source".into(),
+            now_ms: 1800,
+        })
+        .await
+        .expect("fresh owned verification"));
+    let binding = store2
+        .read_subtitle_translation(TranslationRead {
+            user_id: 0,
+            now_ms: 1850,
+            query: TranslationQuery::SourceBinding {
+                asset_id: recipe.asset_id.clone(),
+                node_id: "worker".into(),
+            },
+        })
+        .await
+        .expect("new binding")
+        .remove(0);
+    assert_eq!(binding["boot_id"], new_boot);
+    assert_eq!(binding["preparation_job_id"], job.id);
+    assert_eq!(binding["preparation_ready"], true);
 }
 
 #[tokio::test]
@@ -1277,6 +1406,44 @@ async fn shared_grant_reads_reuse_fixed_lease_and_never_create_compute_authority
         .expect("lease")
         .remove(0);
     let id = lease["lease_id"].as_str().expect("ID").to_owned();
+    for seek in 0..300_i64 {
+        let reused = store
+            .read_shared_captions(read(
+                principal.clone(),
+                Q::AcquireLease {
+                    asset_id: recipe.asset_id.clone(),
+                },
+                2000 + seek,
+            ))
+            .await
+            .expect("rapid shared seek lease")
+            .remove(0);
+        assert_eq!(
+            reused, lease,
+            "seeks do not allocate grant leases for a stable revision"
+        );
+        store
+            .read_shared_captions(read(
+                principal.clone(),
+                Q::Window {
+                    asset_id: recipe.asset_id.clone(),
+                    lease_id: id.clone(),
+                    position_ms: (seek % 3) * 15000,
+                },
+                2000 + seek,
+            ))
+            .await
+            .expect("rapid shared moving window");
+    }
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM shared_caption_read_leases",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .expect("bounded grant lease count"),
+        1
+    );
     let repeated = store
         .read_shared_captions(read(
             principal.clone(),
@@ -1446,6 +1613,365 @@ async fn shared_grant_reads_reuse_fixed_lease_and_never_create_compute_authority
             |r| r.get::<_, i64>(0)
         )
         .expect("retired"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn final_readable_core_completes_without_gaps_or_loser_downgrade_and_cached_retry_completes()
+{
+    use plurx_core::store::{
+        subtitle_translation_publication::{BindTranslationSource, PublishTranslationSegment},
+        subtitle_translation_read::{AcquireTranslationLease, TranslationQuery, TranslationRead},
+    };
+    let (_dir, store, conn) = fixture();
+    let recipe = prepared(&store).await;
+    let observation = |now| TranslationRead {
+        user_id: 1,
+        now_ms: now,
+        query: TranslationQuery::Operation {
+            operation_id: recipe.operation_id.clone(),
+        },
+    };
+    for (index, now) in [(0, 1300), (2, 1500)] {
+        let mut core = recipe.clone();
+        core.core_index = index;
+        let job = range(&store, &core, &format!("gap-{index}"), now).await;
+        assert!(store
+            .publish_translation_segment(PublishTranslationSegment {
+                token: job.token.clone().expect("token"),
+                source: job.supported_payload().expect("payload"),
+                segment: draft(&core, job.fence, "Readable owned cue"),
+                now_ms: now + 10
+            })
+            .await
+            .expect("core publication"));
+        assert_eq!(
+            store
+                .read_subtitle_translation(observation(now + 20))
+                .await
+                .expect("partial")[0]["state"],
+            "partial",
+            "count or tail alone cannot conceal a missing core"
+        );
+    }
+    let old = store
+        .acquire_translation_lease(AcquireTranslationLease {
+            user_id: 1,
+            asset_id: recipe.asset_id.clone(),
+            now_ms: 1600,
+        })
+        .await
+        .expect("partial snapshot")
+        .expect("lease");
+    let mut last = recipe.clone();
+    last.core_index = 1;
+    // The common queue reserves one source lane for a viewer. Give this
+    // fixture an explicit foreground interest so both attempts acquire real,
+    // counted reservations; two background readers must remain contended.
+    let winner = range_for_consumer(&store, &last, "last-winner", 1700, "playback_fragment").await;
+    let loser = range(&store, &last, "last-loser", 1750).await;
+    assert_eq!(conn.query_row(
+        "SELECT count(*) FROM background_job_reservations WHERE resource_key='source_io' AND expires_at_ms>1751",
+        [], |r| r.get::<_, i64>(0)
+    ).expect("two counted live source reservations"), 2);
+    let publication = |job: &plurx_core::store::background_jobs::BackgroundJob,
+                       text: &str,
+                       now_ms| PublishTranslationSegment {
+        token: job.token.clone().expect("owned claim"),
+        source: job.supported_payload().expect("typed payload"),
+        segment: draft(&last, job.fence, text),
+        now_ms,
+    };
+    let winning = publication(&winner, "Immutable winner", 1800);
+    assert!(store
+        .publish_translation_segment(winning.clone())
+        .await
+        .expect("last core"));
+    assert_eq!(
+        store
+            .read_subtitle_translation(observation(1810))
+            .await
+            .expect("completed")[0]["state"],
+        "complete"
+    );
+    assert!(store
+        .publish_translation_segment(publication(&loser, "Different loser bytes", 1820))
+        .await
+        .expect("loser cleanup"));
+    assert_eq!(
+        store
+            .background_job(&loser.id)
+            .await
+            .expect("job")
+            .expect("loser")
+            .state,
+        plurx_core::store::background_jobs::JobState::Succeeded
+    );
+    assert_eq!(
+        store
+            .read_subtitle_translation(observation(1830))
+            .await
+            .expect("complete after loser")[0]["state"],
+        "complete"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT manifest_revision FROM subtitle_translation_assets",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("immutable revision"),
+        3
+    );
+    let current = store
+        .acquire_translation_lease(AcquireTranslationLease {
+            user_id: 1,
+            asset_id: recipe.asset_id.clone(),
+            now_ms: 1900,
+        })
+        .await
+        .expect("complete snapshot")
+        .expect("lease");
+    assert_ne!(
+        current["lease_id"], old["lease_id"],
+        "a new revision receives a separate bounded snapshot"
+    );
+    for seek in 0..300_i64 {
+        let lease = store
+            .acquire_translation_lease(AcquireTranslationLease {
+                user_id: 1,
+                asset_id: recipe.asset_id.clone(),
+                now_ms: 2000 + seek,
+            })
+            .await
+            .expect("rapid seek lease")
+            .expect("lease");
+        for field in ["lease_id", "manifest_revision", "expires_at_ms"] {
+            assert_eq!(
+                lease[field], current[field],
+                "same revision reuses one fixed-expiry lease"
+            );
+        }
+        let core = seek % 3;
+        let rows = store
+            .read_subtitle_translation(TranslationRead {
+                user_id: 1,
+                now_ms: 2000 + seek,
+                query: TranslationQuery::Segments {
+                    asset_id: recipe.asset_id.clone(),
+                    lease_id: current["lease_id"].as_str().expect("lease ID").into(),
+                    after_core: core - 1,
+                    through_core: core,
+                },
+            })
+            .await
+            .expect("moving window");
+        assert_eq!(rows.len(), 1);
+    }
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_read_leases",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("bounded leases"),
+        2
+    );
+    let old_rows = store
+        .read_subtitle_translation(TranslationRead {
+            user_id: 1,
+            now_ms: 2400,
+            query: TranslationQuery::Segments {
+                asset_id: recipe.asset_id.clone(),
+                lease_id: old["lease_id"].as_str().expect("old lease").into(),
+                after_core: -1,
+                through_core: 2,
+            },
+        })
+        .await
+        .expect("old snapshot remains readable");
+    assert_eq!(
+        old_rows.len(),
+        2,
+        "completion must not widen an old leased snapshot"
+    );
+    let stop = store
+        .mutate_subtitle_translation(mutate(
+            TranslationAction::Stop {
+                operation_id: recipe.operation_id.clone(),
+                expected_operation_epoch: 1,
+            },
+            2500,
+        ))
+        .await
+        .expect("Stop completed producer");
+    assert_eq!(stop["state"], "stopped");
+    assert!(store
+        .publish_translation_segment(winning)
+        .await
+        .expect("exact receipt replay"));
+    assert_eq!(
+        store
+            .read_subtitle_translation(observation(2550))
+            .await
+            .expect("Stop retained")[0]["state"],
+        "stopped"
+    );
+    let retried = store
+        .mutate_subtitle_translation(mutate(
+            TranslationAction::RetryOperation {
+                operation_id: recipe.operation_id.clone(),
+                expected_operation_epoch: stop["operation_epoch"]
+                    .as_str()
+                    .expect("epoch")
+                    .parse()
+                    .expect("counter"),
+                expected_view_revision: stop["view_revision"]
+                    .as_str()
+                    .expect("view")
+                    .parse()
+                    .expect("counter"),
+                expected_state: "stopped".into(),
+                playback_id: uuid::Uuid::new_v4().to_string(),
+                position_ms: 0,
+                playback_rate: 1.0,
+                paused: false,
+            },
+            2600,
+        ))
+        .await
+        .expect("explicit retry");
+    let prep = claim(
+        &store,
+        retried["job_id"].as_str().expect("fresh preparation"),
+        JobKind::SubtitleTranslationPrepare,
+        2700,
+    )
+    .await;
+    assert!(store
+        .bind_translation_source(BindTranslationSource {
+            token: prep.token.clone().expect("new claim"),
+            source: prep.supported_payload().expect("new preparation"),
+            source_sha256: recipe.source_sha256.clone(),
+            local_identity: "fresh owned source attestation".into(),
+            now_ms: 2800
+        })
+        .await
+        .expect("all-cached binding"));
+    assert_eq!(
+        store
+            .read_subtitle_translation(observation(2850))
+            .await
+            .expect("cached completion")[0]["state"],
+        "complete",
+        "all readable cores complete at binding without further range publication"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT manifest_revision FROM subtitle_translation_assets",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("same immutable revision"),
+        3
+    );
+}
+
+#[tokio::test]
+async fn legacy_range_incarnation_decodes_without_poll_poison_but_cannot_claim_or_publish() {
+    use plurx_core::store::background_jobs::{
+        CandidateQuery, JobPayload, JobSettlement, SettleJob,
+    };
+    use plurx_core::store::subtitle_translation_publication::PublishTranslationSegment;
+    let (_dir, store, conn) = fixture();
+    let recipe = prepared(&store).await;
+    let job = range(&store, &recipe, "pre-upgrade", 1300).await;
+    assert!(store
+        .settle_job(SettleJob {
+            token: job.token.clone().expect("claim"),
+            settlement: JobSettlement::Yield {
+                error_code: None,
+                checkpoint: None,
+                not_before_ms: 1400
+            },
+            now_ms: 1350
+        })
+        .await
+        .expect("yield owned job"));
+    let mut legacy = job.payload.clone();
+    legacy
+        .as_object_mut()
+        .expect("payload")
+        .remove("producer_preparation_job_id");
+    let parsed: JobPayload =
+        serde_json::from_value(legacy.clone()).expect("old durable payload remains typed");
+    parsed.validate().expect("legacy shape remains inspectable");
+    assert_eq!(
+        serde_json::to_value(&parsed).expect("legacy canonical encoding"),
+        legacy
+    );
+    conn.execute(
+        "UPDATE background_jobs SET payload_json=json(?1) WHERE id=?2",
+        rusqlite::params![legacy.to_string(), job.id],
+    )
+    .expect("pre-upgrade persisted payload fixture");
+    let queued = store
+        .background_job(&job.id)
+        .await
+        .expect("legacy row")
+        .expect("job");
+    queued
+        .supported_payload()
+        .expect("worker polling does not fail deserialization");
+    let candidates = store
+        .job_candidates(CandidateQuery {
+            node_id: "worker".into(),
+            kinds: vec![JobKind::SubtitleTranslationRange],
+            after: None,
+            now_ms: 1400,
+            limit: 16,
+        })
+        .await
+        .expect("legacy candidates");
+    assert!(
+        candidates
+            .jobs
+            .iter()
+            .any(|candidate| candidate.id == job.id),
+        "existing daemon reconciliation can retire the obsolete row"
+    );
+    let outcome = store
+        .claim_artifact_job(ClaimJob {
+            job_id: job.id.clone(),
+            expected_revision: queued.revision,
+            node_id: "worker".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::SubtitleTranslationRange,
+            payload_version: 1,
+            now_ms: 1400,
+            dispatched_at_ms: 1400,
+        })
+        .await
+        .expect("closed legacy claim");
+    assert!(!matches!(outcome, ClaimOutcome::Claimed { .. }));
+    assert!(!store
+        .publish_translation_segment(PublishTranslationSegment {
+            token: job.token.expect("old token"),
+            source: parsed,
+            segment: draft(&recipe, job.fence, "Obsolete output"),
+            now_ms: 1450
+        })
+        .await
+        .expect("closed legacy publication"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_segments",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .expect("no publication"),
         0
     );
 }

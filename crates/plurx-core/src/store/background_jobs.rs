@@ -130,11 +130,15 @@ macro_rules! text_admission {
 }
 
 macro_rules! translation_admission {
-    ($payload:literal,$now:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
+    ($payload:literal,$now:literal,$job:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
       JOIN settings config ON config.key='subtitles.translation.config.v1'
       WHERE op.id=COALESCE(json_extract("#,$payload,r#",'$.operation_id'),json_extract("#,$payload,r#",'$.recipe.operation_id'))
       AND op.operation_epoch=COALESCE(json_extract("#,$payload,r#",'$.operation_epoch'),json_extract("#,$payload,r#",'$.recipe.operation_epoch'))
       AND op.stopped=0 AND op.state NOT IN ('failed','stopped','complete')
+      AND op.target_node_id=json_extract("#,$payload,r#",'$.target_node_id')
+      AND ((json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' AND op.preparation_job_id="#,$job,r#")
+        OR (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_range'
+          AND op.preparation_job_id=json_extract("#,$payload,r#",'$.producer_preparation_job_id')))
       AND f.id=json_extract("#,$payload,r#",'$.file_id') AND f.probe_json IS NOT NULL
       AND f.size=json_extract(op.source_json,'$.source_size') AND f.mtime=json_extract(op.source_json,'$.source_mtime')
       AND CASE WHEN json_valid(config.value) THEN json_extract(config.value,'$.version')=1
@@ -241,7 +245,8 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
       AND NOT ("#,
     translation_admission!(
         "json_extract(body,'$.payload')",
-        "json_extract(body,'$.now_ms')"
+        "json_extract(body,'$.now_ms')",
+        "json_extract(body,'$.id')"
     ),
     r#") THEN 'no_demand'
     WHEN json_extract(body, '$.payload.kind') = 'subtitle_extract' AND (
@@ -518,7 +523,8 @@ WHERE id = json_extract($1, '$.job_id')
   AND (kind NOT IN ('subtitle_translation_prepare','subtitle_translation_range') OR ("#,
     translation_admission!(
         "background_jobs.payload_json",
-        "json_extract($1,'$.now_ms')"
+        "json_extract($1,'$.now_ms')",
+        "background_jobs.id"
     ),
     r#"))
   AND (kind!='subtitle_transcribe_managed' OR ("#,
@@ -982,6 +988,11 @@ pub enum JobPayload {
         file_id: i64,
         recipe: super::subtitle_translation::RangeRecipe,
         target_node_id: String,
+        /// Current mutable producer incarnation; never part of immutable recipe IDs.
+        /// Empty only when decoding a pre-incarnation legacy job. Such jobs
+        /// remain inspectable but cannot pass enqueue/claim/publication guards.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        producer_preparation_job_id: String,
     },
     SubtitleTextTranslate {
         file_id: i64,
@@ -1273,11 +1284,14 @@ impl JobPayload {
                 file_id,
                 recipe,
                 target_node_id,
+                producer_preparation_job_id,
             } => {
                 *file_id == recipe.source.file_id
                     && (0..=255).contains(&recipe.audio_index)
                     && recipe.validate().is_ok()
                     && identifier(target_node_id)
+                    && (producer_preparation_job_id.is_empty()
+                        || uuid::Uuid::parse_str(producer_preparation_job_id).is_ok())
             }
             Self::SubtitleTextTranslate {
                 file_id,

@@ -445,13 +445,21 @@ function translationPrune(state){
 function translationApplyCues(state){
   if(!state.current()||state.positionReady===false||state.rebinding||state.presentationValidated===false||!translationSelected(state.player)||state.player.captionIntent.asset_id!==state.assetId)return;
   const video=state.video,outputLanguage=state.outputLanguage||translationOutputLanguage(state.profile,state.spokenLanguage),task=state.task||translationTask(state.profile);if(!video._translationTrack||video._translationTrackTask!==task||video._translationTrackLanguage!==outputLanguage){if(video._translationTrack)video._translationTrack.mode="disabled";video._translationTrack=video.addTextTrack("subtitles",`${task==="transcribe"?"AI captions":"AI translation"} · ${outputLanguage}`,outputLanguage);video._translationTrackTask=task;video._translationTrackLanguage=outputLanguage;}
-  const track=video._translationTrack;track.mode="hidden";
-  try{while(track.cues?.length)track.removeCue(track.cues[0]);}catch(error){void error;}
-  const Cue=window.VTTCue||window.TextTrackCue;
+  const track=video._translationTrack,Cue=window.VTTCue||window.TextTrackCue,desired=new Map();
   for(const cue of state.cues.values()){
     const start=(cue.start_ms/1000)-(state.player.offset||0),end=(cue.end_ms/1000)-(state.player.offset||0);if(end<=0)continue;
-    const rendered=new Cue(Math.max(0,start),end,translationLiteral(cue.text));rendered.id=cue.cue_id;track.addCue(rendered);
+    desired.set(cue.cue_id,{start:Math.max(0,start),end,text:translationLiteral(cue.text)});
   }
+  // Disabled tracks hide their retained cue list until reactivated.
+  if(track.mode==="disabled")track.mode="hidden";
+  // Keep unchanged active cues attached across manifest refreshes. An offset
+  // change or a pruned window replaces only the affected cue identities.
+  for(const rendered of Array.from(track.cues||[])){
+    const cue=desired.get(rendered.id);
+    if(cue&&rendered.startTime===cue.start&&rendered.endTime===cue.end&&rendered.text===cue.text)desired.delete(rendered.id);
+    else track.removeCue(rendered);
+  }
+  for(const [id,cue]of desired){const rendered=new Cue(cue.start,cue.end,cue.text);rendered.id=id;track.addCue(rendered);}
   track.mode="showing";
 }
 async function translationUse(state){

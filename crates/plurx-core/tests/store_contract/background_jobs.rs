@@ -5747,6 +5747,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             file_id: id,
             recipe: recipe.clone(),
             target_node_id: "worker".into(),
+            producer_preparation_job_id: prep.id.clone(),
         };
         store
             .enqueue_job(EnqueueJob {
@@ -5829,7 +5830,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             store
                 .acquire_translation_lease(AcquireTranslationLease {
                     user_id: user.id,
-                    asset_id: asset,
+                    asset_id: asset.clone(),
                     now_ms: 1700
                 })
                 .await
@@ -5841,6 +5842,110 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             .maintain_translation_cache(1800)
             .await
             .expect("bounded cache upkeep");
+        for (offset, core_index) in [2, 1].into_iter().enumerate() {
+            let now = 1810 + (offset as i64) * 30;
+            let mut next = recipe.clone();
+            next.core_index = core_index;
+            let job_id = uuid::Uuid::new_v4().to_string();
+            let payload = JobPayload::SubtitleTranslationRange {
+                file_id: id,
+                recipe: next.clone(),
+                target_node_id: "worker".into(),
+                producer_preparation_job_id: prep.id.clone(),
+            };
+            store
+                .enqueue_job(EnqueueJob {
+                    id: job_id.clone(),
+                    payload: payload.clone(),
+                    dedupe_key: job_id.clone(),
+                    priority: 1,
+                    not_before_ms: now,
+                    now_ms: now,
+                    request: JobRequest {
+                        scope: "translation".into(),
+                        request_id: job_id.clone(),
+                        request_digest: "5".repeat(64),
+                        consumer_kind: "subtitle_translation_range".into(),
+                        consumer_ref: op.clone(),
+                        target_node_id: Some("worker".into()),
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("remaining core enqueue");
+            let queued = store
+                .background_job(&job_id)
+                .await
+                .expect("job")
+                .expect("queued core");
+            let claim = store
+                .claim_artifact_job(ClaimJob {
+                    job_id,
+                    expected_revision: queued.revision,
+                    node_id: "worker".into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::SubtitleTranslationRange,
+                    payload_version: 1,
+                    now_ms: now + 1,
+                    dispatched_at_ms: now + 1,
+                })
+                .await
+                .expect("claim remaining core");
+            let ClaimOutcome::Claimed { job } = claim else {
+                panic!("{backend}: {claim:?}")
+            };
+            let token = job.token.expect("core token");
+            let (start_ms, end_ms) = next.core_bounds().expect("core bounds");
+            let segment = SegmentDraft {
+                asset_id: asset.clone(),
+                core_index,
+                start_ms,
+                end_ms,
+                cues: vec![],
+                provenance: ExecutionProvenance {
+                    engine_sha256: "c".repeat(64),
+                    model_sha256: profile.model_sha256.clone(),
+                    operation_epoch: 1,
+                    platform: "linux-x86_64".into(),
+                    profile_id: profile.id().expect("profile"),
+                    source_sha256: "b".repeat(64),
+                    worker_fence: token.fence,
+                },
+            };
+            assert!(
+                store
+                    .publish_translation_segment(PublishTranslationSegment {
+                        token,
+                        source: payload,
+                        segment,
+                        now_ms: now + 2
+                    })
+                    .await
+                    .expect("remaining publication"),
+                "{backend}"
+            );
+            let rows = store
+                .read_subtitle_translation(TranslationRead {
+                    user_id: user.id,
+                    now_ms: now + 3,
+                    query: TranslationQuery::Operation {
+                        operation_id: op.clone(),
+                    },
+                })
+                .await
+                .expect("operation completion");
+            assert_eq!(
+                rows[0]["state"],
+                if core_index == 1 {
+                    "complete"
+                } else {
+                    "partial"
+                },
+                "{backend}: all expected readable cores, not the last core or row count alone"
+            );
+        }
         let stop = store
             .mutate_subtitle_translation(TranslationMutation {
                 user_id: user.id,

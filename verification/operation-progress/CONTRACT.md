@@ -243,3 +243,29 @@ schema installation preserves the mapped store timeout boundary.
 Only source correspondence and hashes are refreshed. Model/configuration
 bytes and fairness clauses are unchanged. Final adversarial review,
 current-source runtime checks and TLC qualification remain pending.
+
+## Subtitle producer recovery correspondence
+
+The independent final review on 2026-10-26 inspected the frozen completion
+and retargeting delta atop `be9ee45ae`. Shared queue changes add producer-node
+and preparation-incarnation checks only for `subtitle_translation_prepare`
+and `subtitle_translation_range`; legacy payloads remain inspectable but
+cannot acquire new authority. The selected library enqueue/claim, binding,
+renewal, cancellation, publication and cleanup paths retain their behavior.
+
+The [exact-shape migration recognizer](../../crates/plurx-core/src/store/subtitle_translation_schema.rs)
+and [replacement trigger](../../crates/plurx-core/src/store/subtitle_translation_retarget.sql)
+were also inspected because migration installs effects on the shared job
+table. They recognize the complete legacy caption shape, replace its trigger
+transactionally, preserve domain data and refuse unknown shapes. Queue
+updates select caption kinds for one operation; they do not cancel the
+selected library jobs. New mapping dependencies pin these two boundaries.
+SQLite v117, Hiqlite extension installation and added store-contract module
+wiring leave the selected publication transaction and timeout unchanged.
+
+This source review supersedes the earlier construction-only correspondence
+status for these changes. It does not extend the finite model to caption
+completion, producer recovery, remote-worker liveness or admission fairness.
+Model/configuration bytes, fairness premises and historical receipts remain
+unchanged. Offline mapping validation checks the reviewed inputs and anchors;
+it is not Rust test execution, TLC qualification or a refinement proof.

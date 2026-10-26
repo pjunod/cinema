@@ -1,6 +1,10 @@
 package tv.plurx.app.player
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
@@ -75,17 +79,19 @@ class SubtitleTextTranslationTest {
         val captionIntent = ProgressiveCaptionIntent()
         val captions = ProgressiveCaptions({ api }, this, this, 41, captionIntent, { 1L }, { 0L }, { it },
             { error("No playback mutation belongs to a held text Use") }, { true })
-        val translation = SubtitleTextTranslation({ api }, this, 41, intent, { true }, { captionIntent.selectionRevision })
+        val translationScope = CoroutineScope(coroutineContext + Job(coroutineContext[Job]))
+        val translation = SubtitleTextTranslation({ api }, translationScope, 41, intent, { true }, { captionIntent.selectionRevision })
+        try {
         translation.loadOptions()
         withTimeout(1_000) { while (translation.job == null) yield() }
-        var adopted = 0
-        translation.use { index -> assertEquals(7L, index); adopted++ }
+        val adopted = mutableListOf<Long>()
+        translation.use { index -> adopted += index }
         started.await()
         newChoice?.invoke(captions)
         released.complete(Unit)
-        yield()
-        assertEquals(expectedAdoptions, adopted)
-        captions.release(); translation.release()
+        withTimeout(1_000) { translationScope.coroutineContext[Job]!!.children.toList().joinAll() }
+        assertEquals(if (expectedAdoptions == 0) emptyList<Long>() else listOf(7L), adopted)
+        } finally { captions.release(); translation.release(); translationScope.cancel() }
     }
     @Test fun heldTextUseCannotOverrideNewerOffIntent() = heldUse({ it.off() }, 0)
     @Test fun heldTextUseCannotOverrideNewerOrdinaryCaptionIntent() = heldUse({ captions ->

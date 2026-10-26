@@ -20,7 +20,9 @@ use plurx_core::{
     domain::MediaFile,
     store::{
         background_jobs::{BackgroundJob, JobPayload, JobState},
-        subtitle_translation::{valid_digest, SourceRevision, SpeechTask, TranslationProfile},
+        subtitle_translation::{
+            digest, valid_digest, SourceRevision, SpeechTask, TranslationProfile,
+        },
         subtitle_translation_mutation::{TranslationAction, TranslationMutation},
         subtitle_translation_read::{AcquireTranslationLease, TranslationQuery, TranslationRead},
     },
@@ -577,6 +579,10 @@ async fn mutate(
         return response(mutation_receipt(&receipt, wire_outcome)?);
     }
     config::fresh_intent(expires, now)?;
+    let reconcile_producer = matches!(
+        &action,
+        TranslationAction::Create { .. } | TranslationAction::Demand { .. }
+    );
     let value = state
         .store
         .mutate_subtitle_translation(TranslationMutation {
@@ -592,6 +598,20 @@ async fn mutate(
         Some("accepted") => {}
         Some(outcome) => return Err(mutation_error(outcome, now)),
         None => return Err(observation_error()),
+    }
+    // Exact receipt replay returned above. Producer recovery is best effort and
+    // must never turn an accepted demand renewal into an ambiguous failure.
+    if reconcile_producer {
+        if let Some(operation_id) = value["operation_id"].as_str() {
+            let recovery = tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                super::manager::reconcile_producer(state, operation_id, user_id),
+            )
+            .await;
+            if !matches!(recovery, Ok(Ok(()))) {
+                tracing::debug!("caption producer reconciliation deferred");
+            }
+        }
     }
     // Create, demand, Stop and Retry change what the worker should do now.
     state.subtitle_models.translation.wake.notify_one();
@@ -732,7 +752,21 @@ pub async fn create(
     let duration = super::selected_file_capability(&state, &file, input.audio_index)
         .await
         .map_err(|code| config::failure(StatusCode::CONFLICT, code, crate::state::clock_ms()))?;
-    let target = super::eligible_worker(&state, &file, &profile).await?;
+    let recipe_key = digest(
+        &json!({"source":SourceRevision { file_id:file.id,source_size:file.size,source_mtime:file.mtime },
+        "profile":profile,"audio_index":input.audio_index,"spoken_language":input.spoken_language,"duration_ms":duration.duration_ms}),
+    )?;
+    let existing = read_rows(
+        &state,
+        user.id,
+        TranslationQuery::RecipeOperation { recipe_key },
+    )
+    .await?;
+    let target = if let Some(existing) = existing.first() {
+        field(existing, "target_node_id")?.to_owned()
+    } else {
+        super::eligible_worker(&state, &file, &profile).await?
+    };
     mutate(
         &state,
         user.id,

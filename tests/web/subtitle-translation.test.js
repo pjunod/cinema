@@ -73,6 +73,26 @@ test('literal cue text survives verified raw bytes without WebVTT markup and dup
  const h=harness(),s=segment(h);h.ctx.respond=()=>response(s.bytes);await h.ctx.translationSegment(h.state,s.reference,h.state.lease,0);h.ctx.translationPrune(h.state);h.player.captionIntent={kind:'translation',asset_id:A};h.ctx.translationApplyCues(h.state);h.ctx.translationApplyCues(h.state);
  assert.equal(h.video._translationTrack.cues.length,1);assert.equal(h.video._translationTrack.cues[0].text,'A &amp; B &lt;b&gt;word&lt;/b&gt; &lt;00:01&gt;\nnext line');assert.equal(h.video._translationTrack.mode,'showing');
 });
+test('manifest refresh preserves unchanged cue objects and applies only the window delta',()=>{
+ const h=harness();h.player.captionIntent={kind:'translation',asset_id:A};
+ const first={cue_id:'1'.repeat(64),start_ms:3000,end_ms:7000,text:'first'},second={cue_id:'2'.repeat(64),start_ms:8000,end_ms:11000,text:'second'};
+ h.state.cues.set(first.cue_id,first);h.ctx.translationApplyCues(h.state);const t=h.video._translationTrack,original=t.cues[0];let added=0,removed=0;
+ const add=t.addCue.bind(t),remove=t.removeCue.bind(t);t.addCue=cue=>{added++;add(cue);};t.removeCue=cue=>{removed++;remove(cue);};
+ h.ctx.translationApplyCues(h.state);assert.equal(t.cues[0],original);assert.equal(added,0);assert.equal(removed,0);
+ h.state.cues.set(second.cue_id,second);h.ctx.translationApplyCues(h.state);const retained=t.cues[1];assert.equal(t.cues[0],original);assert.equal(added,1);assert.equal(removed,0);
+ h.state.cues.delete(first.cue_id);h.ctx.translationApplyCues(h.state);assert.equal(t.cues.length,1);assert.equal(t.cues[0],retained);assert.equal(removed,1);
+ h.player.offset=2;h.ctx.translationApplyCues(h.state);assert.notEqual(t.cues[0],retained);assert.equal(t.cues[0].startTime,6);assert.equal(t.cues[0].endTime,9);assert.equal(added,2);assert.equal(removed,2);
+ h.state.cues.set(second.cue_id,{...second,text:'changed'});h.ctx.translationApplyCues(h.state);assert.equal(t.cues[0].text,'changed');assert.equal(added,3);assert.equal(removed,3);assert.equal(t.mode,'showing');
+});
+test('disabled retained tracks expose cues before reconciliation after Off and reselection',async()=>{
+ const h=harness();h.player.captionIntent={kind:'translation',asset_id:A};
+ const first={cue_id:'1'.repeat(64),start_ms:3000,end_ms:7000,text:'first'},second={cue_id:'2'.repeat(64),start_ms:8000,end_ms:11000,text:'second'};
+ h.state.cues.set(first.cue_id,first);h.state.cues.set(second.cue_id,second);h.ctx.translationApplyCues(h.state);
+ const t=h.video._translationTrack,stored=t.cues,retained=stored[1];Object.defineProperty(t,'cues',{get(){return this.mode==='disabled'?null:stored;}});t.addCue=cue=>stored.push(cue);t.removeCue=cue=>stored.splice(stored.indexOf(cue),1);
+ await h.ctx.setSub(-1);assert.equal(t.mode,'disabled');assert.equal(t.cues,null);h.state.cues.delete(first.cue_id);await h.ctx.translationUse(h.state);
+ assert.equal(t.mode,'showing');assert.equal(t.cues.length,1);assert.equal(t.cues[0],retained);
+ await h.ctx.setSub(0);assert.equal(t.cues,null);await h.ctx.translationUse(h.state);assert.equal(t.cues.length,1);assert.equal(t.cues[0],retained);
+});
 test('silent coverage and disjoint future work do not fabricate a gap or runway',()=>{
  const h=harness();assert.deepEqual({...h.ctx.translationRangeStatus([{start_ms:0,end_ms:20000}],10000)},{covered:true,runway_ms:10000,lag_ms:0});assert.deepEqual({...h.ctx.translationRangeStatus([{start_ms:0,end_ms:20000},{start_ms:40000,end_ms:60000}],30000)},{covered:false,runway_ms:0,lag_ms:10000});
 });

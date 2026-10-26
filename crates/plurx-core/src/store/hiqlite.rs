@@ -4012,7 +4012,7 @@ impl HiqliteAuthStore {
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
         let version = super::subtitle_translation_schema::version(&shape)?;
-        if version == Some(1) {
+        if version.is_some() {
             // authority: admission must observe the committed singleton marker paired with the extension shape.
             let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
@@ -4028,13 +4028,18 @@ impl HiqliteAuthStore {
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
-        if self.subtitle_translation_schema_version().await? == Some(1) {
+        let current = self.subtitle_translation_schema_version().await?;
+        if current == Some(1) {
             return Ok(());
         }
-        let statements = super::subtitle_translation_schema::statements()
-            .into_iter()
-            .map(|sql| (sql, params!()))
-            .collect::<Vec<_>>();
+        let statements = if current == Some(0) {
+            super::subtitle_translation_schema::retarget_statements()
+        } else {
+            super::subtitle_translation_schema::statements()
+        }
+        .into_iter()
+        .map(|sql| (sql, params!()))
+        .collect::<Vec<_>>();
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
         if self.subtitle_translation_schema_version().await? == Some(1) {

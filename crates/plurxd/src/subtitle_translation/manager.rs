@@ -7,6 +7,7 @@ use plurx_core::store::{
         JobSettlement,
     },
     subtitle_translation::{RangeRecipe, SourceRevision, TranslationProfile},
+    subtitle_translation_mutation::{TranslationAction, TranslationMutation},
 };
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -81,7 +82,141 @@ async fn bound_this_boot(
         b["operation_id"] == operation_id
             && number(&b["operation_epoch"]) == Some(epoch)
             && b["boot_id"] == state.subtitle_models.boot_id.as_str()
+            && b["preparation_ready"] == true
     }))
+}
+
+/// Existing signed node observations decide availability; no new liveness timer.
+fn incumbent_unavailable(
+    outcome: &crate::http::internal_activity::PeerActivityOutcome,
+    node: &str,
+    now: i64,
+) -> bool {
+    use crate::http::internal_activity::PeerActivityOutcome;
+    match outcome {
+        PeerActivityOutcome::Answered(snapshot) if snapshot.node_id == node => {
+            snapshot.workers.as_ref().is_none_or(|worker| {
+                !worker.accepting_work
+                    || worker.observed_at_ms > now.saturating_add(5_000)
+                    || worker.observed_at_ms < now.saturating_sub(30_000)
+            })
+        }
+        _ => true,
+    }
+}
+
+/// A fresh accepted Create/Demand may recover only its own operation on this
+/// qualified receiver. Root Stop epochs, viewer demands and cached bytes stay intact.
+pub(crate) async fn reconcile_producer(
+    state: &AppState,
+    operation_id: &str,
+    user_id: i64,
+) -> Result<(), StoreError> {
+    let Some(op) = read(
+        state,
+        TranslationQuery::Operation {
+            operation_id: operation_id.into(),
+        },
+    )
+    .await?
+    .pop() else {
+        return Ok(());
+    };
+    if op["cached_complete"] == true
+        || matches!(
+            op["state"].as_str(),
+            Some("stopped" | "failed" | "complete")
+        )
+    {
+        return Ok(());
+    }
+    let Some(epoch) = number(&op["operation_epoch"]) else {
+        return Ok(());
+    };
+    let Some(view) = number(&op["view_revision"]) else {
+        return Ok(());
+    };
+    let Some(target) = op["target_node_id"].as_str() else {
+        return Ok(());
+    };
+    let Some(preparation) = op["preparation_job_id"].as_str() else {
+        return Ok(());
+    };
+    if target != state.node_id {
+        let Ok(outcome) = state.peer_activity.owner_snapshot(target).await else {
+            return Ok(());
+        };
+        if !incumbent_unavailable(&outcome, target, crate::state::clock_ms()) {
+            return Ok(());
+        }
+    } else if op["preparation_state"] == "queued"
+        || op["preparation_state"] == "running"
+            && op["preparation_owner_boot_id"] == state.subtitle_models.boot_id.as_str()
+    {
+        return Ok(());
+    }
+    let Some(file_id) = number(&op["file_id"]) else {
+        return Ok(());
+    };
+    let Some(file) = state.store.get_file(file_id).await? else {
+        return Ok(());
+    };
+    if op["source_size"].as_str() != Some(file.size.to_string().as_str())
+        || op["source_mtime"].as_str() != Some(file.mtime.to_string().as_str())
+    {
+        return Ok(());
+    }
+    let profile: TranslationProfile = serde_json::from_value(op["profile"].clone())
+        .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?;
+    if target == state.node_id
+        && state
+            .subtitle_models
+            .translation
+            .cached(&file)
+            .await
+            .is_some()
+    {
+        if let Some(asset) = op["asset_id"].as_str() {
+            if bound_this_boot(state, asset, operation_id, epoch).await? {
+                return Ok(());
+            }
+        }
+    }
+    if super::eligible_worker(state, &file, &profile)
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+    let now = crate::state::clock_ms();
+    let action = TranslationAction::Retarget {
+        operation_id: operation_id.into(),
+        expected_operation_epoch: epoch,
+        expected_view_revision: view,
+        expected_preparation_job_id: preparation.into(),
+        expected_target_node_id: target.into(),
+        target_node_id: state.node_id.clone(),
+    };
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_digest = plurx_core::store::subtitle_translation::digest(
+        &serde_json::to_value(&action)
+            .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?,
+    )?;
+    let result = state
+        .store
+        .mutate_subtitle_translation(TranslationMutation {
+            user_id,
+            request_id,
+            request_digest,
+            now_ms: now,
+            intent_expires_at_ms: now + 60_000,
+            action,
+        })
+        .await?;
+    if result["outcome"] == "accepted" {
+        state.subtitle_models.translation.wake.notify_one();
+    }
+    Ok(())
 }
 
 /// Enqueue at most one missing core for operations a viewer currently wants.
@@ -225,6 +360,12 @@ async fn schedule(state: &AppState) -> Result<bool, StoreError> {
                         payload: JobPayload::SubtitleTranslationRange {
                             file_id: source.file_id,
                             recipe,
+                            producer_preparation_job_id: op["preparation_job_id"]
+                                .as_str()
+                                .ok_or_else(|| {
+                                    StoreError::Task("translation producer missing".into())
+                                })?
+                                .into(),
                             target_node_id: state.node_id.clone(),
                         },
                         dedupe_key: format!(
@@ -614,6 +755,38 @@ pub(crate) async fn worker_pass(
         .await = candidates.next;
     for candidate in candidates.jobs {
         let source = candidate.supported_payload()?;
+        if let JobPayload::SubtitleTranslationRange {
+            recipe,
+            producer_preparation_job_id,
+            target_node_id,
+            ..
+        } = &source
+        {
+            let current = read(
+                state,
+                TranslationQuery::Operation {
+                    operation_id: recipe.operation_id.clone(),
+                },
+            )
+            .await?;
+            if producer_preparation_job_id.is_empty()
+                || current.first().is_none_or(|op| {
+                    op["preparation_job_id"] != producer_preparation_job_id.as_str()
+                        || op["target_node_id"] != target_node_id.as_str()
+                        || op["cached_complete"] == true
+                        || number(&op["operation_epoch"]) != Some(recipe.operation_epoch)
+                })
+            {
+                state
+                    .store
+                    .cancel_job(plurx_core::store::background_jobs::CancelJob {
+                        job_id: candidate.id.clone(),
+                        now_ms: crate::state::clock_ms(),
+                    })
+                    .await?;
+                continue;
+            }
+        }
         let selected = match &source {
             JobPayload::SubtitleModelOperation {
                 translation_profile: Some(profile),

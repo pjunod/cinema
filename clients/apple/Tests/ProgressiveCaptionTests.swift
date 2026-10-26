@@ -4,6 +4,24 @@ import Foundation
 import XCTest
 @testable import plurx
 
+/// The renderer boundary owns the exact items handed to it, without asking
+/// AVFoundation to load fake network playlists or trigger transport recovery.
+private final class CaptionHandoffItem: AVPlayerItem {
+    override var status: AVPlayerItem.Status { .readyToPlay }
+    override func currentTime() -> CMTime { .zero }
+}
+private final class CaptionHandoffPlayer: AVPlayer {
+    private var attached: AVPlayerItem?
+    private var observedRate: Float = 0
+    override var currentItem: AVPlayerItem? { attached }
+    override func replaceCurrentItem(with item: AVPlayerItem?) { attached = item }
+    override var rate: Float { get { observedRate } set { observedRate = newValue } }
+    override var timeControlStatus: AVPlayer.TimeControlStatus { observedRate == 0 ? .paused : .playing }
+    override func currentTime() -> CMTime { attached?.currentTime() ?? .zero }
+    override func play() { observedRate = 1 }
+    override func pause() { observedRate = 0 }
+}
+
 /// Synthetic HTTP exercises the production native session. It is not a claim
 /// of shipped model quality, server execution, or physical output acceptance.
 private final class CaptionFixture: @unchecked Sendable {
@@ -124,7 +142,7 @@ private final class CaptionFixture: @unchecked Sendable {
 private final class CaptionFixtureProtocol: URLProtocol {
     static var fixture: CaptionFixture?
     static var statusOverrides: [String:Int] = [:]
-    static var holdSuffix: String?
+    static var holdRequest: (method:String,path:String)?
     static var onHeld: (() -> Void)?
     static var releaseHeld: (() -> Void)?
     private var cancelled = false
@@ -132,8 +150,24 @@ private final class CaptionFixtureProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         guard let fixture = Self.fixture else { client?.urlProtocol(self, didFailWithError: URLError(.cancelled)); return }
-        let body = fixture.reply(request)
-        if let suffix = Self.holdSuffix, request.url?.path.hasSuffix(suffix) == true {
+        // URLSession may deliver a POST as an InputStream to URLProtocol.
+        // Preserve the exact bytes the synthetic server consumes so assertions
+        // inspect wire input rather than assuming URLRequest.httpBody storage.
+        var recorded=request
+        if recorded.httpBody == nil,let stream=recorded.httpBodyStream {
+            stream.open();defer { stream.close() }
+            var data=Data(),buffer=[UInt8](repeating:0,count:4096)
+            while true {
+                let count=stream.read(&buffer,maxLength:buffer.count)
+                if count < 0 { client?.urlProtocol(self,didFailWithError:stream.streamError ?? URLError(.cannotDecodeRawData));return }
+                if count == 0 { break }
+                guard data.count+count<=65_536 else { client?.urlProtocol(self,didFailWithError:CaptionProtocolError.budget);return }
+                data.append(contentsOf:buffer.prefix(count))
+            }
+            recorded.httpBodyStream=nil;recorded.httpBody=data
+        }
+        let body = fixture.reply(recorded)
+        if let held = Self.holdRequest, request.httpMethod == held.method, request.url?.path == held.path {
             Self.releaseHeld = { [weak self] in self?.deliver(body) }
             Self.onHeld?()
             return
@@ -157,19 +191,29 @@ final class ProgressiveCaptionTests: XCTestCase {
     private var transport: URLSession!
     private var fixture: CaptionFixture!
     private var owner: ProgressiveCaptionSession!
+    private var captionOwners:[ProgressiveCaptionSession]=[]
+    private var textOwners:[SubtitleTextTranslation]=[]
     override func setUp() {
         fixture = CaptionFixture(); CaptionFixtureProtocol.fixture = fixture
         CaptionFixtureProtocol.statusOverrides=[:]
-        CaptionFixtureProtocol.holdSuffix=nil;CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
+        CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [CaptionFixtureProtocol.self]
         transport = URLSession(configuration: config)
         owner = ProgressiveCaptionSession()
+        captionOwners=[owner];textOwners=[]
         Session.shared.setCredentials(origin: "https://captions.test", token: "caption-fixture")
     }
-    override func tearDown() {
-        owner.retire(); subscriptions = []; transport.invalidateAndCancel()
-        CaptionFixtureProtocol.holdSuffix=nil;CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
-        Session.shared.setCredentials(origin: "", token: nil); CaptionFixtureProtocol.fixture = nil
+    override func tearDown() async throws {
+        // Fence every owner first, then settle its work before closing the
+        // shared injected transport. URLSession task creation is asynchronous.
+        for caption in captionOwners { caption.retire() }
+        for text in textOwners { text.retire() }
+        for caption in captionOwners { await caption.retireAndDrain() }
+        for text in textOwners { await text.retireAndDrain() }
+        subscriptions=[];captionOwners=[];textOwners=[]
+        transport.invalidateAndCancel()
+        CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
+        Session.shared.setCredentials(origin:"",token:nil);CaptionFixtureProtocol.fixture=nil
     }
     private func configure() async {
         let loaded = expectation(description: "validated options")
@@ -188,7 +232,7 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertEqual(CaptionRenderWindow.itemInterval(cue, baseMs: window.baseMs, offsetMs: 0), 4000..<7000)
         XCTAssertEqual(cue.text, "A literal <caption> & source clock")
         let create = try XCTUnwrap(fixture.captured.first { $0.httpMethod == "POST" })
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: create.httpBody!) as? [String: Any])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(create.httpBody,"CREATE must carry its exact serialized body")) as? [String: Any])
         XCTAssertEqual(body["audio_index"] as? Int, 2)
         XCTAssertEqual(body["task"] as? String, "transcribe")
         XCTAssertEqual(body["output_language"] as? String, "en")
@@ -243,7 +287,7 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertEqual(fixture.captured.filter { $0.httpMethod == "PUT" }.count, before)
         XCTAssertEqual(owner.window?.cues.count, 1)
         let stop = try XCTUnwrap(fixture.captured.first { $0.url?.path.hasSuffix("/stop") == true })
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: stop.httpBody!) as? [String: Any])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(stop.httpBody,"Stop must carry its exact serialized body")) as? [String: Any])
         XCTAssertEqual(body["expected_operation_epoch"] as? String, "9007199254740993")
     }
     func testSynchronizedTextRebindsToSuccessorOriginAndTeardownRemovesIt() throws {
@@ -285,6 +329,7 @@ final class ProgressiveCaptionTests: XCTestCase {
     }
     func testExistingTextTranslationUsesDistinctJobAndDoesNotSelectProgressiveTrack() async throws {
         let text = SubtitleTextTranslation()
+        textOwners.append(text)
         defer { text.retire() }
         let loaded = expectation(description: "text caption options")
         text.$options.compactMap { $0 }.prefix(1).sink { _ in loaded.fulfill() }.store(in: &subscriptions)
@@ -297,7 +342,7 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertEqual(text.job?.result?.subtitleIndex, 100005)
         XCTAssertFalse(owner.selected, "Text translation cannot select the progressive speech track")
         let request = try XCTUnwrap(fixture.captured.first { $0.url?.path.hasSuffix("/subtitles/22/translation") == true })
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody,"text translation must carry its exact serialized body")) as? [String: Any])
         XCTAssertEqual(body["source_language"] as? String, "de")
         XCTAssertEqual(body["target_language"] as? String, "en")
         XCTAssertEqual(body["model_id"] as? String, "opus-mt-mul-en")
@@ -305,6 +350,7 @@ final class ProgressiveCaptionTests: XCTestCase {
     }
     func testBitmapTextTranslationDoesNotInventOCRWork() async {
         let text = SubtitleTextTranslation()
+        textOwners.append(text)
         defer { text.retire() }
         let loaded = expectation(description: "text options")
         text.$options.compactMap { $0 }.prefix(1).sink { _ in loaded.fulfill() }.store(in: &subscriptions)
@@ -361,7 +407,8 @@ final class ProgressiveCaptionTests: XCTestCase {
             }
             if mutation == "retry" { owner.stop();try await eventually { !self.owner.busy && self.owner.stopped } }
             let held=expectation(description:"held "+mutation)
-            CaptionFixtureProtocol.holdSuffix=mutation == "create" ? "/subtitle-translation" : "/"+mutation
+            let path=mutation == "create" ? "/api/v1/files/7/subtitle-translation" : "/api/v1/subtitle-translation/operations/\(fixture.operation)/\(mutation)"
+            CaptionFixtureProtocol.holdRequest=(method:"POST",path:path)
             CaptionFixtureProtocol.onHeld={ held.fulfill() }
             switch mutation { case "create":XCTAssertTrue(owner.request(.transcribe));case "stop":owner.stop();default:owner.retry() }
             await fulfillment(of:[held],timeout:2);XCTAssertTrue(owner.busy)
@@ -369,7 +416,7 @@ final class ProgressiveCaptionTests: XCTestCase {
             XCTAssertFalse(owner.busy,"the read owns presentation, not the cancelled mutation's busy flag")
             try await eventually { self.owner.window != nil }
             let replacementStatus=owner.status
-            CaptionFixtureProtocol.holdSuffix=nil;CaptionFixtureProtocol.releaseHeld?()
+            CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.releaseHeld?()
             for _ in 0..<20 { await Task.yield() }
             XCTAssertFalse(owner.busy);XCTAssertEqual(owner.status,replacementStatus)
             XCTAssertFalse(owner.status.contains("Stop is unconfirmed"))
@@ -381,11 +428,11 @@ final class ProgressiveCaptionTests: XCTestCase {
         await configure();owner.spokenLanguage="en";XCTAssertTrue(owner.request(.transcribe))
         try await eventually { !self.owner.busy && self.owner.window != nil }
         let held=expectation(description:"held Stop")
-        CaptionFixtureProtocol.holdSuffix="/stop";CaptionFixtureProtocol.onHeld={ held.fulfill() }
+        CaptionFixtureProtocol.holdRequest=(method:"POST",path:"/api/v1/subtitle-translation/operations/\(fixture.operation)/stop");CaptionFixtureProtocol.onHeld={ held.fulfill() }
         owner.stop();await fulfillment(of:[held],timeout:2)
         owner.retire();await configure()
         let status=owner.status
-        CaptionFixtureProtocol.holdSuffix=nil;CaptionFixtureProtocol.releaseHeld?()
+        CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.releaseHeld?()
         for _ in 0..<20 { await Task.yield() }
         XCTAssertFalse(owner.busy);XCTAssertFalse(owner.selected);XCTAssertEqual(owner.status,status)
     }
@@ -402,20 +449,33 @@ final class ProgressiveCaptionTests: XCTestCase {
         let queued=outcome.hasPrefix("queued")
         let caps=Caps.snapshot().document,entered=expectation(description:"subtitle-off successor held")
         var calls=0,release:CheckedContinuation<HlsStart,Error>?
-        let controller=PlayerController(requestPlaybackDecision:{ _,_,_,_ in (decision,caps) },
+        var initialAttached=false,holdNextChange=false
+        let controller=PlayerController(player:CaptionHandoffPlayer(),
+            makePlayerItem:{ _ in CaptionHandoffItem(asset:AVMutableComposition()) },requestPlaybackDecision:{ _,_,_,_ in (decision,caps) },
             mediaSelectionPreparation:.init(native:{ _,_,_ in .init(hasSubtitleOptions:false,apply:{true}) },audio:{_,_ in nil}),
             itemPreparation:.init(ready:{_,_ in },seek:{_,_ in true}),
             releaseHlsSession:{_,_ in },prepareGrowingPlaylist:{_ in },requestHlsSession:{_,_,body in
                 calls+=1
                 if calls==1 { XCTAssertEqual(body.subtitleBurn,0);return try session("burned") }
-                if queued,calls==2 { XCTAssertEqual(body.subtitleBurn,0) }
+                guard initialAttached else {
+                    XCTFail("unexpected recovery during initial fixture attachment")
+                    throw URLError(.badServerResponse)
+                }
+                if queued,holdNextChange { XCTAssertEqual(body.subtitleBurn,0) }
                 else { XCTAssertNil(body.subtitleBurn) }
-                if calls==2 { return try await withCheckedThrowingContinuation { release=$0;entered.fulfill() } }
+                if holdNextChange {
+                    holdNextChange=false
+                    return try await withCheckedThrowingContinuation { release=$0;entered.fulfill() }
+                }
                 return try session("subtitle-off-queued")
             },requestHlsStatus:{_,id in PlaybackSessionStatus(id:id)})
+        captionOwners.append(controller.progressiveCaptions);textOwners.append(controller.subtitleTextTranslation)
         defer { release?.resume(throwing:CancellationError());controller.stop() }
-        controller.start(model:AppModel(),itemId:7,fileId:7,startMs:0,durationMs:120000,title:"Burned fixture",selection:PrePlaySelection(audioIndex:2,subtitleIndex:0))
-        await controller.loadingTask?.value
+        let playbackTransport=try XCTUnwrap(transport)
+        let model=AppModel(startServices:false,makeAPI:{ _ in PlurxAPI(origin:"https://captions.test",testTransport:playbackTransport) })
+        controller.start(model:model,itemId:7,fileId:7,startMs:0,durationMs:120000,title:"Burned fixture",selection:PrePlaySelection(audioIndex:2,subtitleIndex:0))
+        try await eventually { calls==1 && controller.player.currentItem != nil && !controller.isChangingStream }
+        initialAttached=true
         let incumbent=try XCTUnwrap(controller.player.currentItem)
         let captions=controller.progressiveCaptions
         captions.retire()
@@ -425,6 +485,7 @@ final class ProgressiveCaptionTests: XCTestCase {
                            now:{(65000,0,1,false)},current:{true})
         await fulfillment(of:[loaded],timeout:2);captions.spokenLanguage="en"
         let before=fixture.captured.filter{$0.httpMethod=="POST" && $0.url?.path.hasSuffix("/subtitle-translation")==true}.count
+        holdNextChange=true
         if queued { controller.selectQuality(720);await fulfillment(of:[entered],timeout:2) }
         if generate { controller.selectProgressiveCaptions(.transcribe) } else { controller.selectProgressiveAsset(publishedAsset) }
         if !queued { await fulfillment(of:[entered],timeout:2) }
@@ -465,6 +526,31 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertFalse(owner.busy);XCTAssertFalse(owner.selected)
         XCTAssertTrue(owner.status.contains("Caption access ended"))
         XCTAssertFalse(owner.status.contains("Retry Stop"))
+    }
+
+    func testNetworkDrainWaitsForCancelledWorkAndCapturedCleanup() async throws {
+        let tasks=CaptionNetworkTasks(),entered=expectation(description:"work entered"),cancelled=expectation(description:"work cancelled"),cleanupEntered=expectation(description:"cleanup entered")
+        var finishWork:CheckedContinuation<Void,Never>?,finishCleanup:CheckedContinuation<Void,Never>?
+        tasks.run {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { finishWork=$0;entered.fulfill() }
+            } onCancel:{ cancelled.fulfill() }
+        }
+        tasks.run(cleanup:true) { await withCheckedContinuation { finishCleanup=$0;cleanupEntered.fulfill() } }
+        await fulfillment(of:[entered,cleanupEntered],timeout:2)
+        tasks.cancelWork();await fulfillment(of:[cancelled],timeout:2)
+        var drainFinished=false
+        let drainEntered=expectation(description:"drain entered")
+        let drain=Task { drainEntered.fulfill();await tasks.drain();drainFinished=true }
+        await fulfillment(of:[drainEntered],timeout:2)
+        XCTAssertFalse(drainFinished,"drain must wait while work and cleanup are held")
+        XCTAssertEqual(tasks.pendingCount,2,"cancelled work remains owned until it settles")
+        let work=try XCTUnwrap(finishWork);work.resume()
+        try await eventually { tasks.pendingCount==1 }
+        XCTAssertEqual(tasks.pendingCount,1,"best-effort cleanup also belongs to transport retirement")
+        XCTAssertFalse(drainFinished,"drain must also await captured cleanup after work settles")
+        let cleanup=try XCTUnwrap(finishCleanup);cleanup.resume()
+        await drain.value;XCTAssertTrue(drainFinished);XCTAssertEqual(tasks.pendingCount,0)
     }
 
 }

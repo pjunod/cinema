@@ -9,6 +9,9 @@ pub enum TranslationQuery {
         request_id: String,
         request_digest: String,
     },
+    RecipeOperation {
+        recipe_key: String,
+    },
     Operation {
         operation_id: String,
     },
@@ -83,6 +86,7 @@ pub struct AcquireTranslationLease {
     pub asset_id: String,
     pub now_ms: i64,
 }
+pub(super) const READABLE_OPERATION: &str = r#"EXISTS(SELECT 1 FROM subtitle_translation_assets a WHERE a.id=op.asset_id AND a.operation_id=op.id AND a.retired_at_ms IS NULL AND a.source_json=op.source_json AND a.profile_json=op.profile_json AND a.audio_index=op.audio_index AND a.spoken_language=op.spoken_language AND a.duration_ms=op.duration_ms AND a.core_count=(a.duration_ms+json_extract(a.profile_json,'$.core_ms')-1)/json_extract(a.profile_json,'$.core_ms') AND a.core_count=(SELECT count(*) FROM subtitle_translation_segments s WHERE s.asset_id=a.id AND s.core_index>=0 AND s.core_index<a.core_count AND s.start_ms=s.core_index*json_extract(a.profile_json,'$.core_ms') AND s.end_ms=min((s.core_index+1)*json_extract(a.profile_json,'$.core_ms'),a.duration_ms) AND s.accepted_revision>0 AND s.accepted_revision<=a.manifest_revision))"#;
 const LIVE_ASSET: &str = r#"a.id=json_extract($1,'$.asset_id') AND a.retired_at_ms IS NULL
  AND EXISTS(SELECT 1 FROM files f WHERE f.id=a.file_id AND f.size=json_extract(a.source_json,'$.source_size') AND f.mtime=json_extract(a.source_json,'$.source_mtime') AND f.probe_json IS NOT NULL)"#;
 const USER: &str = "EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.user_id'))";
@@ -119,6 +123,13 @@ pub(super) async fn read<T: QueueSql>(
             "SELECT CASE WHEN r.body_digest=json_extract($1,'$.request_digest') THEN r.outcome_json ELSE json_object('outcome','request_conflict') END AS result_json FROM subtitle_translation_requests r WHERE r.user_id=json_extract($1,'$.user_id') AND r.request_id=json_extract($1,'$.request_id') AND EXISTS(SELECT 1 FROM users WHERE id=r.user_id AND is_admin=1)".into()
         }
 
+        TranslationQuery::RecipeOperation { recipe_key } => {
+            if input.user_id <= 0 || !digest(&recipe_key) {
+                return Err(bad());
+            }
+            body["recipe_key"] = recipe_key.into();
+            format!("SELECT json_object('operation_id',id,'target_node_id',target_node_id) AS result_json FROM subtitle_translation_operations WHERE recipe_key=json_extract($1,'$.recipe_key') AND {USER}")
+        }
         TranslationQuery::Operation { operation_id } => {
             if !uuid(&operation_id) {
                 return Err(bad());
@@ -131,6 +142,8 @@ pub(super) async fn read<T: QueueSql>(
  'file_id',CAST(op.file_id AS TEXT),'source_size',CAST(json_extract(op.source_json,'$.source_size') AS TEXT),'source_mtime',CAST(json_extract(op.source_json,'$.source_mtime') AS TEXT),'content_revision',(SELECT source_sha256 FROM subtitle_translation_assets WHERE id=op.asset_id),'audio_index',op.audio_index,'spoken_language',op.spoken_language,'output_language',CASE WHEN json_extract(op.profile_json,'$.task')='transcribe' THEN op.spoken_language ELSE 'en' END,'task',COALESCE(json_extract(op.profile_json,'$.task'),'translate'),
  'model_id',json_extract(op.profile_json,'$.model_id'),'model_sha256',json_extract(op.profile_json,'$.model_sha256'),'profile',json(op.profile_json),'timeline_contract',json_extract(op.profile_json,'$.timeline_contract'),
  'preparation_job_id',op.preparation_job_id,'target_node_id',op.target_node_id,
+ 'preparation_state',(SELECT state FROM background_jobs WHERE id=op.preparation_job_id),'preparation_owner_boot_id',(SELECT owner_boot_id FROM background_jobs WHERE id=op.preparation_job_id),
+ 'cached_complete',json(CASE WHEN {READABLE_OPERATION} THEN 'true' ELSE 'false' END),
  'active_job',json((SELECT json_object('job_id',j.id,'kind',j.kind,'state',j.state,'attempt',CAST(j.fence AS TEXT),'fence',CAST(j.fence AS TEXT),'phase',json_extract(j.checkpoint_json,'$.phase'),'core_index',json_extract(j.payload_json,'$.recipe.core_index'),'owner_node_id',j.owner_node_id,'cancellable',json('true')) FROM background_jobs j WHERE j.state IN ('queued','running','cancelling') AND COALESCE(json_extract(j.payload_json,'$.operation_id'),json_extract(j.payload_json,'$.recipe.operation_id'))=op.id AND COALESCE(json_extract(j.payload_json,'$.operation_epoch'),json_extract(j.payload_json,'$.recipe.operation_epoch'))=op.operation_epoch ORDER BY CASE j.state WHEN 'running' THEN 0 WHEN 'cancelling' THEN 1 ELSE 2 END,j.created_at_ms LIMIT 1)),
  'server_now_ms',json_extract($1,'$.now_ms')) AS result_json FROM subtitle_translation_operations op WHERE op.id=json_extract($1,'$.operation_id') AND (json_extract($1,'$.user_id')=0 OR {USER})"#
             )
@@ -158,7 +171,7 @@ pub(super) async fn read<T: QueueSql>(
             body["asset_id"] = asset_id.into();
             body["node_id"] = node_id.into();
             format!(
-                r#"SELECT json_object('operation_id',op.id,'operation_epoch',op.operation_epoch,'source',json(a.source_json),'source_sha256',a.source_sha256,'local_identity',b.local_identity,'boot_id',b.boot_id,'verified_at_ms',b.verified_at_ms) AS result_json FROM subtitle_translation_assets a JOIN subtitle_translation_operations op ON op.id=a.operation_id JOIN subtitle_translation_source_bindings b ON b.operation_id=op.id AND b.source_sha256=a.source_sha256 WHERE {LIVE_ASSET} AND b.node_id=json_extract($1,'$.node_id')"#
+                r#"SELECT json_object('operation_id',op.id,'operation_epoch',op.operation_epoch,'source',json(a.source_json),'source_sha256',a.source_sha256,'local_identity',b.local_identity,'boot_id',b.boot_id,'verified_at_ms',b.verified_at_ms,'preparation_job_id',op.preparation_job_id,'preparation_ready',json(CASE WHEN EXISTS(SELECT 1 FROM background_jobs p JOIN background_job_attempts attempt ON attempt.job_id=p.id AND attempt.fence=p.fence WHERE p.id=op.preparation_job_id AND p.state='succeeded' AND p.result_ref=a.id AND attempt.owner_node_id=b.node_id AND attempt.owner_boot_id=b.boot_id) THEN 'true' ELSE 'false' END)) AS result_json FROM subtitle_translation_assets a JOIN subtitle_translation_operations op ON op.id=a.operation_id JOIN subtitle_translation_source_bindings b ON b.operation_id=op.id AND b.operation_epoch=op.operation_epoch AND b.source_sha256=a.source_sha256 WHERE {LIVE_ASSET} AND b.node_id=json_extract($1,'$.node_id')"#
             )
         }
         TranslationQuery::Segments {

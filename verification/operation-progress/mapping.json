@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "369dd585906e5d2e0640c8812f9be4a8a999d6340751dd948dc5b8bc2abc94fc"
+        "sha256": "5046dc487651f5a9bdd6e4da627893139c60618a0c8eba6595b3bcedf5af5864"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "369dd585906e5d2e0640c8812f9be4a8a999d6340751dd948dc5b8bc2abc94fc"
+        "sha256": "5046dc487651f5a9bdd6e4da627893139c60618a0c8eba6595b3bcedf5af5864"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "369dd585906e5d2e0640c8812f9be4a8a999d6340751dd948dc5b8bc2abc94fc"
+        "sha256": "5046dc487651f5a9bdd6e4da627893139c60618a0c8eba6595b3bcedf5af5864"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "3a4b7923ded06ffc3e30df17addbd15e2dc72956f9c702b271c5b86c3876581e"
+        "sha256": "725a2017f0271fe338d2b5ad3cb9995ad267af2a1552c8c5648ce42d7ab4dfc6"
       },
       {
         "table": "31 authority implementation",
@@ -286,9 +286,21 @@
         "source": "crates/plurx-worker-control/src/library_lifecycle.rs",
         "anchor": "pub fn step(state: State, event: Event)",
         "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
+      },
+      {
+        "table": "caption migration exact-shape recognizer outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_schema.rs",
+        "anchor": "/// Some(0) identifies only the complete, exact pre-retarget shape.",
+        "sha256": "808c9f209244a4eaed4022decc3b8dbf329ffe5fe0e7fd34be92a1d4b690e582"
+      },
+      {
+        "table": "caption retarget queue effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_retarget.sql",
+        "anchor": "last_error_code='producer_retargeted'",
+        "sha256": "775b12add23c672d863292db2b0b6c266a243d337c0eda437a316b67812831bf"
       }
     ],
-    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. Construction correspondence reconciliation on 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: selected library candidate/claim, queue heartbeat, bind/complete, heartbeat join and local retirement paths are unchanged. BackgroundJobStore adds separately kind-scoped text-caption methods; Hiqlite adds independent schema installation without changing the mapped transaction timeout. main.rs only declares the text-translation module at this boundary. admit_fragment remains try-only and retains its existing source-work helper. Two-thread speech work shares the background-heavy gate, while one-thread read attestation uses ordinary speculative CPU admission; their competition is outside this selected-worker model and supplies no new fairness guarantee. The obsolete unused queued-fragment wrapper is removed; speech qualification uses its own cancellable FIFO path. This authored construction mapping refresh is not the pending final adversarial review, test execution or TLC qualification; model/configuration bytes, fairness premises and prior receipts retain their identities. Final construction rustfmt refresh on 2026-10-26 changes only line wrapping in read_shared_captions trait/adapter arguments and module declaration ordering; mapped selected-worker behavior, anchors, model/configuration bytes and pending evidence boundaries are unchanged."
+    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. Construction correspondence reconciliation on 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: selected library candidate/claim, queue heartbeat, bind/complete, heartbeat join and local retirement paths are unchanged. BackgroundJobStore adds separately kind-scoped text-caption methods; Hiqlite adds independent schema installation without changing the mapped transaction timeout. main.rs only declares the text-translation module at this boundary. admit_fragment remains try-only and retains its existing source-work helper. Two-thread speech work shares the background-heavy gate, while one-thread read attestation uses ordinary speculative CPU admission; their competition is outside this selected-worker model and supplies no new fairness guarantee. The obsolete unused queued-fragment wrapper is removed; speech qualification uses its own cancellable FIFO path. This authored construction mapping refresh is not the pending final adversarial review, test execution or TLC qualification; model/configuration bytes, fairness premises and prior receipts retain their identities. Final construction rustfmt refresh on 2026-10-26 changes only line wrapping in read_shared_captions trait/adapter arguments and module declaration ordering; mapped selected-worker behavior, anchors, model/configuration bytes and pending evidence boundaries are unchanged. Independent final adversarial correspondence review on 2026-10-26 of the frozen completion/retarget delta atop be9ee45ae: shared queue changes add producer-node/preparation-incarnation predicates only for subtitle_translation_prepare/range and a legacy-defaulted subtitle range payload field. Selected library_scan/metadata_refresh enqueue/claim, binding, renewal, cancellation, publication and cleanup behavior is unchanged. The exact legacy-caption trigger migration and its shared-queue effects were inspected: only caption jobs for the same operation are cancelled; library kinds are excluded. SQLite v117 and Hiqlite recognize the complete old shape before the transactional trigger replacement and reject unknown shapes. Added store-contract module wiring is test-only. New mapping dependencies pin the migration recognizer and replacement trigger so their isolation cannot drift silently. This supersedes the earlier construction-only correspondence status for these changes; source hashes and unchanged anchors do not establish Rust test execution, TLC qualification, remote-worker liveness or new modeled caption guarantees. Model/configuration/fairness bytes and historical receipts remain unchanged."
   },
   "configs": {
     "progress.cfg": {

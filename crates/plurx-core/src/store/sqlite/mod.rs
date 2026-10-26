@@ -1309,7 +1309,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v111: managed subtitle jobs and media-independent model reservations.
     super::subtitle_managed_schema::SCHEMA,
     // v112: independently recognized progressive translation operations and cues.
-    super::subtitle_translation_schema::SCHEMA,
+    super::subtitle_translation_schema::SCHEMA_V1,
     // v113: item ratings and per-person item lists (watchlist, favorites).
     super::library_annotations_schema::SCHEMA,
     // v114: source-revision title acquisition, independent of ordinary probes.
@@ -1318,6 +1318,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_text_translation_schema::SCHEMA,
     // v116: grant-bound read-only progressive caption retention.
     super::shared_caption_schema::SCHEMA,
+    // v117: exact progressive v1 producer-incarnation trigger upgrade, preserving cached assets and leases.
+    super::subtitle_translation_schema::RETARGET_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1846,7 +1848,9 @@ impl SqliteStore {
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
-                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?);
+                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
+                || (version == 117
+                    && super::subtitle_translation_schema::retarget_already_applied(conn)?);
             let applied = Self::apply_migration_step(conn, version, sql, already_applied);
             conn.pragma_update(None, "foreign_keys", "ON")?;
             applied?;

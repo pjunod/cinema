@@ -91,7 +91,11 @@ class CaptionPollingLifecycleTest {
                     readFailed = { fail("Terminal refusal must retire") }, renewalFailed = {},
                     pause = { fail("Terminal refusal cannot schedule a retry") })
                 fail("Expected retirement")
-            } catch (e: Exception) { assertSame(failure, e) }
+            } catch (e: Exception) {
+                // Coroutine stack-trace recovery can copy standard exceptions.
+                assertEquals(failure.javaClass, e.javaClass)
+                assertEquals(failure.message, e.message)
+            }
             assertEquals(1, reads)
         }
         assertTrue(captionReadRetryable(refusal(425, "source_verifying")))

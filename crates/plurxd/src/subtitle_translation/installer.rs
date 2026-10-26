@@ -742,6 +742,10 @@ mod qualification {
                 Some(2),
                 "both real cores must commit: {manifest:?}"
             );
+            assert_eq!(
+                manifest["operation"]["state"], "complete",
+                "all expected readable cores complete atomically"
+            );
             assert_eq!(manifest["audio_index"], 2);
             assert_eq!(manifest["task"], selected.task.name());
             assert_eq!(manifest["profile_id"], selected.id().expect("profile"));

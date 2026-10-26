@@ -65,6 +65,9 @@ mod sharing_source_sessions;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/source_contract.rs"]
 mod source_contract;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/subtitle_translation_upgrade.rs"]
+mod subtitle_translation_upgrade;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;

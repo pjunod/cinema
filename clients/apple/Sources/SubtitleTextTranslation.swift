@@ -59,6 +59,7 @@ final class SubtitleTextTranslation: ObservableObject {
     private var auth: UInt64 = 0
     private var authObserver: UUID?
     private var loop: Task<Void, Never>?
+    private let networkTasks=CaptionNetworkTasks()
     private var pending: [String: CaptionValue]?
     private var pendingKey: String?
     private var jobId: String?
@@ -78,7 +79,7 @@ final class SubtitleTextTranslation: ObservableObject {
         authObserver = observation.id
         guard observation.generation == auth else { retire(); return }
         let captured = generation
-        Task { await refresh(captured, initialize: true) }
+        networkTasks.run { [self] in await refresh(captured, initialize: true) }
     }
     private func current(_ captured: Int) -> Bool {
         generation == captured && auth == Session.shared.playbackAuthorization.generation && !Task.isCancelled
@@ -119,7 +120,7 @@ final class SubtitleTextTranslation: ObservableObject {
             status = "Model readiness is advisory to your saved enable choice."
         } catch { fail(error, captured) }
     }
-    func refresh() { Task { await refresh(generation) } }
+    func refresh() { networkTasks.run { [self] in await refresh(generation) } }
     func save() {
         guard !busy, let configuration else { return }
         send(key: "save:\(enabled):\(configuration.revision)", path: "subtitle-text-translation/config", method: "PUT",
@@ -148,7 +149,7 @@ final class SubtitleTextTranslation: ObservableObject {
         let request = pending
         busy = true
         let captured = generation
-        Task {
+        networkTasks.run { [self] in
             defer { if current(captured) { busy = false } }
             do {
                 if save {
@@ -168,7 +169,7 @@ final class SubtitleTextTranslation: ObservableObject {
     }
     private func startLoop(_ captured: Int) {
         loop?.cancel()
-        loop = Task { [weak self] in
+        loop = networkTasks.run { [weak self] in
             while let self, self.current(captured), let api = self.api, let jobId = self.jobId {
                 do {
                     let reply: CaptionHTTPReply<TextCaptionJob> = try await api.caption("subtitle-text-translation/jobs/\(jobId)")
@@ -190,7 +191,7 @@ final class SubtitleTextTranslation: ObservableObject {
     func cancel() {
         guard let api, let jobId else { return }
         let captured = generation
-        Task {
+        networkTasks.run { [self] in
             do {
                 let _: CaptionHTTPReply<Data> = try await api.captionBytes("cluster/jobs/\(jobId)/cancel", method: "POST")
                 guard current(captured) else { return }; refreshJob()
@@ -202,10 +203,14 @@ final class SubtitleTextTranslation: ObservableObject {
         send(key: "retry:\(jobId)", path: "subtitle-text-translation/jobs/\(jobId)/retry", body: ["version": .integer(1), "request_id": .string(UUID().uuidString.lowercased())])
     }
     func retire() {
-        generation += 1; loop?.cancel(); loop = nil
+        generation += 1; networkTasks.cancelWork();loop?.cancel(); loop = nil
         if let authObserver { Session.shared.removeAuthorizationObserver(authObserver) }
         authObserver = nil; api = nil; fileId = nil; options = nil; configuration = nil; workers = []
         job = nil; jobId = nil; busy = false; pending = nil; pendingKey = nil
+    }
+    func retireAndDrain() async {
+        retire()
+        await networkTasks.drain()
     }
     private func fail(_ error: Error, _ captured: Int) {
         guard current(captured), !(error is CancellationError) else { return }

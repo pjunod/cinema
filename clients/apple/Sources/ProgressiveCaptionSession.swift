@@ -2,6 +2,39 @@ import AVFoundation
 import Combine
 import Foundation
 
+/// Bounded-lifetime ownership for caption HTTP tasks. Completed handles are
+/// removed; cancellation retains each handle until its operation has settled.
+/// Cleanup keeps its captured principal and gets the existing HTTP/TTL bounds.
+@MainActor
+final class CaptionNetworkTasks {
+    private struct Entry { let task: Task<Void,Never>;let cleanup:Bool }
+    private var active:[UUID:Entry]=[:]
+    var pendingCount:Int { active.count }
+    @discardableResult
+    func run(cleanup:Bool=false,_ operation:@escaping @MainActor () async -> Void) -> Task<Void,Never> {
+        let identity=UUID()
+        let task=Task { [weak self] in
+            defer { self?.active[identity]=nil }
+            guard cleanup || !Task.isCancelled else { return }
+            await operation()
+        }
+        active[identity]=Entry(task:task,cleanup:cleanup)
+        return task
+    }
+    func cancelWork() {
+        for entry in active.values where !entry.cleanup { entry.task.cancel() }
+    }
+    func cancelAll() {
+        for entry in active.values { entry.task.cancel() }
+    }
+    func drain() async {
+        // Snapshot the retired owner's work; a later reconfiguration has its
+        // own lifetime and cannot be removed or awaited as the old owner.
+        let pending=active.values.map(\.task)
+        for task in pending { await task.value }
+    }
+}
+
 /// One playback's caption work and bounded source-clock read window. It owns
 /// no AVPlayer, session replacement, media recovery or presentation timer.
 @MainActor
@@ -41,6 +74,7 @@ final class ProgressiveCaptionSession: ObservableObject {
     private var loop: Task<Void, Never>?
     private var action: Task<Void, Never>?
     private var actionSerial = 0
+    private let networkTasks=CaptionNetworkTasks()
     private var now: (() -> (position: Int, base: Int, rate: Double, paused: Bool))?
     private var isPlaybackCurrent: (() -> Bool)?
     private var playbackId = UUID().uuidString.lowercased()
@@ -86,7 +120,7 @@ final class ProgressiveCaptionSession: ObservableObject {
         authObserver = observation.id
         guard observation.generation == authGeneration else { retire(); return }
         let captured = generation
-        action = Task { [weak self] in
+        action = networkTasks.run { [weak self] in
             guard let self else { return }
             do { try await self.loadOptions(captured) }
             catch { self.fail(error, captured) }
@@ -168,7 +202,7 @@ final class ProgressiveCaptionSession: ObservableObject {
         let language = spokenLanguage
         selected = true; busy = true; stopRequested = false
         let captured = generation, serial = actionSerial
-        action = Task { [weak self] in
+        action = networkTasks.run { [weak self] in
             guard let self, let api = self.api else { return }
             defer { self.finishAction(captured, serial) }
             do {
@@ -207,13 +241,14 @@ final class ProgressiveCaptionSession: ObservableObject {
         selected = true; stopRequested = false; assetId = asset.assetId; operationId = asset.operationId
         chosenProfile = profile; chosenLanguage = asset.spokenLanguage; epoch = "0"; view = "0"; contentRevision = nil
         let captured = generation
-        action = Task { [weak self] in
+        action = networkTasks.run { [weak self] in
             guard let self else { return }
             await self.poll(captured); self.startLoop(captured)
         }
     }
 
     func deselect() {
+        networkTasks.cancelWork()
         selected = false; window = nil; seekDemandPosition = nil
         loop?.cancel(); loop = nil; replaceAction()
         windowGeneration += 1; releaseDemand()
@@ -222,6 +257,7 @@ final class ProgressiveCaptionSession: ObservableObject {
 
     func retire() {
         // Invalidate continuations before releasing the captured demand.
+        if authGeneration != Session.shared.playbackAuthorization.generation { networkTasks.cancelAll() }
         generation += 1; deselect()
         if let authObserver { Session.shared.removeAuthorizationObserver(authObserver) }
         authObserver = nil; options = nil; operation = nil; api = nil; now = nil; isPlaybackCurrent = nil
@@ -230,6 +266,13 @@ final class ProgressiveCaptionSession: ObservableObject {
         intents = [:]; chosenProfile = nil; chosenLanguage = nil; contentRevision = nil; serverClock = nil
         playbackId = UUID().uuidString.lowercased(); epoch = "0"; view = "0"; stopRequested = false; polling = false
         seekDemandPosition = nil; lastObserved = nil
+    }
+
+    /// Retire remains synchronous for UI callers. A transport owner may also
+    /// wait for all cancelled requests and captured demand releases to settle.
+    func retireAndDrain() async {
+        retire()
+        await networkTasks.drain()
     }
 
     private func adopt(_ receipt: CaptionReceipt) throws {
@@ -267,7 +310,7 @@ final class ProgressiveCaptionSession: ObservableObject {
 
     private func startLoop(_ captured: Int) {
         loop?.cancel()
-        loop = Task { [weak self] in
+        loop = networkTasks.run { [weak self] in
             while let self, self.current(captured), self.selected {
                 await self.heartbeat(captured)
                 await self.poll(captured)
@@ -308,14 +351,14 @@ final class ProgressiveCaptionSession: ObservableObject {
         body["playback_id"] = .string(playbackId)
         self.demandId = nil; self.demandGeneration = nil; intents["heartbeat"] = nil
         // Best effort only; the server demand TTL is the authority after loss.
-        Task { let _: CaptionHTTPReply<CaptionReceipt>? = try? await api.caption("subtitle-translation/operations/\(operationId)/demands/\(demandId)", method: "DELETE", body: body) }
+        networkTasks.run(cleanup:true) { let _: CaptionHTTPReply<CaptionReceipt>? = try? await api.caption("subtitle-translation/operations/\(operationId)/demands/\(demandId)", method: "DELETE", body: body) }
     }
 
     func stop() {
         guard !busy, let operationId, let api else { return }
         replaceAction(); stopRequested = true; busy = true
         let captured = generation, serial = actionSerial
-        action = Task { [weak self] in
+        action = networkTasks.run { [weak self] in
             guard let self else { return }
             defer { self.finishAction(captured, serial) }
             do {
@@ -343,7 +386,7 @@ final class ProgressiveCaptionSession: ObservableObject {
         let key = range.map { "retry:\($0.coreIndex)" } ?? "retry"
         replaceAction(); busy = true
         let captured = generation, serial = actionSerial
-        action = Task { [weak self] in
+        action = networkTasks.run { [weak self] in
             guard let self else { return }
             defer { self.finishAction(captured, serial) }
             do {
@@ -374,7 +417,7 @@ final class ProgressiveCaptionSession: ObservableObject {
     func moreAssets() {
         guard let cursor = nextAssetCursor, cursor.utf8.count <= 1024, let api else { return }
         let captured = generation
-        Task {
+        networkTasks.run { [self] in
             do {
                 let reply: CaptionHTTPReply<CaptionAssetPage> = try await api.caption("files/\(fileId)/subtitle-translation/assets", query: [URLQueryItem(name: "cursor", value: cursor)])
                 guard current(captured), reply.value.version == 1, reply.value.fileId == String(fileId), reply.value.entries.count <= 16 else { return }
@@ -387,7 +430,7 @@ final class ProgressiveCaptionSession: ObservableObject {
         guard let cursor = nextFailureCursor, cursor.utf8.count <= 1024,
               let operation, let lease, let api, ProcessInfo.processInfo.systemUptime < lease.deadline else { return }
         let captured = generation
-        Task {
+        networkTasks.run { [self] in
             do {
                 let reply: CaptionHTTPReply<CaptionFailurePage> = try await api.caption("subtitle-translation/operations/\(operation.operationId)/failed-ranges", query: [URLQueryItem(name: "cursor", value: cursor)], headers: ["X-Translation-Read-Lease": lease.id])
                 let page = reply.value

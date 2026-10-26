@@ -74,6 +74,37 @@ and canonical leased readback; its result and the final fast lane are recorded
 on PR #1292. Device, broader language accuracy, long-form and deployed evidence
 remain separately attributable; none is implied by these fixtures.
 
+## Closing the remaining implementation gaps
+
+The finite multi-audio worker run exposed a flat120second inference budget:
+its35second window timed out while the shorter tail succeeded. The pinned
+engine processes30second acoustic blocks; the reviewed correction assigns
+120seconds per validated block, bounded to240seconds by the registered40second
+context window. Decoder, resource admission, claim renewal and cancellation
+retain their existing limits. The failed actual worker case must pass again.
+
+Linux package staging now derives a readable FLEURS notice from the canonical
+fixture metadata and includes the complete CC BY4.0 license in both package
+formats. Caption rendering reconciles cue identities instead of clearing the
+entire track on every manifest refresh. Bounded review closed both changes;
+the packaging regression and two cue-delta/reselection regressions passed.
+
+Atomic operation completion and worker reassignment are implemented and
+frozen for bounded review. Completion requires all expected immutable core
+segments with exact bounds and accepted manifest revisions. Reassignment
+retains viewer demand and cached segments while replacing the preparation
+job identity; old jobs cannot publish after a move, including a move back to
+the original node. The SQLite117 and replicated-store upgrade accept only
+the recognized previous trigger shape. Unknown schemas remain refused.
+Focused regressions and the failed actual worker case remain to execute.
+
+All52 focused Android caption cases are covered by passing results. Two
+fixture corrections were reviewed, then only the failed/affected cases were
+rerun. Apple TV testing retained ten passing methods before one semantic
+seek-clear assertion and a stalled fake-network handoff fixture. The isolated
+fixture corrections are built and await bounded review and rerun; this is
+simulator evidence, separate from physical Apple TV playback.
+
 ## Scope and initial inventory
 
 | Work area | Existing contract or evidence | Initial state and unresolved work |
