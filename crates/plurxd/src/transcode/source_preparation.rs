@@ -317,21 +317,74 @@ struct ProbeState {
     settled: AtomicBool,
     changed: Notify,
 }
+// The selected software Source route borrows this SAME retained owner on
+// replay. No daemon task, descriptor or reconstructed cleanup authority is
+// introduced; core retains its original opener, native tasks and transitions.
+#[cfg(target_os = "linux")]
+struct FixedSourceWork {
+    owner: plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner,
+    report:
+        Option<plurx_core::adaptive_resources::runtime::planning_probe::FixedProbeMetadataLease>,
+    native_closed: bool,
+}
+#[cfg(target_os = "linux")]
+struct FixedSourceState {
+    work: tokio::sync::Mutex<FixedSourceWork>,
+    snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+    // All original application payloads above drop before this last fence.
+    // It signals lifetime only; the original core supervisor settles M.
+    _application: plurx_core::adaptive_resources::runtime::finite_lifetime::FiniteApplicationLease,
+}
+enum SourceProbeState {
+    Legacy(Arc<ProbeState>),
+    #[cfg(target_os = "linux")]
+    Fixed(Arc<FixedSourceState>),
+}
 pub(crate) struct SourceProbeOperation {
     assignment: SourceDispatchAssignment,
-    state: Arc<ProbeState>,
     cancel: tokio_util::sync::CancellationToken,
+    // Last: assignment/token allocations disappear before M's application
+    // fence in the fixed state can signal final release.
+    state: SourceProbeState,
 }
 impl SourceProbeOperation {
     pub(crate) fn cancel(&self) {
         self.cancel.cancel();
     }
     pub(crate) async fn settle(&self) -> SourceProbeSettlement {
+        let state = match &self.state {
+            SourceProbeState::Legacy(state) => state,
+            #[cfg(target_os = "linux")]
+            SourceProbeState::Fixed(_) => {
+                // Cancellation is not a close receipt. Keep the exact P
+                // selector and M while its original closer remains pending.
+                let mut warned = false;
+                loop {
+                    match self
+                        .finish_fixed_native(Instant::now() + Duration::from_secs(30))
+                        .await
+                    {
+                        Ok(()) => {
+                            return SourceProbeSettlement {
+                                assignment: self.assignment.clone(),
+                            }
+                        }
+                        Err(error) => {
+                            if !warned {
+                                tracing::warn!(target: "plurxd::transcode", %error, "Source original planning cleanup remains held");
+                                warned = true;
+                            }
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            }
+        };
         loop {
-            let changed = self.state.changed.notified();
+            let changed = state.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self.state.settled.load(Ordering::Acquire) {
+            if state.settled.load(Ordering::Acquire) {
                 return SourceProbeSettlement {
                     assignment: self.assignment.clone(),
                 };
@@ -340,14 +393,144 @@ impl SourceProbeOperation {
         }
     }
     pub(crate) async fn outcome(&self) -> Result<SourceHeldProbeEvidence, String> {
+        let state = match &self.state {
+            SourceProbeState::Legacy(state) => state,
+            #[cfg(target_os = "linux")]
+            SourceProbeState::Fixed(_) => {
+                return Err("fixed Source planning requires its admitted metadata lease".into())
+            }
+        };
         let _receipt = self.settle().await;
-        self.state
+        state
             .result
             .lock()
             .map_err(|_| "Source probe result poisoned".to_owned())?
             .take()
             .ok_or_else(|| "Source probe result already consumed".to_owned())?
     }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_fixed(&self) -> bool {
+        matches!(self.state, SourceProbeState::Fixed(_))
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fixed_snapshot(
+        &self,
+    ) -> Result<&Arc<plurx_core::store::PlaybackPlanningSnapshot>, String> {
+        let SourceProbeState::Fixed(state) = &self.state else {
+            return Err("Source original fixed planning owner is absent".into());
+        };
+        Ok(&state.snapshot)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn prepare_fixed_inputs(&self, deadline: Instant) -> Result<(), String> {
+        let SourceProbeState::Fixed(state) = &self.state else {
+            return Err("Source original fixed planning owner is absent".into());
+        };
+        if self.cancel.is_cancelled() {
+            return Err("Source original planning was cancelled".into());
+        }
+        let mut work = tokio::time::timeout_at(deadline.into(), state.work.lock())
+            .await
+            .map_err(|_| "Source planning owner deadline")?;
+        if work.report.is_some() {
+            return Ok(());
+        }
+        if work.native_closed {
+            return Err("Source original planning is already closed".into());
+        }
+        work.owner
+            .prepare_inputs(deadline)
+            .await
+            .map_err(|error| format!("preparing Source original planning inputs: {error}"))
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn fixed_report(
+        &self,
+        deadline: Instant,
+    ) -> Result<
+        plurx_core::adaptive_resources::runtime::planning_probe::FixedProbeMetadataLease,
+        String,
+    > {
+        let SourceProbeState::Fixed(state) = &self.state else {
+            return Err("Source original fixed planning owner is absent".into());
+        };
+        if self.cancel.is_cancelled() {
+            return Err("Source original planning was cancelled".into());
+        }
+        let mut work = tokio::time::timeout_at(deadline.into(), state.work.lock())
+            .await
+            .map_err(|_| "Source planning owner deadline")?;
+        if let Some(report) = &work.report {
+            return Ok(report.clone());
+        }
+        let report = work
+            .owner
+            .collect_and_refine(deadline)
+            .await
+            .map_err(|error| format!("collecting Source original planning report: {error}"))?;
+        // No await between receiving the original report and retaining it.
+        // Cancelled/repeated callers share M; they cannot enter another P.
+        work.report = Some(report.clone());
+        Ok(report)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn finish_fixed_native(&self, deadline: Instant) -> Result<(), String> {
+        let SourceProbeState::Fixed(state) = &self.state else {
+            return Err("Source original fixed planning owner is absent".into());
+        };
+        let mut work = tokio::time::timeout_at(deadline.into(), state.work.lock())
+            .await
+            .map_err(|_| "Source original planning close deadline")?;
+        if !work.native_closed {
+            work.owner.finish_native(deadline).await.map_err(|error| {
+                format!("closing Source original planning native owner: {error}")
+            })?;
+            work.native_closed = true;
+        }
+        Ok(())
+    }
+}
+
+/// Synchronous installation before any P/native await. The application lease
+/// is the original M partition, not a second admission or a native receipt.
+#[cfg(target_os = "linux")]
+pub(crate) fn start_source_fixed_probe(
+    runtime: &Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
+    request: plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeRequest,
+    snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+    assignment: SourceDispatchAssignment,
+    deadline: Instant,
+) -> Result<SourceProbeOperation, String> {
+    let requested_bytes = request.application_metadata_bytes;
+    let owner = runtime
+        .prepare_fixed_planning_probe(request, deadline)
+        .map_err(|error| format!("admitting Source original planning: {error}"))?;
+    let application = owner
+        .take_application_lease(requested_bytes)
+        .map_err(|error| format!("retaining Source original planning application: {error}"))?;
+    Ok(SourceProbeOperation {
+        assignment,
+        state: SourceProbeState::Fixed(Arc::new(FixedSourceState {
+            work: tokio::sync::Mutex::new(FixedSourceWork {
+                owner,
+                report: None,
+                native_closed: false,
+            }),
+            snapshot,
+            _application: application,
+        })),
+        cancel: tokio_util::sync::CancellationToken::new(),
+    })
+}
+
+/// Requested layouts introduced by the original Source carrier, separate
+/// from the snapshot and the checked P-to-R recipe allowance. Tokio/native
+/// and allocator peaks remain Unknown; this is not an RSS upper bound.
+#[cfg(target_os = "linux")]
+pub(crate) fn fixed_source_requested_bytes() -> usize {
+    std::mem::size_of::<FixedSourceState>()
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<SourceProbeOperation>()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -392,7 +575,7 @@ pub(crate) fn start_source_probe(
     });
     SourceProbeOperation {
         assignment,
-        state,
+        state: SourceProbeState::Legacy(state),
         cancel,
     }
 }
@@ -875,3 +1058,9 @@ mod dv_source_origin_tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "source_preparation/fixed_tests.rs"]
+mod fixed_tests;
+#[cfg(all(test, target_os = "linux"))]
+pub(in crate::transcode) use fixed_tests::source_fixed_planning_fixture;
