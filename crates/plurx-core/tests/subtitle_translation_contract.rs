@@ -49,6 +49,7 @@ fn create(now: i64) -> TranslationMutation {
             position_ms: 0,
             playback_rate: 1.0,
             paused: false,
+            continuity_id: None,
         },
     }
 }
@@ -159,6 +160,7 @@ async fn durable_preparation_stop_and_exact_replay_never_resurrect_work() {
                 position_ms: 30000,
                 playback_rate: 1.0,
                 paused: false,
+                continuity_id: None,
             },
             1200,
         ))
@@ -214,6 +216,7 @@ async fn lapsed_demand_is_renewed_by_its_next_heartbeat_but_never_after_stop() {
                 position_ms: 1000,
                 playback_rate: 1.0,
                 paused: false,
+                continuity_id: None,
             },
             now,
         )
@@ -266,6 +269,7 @@ async fn expired_missing_heartbeat_receipt_and_quotas_do_not_create_work() {
             position_ms: 1000,
             playback_rate: 1.0,
             paused: false,
+            continuity_id: None,
         },
         1100,
     );
@@ -493,6 +497,7 @@ async fn source_bind_cannot_replace_same_epoch_bytes_and_retry_can_revive_verifi
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                continuity_id: None,
             },
             1500,
         ))
@@ -519,12 +524,18 @@ async fn source_bind_cannot_replace_same_epoch_bytes_and_retry_can_revive_verifi
 }
 
 async fn prepared(store: &SqliteStore) -> plurx_core::store::subtitle_translation::RangeRecipe {
+    prepared_from(store, create(1000)).await
+}
+async fn prepared_from(
+    store: &SqliteStore,
+    initial: TranslationMutation,
+) -> plurx_core::store::subtitle_translation::RangeRecipe {
     use plurx_core::store::{
         background_jobs::JobPayload, subtitle_translation::RangeRecipe,
         subtitle_translation_publication::BindTranslationSource,
     };
     let first = store
-        .mutate_subtitle_translation(create(1000))
+        .mutate_subtitle_translation(initial)
         .await
         .expect("create");
     let job = claim(
@@ -1252,6 +1263,7 @@ async fn explicit_failed_range_retry_queues_its_exact_revision_and_source_librar
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                continuity_id: None,
             },
             1500,
         ))
@@ -1837,6 +1849,7 @@ async fn final_readable_core_completes_without_gaps_or_loser_downgrade_and_cache
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                continuity_id: None,
             },
             2600,
         ))
@@ -1974,4 +1987,501 @@ async fn legacy_range_incarnation_decodes_without_poll_poison_but_cannot_claim_o
         .expect("no publication"),
         0
     );
+}
+
+async fn continuity_heartbeat(
+    store: &SqliteStore,
+    recipe: &plurx_core::store::subtitle_translation::RangeRecipe,
+    playback: &str,
+    position: i64,
+    now: i64,
+    continuity: Option<&str>,
+) -> serde_json::Value {
+    use plurx_core::store::subtitle_translation_read::{TranslationQuery, TranslationRead};
+    let demand = store
+        .read_subtitle_translation(TranslationRead {
+            user_id: 0,
+            now_ms: now,
+            query: TranslationQuery::LiveDemands {
+                operation_id: recipe.operation_id.clone(),
+                operation_epoch: 1,
+            },
+        })
+        .await
+        .expect("live demand")
+        .into_iter()
+        .find(|d| d["playback_id"] == playback)
+        .expect("this playback demand");
+    let receipt = store
+        .mutate_subtitle_translation(mutate(
+            TranslationAction::Demand {
+                operation_id: recipe.operation_id.clone(),
+                expected_operation_epoch: 1,
+                demand_id: demand["demand_id"].as_str().expect("demand").into(),
+                expected_generation: demand["generation"].as_i64().expect("generation"),
+                playback_id: playback.into(),
+                position_ms: position,
+                playback_rate: 1.0,
+                paused: false,
+                continuity_id: continuity.map(str::to_owned),
+            },
+            now,
+        ))
+        .await
+        .expect("heartbeat");
+    assert_eq!(receipt["outcome"], "accepted");
+    assert_eq!(
+        receipt["continuity_id"],
+        serde_json::to_value(continuity).expect("echo")
+    );
+    receipt
+}
+async fn range_interested(store: &SqliteStore, id: &str, now: i64) -> bool {
+    use plurx_core::store::subtitle_translation_read::{TranslationQuery, TranslationRead};
+    store
+        .read_subtitle_translation(TranslationRead {
+            user_id: 0,
+            now_ms: now,
+            query: TranslationQuery::RangeInterest { job_id: id.into() },
+        })
+        .await
+        .expect("running interest")
+        .first()
+        .is_some_and(|row| row["interested"] == true)
+}
+#[tokio::test]
+async fn moving_clock_continuity_finishes_claimed_core_and_cleans_exact_attempt_grants() {
+    use plurx_core::store::{
+        background_jobs::{RenewJobs, RenewOutcome},
+        subtitle_translation_publication::PublishTranslationSegment,
+    };
+    let (_dir, store, conn) = fixture();
+    let continuity = uuid::Uuid::new_v4().to_string();
+    let mut initial = create(1000);
+    let playback = if let TranslationAction::Create {
+        continuity_id,
+        playback_id,
+        ..
+    } = &mut initial.action
+    {
+        *continuity_id = Some(continuity.clone());
+        playback_id.clone()
+    } else {
+        unreachable!()
+    };
+    if let TranslationAction::Create { duration_ms, .. } = &mut initial.action {
+        *duration_ms = 180000;
+    }
+    let recipe = prepared_from(&store, initial).await;
+    let job = range(&store, &recipe, "moving-clock", 1300).await;
+    let mut token = job.token.clone().expect("owned");
+    for position in (5000..=120000).step_by(5000) {
+        let now = 1300 + position;
+        continuity_heartbeat(&store, &recipe, &playback, position, now, Some(&continuity)).await;
+        token = match store
+            .renew_jobs(RenewJobs {
+                tokens: vec![token],
+                now_ms: now,
+            })
+            .await
+            .expect("renew")
+            .remove(0)
+        {
+            RenewOutcome::Renewed { token } => token,
+            other => panic!("renewal: {other:?}"),
+        };
+        assert!(
+            range_interested(&store, &job.id, now).await,
+            "ordinary 1x progression must not cancel at a core boundary"
+        );
+    }
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_range_continuities",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("grants"),
+        1
+    );
+    assert!(store
+        .publish_translation_segment(PublishTranslationSegment {
+            token,
+            source: job.supported_payload().expect("payload"),
+            segment: draft(&recipe, job.fence, "Completed continuously owned range"),
+            now_ms: 121400,
+        })
+        .await
+        .expect("publication after four core boundaries"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_range_continuities",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("terminal cleanup"),
+        0
+    );
+}
+#[tokio::test]
+async fn seek_or_legacy_heartbeat_revokes_continuation_but_same_window_stays_useful() {
+    use plurx_core::store::subtitle_translation_publication::PublishTranslationSegment;
+    for legacy in [false, true] {
+        let (_dir, store, conn) = fixture();
+        let continuity = uuid::Uuid::new_v4().to_string();
+        let mut initial = create(1000);
+        let playback = if let TranslationAction::Create {
+            continuity_id,
+            playback_id,
+            ..
+        } = &mut initial.action
+        {
+            *continuity_id = Some(continuity.clone());
+            playback_id.clone()
+        } else {
+            unreachable!()
+        };
+        let recipe = prepared_from(&store, initial).await;
+        let job = range(&store, &recipe, "seek-revocation", 1300).await;
+        let seek = uuid::Uuid::new_v4().to_string();
+        let next = if legacy { None } else { Some(seek.as_str()) };
+        continuity_heartbeat(&store, &recipe, &playback, 30000, 1400, next).await;
+        assert!(!range_interested(&store, &job.id, 1450).await);
+        let publication = PublishTranslationSegment {
+            token: job.token.clone().expect("token"),
+            source: job.supported_payload().expect("payload"),
+            segment: draft(&recipe, job.fence, "Obsolete seek output"),
+            now_ms: 1500,
+        };
+        assert!(!store
+            .publish_translation_segment(publication.clone())
+            .await
+            .expect("withdrawn continuity"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM subtitle_translation_segments",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .expect("no obsolete bytes"),
+            0
+        );
+        continuity_heartbeat(&store, &recipe, &playback, 1000, 1600, next).await;
+        assert!(
+            range_interested(&store, &job.id, 1650).await,
+            "same-window seek can still use the exact core"
+        );
+        assert!(store
+            .publish_translation_segment(PublishTranslationSegment {
+                now_ms: 1700,
+                ..publication
+            })
+            .await
+            .expect("useful core"));
+    }
+}
+#[tokio::test]
+async fn continuity_expiry_stop_and_claim_replacement_never_reuse_old_grants() {
+    use plurx_core::store::background_jobs::{JobSettlement, SettleJob};
+    let (_dir, store, conn) = fixture();
+    let continuity = uuid::Uuid::new_v4().to_string();
+    let mut initial = create(1000);
+    if let TranslationAction::Create { continuity_id, .. } = &mut initial.action {
+        *continuity_id = Some(continuity);
+    }
+    let recipe = prepared_from(&store, initial).await;
+    let first = range(&store, &recipe, "grant-replacement", 1300).await;
+    assert!(store
+        .settle_job(SettleJob {
+            token: first.token.expect("token"),
+            settlement: JobSettlement::Yield {
+                error_code: None,
+                checkpoint: None,
+                not_before_ms: 1500
+            },
+            now_ms: 1400
+        })
+        .await
+        .expect("yield"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_range_continuities",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("yield cleans grant"),
+        0
+    );
+    let next = claim(&store, &first.id, JobKind::SubtitleTranslationRange, 1600).await;
+    assert!(next.fence > first.fence);
+    assert_eq!(
+        conn.query_row(
+            "SELECT fence FROM subtitle_translation_range_continuities",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("new attempt grant"),
+        next.fence
+    );
+    assert!(
+        !range_interested(&store, &next.id, 16001).await,
+        "expired demand cannot retain work"
+    );
+    store
+        .mutate_subtitle_translation(mutate(
+            TranslationAction::Stop {
+                operation_id: recipe.operation_id,
+                expected_operation_epoch: 1,
+            },
+            17000,
+        ))
+        .await
+        .expect("Stop");
+    assert!(!range_interested(&store, &next.id, 17500).await);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_range_continuities",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("Stop clears grant"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn another_continuous_viewer_keeps_shared_range_alive_after_first_viewer_seeks() {
+    let (_dir, store, conn) = fixture();
+    let continuity = uuid::Uuid::new_v4().to_string();
+    let mut initial = create(1000);
+    let playback = if let TranslationAction::Create {
+        continuity_id,
+        playback_id,
+        ..
+    } = &mut initial.action
+    {
+        *continuity_id = Some(continuity.clone());
+        playback_id.clone()
+    } else {
+        unreachable!()
+    };
+    let recipe = prepared_from(&store, initial).await;
+    let peer_continuity = uuid::Uuid::new_v4().to_string();
+    let mut peer = create(1250);
+    let peer_playback = if let TranslationAction::Create {
+        continuity_id,
+        playback_id,
+        ..
+    } = &mut peer.action
+    {
+        *continuity_id = Some(peer_continuity.clone());
+        playback_id.clone()
+    } else {
+        unreachable!()
+    };
+    store
+        .mutate_subtitle_translation(peer)
+        .await
+        .expect("peer joins");
+    let job = range(&store, &recipe, "shared-continuity", 1300).await;
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_range_continuities",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("two supporters"),
+        2
+    );
+    continuity_heartbeat(
+        &store,
+        &recipe,
+        &playback,
+        30000,
+        1400,
+        Some(&uuid::Uuid::new_v4().to_string()),
+    )
+    .await;
+    continuity_heartbeat(
+        &store,
+        &recipe,
+        &peer_playback,
+        30000,
+        1500,
+        Some(&peer_continuity),
+    )
+    .await;
+    assert!(
+        range_interested(&store, &job.id, 1600).await,
+        "one viewer's seek cannot cancel the other captured traversal"
+    );
+    continuity_heartbeat(
+        &store,
+        &recipe,
+        &peer_playback,
+        30000,
+        1700,
+        Some(&uuid::Uuid::new_v4().to_string()),
+    )
+    .await;
+    assert!(
+        !range_interested(&store, &job.id, 1800).await,
+        "all withdrawn continuities cancel obsolete range"
+    );
+}
+
+// Renewing a demand is permitted after expiry; renewing an already-withdrawn
+// captured attempt grant is not. Exercise both mutation paths and UUID reuse.
+async fn withdrawn_continuity_never_revives_case(late_create: bool, aba: bool) {
+    use plurx_core::store::{
+        subtitle_translation_publication::PublishTranslationSegment,
+        subtitle_translation_read::{TranslationQuery, TranslationRead},
+    };
+    let (_dir, store, conn) = fixture();
+    let continuity = uuid::Uuid::new_v4().to_string();
+    let mut initial = create(1000);
+    let playback = if let TranslationAction::Create {
+        continuity_id,
+        playback_id,
+        ..
+    } = &mut initial.action
+    {
+        *continuity_id = Some(continuity.clone());
+        playback_id.clone()
+    } else {
+        unreachable!()
+    };
+    let recipe = prepared_from(&store, initial.clone()).await;
+    let job = range(&store, &recipe, "withdrawn-continuity", 1300).await;
+    let demand = store
+        .read_subtitle_translation(TranslationRead {
+            user_id: 0,
+            now_ms: 1350,
+            query: TranslationQuery::LiveDemands {
+                operation_id: recipe.operation_id.clone(),
+                operation_epoch: 1,
+            },
+        })
+        .await
+        .expect("original demand")
+        .remove(0);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_range_continuities",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("original grant"),
+        1
+    );
+    let now = if aba {
+        let next = uuid::Uuid::new_v4().to_string();
+        continuity_heartbeat(&store, &recipe, &playback, 30000, 1400, Some(&next)).await;
+        continuity_heartbeat(&store, &recipe, &playback, 30000, 1500, Some(&continuity)).await;
+        1600
+    } else {
+        assert!(
+            !range_interested(&store, &job.id, 16001).await,
+            "expiry withdraws running authority"
+        );
+        let receipt = if late_create {
+            initial.request_id = uuid::Uuid::new_v4().to_string();
+            initial.request_digest = "9".repeat(64);
+            initial.now_ms = 20000;
+            initial.intent_expires_at_ms = 300000;
+            if let TranslationAction::Create { position_ms, .. } = &mut initial.action {
+                *position_ms = 30000;
+            }
+            store
+                .mutate_subtitle_translation(initial)
+                .await
+                .expect("late Create upsert")
+        } else {
+            store
+                .mutate_subtitle_translation(mutate(
+                    TranslationAction::Demand {
+                        operation_id: recipe.operation_id.clone(),
+                        expected_operation_epoch: 1,
+                        demand_id: demand["demand_id"].as_str().expect("id").into(),
+                        expected_generation: 1,
+                        playback_id: playback.clone(),
+                        position_ms: 30000,
+                        playback_rate: 1.0,
+                        paused: false,
+                        continuity_id: Some(continuity.clone()),
+                    },
+                    20000,
+                ))
+                .await
+                .expect("late heartbeat renews demand")
+        };
+        assert_eq!(receipt["outcome"], "accepted");
+        assert_eq!(receipt["demand_generation"], "2");
+        assert_eq!(receipt["continuity_id"], continuity);
+        20100
+    };
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_range_continuities",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("irreversible grant withdrawal"),
+        0
+    );
+    assert!(
+        !range_interested(&store, &job.id, now).await,
+        "late renewal or UUID ABA cannot revive out-of-window attempt"
+    );
+    let publication = PublishTranslationSegment {
+        token: job.token.clone().expect("token"),
+        source: job.supported_payload().expect("payload"),
+        segment: draft(&recipe, job.fence, "Withdrawn traversal output"),
+        now_ms: now + 10,
+    };
+    assert!(!store
+        .publish_translation_segment(publication.clone())
+        .await
+        .expect("atomic publication refusal"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM subtitle_translation_segments",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("no withdrawn bytes"),
+        0
+    );
+    continuity_heartbeat(
+        &store,
+        &recipe,
+        &playback,
+        1000,
+        now + 100,
+        Some(&continuity),
+    )
+    .await;
+    assert!(
+        range_interested(&store, &job.id, now + 110).await,
+        "current useful window recovers without reviving the captured grant"
+    );
+    assert!(store
+        .publish_translation_segment(PublishTranslationSegment {
+            now_ms: now + 120,
+            ..publication
+        })
+        .await
+        .expect("useful window publication"));
+}
+#[tokio::test]
+async fn expired_demand_renewal_never_revives_old_out_of_window_continuity_grant() {
+    withdrawn_continuity_never_revives_case(false, false).await;
+}
+#[tokio::test]
+async fn late_create_upsert_never_revives_old_out_of_window_continuity_grant() {
+    withdrawn_continuity_never_revives_case(true, false).await;
+}
+#[tokio::test]
+async fn continuity_uuid_aba_never_revives_an_already_withdrawn_attempt_grant() {
+    withdrawn_continuity_never_revives_case(false, true).await;
 }

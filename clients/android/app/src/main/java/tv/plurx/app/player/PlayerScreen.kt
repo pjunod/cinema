@@ -539,6 +539,7 @@ fun PlayerScreen(
         mutableStateOf(preplayTracks.subtitle)
     }
     val progressiveCaptionIntent = remember(itemId, fileId) { ProgressiveCaptionIntent() }
+    DisposableEffect(progressiveCaptionIntent) { onDispose { progressiveCaptionIntent.retire() } }
     val subtitleTextIntent = remember(itemId, fileId) { SubtitleTextTranslationIntent() }
     // Identity and outstanding destination belong to the presentation. A
     // quality change replaces both the plan and Controller, but not the viewer
@@ -644,6 +645,7 @@ fun PlayerScreen(
                 subtitleTextIntent = subtitleTextIntent,
                 onSubtitleChanged = { playbackSubtitle = SubtitleChoice(it) },
                 onReload = { position, reason, quality ->
+                    progressiveCaptionIntent.prepareOwnerTransfer()
                     resumeAt = position
                     startReason = reason
                     requestedQuality = quality

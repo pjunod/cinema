@@ -8,7 +8,7 @@ const limits={segment_bytes:16384,segment_cues:128,page_bytes:65536,page_entries
 const profile={profile_id:P,model_id:'measured-model-fixture',model_sha256:M,task:'translate',output_language:'en',input_languages:['de','ja'],activation_state:'active',limits,adapter_contract:'fixture-adapter',timeline_contract:'fixture-clock'};
 function canonical(value){return JSON.stringify(value,(_key,row)=>row&&typeof row==='object'&&!Array.isArray(row)?Object.fromEntries(Object.entries(row).sort(([a],[b])=>a.localeCompare(b))):row);}
 function sha(bytes){return createHash('sha256').update(bytes).digest('hex');}
-function response(data,status=200,headers={}){return new Response(typeof data==='string'||data instanceof Uint8Array?data:JSON.stringify(data),{status,headers:{'content-type':'application/json',...headers}});}
+function response(data,status=200,headers={}){const reply=new Response(typeof data==='string'||data instanceof Uint8Array?data:JSON.stringify(data),{status,headers:{'content-type':'application/json',...headers}});if(data&&typeof data==='object'&&!(data instanceof Uint8Array))reply.fixtureData=data;return reply;}
 function track(){return {mode:'disabled',cues:[],addCue(cue){this.cues.push(cue);},removeCue(cue){this.cues.splice(this.cues.indexOf(cue),1);}};}
 function node(){let text='';return {children:[],isConnected:true,hidden:false,disabled:false,value:'',checked:false,dataset:{},className:'',listeners:{},addEventListener(type,fn){this.listeners[type]=fn;},appendChild(child){this.children.push(child);return child;},replaceChildren(){this.children=[];text='';},querySelector(selector){return this.fields?.[selector]||null;},querySelectorAll(){return [];},get textContent(){return text+this.children.map(child=>child.textContent||'').join('');},set textContent(v){text=String(v);this.children=[];},innerHTML:''};}
 function harness(){
@@ -21,7 +21,10 @@ function harness(){
  nodes.video=video;nodes['watch-subtitle-translation']=panel;
  const controls={};for(const key of ['profile','language','confirm','status','clock','use','stop','resume','failures','task','heading','description','start','assets'])controls[`[data-translation-${key}]`]=node();
  controls['[data-translation-profile]'].value=P;controls['[data-translation-language]'].value='de';controls['[data-translation-confirm]'].checked=true;controls['[data-translation-task]'].value='translate';panel.fields=controls;
- const ctx=vm.createContext({console,Uint8Array,TextEncoder,TextDecoder,Response,AbortController,URLSearchParams,Map,Set,BigInt,crypto:webcrypto,performance:{now:()=>now},Date,API:'/api/v1',AUTH_GENERATION:1,TOKEN:'private-fixture',PAGE_RENDER_GENERATION:1,ME:{is_admin:true},location:{hash:'#/item/1'},window:{VTTCue:class{constructor(start,end,text){this.startTime=start;this.endTime=end;this.text=text;}}},document:{getElementById:id=>nodes[id]||null,createElement:tag=>{const el=node();if(tag==='track')el.track=track();return el;}},setTimeout:(fn,ms)=>{const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),esc:x=>String(x).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),toast(){},closeMenu(){},endWait(){},PlaybackPolicy:{subtitleBurnAction:()=>"native"},subNeedsBurn:()=>false,positionForPlaybackIntent:()=>0,supersedePlaybackControlIntent:p=>p.controlIntentGeneration=(p.controlIntentGeneration||0)+1,notifyPlaybackControl(){},restartPendingPlaybackOpen:()=>false,nativeHlsSubtitleOrdinal:()=>-1,pbSyncSubIcon(){},tok:x=>x,playbackFileContextForPlayer:p=>p.fileContext,playbackFileUrl:(_c,s)=>'/source/'+s,subLabelMenu:()=>"Original",fetch:async(url,init)=>{calls.push({url,init});return ctx.respond(url,init);},respond:()=>{throw Error('Unexpected request');}});
+ const ctx=vm.createContext({console,Uint8Array,TextEncoder,TextDecoder,Response,AbortController,URLSearchParams,Map,Set,BigInt,crypto:webcrypto,performance:{now:()=>now},Date,API:'/api/v1',AUTH_GENERATION:1,TOKEN:'private-fixture',PAGE_RENDER_GENERATION:1,ME:{is_admin:true},location:{hash:'#/item/1'},window:{VTTCue:class{constructor(start,end,text){this.startTime=start;this.endTime=end;this.text=text;}}},document:{getElementById:id=>nodes[id]||null,createElement:tag=>{const el=node();if(tag==='track')el.track=track();return el;}},setTimeout:(fn,ms)=>{const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),esc:x=>String(x).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),toast(){},closeMenu(){},endWait(){},PlaybackPolicy:{subtitleBurnAction:()=>"native"},subNeedsBurn:()=>false,positionForPlaybackIntent:()=>0,supersedePlaybackControlIntent:p=>p.controlIntentGeneration=(p.controlIntentGeneration||0)+1,notifyPlaybackControl(){},restartPendingPlaybackOpen:()=>false,nativeHlsSubtitleOrdinal:()=>-1,pbSyncSubIcon(){},tok:x=>x,playbackFileContextForPlayer:p=>p.fileContext,playbackFileUrl:(_c,s)=>'/source/'+s,subLabelMenu:()=>"Original",fetch:async(url,init)=>{calls.push({url,init});const reply=await ctx.respond(url,init),sent=init.body?JSON.parse(init.body):null,data=reply.fixtureData;
+  // Legacy receipt fixtures echo newly supplied continuity unless a test gives
+  // an explicit echo (including a deliberately invalid one).
+  if(reply.ok&&sent?.continuity_id&&data&&data.version===1&&!Object.hasOwn(data,'continuity_id'))return response({...data,continuity_id:sent.continuity_id},reply.status,Object.fromEntries(reply.headers));return reply;},respond:()=>{throw Error('Unexpected request');}});
  vm.runInContext(fs.readFileSync(path.join(WEB,'core/diagnostics-hash.js'),'utf8'),ctx);
  vm.runInContext(fs.readFileSync(path.join(WEB,'player/subtitle-translation.js'),'utf8'),ctx);
  vm.runInContext(fs.readFileSync(path.join(WEB,'player/audio-sync.js'),'utf8'),ctx);
@@ -55,6 +58,7 @@ test('options validate selected audio ordinal independently of other unsupported
 });
 test('task selector switches among task-qualified profiles and retains valid language choices',async()=>{
  const h=harness(),transcribe={...structuredClone(profile),profile_id:A,task:'transcribe',input_languages:['de','en']};h.ctx.respond=()=>response({version:1,file_id:h.player.fileId,source_size:'9007199254740995',source_mtime:'9007199254740997',duration_ms:120000,source_origin_ms:0,audio_tracks:[{index:0,audio_ordinal:0,normalized_language:'de',title:'German',capability:{supported:true}}],models:[structuredClone(profile),transcribe],permissions:{read:true,demand:true,stop:true,resume:true},assets:[],assets_next_cursor:null});
+ h.ctx.translationRetire('open task selector fixture');assert.equal(h.state.retired,true);
  await h.ctx.translationOpen(node());const selector=h.controls['[data-translation-task]'];assert.equal(selector.value,'translate');selector.value='transcribe';selector.listeners.change();assert.equal(vm.runInContext('SUBTITLE_TRANSLATION.task',h.ctx),'transcribe');assert.equal(h.controls['[data-translation-profile]'].value,A);assert.equal(h.controls['[data-translation-language]'].value,'de');assert.match(h.panel.innerHTML,/Generate captions in the spoken language/);
 });
 test('existing caption assets remain readable and bind their task to the matching profile',async()=>{
@@ -106,7 +110,7 @@ test('existing offset VTT fetch cannot replace a newer source selection with sam
  const h=harness();h.player.offset=2;h.player.method='remux';const answers=[];h.ctx.fetch=()=>new Promise(resolve=>answers.push(resolve));const old=h.ctx.setSub(0);await h.ctx.setSub(-1);const current=h.ctx.setSub(0);answers[1]({ok:true,text:async()=>"WEBVTT\n\n00:03.000 --> 00:06.000\nnew\n"});await current;answers[0]({ok:true,text:async()=>"WEBVTT\n\n00:03.000 --> 00:06.000\nold\n"});await old;assert.equal(h.video._vsubs.cues.length,1);assert.equal(h.video._vsubs.cues[0].text,'new');
 });
 test('pending asset A reads cannot populate asset B or retain A demand',async()=>{
- const h=harness(),s=segment(h);h.state.demand={id:DEMAND,generation:'1',epoch:'1'};let finish;h.ctx.respond=(url,init)=>init?.method==='DELETE'?response({version:1,server_now_ms:100000}):new Promise(resolve=>finish=resolve);const read=h.ctx.translationSegment(h.state,s.reference,h.state.lease,0);h.ctx.translationPoll=async()=>{};await h.ctx.translationReadAsset(h.state,{asset_id:'9'.repeat(64),profile_id:P});finish(response(s.bytes));await read;assert.equal(h.state.assetId,'9'.repeat(64));assert.equal(h.state.segments.size,0);assert.equal(h.state.demand,null);assert.equal(h.calls.filter(call=>call.init.method==='DELETE').length,1);assert.equal(h.calls.some(call=>call.url.endsWith('/stop')),false);
+ const h=harness(),s=segment(h);h.state.demand={id:DEMAND,generation:'1',epoch:'1'};let finish;h.ctx.respond=(url,init)=>init?.method==='DELETE'?response({version:1,server_now_ms:100000}):new Promise(resolve=>finish=resolve);const read=h.ctx.translationSegment(h.state,s.reference,h.state.lease,0);h.ctx.translationPoll=async()=>{};await h.ctx.translationReadAsset(h.state,{asset_id:'9'.repeat(64),profile_id:P,task:'translate',spoken_language:'de',output_language:'en'});finish(response(s.bytes));await read;assert.equal(h.state.assetId,'9'.repeat(64));assert.equal(h.state.segments.size,0);assert.equal(h.state.demand,null);assert.equal(h.calls.filter(call=>call.init.method==='DELETE').length,1);assert.equal(h.calls.some(call=>call.url.endsWith('/stop')),false);
 });
 test('expired lease after fetched bytes and mixed snapshot pages refuse adoption',async()=>{
  const h=harness(),s=segment(h);h.ctx.respond=()=>{h.clock(40000);return response(s.bytes);};await h.ctx.translationSegment(h.state,s.reference,h.state.lease,0);assert.equal(h.state.segments.size,0);
@@ -192,7 +196,7 @@ test('running model test phases show their work instead of queued status',()=>{
 });
 test('model speech test failures retain their distinct trusted recovery actions',()=>{
  const h=harness(),s=settings(h);
- for(const [reason,expected]of [['output_invalid',/model test could not prepare or validate captions.*server storage and logs/],['inference_failed',/speech test could not run recognition/],['inference_timeout',/speech test exceeded its time limit/],['decode_failed',/speech test could not decode its sample audio/]]){s.setup.rows=[{node_id:s.worker.value,outcome:'accepted',job:{state:'failed',phase:'failed',reason}}];h.ctx.translationSetupModelRows(s.setup);assert.match(s.fields['[data-translation-model-status]'].textContent,expected);}
+ for(const [reason,expected]of [['output_invalid',/model test could not prepare or validate captions.*server storage and logs/],['inference_failed',/model speech test could not run.*Retry Test.*update or repair/],['inference_timeout',/speech test exceeded its time limit/],['decode_failed',/speech test could not decode its sample audio/]]){s.setup.rows=[{node_id:s.worker.value,outcome:'accepted',job:{state:'failed',phase:'failed',reason}}];h.ctx.translationSetupModelRows(s.setup);assert.match(s.fields['[data-translation-model-status]'].textContent,expected);}
 });
 test('download and test prevents duplicate submission and reopens actions after an observed failure',async()=>{
  const h=harness(),s=settings(h);let finish;
@@ -234,7 +238,7 @@ test('catalog refresh recovers initial choices and keeps newer unsaved model lan
  s.fields['[data-translation-setting-profile]'].value='';await h.ctx.translationRefreshSetup();assert.equal(s.fields['[data-translation-setting-profile]'].value,'');
 });
 test('first-use model suggestion requires exactly one active profile and never replaces a saved profile',()=>{
- const h=harness(),s=settings(h);s.setup.saved.profile_id=null;s.fields['[data-translation-setting-profile]'].value='';s.setup.catalog.profiles=[profile,{...profile,profile_id:A}];h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,'');
+ const h=harness(),s=settings(h);s.setup.saved.profile_id=null;s.setup.saved.model_id=null;s.fields['[data-translation-setting-profile]'].value='';s.setup.catalog.profiles=[profile,{...profile,profile_id:A}];h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,'');
  s.setup.choicesLoaded=false;s.setup.catalog.profiles=[{...profile,activation_state:'pending'}];h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,'');
  s.setup.choicesLoaded=false;s.setup.saved.profile_id=B;s.fields['[data-translation-setting-profile]'].value=B;s.setup.catalog.profiles=[profile];h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,B);assert.match(s.fields['[data-translation-setting-profile]'].innerHTML,/Saved model/);
 });
@@ -386,9 +390,17 @@ test('audio selection uses the source ordinal rather than its array position and
 test('accepted attachment position waits for current data and rejects obsolete readiness events',()=>{
  const h=harness();h.ctx.PlaybackPolicy.DECODE_LIMIT_DEFAULTS={ttlMs:1000,retestMs:1000};h.ctx.clearEffectiveProcessing=()=>{};h.ctx.playbackSurfaceStep=()=>{};h.ctx.playbackSurfaceGeneration=()=>({});h.ctx.translationAttachmentWillChange=()=>{};h.ctx.translationAttachmentDidBegin=()=>{};
  const ready=[];h.ctx.translationAttachmentPositionReady=(_p,token)=>ready.push(token.id);h.ctx.sharedCaptionAttachmentPositionReady=()=>{};vm.runInContext(fs.readFileSync(path.join(WEB,'player/decode-margin.js'),'utf8'),h.ctx);
+ // Establish the predecessor through the real owner so the attachment ordinal
+ // and its token agree; the generic harness only seeds a stand-in token.
+ const predecessor=h.ctx.beginPlaybackMediaAttachment(h.player);assert.equal(predecessor.token.id,1);
  h.player.offset=10;h.player.controlSeek={targetMs:12000};h.video.readyState=1;h.video.seeking=false;const attachment=h.ctx.beginPlaybackMediaAttachment(h.player);h.ctx.applyPlaybackAttachmentPosition(h.video,h.player,attachment,0);assert.equal(h.video.currentTime,2);assert.deepEqual(ready,[]);
  h.video.readyState=2;h.video.seeking=true;h.video.listeners.seeked();assert.deepEqual(ready,[]);h.video.seeking=false;h.video.listeners.seeked();assert.deepEqual(ready,[2]);
- const old=h.video.listeners.seeked;h.ctx.beginPlaybackMediaAttachment(h.player);old();assert.deepEqual(ready,[2]);
+ // Retire a positioned attachment before it has current data. Its captured
+ // handler must fail ownership, rather than the already-ready short circuit.
+ h.video.readyState=1;const retired=h.ctx.beginPlaybackMediaAttachment(h.player);h.ctx.applyPlaybackAttachmentPosition(h.video,h.player,retired,0);
+ assert.equal(retired.token.id,3);assert.equal(retired.token.captionPositionApplied,true);assert.equal(retired.token.captionPositionReady,false);
+ const old=h.video.listeners.seeked,next=h.ctx.beginPlaybackMediaAttachment(h.player);assert.equal(next.token.id,4);h.video.readyState=2;old();
+ assert.deepEqual(ready,[2]);assert.equal(retired.token.captionPositionReady,false);assert.equal(next.token.captionPositionReady,false);assert.equal(attachment.token.captionPositionReady,true);
 });
 
 test('opaque transport delegation reuses the exact byte and provenance validation without local file addressing',async()=>{
@@ -396,4 +408,114 @@ test('opaque transport delegation reuses the exact byte and provenance validatio
  h.state.segmentRead=async(reference,lease)=>{reads++;assert.equal(reference.segment_id,B);assert.equal(lease,h.state.lease);return {bytes:s.bytes};};
  await h.ctx.translationSegment(h.state,s.reference,h.state.lease,0);assert.equal(reads,1);assert.equal(h.calls.length,0);assert.equal(h.state.segments.size,1);
  h.state.segmentRead=async()=>({bytes:Buffer.from('untrusted bytes')});await assert.rejects(h.ctx.translationSegment(h.state,s.reference,h.state.lease,0),/digest mismatch/);
+});
+
+function continuityReceipt(h,sent,fields={}){
+ return response({version:1,operation_id:OP,operation_epoch:h.state.operation?.operation_epoch||'1',view_revision:'2',state:'partial',asset_id:A,demand_id:DEMAND,demand_generation:sent.demand_generation||'1',continuity_id:sent.continuity_id,server_now_ms:100000,...fields});
+}
+function loadTransport(h){
+ h.ctx.PlaybackPolicy.createHeldKeyCommitter=()=>({cancel(){}});h.ctx.PlaybackPolicy.contractTiming=()=>100;
+ vm.runInContext(fs.readFileSync(path.join(WEB,'player/transport.js'),'utf8'),h.ctx);
+ Object.assign(h.ctx,{clearEffectiveProcessing(){},supersedePlaybackControlIntent:p=>p.controlIntentGeneration=(p.controlIntentGeneration||0)+1,notifyPlaybackControl(){},playbackSurfaceStep(){},finishPlaybackSeekTelemetry(){},watchPlaybackSeekTelemetry(){},samplePlaybackPresentationClock(){}});
+}
+test('ordinary clock progress across cores, pause and rate changes retain one continuity UUID',async()=>{
+ const h=harness();h.state.demand={id:DEMAND,generation:'1',epoch:'1'};h.ctx.translationPoll=async()=>{};
+ h.ctx.respond=(_url,init)=>continuityReceipt(h,JSON.parse(init.body));
+ for(const seconds of [5,31,61,92]){h.video.currentTime=seconds;h.ctx.translationMediaEvent(h.state,'timeupdate');await h.ctx.translationHeartbeat(h.state);}
+ const continuity=JSON.parse(h.calls[0].init.body).continuity_id;assert.equal(h.ctx.translationId(continuity),true);
+ h.video.paused=true;h.ctx.translationMediaEvent(h.state,'pause');await settle();h.video.playbackRate=1.5;h.ctx.translationMediaEvent(h.state,'ratechange');await settle();
+ assert.equal(new Set(h.calls.map(call=>JSON.parse(call.init.body).continuity_id)).size,1);
+ assert.equal(h.state.continuityId,continuity);assert.equal(h.state.playbackId,'44444444-4444-4444-8444-444444444444');
+});
+test('viewer seek invalidates continuity before held HLS attachment and at actual execution, while quality retains it',()=>{
+ const h=harness();loadTransport(h);const original=h.ctx.translationContinuity(h.state),attachment=h.player.mediaAttachment;
+ h.ctx.beginPlaybackControlSeek(h.player,5,false);assert.equal(h.state.continuityId,original,'quality-only destination keeps continuity');
+ const pending=h.ctx.beginPlaybackControlSeek(h.player,80,true),announced=h.state.continuityId;
+ assert.notEqual(announced,original);assert.equal(h.player.mediaAttachment,attachment,'held decoder still owns its old attachment');
+ const successor={...h.player,controlSeek:{...pending}};h.ctx.PLAYER=successor;h.state.handoffTarget=successor;
+ assert.equal(h.ctx.markPlaybackControlSeekExecuted(successor,80,h.video),true);
+ const executed=h.state.continuityId;assert.notEqual(executed,announced);
+ h.ctx.translationPlaybackSeek(successor,{...successor.controlSeek});assert.equal(h.state.continuityId,executed,'copied pending identity rotates once per stage');
+ h.ctx.beginPlaybackControlSeek(successor,80,false);assert.equal(h.state.continuityId,executed);
+ h.ctx.PLAYER=h.player;h.state.handoffTarget=null;h.player.controlSeek=null;h.ctx.translationPoll=async()=>{};
+ h.ctx.translationMediaEvent(h.state,'seeking');assert.notEqual(h.state.continuityId,executed,'native media seek is an explicit discontinuity');
+});
+test('held old heartbeat acknowledges CAS before one current-continuity renewal and keeps newer presentation',async()=>{
+ const h=harness();h.state.demand={id:DEMAND,generation:'1',epoch:'1'};h.ctx.translationPoll=async()=>{};let finish;
+ h.ctx.respond=(_url,init)=>h.calls.length===1?new Promise(resolve=>finish=resolve):continuityReceipt(h,JSON.parse(init.body),{view_revision:'8'});
+ const pending=h.ctx.translationHeartbeat(h.state);await settle();const sent=JSON.parse(h.calls[0].init.body);
+ h.ctx.translationPlaybackSeek(h.player,{sequence:1,intentGeneration:1,targetMs:85000,executed:false,captionViewerSeek:true});h.video.currentTime=85;
+ const current=h.state.continuityId;h.state.operation.view_revision='8';finish(continuityReceipt(h,sent));await pending;await settle();if(h.state.heartbeatTask)await h.state.heartbeatTask;
+ const puts=h.calls.filter(call=>call.init.method==='PUT').map(call=>JSON.parse(call.init.body));
+ assert.equal(puts.length,2);assert.equal(puts[0].demand_generation,'2');assert.equal(puts[1].demand_generation,'3');assert.equal(puts[1].continuity_id,current);assert.notEqual(current,sent.continuity_id);assert.equal(puts[1].position_ms,85000);
+ assert.equal(h.state.demand.generation,'3');assert.equal(h.state.operation.view_revision,'8');assert.equal(h.state.continuityId,current);
+});
+test('uncertain old heartbeat replays exact bytes after seek, then renews once without a failure loop',async()=>{
+ const h=harness();h.state.demand={id:DEMAND,generation:'1',epoch:'1'};h.ctx.translationPoll=async()=>{};
+ h.ctx.respond=()=>response({code:'network_error',server_now_ms:100000},503);await h.ctx.translationHeartbeat(h.state);await settle();assert.equal(h.calls.length,1);
+ const original=h.calls[0].init.body;h.ctx.translationRotateContinuity(h.state);const current=h.state.continuityId;h.video.currentTime=65;
+ h.ctx.respond=(_url,init)=>continuityReceipt(h,JSON.parse(init.body));await h.ctx.translationHeartbeat(h.state);await settle();if(h.state.heartbeatTask)await h.state.heartbeatTask;
+ assert.equal(h.calls[1].init.body,original);assert.equal(h.calls.length,3);const latest=JSON.parse(h.calls[2].init.body);
+ assert.equal(latest.demand_generation,'3');assert.equal(latest.continuity_id,current);assert.equal(latest.position_ms,65000);
+});
+test('wrong continuity echo cannot advance acknowledged generation or replace the exact pending intent',async()=>{
+ for(const echo of [null,'99999999-9999-4999-8999-999999999999']){
+  const h=harness();h.state.demand={id:DEMAND,generation:'1',epoch:'1'};
+  h.ctx.respond=(_url,init)=>continuityReceipt(h,JSON.parse(init.body),{continuity_id:echo});await h.ctx.translationHeartbeat(h.state);await settle();
+  assert.equal(h.state.demand.generation,'1');assert.equal(h.calls.length,1);assert.match(h.state.error,/continuity/);
+  const original=h.calls[0].init.body;h.ctx.respond=(_url,init)=>continuityReceipt(h,JSON.parse(init.body));await h.ctx.translationHeartbeat(h.state);
+  assert.equal(h.calls[1].init.body,original);assert.equal(h.state.demand.generation,'2');
+ }
+});
+test('late Create and both Retry scopes survive seek and immediately renew their adopted demand',async()=>{
+ for(const action of ['create','resume','range']){
+  const h=harness();h.ctx.translationPoll=async()=>{};let finish;
+  if(action==='create'){h.state.operation=null;h.state.assetId=null;}else if(action==='resume'){h.state.operation.state='stopped';h.state.stopped=true;}
+  h.ctx.respond=(_url,init)=>init.method==='POST'?new Promise(resolve=>finish=resolve):continuityReceipt(h,JSON.parse(init.body));
+  const pending=action==='create'?h.ctx.translationStart(h.state):action==='resume'?h.ctx.translationResume(h.state):h.ctx.translationRetryRange(h.state,{core_index:2,range_revision:'4',retryable:true});
+  await settle();const sent=JSON.parse(h.calls[0].init.body);h.video.currentTime=75;h.ctx.translationMediaEvent(h.state,'seeking');const current=h.state.continuityId;
+  finish(continuityReceipt(h,sent));await pending;await settle();if(h.state.heartbeatTask)await h.state.heartbeatTask;
+  assert.equal(h.state.operation.operation_id,OP);assert.equal(h.state.demand.generation,'2');assert.equal(h.state.continuityId,current);assert.notEqual(current,sent.continuity_id);
+  const renewed=JSON.parse(h.calls.find(call=>call.init.method==='PUT').init.body);assert.equal(renewed.continuity_id,current);assert.equal(renewed.position_ms,75000);
+ }
+});
+test('late Stop survives seek but Create and Retry cannot overwrite a replacement producer',async()=>{
+ const stopped=harness();stopped.ctx.translationPoll=async()=>{};let finishStop;stopped.ctx.respond=()=>new Promise(resolve=>finishStop=resolve);
+ const stopping=stopped.ctx.translationStop(stopped.state);await settle();stopped.ctx.translationMediaEvent(stopped.state,'seeking');finishStop(response({version:1,operation_id:OP,operation_epoch:'2',view_revision:'9',state:'stopped',asset_id:A,server_now_ms:100000}));await stopping;assert.equal(stopped.state.stopped,true);
+ for(const action of ['create','resume','range'])for(const replacement of ['asset','profile']){
+  const h=harness();h.ctx.translationPoll=async()=>{};let finish;h.ctx.respond=()=>new Promise(resolve=>finish=resolve);
+  if(action==='resume')h.state.operation.state='stopped';const pending=action==='create'?h.ctx.translationStart(h.state):action==='resume'?h.ctx.translationResume(h.state):h.ctx.translationRetryRange(h.state,{core_index:2,range_revision:'4',retryable:true});
+  await settle();const sent=JSON.parse(h.calls[0].init.body);h.ctx.translationSwitchAsset(h.state);h.state.assetId=B;
+  h.state.operation={operation_id:'77777777-7777-4777-8777-777777777777',operation_epoch:'1',view_revision:'2',state:'partial'};if(replacement==='profile')h.state.profile={...h.state.profile,profile_id:'8'.repeat(64)};
+  finish(continuityReceipt(h,sent));await pending;assert.equal(h.state.assetId,B);assert.equal(h.state.operation.operation_id,'77777777-7777-4777-8777-777777777777');assert.equal(h.state.demand,null);assert.equal(h.state.error==null,true);
+ }
+});
+test('continuous quality handoff resolves an uncertain Create with the original UUID and body once position is proven',async()=>{
+ const h=harness();h.state.operation=null;h.state.assetId=null;h.ctx.translationPoll=async()=>{};
+ h.ctx.respond=(url,init)=>{
+  if(url.endsWith('/options'))return response(structuredClone(h.state.options));
+  if(h.calls.filter(call=>call.init.method==='POST').length===1)return new Promise((_resolve,reject)=>init.signal.addEventListener('abort',()=>reject(Error('attachment replaced')),{once:true}));
+  return continuityReceipt(h,JSON.parse(init.body));
+ };
+ const creating=h.ctx.translationStart(h.state);await settle();const original=h.calls[0].init.body,continuity=h.state.continuityId;
+ h.ctx.translationAttachmentWillChange(h.player);const token={id:2,audioOrdinal:0,captionPositionReady:false};h.player.mediaAttachment=token;h.ctx.translationAttachmentDidBegin(h.player,token);await creating;await settle();
+ assert.equal(h.calls.filter(call=>call.init.method==='POST').length,1);assert.ok(h.state.createIntent);token.captionPositionReady=true;h.ctx.translationAttachmentPositionReady(h.player,token);await settle();await settle();
+ const posts=h.calls.filter(call=>call.init.method==='POST');assert.equal(posts.length,2);assert.equal(posts[1].init.body,original);assert.equal(h.state.continuityId,continuity);assert.equal(h.state.demand.id,DEMAND);assert.equal(h.state.createIntent,null);
+});
+test('preferred speech profiles honor saved Small task pairs, new Base defaults and strict server hints',()=>{
+ const h=harness(),base={...profile,profile_id:'0'.repeat(64),model_id:'base',default:true,label:'Base multilingual'},baseCaptions={...base,profile_id:'1'.repeat(64),task:'transcribe'},small={...profile,model_id:'small',default:false},smallCaptions={...small,profile_id:A,task:'transcribe'};
+ const options={models:[base,baseCaptions,small,smallCaptions],default_profile_id:base.profile_id};
+ assert.equal(h.ctx.translationPreferredProfile(options,'translate').profile_id,base.profile_id);options.default_profile_id=small.profile_id;
+ assert.equal(h.ctx.translationPreferredProfile(options,'transcribe').profile_id,smallCaptions.profile_id);
+ assert.equal(h.ctx.translationPreferredProfile(options,'translate',baseCaptions.profile_id).profile_id,base.profile_id);
+ options.default_profile_id='broken';assert.throws(()=>h.ctx.translationPreferredProfile(options,'translate'),/Invalid preferred/);
+ options.default_profile_id='7'.repeat(64);assert.throws(()=>h.ctx.translationPreferredProfile(options,'translate',small.profile_id),/Invalid preferred/);
+});
+test('first unedited setup follows saved Small model or Base hint without changing enablement or later edits',()=>{
+ const h=harness(),s=settings(h),base={...profile,profile_id:'0'.repeat(64),model_id:'base',default:true},small={...profile,model_id:'small',default:false};
+ s.setup.catalog.profiles=[base,small];s.setup.catalog.default_profile_id=base.profile_id;s.setup.saved.model_id='small';s.setup.saved.profile_id=null;s.fields['[data-translation-setting-profile]'].value='';s.fields['[data-translation-setting-enabled]'].checked=false;
+ h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,P);assert.equal(s.fields['[data-translation-setting-enabled]'].checked,false);
+ s.setup.edit++;s.fields['[data-translation-setting-profile]'].value=base.profile_id;h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,base.profile_id);
+ s.setup.edit=0;s.setup.choicesLoaded=false;s.setup.saved.model_id=null;s.fields['[data-translation-setting-profile]'].value='';h.ctx.translationSetupChoices(s.setup);assert.equal(s.fields['[data-translation-setting-profile]'].value,base.profile_id);
+ s.setup.catalog.default_profile_id='8'.repeat(64);assert.throws(()=>h.ctx.translationSetupChoices(s.setup),/Invalid preferred/);assert.equal(s.fields['[data-translation-setting-profile]'].value,base.profile_id);
 });

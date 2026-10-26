@@ -4029,20 +4029,23 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
         let current = self.subtitle_translation_schema_version().await?;
-        if current == Some(1) {
+        if current == Some(2) {
             return Ok(());
         }
-        let statements = if current == Some(0) {
-            super::subtitle_translation_schema::retarget_statements()
-        } else {
-            super::subtitle_translation_schema::statements()
+        let statements = match current {
+            Some(0) => super::subtitle_translation_schema::retarget_statements()
+                .into_iter()
+                .chain(super::subtitle_translation_schema::continuity_statements())
+                .collect(),
+            Some(1) => super::subtitle_translation_schema::continuity_statements(),
+            _ => super::subtitle_translation_schema::statements(),
         }
         .into_iter()
         .map(|sql| (sql, params!()))
         .collect::<Vec<_>>();
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
-        if self.subtitle_translation_schema_version().await? == Some(1) {
+        if self.subtitle_translation_schema_version().await? == Some(2) {
             return Ok(());
         }
         result?;

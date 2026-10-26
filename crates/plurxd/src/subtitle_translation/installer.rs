@@ -41,7 +41,6 @@ fn interrupted(cancel: &CancellationToken) -> Result<(), StoreError> {
 
 fn action(source: &JobPayload, node_id: &str) -> Result<ModelAction, StoreError> {
     source.validate()?;
-    let spec = profile::model_spec();
     let JobPayload::SubtitleModelOperation {
         translation_profile: Some(accepted),
         action,
@@ -54,6 +53,7 @@ fn action(source: &JobPayload, node_id: &str) -> Result<ModelAction, StoreError>
     else {
         return Err(failure("translation_unverified"));
     };
+    let spec = profile::model_spec_for(accepted)?;
     if !action.is_translation()
         || !profile::registered(accepted)
         || model_id != &spec.id
@@ -108,13 +108,13 @@ async fn hash_admitted(
     state: &AppState,
     cancel: &CancellationToken,
     admission: &FragmentAdmission,
+    spec: &crate::subtitle_models::artifacts::CatalogModel,
 ) -> Result<ManagedModel, StoreError> {
     interrupted(cancel)?;
     if !state.transcode.speech_capacity_available(admission) {
         return Err(failure("waiting_for_playback_capacity"));
     }
-    let spec = profile::model_spec();
-    let hash = artifacts::open_model_cancellable(&state.subtitle_models.root, &spec, cancel);
+    let hash = artifacts::open_model_cancellable(&state.subtitle_models.root, spec, cancel);
     tokio::pin!(hash);
     tokio::select! {
         result = &mut hash => result.map_err(StoreError::Task),
@@ -149,7 +149,7 @@ pub(crate) async fn execute(
         } => profile.clone(),
         _ => return Err(failure("translation_unverified")),
     };
-    let spec = profile::model_spec();
+    let spec = profile::model_spec_for(&selected)?;
     if engine.adapter_contract != selected.adapter_contract {
         return Err(failure("packaged_engine_unqualified"));
     }
@@ -166,7 +166,7 @@ pub(crate) async fn execute(
         ModelAction::TranslationVerify => {
             let admission = admit(state, fence, &cancel).await?;
             phase(fence, SubtitlePhase::Verifying, &cancel).await?;
-            let model = hash_admitted(state, &cancel, &admission).await?;
+            let model = hash_admitted(state, &cancel, &admission, &spec).await?;
             (model, admission)
         }
         _ => return Err(failure("translation_unverified")),
@@ -276,6 +276,37 @@ mod tests {
                 *model_sha256 = "0".repeat(64);
             }
             assert!(action(&changed, "translation-worker").is_err());
+        }
+    }
+
+    #[test]
+    fn model_actions_bind_each_task_to_its_own_immutable_model() {
+        for selected in profile::profiles() {
+            for expected in [
+                ModelAction::TranslationInstall,
+                ModelAction::TranslationVerify,
+            ] {
+                let mut source = payload(expected);
+                if let JobPayload::SubtitleModelOperation {
+                    translation_profile,
+                    model_id,
+                    model_sha256,
+                    ..
+                } = &mut source
+                {
+                    *translation_profile = Some(selected.clone());
+                    *model_id = selected.model_id.clone();
+                    *model_sha256 = selected.model_sha256.clone();
+                }
+                assert_eq!(
+                    action(&source, "translation-worker").expect("exact task/model recipe"),
+                    expected
+                );
+                if let JobPayload::SubtitleModelOperation { model_sha256, .. } = &mut source {
+                    *model_sha256 = "0".repeat(64);
+                }
+                assert!(action(&source, "translation-worker").is_err());
+            }
         }
     }
 
@@ -403,7 +434,7 @@ mod qualification {
         deadline: tokio::time::Instant,
     ) -> serde_json::Value {
         let profile_id = selected.id().expect("profile identity");
-        let spec = profile::model_spec();
+        let spec = profile::model_spec_for(selected).expect("registered qualification profile");
         let request = json!({
             "version":2, "request_id":uuid::Uuid::new_v4().to_string(),
             "intent_expires_at_ms":crate::state::clock_ms()+300000,
@@ -481,7 +512,7 @@ mod qualification {
             "action":action,"state":"succeeded","fence":completed.fence})
     }
 
-    /// Downloads/reuses the pinned small model and exercises real decoding,
+    /// Downloads/reuses the pinned legacy Small model and exercises real decoding,
     /// Whisper inference, task-specific cue checks and durable receipt publish.
     /// It proves the compiled German fixture, not arbitrary media or languages.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -495,7 +526,7 @@ mod qualification {
         let spec = profile::model_spec();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20 * 60);
         let mut evidence = Vec::new();
-        for selected in profile::profiles() {
+        for selected in profile::legacy_profiles() {
             for action in [
                 ModelAction::TranslationInstall,
                 ModelAction::TranslationVerify,
@@ -515,7 +546,7 @@ mod qualification {
             })
             .await
             .expect("durable qualified capabilities");
-        for selected in profile::profiles() {
+        for selected in profile::legacy_profiles() {
             let id = selected.id().expect("profile ID");
             assert!(
                 receipts.iter().any(|receipt| receipt["profile_id"] == id
@@ -523,7 +554,7 @@ mod qualification {
                     && receipt["model"]["engine_sha256"] == engine.binary_sha256
                     && receipt["model"]["boot_id"] == state.subtitle_models.boot_id
                     && receipt["self_test_sha256"] == profile::SELF_TEST_SHA256),
-                "both exact task receipts must survive reopening private SQLite"
+                "both exact legacy task receipts must survive reopening private SQLite"
             );
         }
         state.shutdown.cancel();
@@ -546,11 +577,168 @@ mod qualification {
         serde_json::from_slice(&bytes).expect("typed API JSON")
     }
 
+    fn playback_position(viewer: &serde_json::Value, clock: std::time::Instant) -> i64 {
+        if viewer["moving"] != true {
+            return 0;
+        }
+        i64::try_from(clock.elapsed().as_millis())
+            .expect("bounded test clock")
+            .min(viewer["duration_ms"].as_i64().expect("source duration"))
+    }
+    async fn observe_current(
+        state: &AppState,
+        admin: &plurx_core::domain::User,
+        viewer: &mut serde_json::Value,
+        clock: std::time::Instant,
+    ) {
+        use sha2::{Digest, Sha256};
+        if viewer["moving"] != true {
+            return;
+        }
+        let position = playback_position(viewer, clock);
+        if position >= viewer["duration_ms"].as_i64().expect("duration") {
+            return;
+        }
+        let operation = reply(
+            super::super::api::operation(
+                AuthUser(admin.clone()),
+                State(state.clone()),
+                Path(viewer["operation_id"].as_str().expect("operation").into()),
+            )
+            .await
+            .expect("moving operation read"),
+        )
+        .await;
+        let Some(asset) = operation["asset_id"].as_str() else {
+            return;
+        };
+        let manifest = reply(
+            super::super::api::manifest(
+                AuthUser(admin.clone()),
+                State(state.clone()),
+                Path(asset.into()),
+                axum::http::HeaderMap::new(),
+                axum::extract::Query(
+                    serde_json::from_value(json!({"position_ms":position}))
+                        .expect("current-position query"),
+                ),
+            )
+            .await
+            .expect("moving manifest read"),
+        )
+        .await;
+        let mut useful = false;
+        let mut active_cue = false;
+        for reference in manifest["segments"].as_array().expect("moving references") {
+            if reference["start_ms"].as_i64().expect("start") > position
+                || reference["end_ms"].as_i64().expect("end") <= position
+            {
+                continue;
+            }
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                "x-translation-read-lease",
+                axum::http::HeaderValue::from_str(
+                    manifest["snapshot"]["lease_id"].as_str().expect("lease"),
+                )
+                .expect("header"),
+            );
+            let response = super::super::api::segment(
+                AuthUser(admin.clone()),
+                State(state.clone()),
+                Path((
+                    asset.into(),
+                    reference["segment_id"].as_str().expect("segment").into(),
+                )),
+                headers,
+            )
+            .await
+            .expect("current canonical read");
+            let bytes = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .expect("bounded current segment");
+            assert_eq!(
+                hex::encode(Sha256::digest(&bytes)),
+                reference["digest"].as_str().expect("digest")
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("canonical current body");
+            assert_eq!(body["asset_id"], asset);
+            assert_eq!(body["provenance"]["profile_id"], viewer["profile_id"]);
+            assert_eq!(manifest["audio_index"], 2);
+            active_cue = body["cues"].as_array().expect("cues").iter().any(|cue| {
+                cue["start_ms"]
+                    .as_i64()
+                    .is_some_and(|start| start <= position)
+                    && cue["end_ms"].as_i64().is_some_and(|end| end > position)
+            });
+            useful = body["cues"].as_array().expect("cues").iter().any(|cue| {
+                !cue["text"].as_str().unwrap_or_default().is_empty()
+                    && cue["start_ms"].as_i64().is_some_and(|start| {
+                        start < reference["end_ms"].as_i64().expect("end")
+                            && start <= position + 5000
+                    })
+                    && cue["end_ms"].as_i64().is_some_and(|end| {
+                        end > reference["start_ms"].as_i64().expect("start")
+                            && end >= position - 5000
+                    })
+            });
+        }
+        let observations = viewer["observations"]
+            .as_array_mut()
+            .expect("bounded observations");
+        assert!(
+            observations.len() < 128,
+            "qualification read cadence remains bounded"
+        );
+        observations.push(json!({"position_ms":position,"useful_current_core":useful,"active_cue":active_cue,"cue_proximity_bound_ms":5000,
+            "manifest_revision":manifest["manifest_revision"],"task":manifest["task"],"profile_id":manifest["profile_id"]}));
+        if useful && viewer["first_useful_ms"].is_null() {
+            viewer["first_useful_ms"] = position.into();
+        }
+    }
+    async fn viewer_tick(
+        state: &AppState,
+        admin: &plurx_core::domain::User,
+        viewer: &mut serde_json::Value,
+        clock: std::time::Instant,
+    ) -> Result<(), String> {
+        let position = playback_position(viewer, clock);
+        viewer["max_heartbeat_position_ms"] = position.into();
+        let generation = viewer["demand_generation"]
+            .as_str()
+            .expect("generation")
+            .parse::<u64>()
+            .expect("counter")
+            + 1;
+        let request=serde_json::from_value(json!({"version":1,"request_id":uuid::Uuid::new_v4().to_string(),
+            "intent_expires_at_ms":crate::state::clock_ms()+300000,"expected_operation_epoch":viewer["operation_epoch"],
+            "demand_generation":generation.to_string(),"playback_id":viewer["playback_id"],"continuity_id":viewer["continuity_id"],
+            "position_ms":position,"playback_rate":1.0,"paused":false})).expect("typed heartbeat");
+        let response = super::super::api::demand(
+            AdminUser(admin.clone()),
+            State(state.clone()),
+            Path((
+                viewer["operation_id"].as_str().expect("operation").into(),
+                viewer["demand_id"].as_str().expect("demand").into(),
+            )),
+            Json(request),
+        )
+        .await
+        .map_err(|error| format!("heartbeat: {error:?}"))?;
+        let receipt = reply(response).await;
+        assert_eq!(receipt["demand_generation"], generation.to_string());
+        assert_eq!(receipt["continuity_id"], viewer["continuity_id"]);
+        viewer["demand_generation"] = receipt["demand_generation"].clone();
+        observe_current(state, admin, viewer, clock).await;
+        Ok(())
+    }
     async fn viewer_pass(
         state: &AppState,
         admin: &plurx_core::domain::User,
         viewer: &mut serde_json::Value,
         deadline: tokio::time::Instant,
+        clock: std::time::Instant,
     ) {
         let cancel = CancellationToken::new();
         let worker = crate::subtitle_translation::manager::worker_pass(state, &cancel);
@@ -559,32 +747,30 @@ mod qualification {
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                result = &mut worker => { assert!(result.expect("real progressive worker"), "queued/demanded work"); break; }
-                () = tokio::time::sleep_until(deadline) => {
-                    cancel.cancel(); let result = worker.await;
-                    panic!("qualification deadline; actual worker cancelled and awaited: {result:?}");
-                }
-                _ = heartbeat.tick() => {
-                    let generation = viewer["demand_generation"].as_str().expect("generation").parse::<u64>().expect("counter") + 1;
-                    let request = serde_json::from_value(json!({"version":1,"request_id":uuid::Uuid::new_v4().to_string(),
-                        "intent_expires_at_ms":crate::state::clock_ms()+300000,"expected_operation_epoch":viewer["operation_epoch"],
-                        "demand_generation":generation.to_string(),"playback_id":viewer["playback_id"],"position_ms":0,"playback_rate":1.0,"paused":false})).expect("typed heartbeat");
-                    let result = crate::subtitle_translation::api::demand(AdminUser(admin.clone()),State(state.clone()),
-                        Path((viewer["operation_id"].as_str().expect("operation").into(),viewer["demand_id"].as_str().expect("demand").into())),Json(request)).await;
-                    let response = match result { Ok(response)=>response, Err(error)=>{cancel.cancel();let result=worker.await;panic!("heartbeat failed: {error:?}; worker awaited: {result:?}");} };
-                    let receipt=reply(response).await;
-                    assert_eq!(receipt["demand_generation"],generation.to_string());
-                    viewer["demand_generation"]=receipt["demand_generation"].clone();
-                }
+                result=&mut worker=>{assert!(result.expect("real progressive worker"),"queued/demanded work");break;}
+                ()=tokio::time::sleep_until(deadline)=>{cancel.cancel();let result=worker.await;panic!("qualification deadline; cancelled/awaited: {result:?}");}
+                _=heartbeat.tick()=>{if let Err(error)=viewer_tick(state,admin,viewer,clock).await {
+                    cancel.cancel();let result=worker.await;panic!("{error}; worker awaited: {result:?}");
+                }}
             }
         }
     }
 
-    /// Finite private source -> selected third audio -> real progressive jobs ->
-    /// canonical leased readback. Timing is observed, without a real-time claim.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "real progressive inference; explicit speech qualification root/cache/engine/ffmpeg/ffprobe/TMPDIR required"]
+    #[ignore = "real legacy Small inference; explicit speech qualification root/cache/engine/ffmpeg/ffprobe/TMPDIR required"]
     async fn pinned_progressive_worker_commits_both_tasks_for_selected_audio_two() {
+        progressive_case(35000, false, profile::legacy_profiles()).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "real useful 1x Small playback qualification; explicit speech qualification root/cache/engine/ffmpeg/ffprobe/TMPDIR required"]
+    async fn pinned_progressive_worker_covers_advancing_playback_for_both_tasks() {
+        progressive_case(95000, true, profile::profiles()).await;
+    }
+    async fn progressive_case(
+        duration_ms: i64,
+        moving: bool,
+        selected_profiles: [plurx_core::store::subtitle_translation::TranslationProfile; 2],
+    ) {
         let (session, state) = private_state().await;
         assert!(
             required_path("PLURX_FFPROBE").is_file(),
@@ -595,16 +781,22 @@ mod qualification {
             .await
             .expect("actual packaged engine");
         let mut qualifications = Vec::new();
-        for selected in profile::profiles() {
-            qualifications
-                .push(qualify(&state, &selected, ModelAction::TranslationVerify, deadline).await);
+        for (index, selected) in selected_profiles.iter().enumerate() {
+            let action = if moving && index == 0 {
+                ModelAction::TranslationInstall
+            } else {
+                ModelAction::TranslationVerify
+            };
+            qualifications.push(qualify(&state, selected, action, deadline).await);
         }
+        let model_sha256 = selected_profiles[0].model_sha256.clone();
+        let expected_cores = usize::try_from((duration_ms + 29999) / 30000).expect("core count");
         let source = session.join("selected-audio-two.mkv");
         let fixture = session.join("german.wav");
         std::fs::write(&fixture, profile::SELF_TEST_FIXTURE).expect("compiled publisher fixture");
         let mut command = tokio::process::Command::new(required_path("PLURX_FFMPEG"));
-        command.args("-v error -nostdin -threads 1 -f lavfi -i color=size=16x16:rate=1:duration=35 -f lavfi -i anullsrc=r=16000:cl=mono -f lavfi -i sine=frequency=550:sample_rate=16000 -stream_loop -1 -i".split_whitespace())
-            .arg(&fixture).args("-map 0:v -map 1:a -map 2:a -map 3:a -t 35 -c:v ffv1 -threads 1 -c:a pcm_s16le -metadata:s:a:0 language=eng -metadata:s:a:1 language=fra -metadata:s:a:2 language=deu".split_whitespace())
+        command.args(format!("-v error -nostdin -threads 1 -f lavfi -i color=size=16x16:rate=1:duration={} -f lavfi -i anullsrc=r=16000:cl=mono -f lavfi -i sine=frequency=550:sample_rate=16000 -stream_loop -1 -i",duration_ms/1000).split_whitespace())
+            .arg(&fixture).args(format!("-map 0:v -map 1:a -map 2:a -map 3:a -t {} -c:v ffv1 -threads 1 -c:a pcm_s16le -metadata:s:a:0 language=eng -metadata:s:a:1 language=fra -metadata:s:a:2 language=deu",duration_ms/1000).split_whitespace())
             .arg(&source).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true);
         let mut child = command.spawn().expect("finite fixture encoder");
         let status = match tokio::time::timeout(Duration::from_secs(60), child.wait()).await {
@@ -636,7 +828,7 @@ mod qualification {
                 library_id: library.id,
                 kind: ItemKind::Movie,
                 parent_id: None,
-                title: "35-second ordinal2 fixture".into(),
+                title: format!("{}-second ordinal2 fixture", duration_ms / 1000),
                 year: None,
                 season_number: None,
                 episode_number: None,
@@ -658,7 +850,7 @@ mod qualification {
             .await
             .expect("source read")
             .expect("source");
-        assert_eq!(file.duration_ms, Some(35000));
+        assert_eq!(file.duration_ms, Some(duration_ms));
         let source_sha = hex::encode(Sha256::digest(
             std::fs::read(&source).expect("private source bytes"),
         ));
@@ -673,7 +865,7 @@ mod qualification {
         let st = State(state.clone());
         let read = || AuthUser(reader.clone());
         let mut operations = Vec::new();
-        for selected in profile::profiles() {
+        for selected in selected_profiles {
             let settings = config::read(state.store.as_ref(), crate::state::clock_ms())
                 .await
                 .expect("normal configuration read");
@@ -682,19 +874,28 @@ mod qualification {
                 "model_id":selected.model_id,"profile_id":selected.id().expect("profile ID"),"preferred_spoken_language":"de"})).expect("typed CAS request"))).await.expect("normal settings CAS")).await;
             let started = std::time::Instant::now();
             let playback = uuid::Uuid::new_v4().to_string();
+            let continuity = moving.then(|| uuid::Uuid::new_v4().to_string());
+            let playback_started_at_ms = crate::state::clock_ms();
             let mut viewer=reply(api::create(AdminUser(admin.clone()),State(state.clone()),Path(file_id),Json(serde_json::from_value(json!({"version":1,"request_id":uuid::Uuid::new_v4().to_string(),
                 "intent_expires_at_ms":crate::state::clock_ms()+300000,"source_size":file.size.to_string(),"source_mtime":file.mtime.to_string(),"audio_index":2,"spoken_language":"de",
                 "output_language":selected.task.output_language("de"),"task":selected.task,"model_id":selected.model_id,"profile_id":selected.id().expect("profile ID"),
-                "playback_id":playback,"position_ms":0,"playback_rate":1.0,"paused":false})).expect("typed create"))).await.expect("real producer request")).await;
+                "playback_id":playback,"continuity_id":continuity,"position_ms":0,"playback_rate":1.0,"paused":false})).expect("typed create"))).await.expect("real producer request")).await;
+            assert_eq!(viewer["continuity_id"], json!(continuity));
             viewer["playback_id"] = playback.into();
+            viewer["playback_started_at_ms"] = playback_started_at_ms.into();
+            viewer["moving"] = moving.into();
+            viewer["duration_ms"] = duration_ms.into();
+            viewer["observations"] = json!([]);
+            viewer["profile_id"] = selected.id().expect("profile").into();
             let operation_id = viewer["operation_id"]
                 .as_str()
                 .expect("operation ID")
                 .to_owned();
             let mut manifest = json!(null);
             let mut first_ms = None;
-            for _ in 0..4 {
-                viewer_pass(&state, &admin, &mut viewer, deadline).await;
+            for _ in 0..expected_cores + 2 {
+                viewer_pass(&state, &admin, &mut viewer, deadline, started).await;
+                observe_current(&state, &admin, &mut viewer, started).await;
                 let operation = reply(
                     api::operation(read(), st.clone(), Path(operation_id.clone()))
                         .await
@@ -712,7 +913,8 @@ mod qualification {
                     continue;
                 };
                 let query = Query(
-                    serde_json::from_value(json!({"position_ms":0})).expect("manifest query"),
+                    serde_json::from_value(json!({"position_ms":(duration_ms-90000).max(0)}))
+                        .expect("manifest query"),
                 );
                 manifest = reply(
                     api::manifest(
@@ -733,14 +935,14 @@ mod qualification {
                 if count > 0 && first_ms.is_none() {
                     first_ms = Some(started.elapsed().as_millis());
                 }
-                if count == 2 {
+                if count == expected_cores {
                     break;
                 }
             }
             assert_eq!(
                 manifest["segments"].as_array().map(Vec::len),
-                Some(2),
-                "both real cores must commit: {manifest:?}"
+                Some(expected_cores),
+                "all real cores must commit: {manifest:?}"
             );
             assert_eq!(
                 manifest["operation"]["state"], "complete",
@@ -754,6 +956,46 @@ mod qualification {
                 manifest["output_language"],
                 selected.task.output_language("de")
             );
+            let complete_ms = started.elapsed().as_millis();
+            if moving {
+                assert!(
+                    complete_ms <= u128::try_from(duration_ms + 5000).expect("completion bound"),
+                    "all cores must complete by EOF plus one observation cadence: {complete_ms}ms"
+                );
+                let mut observation = tokio::time::interval(Duration::from_secs(5));
+                observation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                while started.elapsed() < Duration::from_secs(70) {
+                    tokio::select! { _=observation.tick()=>viewer_tick(&state,&admin,&mut viewer,started).await.expect("continuing bounded viewer"),
+                    ()=tokio::time::sleep_until(deadline)=>panic!("moving observation deadline") }
+                }
+                assert!(
+                    viewer["first_useful_ms"]
+                        .as_i64()
+                        .is_some_and(|at| at < 30000),
+                    "first currently useful coverage must arrive within first core: {viewer}"
+                );
+                for boundary in [30000, 60000] {
+                    assert!(viewer["observations"].as_array().expect("observations").iter().filter(|o|
+                        o["useful_current_core"]==true && o["position_ms"].as_i64().is_some_and(|p|p>boundary && p<boundary+30000)).count()>=2,
+                        "must repeatedly read useful current-core canonical bytes after boundary {boundary}: {viewer}");
+                }
+            }
+            let asset_id = manifest["asset_id"].as_str().expect("asset").to_owned();
+            manifest = reply(
+                api::manifest(
+                    read(),
+                    st.clone(),
+                    Path(asset_id),
+                    HeaderMap::new(),
+                    Query(
+                        serde_json::from_value(json!({"position_ms":(duration_ms-90000).max(0)}))
+                            .expect("fresh final snapshot"),
+                    ),
+                )
+                .await
+                .expect("fresh canonical read lease"),
+            )
+            .await;
             let asset = manifest["asset_id"].as_str().expect("asset");
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -813,7 +1055,7 @@ mod qualification {
                     profile: selected.clone(),
                     audio_index: 2,
                     spoken_language: "de".into(),
-                    duration_ms: 35000,
+                    duration_ms,
                     core_index: draft.core_index,
                 };
                 draft
@@ -846,7 +1088,7 @@ mod qualification {
                 .expect("next release generation");
             reply(api::release(AdminUser(admin.clone()),State(state.clone()),Path((operation_id.clone(),viewer["demand_id"].as_str().expect("demand").into())),Json(serde_json::from_value(json!({"version":1,"request_id":uuid::Uuid::new_v4().to_string(),
                 "intent_expires_at_ms":crate::state::clock_ms()+300000,"expected_operation_epoch":viewer["operation_epoch"],"demand_generation":release_generation.to_string(),"playback_id":viewer["playback_id"]})).expect("typed release"))).await.expect("release owned viewer")).await;
-            operations.push(json!({"operation_id":operation_id,"task":selected.task,"profile_id":selected.id().expect("profile"),"first_committed_ms":first_ms,"complete_ms":started.elapsed().as_millis(),"segments":segments}));
+            operations.push(json!({"operation_id":operation_id,"task":selected.task,"profile_id":selected.id().expect("profile"),"moving_playback":{"rate":1.0,"duration_ms":duration_ms,"max_heartbeat_position_ms":viewer["max_heartbeat_position_ms"],"continuity_id":viewer["continuity_id"]},"first_committed_ms":first_ms,"complete_ms":complete_ms,"processing_wall_per_source_second":complete_ms as f64/duration_ms as f64,"first_useful_ms":viewer["first_useful_ms"],"useful_coverage_observations":viewer["observations"],"segments":segments}));
         }
         let jobs = state
             .store
@@ -871,9 +1113,13 @@ mod qualification {
             .collect();
         state.shutdown.cancel();
         let evidence = json!({"version":1,"scope":"local production progressive worker and leased canonical API reads; no real-time guarantee or video-player qualification",
-            "duration_ms":35000,"audio_ordinal":2,"source_index":3,"source_sha256":source_sha,"file_id":file_id.to_string(),"fresh_boot":state.subtitle_models.boot_id,"engine_sha256":engine.binary_sha256,
-            "model_sha256":profile::MODEL_SHA256,"qualifications":qualifications,"operations":operations,"jobs":jobs});
-        let path = session.join("progressive-worker-qualification.json");
+            "duration_ms":duration_ms,"moving_playback":moving,"audio_ordinal":2,"source_index":3,"source_sha256":source_sha,"file_id":file_id.to_string(),"fresh_boot":state.subtitle_models.boot_id,"engine_sha256":engine.binary_sha256,
+            "model_sha256":model_sha256,"qualifications":qualifications,"operations":operations,"jobs":jobs});
+        let path = session.join(if moving {
+            "moving-progressive-worker-qualification.json"
+        } else {
+            "progressive-worker-qualification.json"
+        });
         std::fs::write(
             &path,
             serde_json::to_vec_pretty(&evidence).expect("evidence JSON"),

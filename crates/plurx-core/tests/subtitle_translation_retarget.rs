@@ -53,6 +53,7 @@ fn create() -> TranslationMutation {
             position_ms: 0,
             playback_rate: 1.0,
             paused: false,
+            continuity_id: None,
         },
         1_000,
     )
@@ -184,7 +185,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
                 .starts_with("CREATE TRIGGER subtitle_translation_mutate ")
         })
         .expect("known legacy trigger");
-    conn.execute_batch("DROP TRIGGER subtitle_translation_mutate")
+    conn.execute_batch("DROP TRIGGER subtitle_translation_mutate; DROP TRIGGER subtitle_translation_capture_continuity; DROP TRIGGER subtitle_translation_retire_continuity; DROP TRIGGER subtitle_translation_revoke_continuity; DROP TABLE subtitle_translation_range_continuities; ALTER TABLE subtitle_translation_demands DROP COLUMN continuity_id;")
         .expect("downgrade fixture only");
     conn.execute_batch(legacy).expect("published trigger");
     conn.pragma_update(None, "user_version", 116)

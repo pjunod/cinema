@@ -32,6 +32,11 @@ async fn replicated_progressive_retarget_upgrade_preserves_owned_data_and_refuse
         .expect("published trigger");
     client.txn([
         ("DROP TRIGGER subtitle_translation_mutate".to_owned(),hiqlite::params!()),
+        ("DROP TRIGGER subtitle_translation_capture_continuity".to_owned(),hiqlite::params!()),
+        ("DROP TRIGGER subtitle_translation_retire_continuity".to_owned(),hiqlite::params!()),
+        ("DROP TRIGGER subtitle_translation_revoke_continuity".to_owned(),hiqlite::params!()),
+        ("DROP TABLE subtitle_translation_range_continuities".to_owned(),hiqlite::params!()),
+        ("ALTER TABLE subtitle_translation_demands DROP COLUMN continuity_id".to_owned(),hiqlite::params!()),
         (legacy.to_owned(),hiqlite::params!()),
         ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{\"preserve\":true}')".to_owned(),hiqlite::params!()),
     ]).await.expect("published shape fixture").into_iter().collect::<Result<Vec<_>,_>>().expect("atomic legacy fixture");

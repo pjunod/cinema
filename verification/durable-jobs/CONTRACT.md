@@ -334,3 +334,26 @@ The later 2026-10-26 formatter pass only moved the unchanged feature-gated
 Its visibility, feature condition and source path are unchanged. The one
 inspected `store_contract.rs` mapping hash was rebound; this adds no model
 semantics or execution evidence.
+
+## Moving-playback continuity correspondence
+
+The independent bounded review on 2026-10-26 inspected the frozen delta atop
+`352137f764d8cf87d530352222d5948a77275d4f`. Hiqlite changes only the
+recognized caption extension chain; SQLite adds caption migration118. The
+selected library transaction, publication and timeout paths are unchanged.
+
+The exact original0/retarget1/continuity2 recognizer refuses unknown shapes.
+The new [continuity triggers](../../crates/plurx-core/src/store/subtitle_translation_continuity.sql)
+capture and retire grants only for `subtitle_translation_range`; demand
+revocation deletes only matching captured caption grant rows. Comparing
+the replacement mutation trigger with the previous retarget trigger confirms
+that its shared-job effects retain their caption-kind/operation scope. New
+dependency anchors pin these isolation boundaries. The expiry/UUID-reuse
+review finding was fixed by atomic demand-trigger grant withdrawal.
+
+The selected library enqueue, claim, renewal, binding, settlement and cleanup
+semantics remain unchanged. This source correspondence does not extend the
+finite model to caption continuity, playback deadlines or remote-worker
+liveness. Model/configuration bytes, fairness premises and historical
+receipts retain their identities. Offline mapping validation is distinct
+from runtime tests, TLC qualification and a refinement proof.

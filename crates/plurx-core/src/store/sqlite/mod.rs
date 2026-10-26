@@ -1320,6 +1320,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::shared_caption_schema::SCHEMA,
     // v117: exact progressive v1 producer-incarnation trigger upgrade, preserving cached assets and leases.
     super::subtitle_translation_schema::RETARGET_MIGRATION,
+    // v118: explicit playback continuity grants captured by exact range claims.
+    super::subtitle_translation_schema::CONTINUITY_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1850,7 +1852,9 @@ impl SqliteStore {
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
                 || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
                 || (version == 117
-                    && super::subtitle_translation_schema::retarget_already_applied(conn)?);
+                    && super::subtitle_translation_schema::retarget_already_applied(conn)?)
+                || (version == 118
+                    && super::subtitle_translation_schema::continuity_already_applied(conn)?);
             let applied = Self::apply_migration_step(conn, version, sql, already_applied);
             conn.pragma_update(None, "foreign_keys", "ON")?;
             applied?;

@@ -34,7 +34,24 @@ fn demand_wants(d: &Value, core: i64, width: i64) -> bool {
     let ahead = (d["playback_rate"].as_f64().unwrap_or(1.0) as i64 + 1).min(2);
     core >= current && core <= current + ahead
 }
-async fn interested(state: &AppState, source: &JobPayload) -> Result<bool, StoreError> {
+async fn interested(
+    state: &AppState,
+    source: &JobPayload,
+    running_job: Option<&str>,
+) -> Result<bool, StoreError> {
+    if matches!(source, JobPayload::SubtitleTranslationRange { .. }) {
+        if let Some(job_id) = running_job {
+            return Ok(read(
+                state,
+                TranslationQuery::RangeInterest {
+                    job_id: job_id.into(),
+                },
+            )
+            .await?
+            .first()
+            .is_some_and(|row| row["interested"] == true));
+        }
+    }
     let (op, epoch, core) = match source {
         JobPayload::SubtitleTranslationPrepare {
             operation_id,
@@ -484,7 +501,14 @@ async fn execute(
             verified
         }
     };
-    if !interested(state, source).await? || cancel.is_cancelled() {
+    if !interested(
+        state,
+        source,
+        fence.snapshot().await.as_ref().map(|t| t.job_id.as_str()),
+    )
+    .await?
+        || cancel.is_cancelled()
+    {
         return Err(StoreError::Task("demand_expired".into()));
     }
     match source {
@@ -514,7 +538,7 @@ async fn execute(
             let engine = artifacts::inspect_engine()
                 .await
                 .map_err(StoreError::Task)?;
-            let spec = profile::model_spec();
+            let spec = profile::model_spec_for(selected)?;
             let hash =
                 artifacts::open_model_cancellable(&state.subtitle_models.root, &spec, cancel);
             tokio::pin!(hash);
@@ -613,7 +637,7 @@ async fn automatic_profile_verification(
     state: &AppState,
     selected: TranslationProfile,
 ) -> Result<(), StoreError> {
-    let spec = profile::model_spec();
+    let spec = profile::model_spec_for(&selected)?;
     let profile_id = selected.id()?;
     if state
         .subtitle_models
@@ -803,7 +827,7 @@ pub(crate) async fn worker_pass(
         if shutdown.is_cancelled() || !authority.may_execute_job(source.kind()).await {
             continue;
         }
-        if !model && !interested(state, &source).await? {
+        if !model && !interested(state, &source, None).await? {
             state
                 .store
                 .cancel_job(plurx_core::store::background_jobs::CancelJob {
@@ -833,7 +857,7 @@ pub(crate) async fn worker_pass(
                     .await?;
                 continue;
             }
-            let spec = profile::model_spec();
+            let spec = profile::model_spec_for(&selected)?;
             let Ok(identity) = artifacts::model_identity(&state.subtitle_models.root, &spec).await
             else {
                 continue;
@@ -961,7 +985,7 @@ pub(crate) async fn worker_pass(
                 result=&mut operation=>break result,
                 ()=shutdown.cancelled()=>{cancel.cancel();break operation.await;},
                 ()=tokio::time::sleep(Duration::from_millis(250))=>{
-                    match tokio::time::timeout(Duration::from_secs(2),interested(state,&source)).await{Ok(Ok(true))=>{},Ok(Ok(false))|Ok(Err(_))|Err(_)=>{cancel.cancel();let _=operation.await;break Err(StoreError::Task("demand_expired".into()));}}
+                    match tokio::time::timeout(Duration::from_secs(2),interested(state,&source,Some(&job.id))).await{Ok(Ok(true))=>{},Ok(Ok(false))|Ok(Err(_))|Err(_)=>{cancel.cancel();let _=operation.await;break Err(StoreError::Task("demand_expired".into()));}}
                 }
             }
         };
@@ -1067,6 +1091,7 @@ fn safe_reason(message: &str) -> &'static str {
         "output_too_large",
         "engine_unavailable",
         "model_verification_failed",
+        "model_self_test_failed",
         "artifact_changed",
     ]
     .into_iter()
@@ -1077,6 +1102,17 @@ fn safe_reason(message: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_model_speech_test_retains_trusted_setup_recovery_reason() {
+        assert_eq!(
+            safe_reason("task failed: model_self_test_failed"),
+            "model_self_test_failed"
+        );
+        assert_eq!(
+            safe_reason("untrusted raw recognizer output"),
+            "translation_failed"
+        );
+    }
     #[test]
     fn shared_demand_window_preserves_peer_interest_and_caps_total_cores() {
         let a = serde_json::json!({"position_ms":0,"playback_rate":4.0});
@@ -1092,6 +1128,45 @@ mod tests {
 #[cfg(test)]
 mod automatic_tests {
     use super::*;
+    #[test]
+    fn automatic_receipts_cannot_cross_task_or_model_boundaries() {
+        for selected in profile::profiles() {
+            let receipt: super::super::Capability = serde_json::from_value(serde_json::json!({
+                "model":{"node_id":"worker","boot_id":"boot","model_id":selected.model_id,
+                    "model_sha256":selected.model_sha256,"adapter_contract":selected.adapter_contract,
+                    "engine_sha256":"a".repeat(64),"model_file_identity":"model-identity",
+                    "engine_file_identity":"engine-identity","job_id":"job","fence":1,"verified_at_ms":1},
+                "profile":selected,"profile_id":selected.id().expect("profile identity"),
+                "self_test_sha256":profile::SELF_TEST_SHA256
+            })).expect("receipt fixture");
+            for candidate in profile::profiles() {
+                assert_eq!(
+                    accepted_capability(
+                        &receipt,
+                        &candidate,
+                        &candidate.model_sha256,
+                        "model-identity"
+                    ),
+                    candidate == selected
+                );
+            }
+            assert!(!accepted_capability(
+                &receipt,
+                &selected,
+                &selected.model_sha256,
+                "replacement-identity"
+            ));
+            let mut mismatched = receipt.clone();
+            mismatched.model.model_id = "unregistered-model".into();
+            assert!(!accepted_capability(
+                &mismatched,
+                &selected,
+                &selected.model_sha256,
+                "model-identity"
+            ));
+        }
+    }
+
     #[test]
     fn transient_enqueue_rejections_do_not_memoize_automatic_verification() {
         for outcome in [

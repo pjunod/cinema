@@ -18,6 +18,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.TimeoutCancellationException
 import java.io.IOException
 import kotlinx.serialization.decodeFromString
@@ -88,9 +90,24 @@ internal fun verifiedCaptionSegment(bytes: ByteArray, ref: CaptionSegmentRef, ma
     return segment
 }
 
-internal data class ProgressiveCaptionSelection(val task: String, val spokenLanguage: String)
+internal data class ProgressiveCaptionSelection(val task: String, val spokenLanguage: String, val profileId: String? = null)
 /** Presentation-owned intent survives quality replans; no invented subtitle stream index. */
 internal class ProgressiveCaptionIntent {
+    val continuity = CaptionContinuity()
+    val producer = CaptionProducerOwnership()
+    val mutations = CaptionProducerMutations<CaptionProducerRequest>(producer)
+    var stopRevision: Long = 0; private set
+    fun requestStop() { stopRevision++ }
+    private var traversal: Pair<Long, Long>? = null
+    fun bindTraversal(fileId: Long, audio: Long) {
+        val next = fileId to audio
+        if (traversal != null && traversal != next) { mutations.retire(); producer.newTraversal() }
+        traversal = next
+        continuity.bind(fileId, audio)
+    }
+    fun endTraversal() { traversal = null; mutations.retire(); producer.newTraversal(); continuity.endTraversal() }
+    fun prepareOwnerTransfer() { if (selection != null) producer.prepareTransfer() }
+    fun retire() { traversal = null; mutations.retire(); producer.retire(); continuity.endTraversal() }
     var selectionRevision: Long = 0; private set
     fun captionChoiceChanged() { selectionRevision++ }
     var selection: ProgressiveCaptionSelection? by mutableStateOf(null)
@@ -123,8 +140,9 @@ internal fun captionBinding(options: CaptionOptions, selectedAudioOrdinal: Long?
         ?: error("The selected audio track has no verified caption mapping")
     require(audio.audio_ordinal != null && audio.audio_ordinal >= 0 && audio.capability?.supported == true) { "The selected audio clock is unsupported" }
     require(captionCounter(options.source_size) > BigInteger.ZERO && options.source_mtime.toLongOrNull()?.toString() == options.source_mtime)
-    val profile = options.models.firstOrNull { it.task == selection.task && selection.spokenLanguage in it.input_languages }
-        ?: error("Choose a supported spoken language and model")
+    val profile = captionPreferredProfile(options.models, options.default_profile_id, selection.task, selection.profileId)
+        ?.takeIf { selection.spokenLanguage in it.input_languages }
+        ?: error("The selected caption model or language is unavailable; choose a model in Settings")
     require(captionHash(profile.profile_id))
     return CaptionBinding(options, profile, audio, selection)
 }
@@ -144,11 +162,11 @@ internal fun captionRetryTargetCurrent(target: CaptionRetryTarget, op: CaptionOp
 internal data class CaptionRetryAttempt(val target: CaptionRetryTarget, val operation: CaptionRetry? = null,
     val range: CaptionRangeRetry? = null)
 internal fun captionRetryAttempt(target: CaptionRetryTarget, requestId: String, expires: Long,
-    playbackId: String, position: Long, rate: Double, paused: Boolean): CaptionRetryAttempt =
+    playbackId: String, position: Long, rate: Double, paused: Boolean, continuityId: String? = null): CaptionRetryAttempt =
     target.range?.let { range -> CaptionRetryAttempt(target, range = CaptionRangeRetry(1, requestId, expires,
-        target.epoch, "partial", range.core_index, range.range_revision, "failed", playbackId, position, rate, paused, "range")) }
+        target.epoch, "partial", range.core_index, range.range_revision, "failed", playbackId, position, rate, paused, "range", continuityId)) }
         ?: CaptionRetryAttempt(target, operation = CaptionRetry("operation", 1, requestId, expires,
-            target.epoch, target.view, target.state, playbackId, position, rate, paused))
+            target.epoch, target.view, target.state, playbackId, position, rate, paused, continuityId))
 internal fun captionValidateFailures(rows: List<CaptionFailedRange>, cursor: String?) {
     require(rows.size <= 16 && rows.map { it.core_index }.distinct().size == rows.size)
     require(cursor == null || cursor.length in 1..4096)
@@ -178,8 +196,8 @@ internal class CaptionDemandAttempt {
 /** Two children of the same caption owner: slow window I/O cannot starve demand renewal. */
 internal suspend fun captionPollingLifecycle(current: () -> Boolean, read: suspend () -> Unit,
     renew: suspend () -> Unit, readFailed: (Exception) -> Unit, renewalFailed: (Exception) -> Unit,
-    pause: suspend (Long) -> Unit = { delay(it) }) = coroutineScope {
-    suspend fun loop(interval: Long, maximumBackoff: Long, work: suspend () -> Unit, failed: (Exception) -> Unit) {
+    pause: suspend (Long) -> Unit = { delay(it) }, renewalPause: suspend (Long) -> Unit = pause) = coroutineScope {
+    suspend fun loop(interval: Long, maximumBackoff: Long, work: suspend () -> Unit, failed: (Exception) -> Unit, wait: suspend (Long) -> Unit) {
         var backoff = interval
         while (current()) {
             try { work(); backoff = interval }
@@ -190,11 +208,11 @@ internal suspend fun captionPollingLifecycle(current: () -> Boolean, read: suspe
                 failed(e)
                 backoff = (backoff * 2).coerceAtMost(maximumBackoff)
             }
-            if (current()) pause(backoff)
+            if (current()) wait(backoff)
         }
     }
-    val renewal = launch { loop(3_000, 3_000, { withTimeout(3_000) { renew() } }, renewalFailed) }
-    try { loop(2_000, 8_000, { withTimeout(12_000) { read() } }, readFailed) }
+    val renewal = launch { loop(3_000, 3_000, { withTimeout(3_000) { renew() } }, renewalFailed, renewalPause) }
+    try { loop(2_000, 8_000, { withTimeout(12_000) { read() } }, readFailed, pause) }
     finally { renewal.cancelAndJoin() }
 }
 
@@ -236,8 +254,9 @@ internal class ProgressiveCaptions(
     val selected: ProgressiveCaptionSelection? get() = intent.selection
     val offsetMs: Long get() = intent.offsetMs
     val canProduce: Boolean get() = options?.permissions?.demand == true
-    val hasPendingRetry: Boolean get() = retryRequest != null
-    private val playbackId = UUID.randomUUID().toString()
+    val hasPendingRetry: Boolean get() = retryRequest != null || intent.mutations.pending?.request?.retry != null
+    private val owner = intent.producer.claim()
+    private val playbackId: String get() = intent.producer.playbackId
     private var generation = 0L
     private var job: Job? = null
     private var boundary: PlayerMessage? = null
@@ -250,6 +269,7 @@ internal class ProgressiveCaptions(
     private var lastHeartbeat = 0L
     private val actions = CaptionActionFence()
     private val heartbeatAttempt = CaptionDemandAttempt()
+    private val renewalWake = Channel<Unit>(Channel.CONFLATED)
     private var refreshingStatus = false
     private var createRequest: Pair<String, CaptionCreate>? = null
     private var retryRequest: Pair<String, CaptionRetryAttempt>? by mutableStateOf(null)
@@ -267,7 +287,7 @@ internal class ProgressiveCaptions(
     private val window = CaptionWindow()
     private var clockOwner: ExoPlayer? = null
     private var clockOrigin: Long? = null
-    private fun current(g: Long) = active && g == generation && authorized()
+    private fun current(g: Long) = active && intent.producer.owns(owner) && g == generation && authorized()
     private fun position() = sourcePosition().coerceIn(0, binding?.options?.duration_ms ?: 14_400_000)
     private fun rate() = player().playbackParameters.speed.toDouble().coerceIn(0.25, 4.0)
     private fun now() = serverNow + (SystemClock.elapsedRealtime() - observedAt).coerceAtLeast(0)
@@ -275,13 +295,18 @@ internal class ProgressiveCaptions(
     private fun observe(time: Long) { serverNow = if (serverNow > 0) maxOf(now(), time) else time; observedAt = SystemClock.elapsedRealtime() }
 
     fun loadOptions() {
+        if (!current(generation)) return
         val g = generation
         scope.launch {
             try {
                 val answer = captionRead<CaptionOptions>(api().captionOptions(fileId))
                 if (!current(g)) return@launch
                 require(answer.version == 1 && answer.file_id == fileId.toString())
+                captionPreferredProfile(answer.models, answer.default_profile_id, "translate")
                 options = answer; observe(answer.server_now_ms)
+                if (intent.selection == null && answer.default_profile_id == null &&
+                    answer.models.any { it.default != null } && answer.models.none { it.default == true })
+                    status = "The saved caption model is unavailable. Choose a model and task in Settings."
                 if (intent.selection != null && job?.isActive != true && !readRetired) select(intent.selection!!)
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (current(g)) status = e.message ?: "Caption options unavailable" }
@@ -289,13 +314,16 @@ internal class ProgressiveCaptions(
     }
 
     fun select(selection: ProgressiveCaptionSelection) {
-        if (!active || !authorized() || actions.inFlight && intent.selection == selection) return
+        if (!current(generation) || actions.inFlight && intent.selection == selection) return
         intent.captionChoiceChanged()
         readRetired = false; failedRangePage = null; loadingFailures = false; refreshingStatus = false
         actions.invalidate(keepPending = intent.selection == selection)
-        if (intent.selection != selection) { createRequest = null; retryRequest = null; createStopResolution = false }
+        if (intent.selection != selection) {
+            intent.mutations.retire(); intent.producer.newTraversal()
+            createRequest = null; retryRequest = null; createStopResolution = false
+        }
         if (intent.selection != selection) { intent.operationId = null; intent.stopped = false }
-        releaseDemand()
+        releaseDemand(preserveRetained = true)
         generation++; job?.cancel(); job = null; clearCues(); operation = null; viewFence = CaptionViewFence()
         intent.selection = selection
         val g = generation
@@ -308,6 +336,8 @@ internal class ProgressiveCaptions(
                 binding = chosen
                 if (intent.audioOrdinal != chosen.audio.audio_ordinal) { intent.operationId = null; intent.stopped = false }
                 intent.audioOrdinal = chosen.audio.audio_ordinal
+                intent.bindTraversal(fileId, requireNotNull(chosen.audio.audio_ordinal))
+                intent.selection = selection.copy(profileId = chosen.profile.profile_id)
                 var cached = opt.assets.firstOrNull(chosen::matches)
                 var cursor = opt.assets_next_cursor
                 val visited = mutableSetOf<String>()
@@ -326,23 +356,33 @@ internal class ProgressiveCaptions(
                         readFailed = { status = "Caption status temporarily unavailable; retrying…" }, renewalFailed = {})
                 }
                 if (!current(g)) return@launch
-                if (canProduce && (!intent.stopped || createRequest != null)) {
+                // A predecessor may have committed after its transport was cancelled. Resolve
+                // the immutable shared request before any successor can mutate this playback.
+                val inherited = intent.mutations.pending
+                if (inherited != null) {
+                    require(inherited.request.matches(fileId, chosen)) { "Caption source or profile changed" }
+                    if (!settleProducer(chosen, g)) return@launch
+                }
+                if (inherited == null && canProduce && (!intent.stopped || createRequest != null)) {
                     val key = "create:${opt.source_size}:${opt.source_mtime}:${chosen.profile.profile_id}:${chosen.audio.audio_ordinal}:${selection.task}:${selection.spokenLanguage}:$playbackId"
                     val owner = actions.begin(key) ?: return@launch
                     if (!owner.replay) createStopResolution = false
                     val body = createRequest?.takeIf { it.first == owner.requestId }?.second ?: CaptionCreate(1,
                         owner.requestId, expires(), opt.source_size, opt.source_mtime, chosen.audio.audio_ordinal!!,
                         selection.spokenLanguage, chosen.outputLanguage, selection.task, chosen.profile.model_id,
-                        chosen.profile.profile_id, playbackId, position(), rate(), !player().playWhenReady)
+                        chosen.profile.profile_id, playbackId, position(), rate(), !player().playWhenReady, intent.continuity.id)
                     createRequest = owner.requestId to body
                     var ambiguous = false
                     try {
-                        val answer = captionRead<CaptionReceipt>(api().createCaptions(fileId, body))
-                        if (!current(g) || !actions.owns(owner)) { releaseReceipt(answer); return@launch }
-                        intent.operationId = answer.operation_id
-                        observe(answer.server_now_ms)
-                        if (intent.stopped || actions.stoppedSince(owner)) stopOperation(answer.operation_id, answer.operation_epoch, g)
-                        else acceptReceipt(answer)
+                        val endpoint = api()
+                        intent.mutations.install(this@ProgressiveCaptions.owner,
+                            CaptionProducerMutations.Pending(CaptionProducerRequest(fileId, chosen, create = body),
+                                explicitResume = false, stopRevision = intent.stopRevision, authorized = authorized) {
+                                captionRead<CaptionReceipt>(endpoint.createCaptions(fileId, body)).also {
+                                    captionReceiptContinuity(it, body.continuity_id)
+                                }
+                            })
+                        if (!settleProducer(chosen, g)) return@launch
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) { ambiguous = captionActionAmbiguous(e); if (!actions.owns(owner)) return@launch; throw e }
                     finally { if (actions.finish(owner, ambiguous) && !ambiguous) createRequest = null }
@@ -358,14 +398,31 @@ internal class ProgressiveCaptions(
             catch (e: Exception) {
                 if (current(g)) {
                     readRetired = !captionReadRetryable(e)
-                    clearCues(); releaseDemand(); status = e.message ?: "Captions failed; refresh and retry"
+                    clearCues(); releaseDemand(preserveRetained = intent.mutations.pending != null)
+                    status = e.message ?: "Captions failed; refresh and retry"
                     if (intent.stopped && createRequest != null && !createStopResolution) {
-                        createStopResolution = true; select(selection) // One exact replay resolves the owner for the requested Stop.
+                        createStopResolution = true; intent.selection?.let(::select) // Preserve the resolved profile and exact pending request for Stop.
                     }
                 }
             }
         }
     }
+    private suspend fun settleProducer(chosen: CaptionBinding, g: Long, resolveOnly: Boolean = false): Boolean {
+        val pending = intent.mutations.pending ?: return false
+        require(pending.request.matches(fileId, chosen)) { "Caption source or profile changed" }
+        val settled = intent.mutations.settle(owner) { current(g) } ?: return false
+        val value = settled.receipt
+        if (!current(g)) return false
+        intent.operationId = value.operation_id
+        observe(value.server_now_ms)
+        if (settled.pending.requiresStop(intent.stopRevision, intent.stopped, resolveOnly)) {
+            val epoch = operation?.takeIf { it.operation_id == value.operation_id &&
+                captionCounter(it.operation_epoch) > captionCounter(value.operation_epoch) }?.operation_epoch ?: value.operation_epoch
+            stopOperation(value.operation_id, epoch, g)
+        } else acceptReceipt(value, explicitResume = settled.pending.explicitResume)
+        return true
+    }
+
     private suspend fun pollOperation(id: String, chosen: CaptionBinding, g: Long) {
         try {
             captionPollingLifecycle(current = { current(g) }, read = {
@@ -373,7 +430,7 @@ internal class ProgressiveCaptions(
                 if (current(g)) operation?.asset_id?.let { readWindow(it, chosen, g) }
             }, renew = {
                 if (current(g) && !intent.stopped && receipt?.demand_id != null &&
-                    SystemClock.elapsedRealtime() - lastHeartbeat >= 3_000) heartbeat(g)
+                    (SystemClock.elapsedRealtime() - lastHeartbeat >= 3_000 || receipt?.continuity_id != intent.continuity.id)) heartbeat(g)
             }, readFailed = {
                 if (current(g)) {
                     if (SystemClock.elapsedRealtime() >= lastLeaseDeadline ||
@@ -382,7 +439,7 @@ internal class ProgressiveCaptions(
                 }
             }, renewalFailed = {
                 if (current(g)) status = "Caption renewal temporarily unavailable; retrying…"
-            })
+            }, renewalPause = { interval -> withTimeoutOrNull(interval) { renewalWake.receive() }; Unit })
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) {
             if (current(g)) { readRetired = true; clearCues(); releaseDemand() }
@@ -431,28 +488,41 @@ internal class ProgressiveCaptions(
         if (currentView) operation = operation?.copy(operation_epoch = value.operation_epoch, view_revision = value.view_revision,
             state = value.state ?: operation!!.state)
         receipt = value.takeIf { intent.acceptDemand(value.state, explicitResume) }
+        receipt?.let { accepted ->
+            val acceptedPlayback = playbackId
+            intent.producer.retain(owner) { releaseReceipt(accepted, acceptedPlayback) }
+        }
         observe(value.server_now_ms); lastHeartbeat = SystemClock.elapsedRealtime()
         return true
     }
     private suspend fun heartbeat(g: Long) {
-        val r = receipt ?: return; val demand = r.demand_id ?: return
-        val op = operation
-        if (intent.stopped || op?.state == "stopped") return
-        val epoch = op?.operation_epoch ?: r.operation_epoch
-        val body = heartbeatAttempt.request(r, epoch) {
-            CaptionDemand(1, UUID.randomUUID().toString(), expires(), epoch,
-                nextCaptionCounter(requireNotNull(r.demand_generation)), playbackId, position(), rate(), !player().playWhenReady)
+        // A seek never rewrites an uncertain request. Resolve its exact body,
+        // then serially publish the current traversal on the acknowledged generation.
+        repeat(2) {
+            val r = receipt ?: return; val demand = r.demand_id ?: return
+            val op = operation
+            if (!current(g) || intent.stopped || op?.state == "stopped") return
+            val epoch = op?.operation_epoch ?: r.operation_epoch
+            val body = heartbeatAttempt.request(r, epoch) {
+                CaptionDemand(1, UUID.randomUUID().toString(), expires(), epoch,
+                    nextCaptionCounter(requireNotNull(r.demand_generation)), playbackId, position(), rate(),
+                    !player().playWhenReady, intent.continuity.id)
+            }
+            var ambiguous = true
+            try {
+                val value = captionRead<CaptionReceipt>(api().captionDemand(r.operation_id, demand, body))
+                captionReceiptContinuity(value, body.continuity_id)
+                ambiguous = false
+                if (!current(g) || intent.stopped || receipt !== r || !acceptReceipt(value)) return
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                ambiguous = captionActionAmbiguous(e)
+                if (!intent.stopped && receipt === r) throw e
+                return
+            } finally { heartbeatAttempt.finish(body, ambiguous) }
+            if (body.continuity_id == intent.continuity.id) return
         }
-        var ambiguous = true
-        try {
-            val value = captionRead<CaptionReceipt>(api().captionDemand(r.operation_id, demand, body))
-            ambiguous = false
-            if (current(g) && !intent.stopped && receipt === r) acceptReceipt(value)
-        } catch (e: CancellationException) { throw e }
-        catch (e: Exception) {
-            ambiguous = captionActionAmbiguous(e)
-            if (!intent.stopped && receipt === r) throw e
-        } finally { heartbeatAttempt.finish(body, ambiguous) }
+        renewalWake.trySend(Unit)
     }
 
     private suspend fun readWindow(assetId: String, chosen: CaptionBinding, g: Long) {
@@ -522,6 +592,22 @@ internal class ProgressiveCaptions(
         reconcile()
     }
 
+    fun viewerSeek() {
+        if (!current(generation)) return
+        intent.continuity.viewerSeekRequested(); renewalWake.trySend(Unit)
+    }
+    fun executionAttached() {
+        if (current(generation) && intent.continuity.executionAttached()) renewalWake.trySend(Unit)
+    }
+    fun rendererDiscontinuity(reason: Int) {
+        if (!current(generation)) return
+        val before = intent.continuity.discontinuitySerial
+        intent.continuity.rendererDiscontinuity(reason)
+        if (before != intent.continuity.discontinuitySerial) renewalWake.trySend(Unit)
+        reconcile()
+    }
+    fun <T> ownedMediaMutation(block: () -> T): T = intent.continuity.ownedMediaMutation(block)
+
     /** Reuses Controller's owner sample; cue delivery itself stays on Media3's timeline. */
     fun clockChanged() {
         if (!authorized()) { generation++; job?.cancel(); clearCues(); return }
@@ -535,7 +621,7 @@ internal class ProgressiveCaptions(
     /** Called by the existing player's seek, rate, pause and item events. */
     fun reconcile() {
         boundary?.cancel(); boundary = null
-        if (!active || !authorized() || selected == null) { text = ""; return }
+        if (!current(generation) || selected == null) { text = ""; return }
         val g = generation
         val at = position() - intent.offsetMs
         text = window.textAt(at)
@@ -547,16 +633,16 @@ internal class ProgressiveCaptions(
             if (current(g) && owner === player()) reconcile()
         }.setLooper(owner.applicationLooper).setPosition(local).setDeleteAfterDelivery(true).send()
     }
-    fun setOffset(ms: Long) { intent.offsetMs = ms.coerceIn(-15_000, 15_000); reconcile() }
+    fun setOffset(ms: Long) { if (!current(generation)) return; intent.offsetMs = ms.coerceIn(-15_000, 15_000); reconcile() }
     private fun clearCues() { leaseExpiry?.cancel(); leaseExpiry = null; boundary?.cancel(); boundary = null; window.clear(); cachedSegments = emptyMap(); text = "" }
 
     fun stop() {
-        if (options?.permissions?.stop != true) return
-        actions.stop(); intent.stopped = true
+        if (!current(generation) || options?.permissions?.stop != true) return
+        actions.stop(); intent.requestStop(); intent.stopped = true
         status = "Stopping generation…"
         if (actions.inFlight || stopping) return
-        if (createRequest != null && operation == null) { selected?.let(::select); return }
-        if (retryRequest != null) { resume(resolveOnly = true); return }
+        if (intent.mutations.pending?.request?.create != null && operation == null) { selected?.let(::select); return }
+        if (intent.mutations.pending?.request?.retry != null) { resume(resolveOnly = true); return }
         val op = operation
         if (op?.state == "stopped") { status = "Stopped — cached captions remain available"; return }
         val id = op?.operation_id ?: receipt?.operation_id ?: return
@@ -583,6 +669,7 @@ internal class ProgressiveCaptions(
     fun retry() = resume(resolveOnly = false)
     fun retry(target: CaptionRetryTarget) = resume(resolveOnly = false, target = target)
     fun loadMoreFailedRanges() {
+        if (!current(generation)) return
         val op = operation ?: return
         val cursor = op.failed_ranges_next_cursor ?: return
         val lease = lastLease ?: return
@@ -623,14 +710,14 @@ internal class ProgressiveCaptions(
         }
     }
     private fun resume(resolveOnly: Boolean, target: CaptionRetryTarget? = null) {
-        if (actions.inFlight || stopping || !active || !authorized()) return
+        if (actions.inFlight || stopping || !current(generation)) return
         val op = operation
         if (op == null) {
             if (!resolveOnly && createRequest == null) intent.stopped = false
             selected?.let(::select); return
         }
         if (options?.permissions?.resume != true) return
-        val pending = retryRequest?.second
+        val pending = intent.mutations.pending?.request?.retry ?: retryRequest?.second
         if (pending != null && target != null && pending.target != target) {
             status = "Resolve the previous retry before choosing another failed range."; return
         }
@@ -640,25 +727,28 @@ internal class ProgressiveCaptions(
         if (pending == null && !captionRetryTargetCurrent(chosenTarget, op)) {
             status = "Failed ranges changed; refresh current status before retrying."; refreshStatus(); return
         }
+        val chosen = binding ?: return
         val key = "retry:$chosenTarget"
         val owner = actions.begin(key) ?: return
-        val body = retryRequest?.takeIf { it.first == owner.requestId }?.second ?: captionRetryAttempt(chosenTarget,
-            owner.requestId, expires(), playbackId, position(), rate(), !player().playWhenReady)
+        val body = pending ?: retryRequest?.takeIf { it.first == owner.requestId }?.second ?: captionRetryAttempt(chosenTarget,
+            owner.requestId, expires(), playbackId, position(), rate(), !player().playWhenReady, intent.continuity.id)
         retryRequest = owner.requestId to body
+        val endpoint = api()
+        intent.mutations.install(this@ProgressiveCaptions.owner,
+            CaptionProducerMutations.Pending(CaptionProducerRequest(fileId, chosen, retry = body),
+                explicitResume = !resolveOnly, stopRevision = intent.stopRevision, authorized = authorized) {
+                val response = body.range?.let { endpoint.retryCaptionRange(body.target.operationId, it) }
+                    ?: endpoint.retryCaptions(body.target.operationId, requireNotNull(body.operation))
+                captionRead<CaptionReceipt>(response).also {
+                    captionReceiptContinuity(it, body.range?.continuity_id ?: body.operation?.continuity_id)
+                }
+            })
         val g = generation
         scope.launch {
             var ambiguous = false
             try {
-                val response = body.range?.let { api().retryCaptionRange(op.operation_id, it) }
-                    ?: api().retryCaptions(op.operation_id, requireNotNull(body.operation))
-                val value = captionRead<CaptionReceipt>(response)
-                if (!current(g) || !actions.owns(owner)) { releaseReceipt(value); return@launch }
-                if (resolveOnly || actions.stoppedSince(owner)) {
-                    observe(value.server_now_ms)
-                    val epoch = operation?.takeIf { it.operation_id == value.operation_id && captionCounter(it.operation_epoch) > captionCounter(value.operation_epoch) }
-                        ?.operation_epoch ?: value.operation_epoch
-                    stopOperation(value.operation_id, epoch, g)
-                } else acceptReceipt(value, explicitResume = true)
+                if (!settleProducer(chosen, g, resolveOnly)) return@launch
+                val value = receipt ?: return@launch
                 if (job?.isActive != true) binding?.let { chosen ->
                     job = scope.launch {
                         try { pollOperation(value.operation_id, chosen, g) }
@@ -682,18 +772,20 @@ internal class ProgressiveCaptions(
         }
     }
     fun off() {
+        if (!active || !intent.producer.owns(owner)) return
+        intent.endTraversal()
         intent.captionChoiceChanged()
         intent.selection = null; intent.operationId = null; intent.stopped = false; intent.audioOrdinal = null
         generation++; actions.invalidate(); createRequest = null; retryRequest = null
         job?.cancel(); job = null; readRetired = false; failedRangePage = null; loadingFailures = false; refreshingStatus = false; clearCues(); binding = null; operation = null; status = "Captions Off"
         releaseDemand()
     }
-    private fun releaseReceipt(value: CaptionReceipt) {
+    private fun releaseReceipt(value: CaptionReceipt, ownerPlaybackId: String = playbackId) {
         if (!authorized()) return
         val demand = value.demand_id ?: return
         val generation = value.demand_generation ?: return
         val body = CaptionRelease(1, UUID.randomUUID().toString(), expires(), value.operation_epoch,
-            nextCaptionCounter(generation), playbackId)
+            nextCaptionCounter(generation), ownerPlaybackId)
         cleanupScope.launch {
             if (!authorized()) return@launch
             try { captionBytes(api().releaseCaptions(value.operation_id, demand, body)) }
@@ -701,6 +793,13 @@ internal class ProgressiveCaptions(
             catch (_: Exception) { /* A lost release expires after the bounded server demand TTL. */ }
         }
     }
-    private fun releaseDemand() { heartbeatAttempt.clear(); val old = receipt; receipt = null; if (old != null && authorized()) releaseReceipt(old) }
-    fun release() { active = false; generation++; actions.invalidate(); job?.cancel(); job = null; clearCues(); releaseDemand() }
+    private fun releaseDemand(preserveRetained: Boolean = false) {
+        heartbeatAttempt.clear()
+        receipt = null
+        if (intent.producer.owns(owner) && !preserveRetained) intent.producer.retireDemand()
+    }
+    fun release() {
+        active = false; generation++; actions.invalidate(); job?.cancel(); job = null; clearCues()
+        heartbeatAttempt.clear(); receipt = null; intent.producer.release(owner)
+    }
 }

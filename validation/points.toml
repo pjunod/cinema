@@ -1721,6 +1721,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_translation*.rs",
   "crates/plurx-core/src/store/subtitle_translation.sql",
   "crates/plurx-core/src/store/subtitle_translation_retarget.sql",
+  "crates/plurx-core/src/store/subtitle_translation_continuity.sql",
   "crates/plurx-core/src/store/shared_caption_read.rs",
   "crates/plurx-core/src/store/shared_caption_schema.rs",
   "crates/plurx-core/src/store/shared_caption_read.sql",

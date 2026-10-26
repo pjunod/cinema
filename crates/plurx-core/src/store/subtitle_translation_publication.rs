@@ -90,11 +90,21 @@ async fn settled<T: QueueSql>(store: &T, body: String) -> Result<bool, StoreErro
         .transpose()
         .map(|r| r.unwrap_or(false))
 }
+fn continuation() -> String {
+    let interest = super::subtitle_translation_read::range_interest(
+        "json_extract($1,'$.source')",
+        "json_extract($1,'$.token.job_id')",
+        "json_extract($1,'$.token.fence')",
+        "json_extract($1,'$.now_ms')",
+    );
+    format!("(json_extract($1,'$.source.kind')='subtitle_translation_prepare' OR {interest})")
+}
 fn success_sql() -> String {
+    let continuation = continuation();
     format!(
         r#"UPDATE background_jobs AS job SET state='succeeded',result_ref=json_extract($1,'$.result_ref'),
  owner_node_id=NULL,owner_boot_id=NULL,claim_id=NULL,lease_expires_ms=NULL,revision=revision+1,updated_at_ms=json_extract($1,'$.now_ms')
- WHERE {OWNS} AND EXISTS(SELECT 1 FROM subtitle_translation_operations op WHERE {CURRENT} AND op.asset_id=json_extract($1,'$.recipe.asset_id'))
+ WHERE {OWNS} AND {continuation} AND EXISTS(SELECT 1 FROM subtitle_translation_operations op WHERE {CURRENT} AND op.asset_id=json_extract($1,'$.recipe.asset_id'))
  AND EXISTS(SELECT 1 FROM subtitle_translation_assets a WHERE a.id=json_extract($1,'$.recipe.asset_id') AND a.operation_id=json_extract($1,'$.recipe.operation_id') AND a.retired_at_ms IS NULL
   AND a.source_sha256=json_extract($1,'$.recipe.source_sha256'))
  AND (job.kind='subtitle_translation_prepare' OR EXISTS(SELECT 1 FROM subtitle_translation_segments s
@@ -196,8 +206,9 @@ pub(super) async fn publish<T: QueueSql>(
     )?;
     body_size(&body)?;
     let progress = operation_progress();
+    let continuation = continuation();
     let guard = format!(
-        r#"EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS}) AND EXISTS(SELECT 1 FROM subtitle_translation_operations op WHERE {CURRENT}
+        r#"{continuation} AND EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS}) AND EXISTS(SELECT 1 FROM subtitle_translation_operations op WHERE {CURRENT}
  AND op.view_revision<9223372036854775807 AND op.asset_id=json_extract($1,'$.recipe.asset_id') AND EXISTS(SELECT 1 FROM subtitle_translation_source_bindings b
  WHERE b.operation_id=op.id AND b.operation_epoch=op.operation_epoch AND b.node_id=json_extract($1,'$.token.node_id')
  AND b.boot_id=json_extract($1,'$.token.boot_id') AND b.source_sha256=json_extract($1,'$.recipe.source_sha256'))
@@ -215,7 +226,7 @@ pub(super) async fn publish<T: QueueSql>(
  WHERE id=json_extract($1,'$.recipe.asset_id') AND EXISTS(SELECT 1 FROM subtitle_translation_segments s WHERE s.asset_id=subtitle_translation_assets.id
  AND s.core_index=json_extract($1,'$.recipe.core_index') AND s.publication_id=json_extract($1,'$.publication_id') AND s.accepted_revision=subtitle_translation_assets.manifest_revision+1)"#.into(),body.clone()),
  (format!(r#"UPDATE subtitle_translation_operations AS op SET view_revision=view_revision+1,{progress},updated_at_ms=json_extract($1,'$.now_ms')
- WHERE {CURRENT} AND EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS}) AND EXISTS(SELECT 1 FROM subtitle_translation_segments s WHERE s.asset_id=op.asset_id AND s.core_index=json_extract($1,'$.recipe.core_index') AND s.publication_id=json_extract($1,'$.publication_id'))"#),body.clone()),
+ WHERE {CURRENT} AND {continuation} AND EXISTS(SELECT 1 FROM background_jobs job WHERE {OWNS}) AND EXISTS(SELECT 1 FROM subtitle_translation_segments s WHERE s.asset_id=op.asset_id AND s.core_index=json_extract($1,'$.recipe.core_index') AND s.publication_id=json_extract($1,'$.publication_id'))"#),body.clone()),
  (success_sql(),body.clone()),(SETTLE_WAITERS.into(),body.clone())]).await?;
     settled(store, body).await
 }

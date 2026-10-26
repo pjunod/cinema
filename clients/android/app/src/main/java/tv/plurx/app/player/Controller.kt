@@ -1242,7 +1242,7 @@ class Controller internal constructor(
                     errorCode = error.errorCode,
                     live = player.isCurrentMediaItemLive,
                     seekTargetMs = { playerTimelinePositionMs(filmPositionMs) },
-                    seekTo = { target -> player.seekTo(target) },
+                    seekTo = { target -> progressiveCaptions.ownedMediaMutation { player.seekTo(target) } },
                     prepare = { player.prepare() },
                 )
             ) {
@@ -1415,7 +1415,7 @@ class Controller internal constructor(
         ) {
             // A discontinuity is the viewer's move: it ends a failure backoff.
             pgsOverlay.reconcile(seeked = true)
-            progressiveCaptions.reconcile()
+            progressiveCaptions.rendererDiscontinuity(reason)
         }
 
         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
@@ -1550,6 +1550,7 @@ class Controller internal constructor(
         inPlace: Boolean = false,
     ) {
         if (recipeOwnership.needsMediaReplacement(recipe) || !playbackIntent.isCurrent(sequence)) return
+        progressiveCaptions.executionAttached()
         recipeExecution = RecipeExecution(sequence, recipe, inPlace)
         recipePresentationFrame = null
         firstVideoFrameForSeek = null
@@ -1772,6 +1773,7 @@ class Controller internal constructor(
         stallGuard.viewerSeek {
             playbackControl.clearVerdict()
             val pending = begin()
+            progressiveCaptions.viewerSeek()
             sampleTargetPresentationDeadline()
             val publicationEpoch = mediaMutationEpoch
             seekJob?.cancel()
@@ -1837,7 +1839,7 @@ class Controller internal constructor(
         armTrackSelections(recipe)
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
-                player.seekTo(t)
+                progressiveCaptions.ownedMediaMutation { player.seekTo(t) }
                 playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             }
@@ -1860,7 +1862,7 @@ class Controller internal constructor(
             // session churn. A live one can't be range-sought, so it reopens.
             PlaybackMediaTransport.HlsCopy,
             PlaybackMediaTransport.HlsTranscode -> if (sessionIsVod) {
-                player.seekTo(t)
+                progressiveCaptions.ownedMediaMutation { player.seekTo(t) }
                 playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             } else {
@@ -6662,19 +6664,26 @@ internal fun TrackMenu(
             Text("Generate captions", style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 14.dp, bottom = 4.dp))
             listOf("transcribe" to "Generate captions (spoken language)", "translate" to "Translate audio to English").forEach { (task, label) ->
-                val profile = progressiveCaptions.options?.models?.firstOrNull { it.task == task }
+                val profile = progressiveCaptions.options?.let { options -> runCatching {
+                    captionPreferredProfile(options.models, options.default_profile_id, task,
+                        progressiveCaptions.selected?.profileId)
+                }.getOrNull() }
                 TrackRow(label, progressiveCaptions.selected?.task == task, enabled = profile != null) {
                     val known = progressiveCaptions.options?.audio_tracks?.singleOrNull { it.audio_ordinal == selectedServerAudio }
                         ?.normalized_language?.takeIf { it in profile!!.input_languages }
-                    if (known != null) { onGenerateCaptions(ProgressiveCaptionSelection(task, known)); onDismiss() }
+                    if (known != null) { onGenerateCaptions(ProgressiveCaptionSelection(task, known, profile!!.profile_id)); onDismiss() }
                     else captionLanguageTask = task
                 }
             }
             captionLanguageTask?.let { task ->
                 Text("Choose the language spoken in the selected audio track", style = MaterialTheme.typography.bodySmall)
-                progressiveCaptions.options?.models?.firstOrNull { it.task == task }?.input_languages?.forEach { language ->
+                val languageProfile = progressiveCaptions.options?.let { options -> runCatching {
+                    captionPreferredProfile(options.models, options.default_profile_id, task,
+                        progressiveCaptions.selected?.profileId)
+                }.getOrNull() }
+                languageProfile?.input_languages?.forEach { language ->
                     TrackRow(languageName(language) ?: language, false, true) {
-                        onGenerateCaptions(ProgressiveCaptionSelection(task, language)); onDismiss()
+                        onGenerateCaptions(ProgressiveCaptionSelection(task, language, languageProfile.profile_id)); onDismiss()
                     }
                 }
             }

@@ -111,7 +111,9 @@ fn private_headers(response: &mut Response, now: i64, expiry: Option<i64>) -> Re
     Ok(())
 }
 fn languages() -> Vec<String> {
-    super::profile::model_spec().languages.into_iter().collect()
+    super::profile::model_spec_for(&super::profile::default_profile())
+        .expect("registered default speech profile")
+        .languages
 }
 fn selected_profile(model: &str, profile_id: &str) -> Result<TranslationProfile, ApiError> {
     super::profile::profiles()
@@ -119,10 +121,33 @@ fn selected_profile(model: &str, profile_id: &str) -> Result<TranslationProfile,
         .find(|p| model == p.model_id && p.id().is_ok_and(|id| id == profile_id))
         .ok_or_else(invalid)
 }
-fn profile_summary(profile: TranslationProfile) -> Result<Value, ApiError> {
+/// Saved preferences choose metadata defaults only; readiness never changes them.
+fn configured_default_profile(saved: &config::Snapshot) -> Option<TranslationProfile> {
+    if let Some(id) = saved.profile_id.as_deref() {
+        return super::profile::profiles().into_iter().find(|profile| {
+            profile.id().is_ok_and(|candidate| candidate == id)
+                && saved
+                    .model_id
+                    .as_deref()
+                    .is_none_or(|model| model == profile.model_id)
+        });
+    }
+    if let Some(model) = saved.model_id.as_deref() {
+        return super::profile::profiles()
+            .into_iter()
+            .find(|profile| profile.model_id == model && profile.task.is_translation());
+    }
+    Some(super::profile::default_profile())
+}
+fn profile_summary(
+    profile: TranslationProfile,
+    preferred_model: Option<&str>,
+) -> Result<Value, ApiError> {
+    let model = super::profile::model_spec_for(&profile)?;
+    let is_default = preferred_model == Some(profile.model_id.as_str());
     Ok(
         json!({"profile_id":profile.id()?,"model_id":profile.model_id,"model_sha256":profile.model_sha256,
-        "task":profile.task.name(),"output_language":if profile.task.is_translation(){Some("en")}else{None},"input_languages":languages().into_iter().filter(|language| !profile.task.is_translation() || language != "en").collect::<Vec<_>>(),"adapter_contract":profile.adapter_contract,
+        "label":model.label,"default":is_default,"task":profile.task.name(),"output_language":if profile.task.is_translation(){Some("en")}else{None},"input_languages":model.languages.into_iter().filter(|language| !profile.task.is_translation() || language != "en").collect::<Vec<_>>(),"adapter_contract":profile.adapter_contract,
         "pipeline_revision":profile.pipeline_revision,"timeline_contract":profile.timeline_contract,
         "window":{"core_ms":profile.core_ms,"left_context_ms":profile.left_context_ms,"right_context_ms":profile.right_context_ms},
         "eligibility":{"delivery":["direct","remux","transcode"],"max_source_audio_streams":256,"clock_contract":profile.timeline_contract},
@@ -148,7 +173,6 @@ pub async fn update_settings(
             state.store.as_ref(),
             user.id,
             request,
-            &super::profile::selected_profile(),
             &languages(),
             crate::state::clock_ms(),
         )
@@ -159,11 +183,16 @@ pub async fn models(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Response, ApiError> {
-    let model = super::profile::model_spec();
+    let preferred = configured_default_profile(
+        &config::read(state.store.as_ref(), crate::state::clock_ms()).await?,
+    );
+    let default_profile_id = preferred.as_ref().map(TranslationProfile::id).transpose()?;
+    let preferred_model = preferred.as_ref().map(|profile| profile.model_id.as_str());
+    let models = super::profile::model_specs().into_iter().map(|model| json!({"id":model.id,"label":model.label,"download_bytes":model.download_bytes,"sha256":model.sha256,"source":model.source,"license":model.license})).collect::<Vec<_>>();
     response(
         json!({"version":1,"catalog_revision":"plurx-managed-subtitle-models-v2",
-        "models":[{"id":model.id,"label":model.label,"download_bytes":model.download_bytes,"sha256":model.sha256,"source":model.source,"license":model.license}],
-        "profiles":super::profile::profiles().into_iter().map(profile_summary).collect::<Result<Vec<_>,_>>()?,"workers":worker_rows(super::workers_public(&state).await?)?,"server_now_ms":crate::state::clock_ms()}),
+        "models":models,"default_profile_id":default_profile_id,
+        "profiles":super::profile::profiles().into_iter().map(|profile| profile_summary(profile, preferred_model)).collect::<Result<Vec<_>,_>>()?,"workers":worker_rows(super::workers_public(&state).await?)?,"server_now_ms":crate::state::clock_ms()}),
     )
 }
 fn worker_rows(rows: Vec<Value>) -> Result<Vec<Value>, ApiError> {
@@ -303,6 +332,11 @@ pub async fn options(
     State(state): State<AppState>,
     ApiPath(file_id): ApiPath<i64>,
 ) -> Result<Response, ApiError> {
+    let preferred = configured_default_profile(
+        &config::read(state.store.as_ref(), crate::state::clock_ms()).await?,
+    );
+    let default_profile_id = preferred.as_ref().map(TranslationProfile::id).transpose()?;
+    let preferred_model = preferred.as_ref().map(|profile| profile.model_id.as_str());
     let file = file(&state, file_id).await?;
     let (assets, next) = asset_page(&state, user.id, file.id, None).await?;
     let mut audio = Vec::new();
@@ -323,7 +357,7 @@ pub async fn options(
     response(
         json!({"version":1,"file_id":file.id.to_string(),"source_size":file.size.to_string(),"source_mtime":file.mtime.to_string(),
         "content_revision":null,"duration_ms":file.duration_ms,"source_origin_ms":source_origin_ms,"timeline_contract":super::profile::selected_profile().timeline_contract,
-        "audio_tracks":audio,"subtitle_streams":file.subtitle_streams,"models":super::profile::profiles().into_iter().map(profile_summary).collect::<Result<Vec<_>,_>>()?,
+        "default_profile_id":default_profile_id,"audio_tracks":audio,"subtitle_streams":file.subtitle_streams,"models":super::profile::profiles().into_iter().map(|profile| profile_summary(profile, preferred_model)).collect::<Result<Vec<_>,_>>()?,
         "capability":{"supported":any_supported,"reason":if any_supported{None}else{Some(capability_reason)}},
         "permissions":{"read":true,"demand":user.is_admin,"stop":user.is_admin,"resume":user.is_admin},
         "assets":assets,"assets_next_cursor":next,"server_now_ms":crate::state::clock_ms()}),
@@ -468,6 +502,8 @@ pub(crate) struct CreateRequest {
     position_ms: i64,
     playback_rate: f64,
     paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continuity_id: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -481,6 +517,8 @@ pub(crate) struct DemandRequest {
     position_ms: i64,
     playback_rate: f64,
     paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continuity_id: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -514,6 +552,8 @@ pub(crate) enum RetryRequest {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
     Range {
         version: u8,
@@ -528,6 +568,8 @@ pub(crate) enum RetryRequest {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
 }
 fn window(playback_id: &str, position: i64, rate: f64) -> Result<(), ApiError> {
@@ -566,6 +608,16 @@ async fn mutate(
     action: TranslationAction,
     wire_outcome: &str,
 ) -> Result<Response, ApiError> {
+    let continuity = match &action {
+        TranslationAction::Create { continuity_id, .. }
+        | TranslationAction::Demand { continuity_id, .. }
+        | TranslationAction::RetryOperation { continuity_id, .. }
+        | TranslationAction::RetryRange { continuity_id, .. } => continuity_id.as_deref(),
+        _ => None,
+    };
+    if continuity.is_some_and(|id| id.len() != 36 || uuid::Uuid::parse_str(id).is_err()) {
+        return Err(invalid());
+    }
     let now = crate::state::clock_ms();
     if let Some(receipt) = config::replay(
         state.store.as_ref(),
@@ -656,6 +708,7 @@ fn mutation_receipt(value: &Value, outcome: &str) -> Result<Value, ApiError> {
         let demand = field(value, "demand_id")?;
         id_check(demand)?;
         answer["demand_id"] = demand.into();
+        answer["continuity_id"] = nullable_id(value, "continuity_id")?;
         answer["demand_generation"] = counter(value, "demand_generation", true)?.into();
     }
     if outcome == "updated" {
@@ -788,6 +841,7 @@ pub async fn create(
             position_ms: input.position_ms,
             playback_rate: input.playback_rate,
             paused: input.paused,
+            continuity_id: input.continuity_id,
         },
         "accepted",
     )
@@ -827,6 +881,7 @@ pub async fn demand(
             position_ms: input.position_ms,
             playback_rate: input.playback_rate,
             paused: input.paused,
+            continuity_id: input.continuity_id,
         },
         "updated",
     )
@@ -919,6 +974,7 @@ pub async fn retry(
             position_ms,
             playback_rate,
             paused,
+            continuity_id,
         } => {
             envelope(version, &request_id, intent_expires_at_ms)?;
             window(&playback_id, position_ms, playback_rate)?;
@@ -937,6 +993,7 @@ pub async fn retry(
                     position_ms,
                     playback_rate,
                     paused,
+                    continuity_id,
                 },
                 "resumed",
             )
@@ -954,6 +1011,7 @@ pub async fn retry(
             position_ms,
             playback_rate,
             paused,
+            continuity_id,
         } => {
             envelope(version, &request_id, intent_expires_at_ms)?;
             window(&playback_id, position_ms, playback_rate)?;
@@ -975,6 +1033,7 @@ pub async fn retry(
                     position_ms,
                     playback_rate,
                     paused,
+                    continuity_id,
                 },
                 "range_retry_queued",
             )
@@ -1816,6 +1875,92 @@ mod tests {
     use super::*;
     use plurx_core::store::{background_jobs::BackgroundJobStore, SqliteStore};
 
+    #[test]
+    fn configured_defaults_preserve_saved_model_and_task_without_readiness() {
+        let mut saved = config::Snapshot {
+            version: 1,
+            revision: "opaque".into(),
+            enabled: true,
+            model_id: None,
+            profile_id: None,
+            preferred_spoken_language: None,
+            outcome: None,
+            server_now_ms: 0,
+        };
+        assert_eq!(
+            configured_default_profile(&saved),
+            Some(super::super::profile::default_profile())
+        );
+        saved.model_id = Some("small".into());
+        assert_eq!(
+            configured_default_profile(&saved),
+            Some(super::super::profile::selected_profile())
+        );
+        for profile in super::super::profile::profiles() {
+            let summary = profile_summary(profile.clone(), Some("small")).expect("profile summary");
+            assert_eq!(summary["default"], profile.model_id == "small");
+        }
+        let transcribe = super::super::profile::for_task(SpeechTask::Transcribe);
+        saved.profile_id = Some(transcribe.id().expect("explicit task"));
+        assert_eq!(configured_default_profile(&saved), Some(transcribe));
+        saved.model_id = Some("base".into());
+        assert!(
+            configured_default_profile(&saved).is_none(),
+            "unregistered model pair cannot choose a default"
+        );
+        saved.profile_id = Some("f".repeat(64));
+        assert!(
+            configured_default_profile(&saved).is_none(),
+            "unknown explicit profile cannot choose a default"
+        );
+    }
+
+    #[test]
+    fn profile_projection_exposes_both_registered_small_task_defaults() {
+        let profiles = super::super::profile::profiles()
+            .into_iter()
+            .map(|profile| {
+                profile_summary(profile, Some("small")).expect("registered profile summary")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            profiles
+                .iter()
+                .filter(|profile| profile["default"] == true)
+                .count(),
+            2
+        );
+        for profile in profiles {
+            assert_eq!(profile["model_id"], "small");
+            assert_eq!(profile["default"], true);
+            assert!(profile["label"]
+                .as_str()
+                .is_some_and(|label| !label.is_empty()));
+            let input = profile["input_languages"]
+                .as_array()
+                .expect("input languages");
+            assert_eq!(
+                input.len(),
+                if profile["task"] == "translate" {
+                    98
+                } else {
+                    99
+                }
+            );
+            assert!(!input.iter().any(|language| language == "yue"));
+            let selected = selected_profile(
+                profile["model_id"].as_str().expect("model"),
+                profile["profile_id"].as_str().expect("profile"),
+            )
+            .expect("exact selection");
+            assert_eq!(
+                Some(selected.model_sha256.as_str()),
+                profile["model_sha256"].as_str()
+            );
+        }
+    }
+
     fn create_input() -> CreateRequest {
         let profile = super::super::profile::selected_profile();
         CreateRequest {
@@ -1834,6 +1979,7 @@ mod tests {
             position_ms: 0,
             playback_rate: 1.0,
             paused: false,
+            continuity_id: None,
         }
     }
 
@@ -1899,6 +2045,7 @@ mod tests {
                     position_ms: 0,
                     playback_rate: 1.0,
                     paused: false,
+                    continuity_id: None,
                 },
             })
             .await

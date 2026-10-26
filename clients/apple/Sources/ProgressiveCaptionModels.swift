@@ -85,6 +85,8 @@ struct CaptionLimits: Decodable {
 struct CaptionProfile: Decodable, Identifiable {
     let profileId: String, modelId: String, modelSha256: String
     let task: CaptionTask
+    let label: String?
+    let `default`: Bool?
     let outputLanguage: String?
     let inputLanguages: [String]
     let timelineContract: String
@@ -121,11 +123,13 @@ struct CaptionOptions: Decodable {
     let audioTracks: [CaptionAudio], models: [CaptionProfile], capability: CaptionCapability
     let permissions: CaptionPermissions, assets: [CaptionAsset]
     let assetsNextCursor: String?
+    let defaultProfileId: String?
     let serverNowMs: Int
     func validate(file: Int) throws {
         guard version == 1, fileId == String(file), CaptionValidation.counter(sourceSize),
               Int64(sourceMtime) != nil, durationMs > 0, durationMs <= 14_400_000,
               audioTracks.count <= 256, models.count <= 16, assets.count <= 64,
+              defaultProfileId.map({ hint in CaptionValidation.digest(hint) && models.contains(where: { $0.profileId == hint }) }) ?? true,
               Set(audioTracks.map(\.ordinal)).count == audioTracks.count,
               audioTracks.allSatisfy({ (0...255).contains($0.ordinal) }) else { throw CaptionProtocolError.invalid }
         for model in models { try model.validate() }
@@ -133,12 +137,14 @@ struct CaptionOptions: Decodable {
 }
 struct CaptionReceipt: Decodable {
     let version: Int, outcome: String, operationId: String, operationEpoch: String, viewRevision: String
-    let demandId: String?, demandGeneration: String?, assetId: String?, state: String?
+    let demandId: String?, demandGeneration: String?, continuityId: String?, assetId: String?, state: String?
     let serverNowMs: Int
-    func validate() throws {
+    func validate(continuity expected: String? = nil) throws {
         guard version == 1, CaptionValidation.uuid(operationId), CaptionValidation.counter(operationEpoch),
               CaptionValidation.counter(viewRevision), demandId.map(CaptionValidation.uuid) ?? true,
               demandGeneration.map(CaptionValidation.counter) ?? true,
+              continuityId.map(CaptionValidation.uuid) ?? true,
+              expected == nil || demandId == nil || continuityId == expected,
               assetId.map(CaptionValidation.digest) ?? true else { throw CaptionProtocolError.invalid }
     }
 }

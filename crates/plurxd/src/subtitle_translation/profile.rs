@@ -48,11 +48,36 @@ pub(crate) fn for_task(task: SpeechTask) -> TranslationProfile {
         ..selected_profile()
     }
 }
-pub(crate) fn profiles() -> [TranslationProfile; 2] {
+/// Defaults retain the registered Small model and its immutable profile IDs.
+pub(crate) fn default_profile() -> TranslationProfile {
+    default_for_task(SpeechTask::TranslateToEnglish)
+}
+pub(crate) fn default_for_task(task: SpeechTask) -> TranslationProfile {
+    for_task(task)
+}
+pub(crate) fn legacy_profiles() -> [TranslationProfile; 2] {
     [selected_profile(), for_task(SpeechTask::Transcribe)]
 }
+pub(crate) fn profiles() -> [TranslationProfile; 2] {
+    legacy_profiles()
+}
 pub(crate) fn registered(profile: &TranslationProfile) -> bool {
-    *profile == for_task(profile.task)
+    profiles().iter().any(|candidate| candidate == profile)
+}
+/// Only an exact registered profile can choose an artifact. Never fall back
+/// from an unknown or modified model/profile pair to the legacy model.
+pub(crate) fn model_spec_for(
+    profile: &TranslationProfile,
+) -> Result<CatalogModel, plurx_core::error::StoreError> {
+    if !registered(profile) {
+        return Err(plurx_core::error::StoreError::Task(
+            "translation_profile_unavailable".into(),
+        ));
+    }
+    Ok(model_spec())
+}
+pub(crate) fn model_specs() -> [CatalogModel; 1] {
+    [model_spec()]
 }
 /// Task-specific production-path evidence using the publisher's German words.
 /// This is a bounded smoke qualification, not a broad recognition quality claim.
@@ -131,6 +156,47 @@ pub(crate) fn english_self_test(cues: &[TranslationCue]) -> bool {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn registered_small_profiles_resolve_exact_bytes_and_preserve_legacy_identity() {
+        let legacy = br#"{"adapter_contract":"whisper.cpp-1.9.2-cpu-v1","core_ms":30000,"left_context_ms":5000,"model_id":"small","model_sha256":"1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b","pipeline_revision":"translation-window-v1","right_context_ms":5000,"timeline_contract":"source-audio-clock-v1","version":1}"#;
+        assert_eq!(
+            plurx_core::store::subtitle_translation::canonical_bytes(&selected_profile())
+                .expect("legacy bytes")
+                .as_slice(),
+            legacy
+        );
+        let ids = profiles()
+            .into_iter()
+            .map(|profile| {
+                assert!(registered(&profile));
+                let model = model_spec_for(&profile).expect("exact registered model");
+                assert_eq!(model.id, profile.model_id);
+                assert_eq!(model.sha256, profile.model_sha256);
+                assert_eq!(model.languages.len(), 99);
+                assert!(!model.languages.iter().any(|language| language == "yue"));
+                assert_eq!(model.id, "small");
+                assert_eq!(model.download_bytes, 487_601_967);
+                profile.id().expect("profile identity")
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(default_profile(), profiles()[0]);
+        assert_eq!(for_task(SpeechTask::Transcribe).model_id, "small");
+        let mut crosswired = default_profile();
+        crosswired.model_sha256 = "0".repeat(64);
+        assert!(!registered(&crosswired));
+        assert!(model_spec_for(&crosswired).is_err());
+        let mut unsupported_model = default_profile();
+        unsupported_model.model_id = "base".into();
+        unsupported_model.model_sha256 =
+            "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe".into();
+        assert!(!registered(&unsupported_model));
+        assert!(model_spec_for(&unsupported_model).is_err());
+        let mut unregistered = default_profile();
+        unregistered.core_ms = 1_000;
+        assert!(model_spec_for(&unregistered).is_err());
+    }
 
     #[test]
     fn tasks_keep_legacy_profile_bytes_and_qualify_independently() {

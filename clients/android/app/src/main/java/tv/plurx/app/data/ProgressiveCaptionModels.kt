@@ -8,40 +8,40 @@ import kotlinx.serialization.Serializable
 @Serializable data class CaptionAudio(val index: Long, val audio_ordinal: Long? = null, val source_index: Long? = null,
     val capability: CaptionCapability? = null, val normalized_language: String? = null, val language: String? = null, val title: String? = null, val default: Boolean = false)
 @Serializable data class CaptionProfile(val profile_id: String, val model_id: String, val task: String,
-    val output_language: String? = null, val input_languages: List<String>)
+    val output_language: String? = null, val input_languages: List<String>, val label: String? = null, val default: Boolean? = null)
 @Serializable data class CaptionAsset(val asset_id: String, val operation_id: String, val source_size: String,
     val source_mtime: String, val profile_id: String, val audio_index: Long, val spoken_language: String,
     val output_language: String, val content_revision: String, val timeline_contract: String)
 @Serializable data class CaptionOptions(val version: Int, val file_id: String, val source_size: String, val source_mtime: String,
     val duration_ms: Long, val source_origin_ms: Long? = null, val timeline_contract: String,
     val audio_tracks: List<CaptionAudio>, val models: List<CaptionProfile>, val capability: CaptionCapability,
-    val permissions: CaptionPermissions, val assets: List<CaptionAsset>, val assets_next_cursor: String? = null, val server_now_ms: Long)
+    val permissions: CaptionPermissions, val assets: List<CaptionAsset>, val assets_next_cursor: String? = null, val server_now_ms: Long, val default_profile_id: String? = null)
 @Serializable data class CaptionAssetPage(val version: Int, val assets: List<CaptionAsset> = emptyList(),
     val entries: List<CaptionAsset> = emptyList(), val next_cursor: String? = null)
 @Serializable data class CaptionCreate(val version: Int, val request_id: String, val intent_expires_at_ms: Long,
     val source_size: String, val source_mtime: String, val audio_index: Long, val spoken_language: String,
     val output_language: String, val task: String, val model_id: String, val profile_id: String,
-    val playback_id: String, val position_ms: Long, val playback_rate: Double, val paused: Boolean)
+    val playback_id: String, val position_ms: Long, val playback_rate: Double, val paused: Boolean, val continuity_id: String? = null)
 @Serializable data class CaptionDemand(val version: Int, val request_id: String, val intent_expires_at_ms: Long,
     val expected_operation_epoch: String, val demand_generation: String, val playback_id: String,
-    val position_ms: Long, val playback_rate: Double, val paused: Boolean)
+    val position_ms: Long, val playback_rate: Double, val paused: Boolean, val continuity_id: String? = null)
 @Serializable data class CaptionRelease(val version: Int, val request_id: String, val intent_expires_at_ms: Long,
     val expected_operation_epoch: String, val demand_generation: String, val playback_id: String)
 @Serializable data class CaptionStop(val version: Int, val request_id: String, val intent_expires_at_ms: Long, val expected_operation_epoch: String)
 @Serializable data class CaptionRetry(val scope: String, val version: Int, val request_id: String, val intent_expires_at_ms: Long,
     val expected_operation_epoch: String, val expected_view_revision: String, val expected_state: String,
-    val playback_id: String, val position_ms: Long, val playback_rate: Double, val paused: Boolean)
+    val playback_id: String, val position_ms: Long, val playback_rate: Double, val paused: Boolean, val continuity_id: String? = null)
 @Serializable data class CaptionRangeRetry(val version: Int, val request_id: String, val intent_expires_at_ms: Long,
     val expected_operation_epoch: String, val expected_operation_state: String, val core_index: Long,
     val expected_range_revision: String, val expected_range_state: String, val playback_id: String,
-    val position_ms: Long, val playback_rate: Double, val paused: Boolean, val scope: String)
+    val position_ms: Long, val playback_rate: Double, val paused: Boolean, val scope: String, val continuity_id: String? = null)
 @Serializable data class CaptionFailedRange(val core_index: Long, val range_revision: String,
     val reason: String? = null, val retryable: Boolean, val attempts: Long)
 @Serializable data class CaptionFailedRangePage(val version: Int, val operation_id: String,
     val operation_epoch: String, val view_revision: String, val entries: List<CaptionFailedRange>, val next_cursor: String? = null)
 @Serializable data class CaptionReceipt(val version: Int, val outcome: String, val operation_id: String,
     val operation_epoch: String, val view_revision: String, val state: String? = null, val asset_id: String? = null,
-    val demand_id: String? = null, val demand_generation: String? = null, val server_now_ms: Long)
+    val demand_id: String? = null, val demand_generation: String? = null, val server_now_ms: Long, val continuity_id: String? = null)
 @Serializable data class CaptionSourceCheck(val state: String, val bytes_read: String, val total_bytes: String)
 @Serializable data class CaptionJob(val phase: String, val reason: String? = null)
 @Serializable data class CaptionOperation(val version: Int, val operation_id: String, val operation_epoch: String,
@@ -73,7 +73,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class CaptionWorker(val node_id: String, val label: String, val current: Boolean, val eligible: Boolean,
     val expires_at_ms: Long, val capabilities: List<CaptionWorkerCapability>)
 @Serializable data class CaptionCatalog(val version: Int, val models: List<CaptionModel>, val profiles: List<CaptionProfile>,
-    val workers: List<CaptionWorker>, val server_now_ms: Long)
+    val workers: List<CaptionWorker>, val server_now_ms: Long, val default_profile_id: String? = null)
 @Serializable data class CaptionModelRequest(val version: Int, val request_id: String, val intent_expires_at_ms: Long,
     val purpose: String, val profile_id: String, val node_ids: List<String>)
 @Serializable data class CaptionModelOperation(val node_id: String, val job_id: String? = null, val outcome: String)

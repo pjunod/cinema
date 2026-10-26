@@ -58,6 +58,10 @@ pub enum TranslationQuery {
     Capabilities {
         node_id: String,
     },
+    /// Worker-only lifetime check for an already-owned range attempt.
+    RangeInterest {
+        job_id: String,
+    },
     LiveDemands {
         operation_id: String,
         operation_epoch: i64,
@@ -85,6 +89,20 @@ pub struct AcquireTranslationLease {
     pub user_id: i64,
     pub asset_id: String,
     pub now_ms: i64,
+}
+// Scheduling admits only the current useful window. A running attempt may
+// additionally finish under the exact traversal grants captured by its claim.
+pub(super) fn range_interest(payload: &str, job: &str, fence: &str, now: &str) -> String {
+    format!(
+        r#"EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id
+ WHERE d.operation_id=json_extract({payload},'$.recipe.operation_id')
+ AND d.operation_epoch=json_extract({payload},'$.recipe.operation_epoch')
+ AND d.released=0 AND d.expires_at_ms>{now} AND u.is_admin=1
+ AND (json_extract({payload},'$.recipe.core_index') BETWEEN CAST(d.position_ms/json_extract({payload},'$.recipe.profile.core_ms') AS INTEGER)
+  AND CAST(d.position_ms/json_extract({payload},'$.recipe.profile.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)
+ OR EXISTS(SELECT 1 FROM subtitle_translation_range_continuities c
+  WHERE c.job_id={job} AND c.fence={fence} AND c.demand_id=d.id AND c.continuity_id=d.continuity_id)))"#
+    )
 }
 pub(super) const READABLE_OPERATION: &str = r#"EXISTS(SELECT 1 FROM subtitle_translation_assets a WHERE a.id=op.asset_id AND a.operation_id=op.id AND a.retired_at_ms IS NULL AND a.source_json=op.source_json AND a.profile_json=op.profile_json AND a.audio_index=op.audio_index AND a.spoken_language=op.spoken_language AND a.duration_ms=op.duration_ms AND a.core_count=(a.duration_ms+json_extract(a.profile_json,'$.core_ms')-1)/json_extract(a.profile_json,'$.core_ms') AND a.core_count=(SELECT count(*) FROM subtitle_translation_segments s WHERE s.asset_id=a.id AND s.core_index>=0 AND s.core_index<a.core_count AND s.start_ms=s.core_index*json_extract(a.profile_json,'$.core_ms') AND s.end_ms=min((s.core_index+1)*json_extract(a.profile_json,'$.core_ms'),a.duration_ms) AND s.accepted_revision>0 AND s.accepted_revision<=a.manifest_revision))"#;
 const LIVE_ASSET: &str = r#"a.id=json_extract($1,'$.asset_id') AND a.retired_at_ms IS NULL
@@ -277,6 +295,27 @@ pub(super) async fn read<T: QueueSql>(
             body["node_id"] = node_id.into();
             "SELECT receipt_json AS result_json FROM subtitle_translation_capabilities WHERE node_id=json_extract($1,'$.node_id') ORDER BY model_id,profile_id LIMIT 16".into()
         }
+        TranslationQuery::RangeInterest { job_id } => {
+            if input.user_id != 0 || !uuid(&job_id) {
+                return Err(bad());
+            }
+            body["job_id"] = job_id.into();
+            let interest = range_interest(
+                "j.payload_json",
+                "j.id",
+                "j.fence",
+                "json_extract($1,'$.now_ms')",
+            );
+            format!(
+                r#"SELECT json_object('interested',json(CASE WHEN {interest} THEN 'true' ELSE 'false' END)) AS result_json
+ FROM background_jobs j JOIN subtitle_translation_operations op ON op.id=json_extract(j.payload_json,'$.recipe.operation_id')
+ WHERE j.id=json_extract($1,'$.job_id') AND j.kind='subtitle_translation_range' AND j.state='running' AND j.lease_expires_ms>json_extract($1,'$.now_ms')
+ AND op.stopped=0 AND op.state NOT IN ('stopped','failed')
+ AND op.operation_epoch=json_extract(j.payload_json,'$.recipe.operation_epoch')
+ AND op.preparation_job_id=json_extract(j.payload_json,'$.producer_preparation_job_id')
+ AND op.target_node_id=json_extract(j.payload_json,'$.target_node_id')"#
+            )
+        }
         TranslationQuery::LiveDemands {
             operation_id,
             operation_epoch,
@@ -286,7 +325,7 @@ pub(super) async fn read<T: QueueSql>(
             }
             body["operation_id"] = operation_id.into();
             body["epoch"] = operation_epoch.into();
-            "SELECT json_object('demand_id',d.id,'generation',d.generation,'user_id',d.user_id,'position_ms',d.position_ms,'playback_rate',d.playback_rate,'paused',json(CASE WHEN d.paused=1 THEN 'true' ELSE 'false' END),'expires_at_ms',d.expires_at_ms) AS result_json FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id JOIN subtitle_translation_operations op ON op.id=d.operation_id AND op.operation_epoch=d.operation_epoch WHERE op.stopped=0 AND d.operation_id=json_extract($1,'$.operation_id') AND d.operation_epoch=json_extract($1,'$.epoch') AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND u.is_admin=1 ORDER BY d.user_id,d.id LIMIT 16".into()
+            "SELECT json_object('demand_id',d.id,'playback_id',d.playback_id,'continuity_id',d.continuity_id,'generation',d.generation,'user_id',d.user_id,'position_ms',d.position_ms,'playback_rate',d.playback_rate,'paused',json(CASE WHEN d.paused=1 THEN 'true' ELSE 'false' END),'expires_at_ms',d.expires_at_ms) AS result_json FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id JOIN subtitle_translation_operations op ON op.id=d.operation_id AND op.operation_epoch=d.operation_epoch WHERE op.stopped=0 AND d.operation_id=json_extract($1,'$.operation_id') AND d.operation_epoch=json_extract($1,'$.epoch') AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND u.is_admin=1 ORDER BY d.user_id,d.id LIMIT 16".into()
         }
         TranslationQuery::CoreState {
             operation_id,

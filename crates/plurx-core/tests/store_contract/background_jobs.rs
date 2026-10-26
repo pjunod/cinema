@@ -5654,6 +5654,8 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             source_size: file.size,
             source_mtime: file.mtime,
         };
+        let continuity = uuid::Uuid::new_v4().to_string();
+        let playback = uuid::Uuid::new_v4().to_string();
         let input = TranslationMutation {
             user_id: user.id,
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -5667,10 +5669,11 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
                 spoken_language: "de".into(),
                 duration_ms: 61000,
                 target_node_id: "worker".into(),
-                playback_id: uuid::Uuid::new_v4().to_string(),
+                playback_id: playback.clone(),
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                continuity_id: Some(continuity.clone()),
             },
         };
         let accepted = store
@@ -5793,6 +5796,42 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             panic!("{backend}: {claimed:?}");
         };
         let token = job.token.expect("token");
+        let advanced = store
+            .mutate_subtitle_translation(TranslationMutation {
+                user_id: user.id,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request_digest: "6".repeat(64),
+                intent_expires_at_ms: 300000,
+                now_ms: 1550,
+                action: TranslationAction::Demand {
+                    operation_id: op.clone(),
+                    expected_operation_epoch: 1,
+                    demand_id: accepted["demand_id"].as_str().expect("demand").into(),
+                    expected_generation: 1,
+                    playback_id: playback,
+                    position_ms: 31000,
+                    playback_rate: 1.0,
+                    paused: false,
+                    continuity_id: Some(continuity.clone()),
+                },
+            })
+            .await
+            .expect("advance across core boundary");
+        assert_eq!(advanced["continuity_id"], continuity, "{backend}");
+        let interest = store
+            .read_subtitle_translation(TranslationRead {
+                user_id: 0,
+                now_ms: 1551,
+                query: TranslationQuery::RangeInterest {
+                    job_id: job.id.clone(),
+                },
+            })
+            .await
+            .expect("owned continuity");
+        assert_eq!(
+            interest[0]["interested"], true,
+            "{backend}: running core survives advancing viewer"
+        );
         let segment = SegmentDraft {
             asset_id: asset.clone(),
             core_index: 0,

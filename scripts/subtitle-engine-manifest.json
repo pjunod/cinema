@@ -28,6 +28,47 @@
     "WHISPER_CURL": "OFF",
     "WHISPER_OPENVINO": "OFF"
   },
+  "cpu_variants": {
+    "x86_64-avx2": {
+      "build_options": {
+        "BUILD_SHARED_LIBS": "OFF",
+        "CMAKE_BUILD_TYPE": "Release",
+        "GGML_ACCELERATE": "OFF",
+        "GGML_AVX": "ON",
+        "GGML_AVX2": "ON",
+        "GGML_BACKEND_DL": "OFF",
+        "GGML_BLAS": "OFF",
+        "GGML_BMI2": "ON",
+        "GGML_CCACHE": "OFF",
+        "GGML_CPU_ARM_ARCH": "armv8-a",
+        "GGML_CUDA": "OFF",
+        "GGML_F16C": "ON",
+        "GGML_FMA": "ON",
+        "GGML_METAL": "OFF",
+        "GGML_NATIVE": "OFF",
+        "GGML_OPENMP": "OFF",
+        "GGML_RPC": "OFF",
+        "GGML_SSE42": "ON",
+        "GGML_VULKAN": "OFF",
+        "WHISPER_BUILD_EXAMPLES": "ON",
+        "WHISPER_BUILD_SERVER": "OFF",
+        "WHISPER_BUILD_TESTS": "OFF",
+        "WHISPER_COMMON_FFMPEG": "OFF",
+        "WHISPER_COREML": "OFF",
+        "WHISPER_CURL": "OFF",
+        "WHISPER_OPENVINO": "OFF"
+      },
+      "filename": "whisper-cli-avx2",
+      "required_features": [
+        "sse4.2",
+        "avx",
+        "avx2",
+        "f16c",
+        "fma",
+        "bmi2"
+      ]
+    }
+  },
   "release": "v1.9.2",
   "source_archive_bytes": 9627120,
   "source_archive_sha256": "f3585ebf64df3e41b26c45d93bdb38b423ca1de0bf40cc4b6d320254867a75df",

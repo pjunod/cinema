@@ -1,6 +1,6 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** built · qualification and landing recorded on PR #1292
+**Status:** built · runtime qualified, final gate pending
 
 **Date:** 2026-10-25 · **Updated:** 2026-10-26 · **Owner:** Codex /root · **Branch:** `effort/subtitle-completion`
 
@@ -16,16 +16,62 @@ deployment and is distinct from server/runtime or simulator evidence.
 
 | Area | Current implementation | Qualification and acceptance |
 |---|---|---|
-| On-the-fly captions | Shared progressive worker supports same-language transcription and speech-to-English translation, selected audio ordinal and actual media clock. | Review closed; focused regressions and model self-tests passed. Progressive-worker and final gate results are recorded on PR #1292. |
+| On-the-fly captions | Shared progressive worker supports same-language transcription and speech-to-English translation, selected audio ordinal and actual media clock. | Review and focused regressions pass; real advancing-clock qualification produced useful captions at 14.3/15.9 seconds and complete 95-second coverage at 51.4/54.6 seconds on two CPUs. Final gate is tracked on PR #1292. |
 | Existing subtitle translation | Pinned local multilingual-to-English Marian model, durable eight-cue slices, bounded partial storage, explicit stable-ID adoption. | Production multilingual self-test and durable-slice regressions passed; broader human accuracy remains acceptance evidence. |
-| Apple/iOS/tvOS | Setup, three caption operations, synchronized rendering, Stop/seek/audio/auth ownership and Shared read-only delivery implemented. App and test targets compile. | Final tests and Apple TV physical acceptance after user deployment. |
-| Android | Equivalent caption operations and Shared reader; direct downloaded caption attachment repaired. Main and JVM test sources compile. | Final tests and device acceptance. |
-| Web | Speech/text setup and controls, explicit track adoption, attachment handoff and Shared reader integrated. | Final protocol/UI regressions and playback acceptance. |
+| Apple/iOS/tvOS | Setup, three caption operations, synchronized rendering, Stop/seek/audio/auth ownership and Shared read-only delivery implemented. App and test targets compile. | 25 affected simulator methods pass; physical Apple TV acceptance follows user deployment. |
+| Android | Equivalent caption operations and Shared reader; direct downloaded caption attachment repaired. Main and JVM test sources compile. | 47 affected JVM tests pass; device acceptance follows user deployment. |
+| Web | Speech/text setup and controls, explicit track adoption, attachment handoff and Shared reader integrated. | 73 focused protocol/UI cases pass; deployed acceptance remains attributable separately. |
 | Source/B sharing | Opaque grant-scoped catalog/manifest/segments, snapshot retention, read-only source verification. No Shared viewer inference authority. | Focused grant, retention and restart regressions passed; deployed acceptance is separate. |
 | Landing | PR #1292 is the owned integration and qualification record. | Current check results, blockers and merge receipt are maintained on the PR. |
 
 The historical inventory below records the starting point; it is not a claim
 that the newly implemented operations remain absent.
+
+## Advancing-playback correction — 2026-10-26
+
+The user explicitly requested this correction before merge. The real35second
+fixed-position Small test passed both speech tasks, canonical readback and
+complete coverage. Its measured first publication was123/137seconds and full
+completion177/194seconds on two CPUs. Its constant-position heartbeat did not
+prove ordinary advancing playback. A later source audit found the manager
+cancelled running work when its core fell behind the current scheduling
+window; normal advancement could therefore repeatedly abandon inference.
+
+The correction separates queued-window admission from claim-bound continuous
+playback authority. Requests carry an explicit traversal UUID; seeks replace
+it, while normal advancement retains it. Stop, expiry, source/producer changes
+and resource limits remain authoritative. Implementation and bounded review
+are complete, including expiry-gap revocation and native in-flight mutation
+handoff corrections. The three exact-shape schema tests, 47 affected Android
+tests, 25 Apple TV simulator methods and 73 focused web cases have passed;
+passing cases are retained and only failed fixture cases were rerun.
+
+The real advancing-playback qualification exposed another setup blocker before
+playback began: Base recognition failed the existing speech-quality check.
+That check remains intact and the unqualified Base progressive choices are
+removed. Small retains its original profile identities, model bytes and
+decoding parameters. The generic pinned engine disabled x86 vector instructions;
+a reviewed statically linked AVX2 executable now accompanies the compatible
+baseline. Runtime CPU selection keeps the existing held-descriptor execution
+boundary and introduces no plugin loader. Both executables build, strict Rust
+construction checks pass, and all 17 packaging/verifier tests pass.
+
+The real moving-playback qualification passed for both Small tasks on the
+95-second source with selected audio ordinal 2. English translation first
+became useful at 14.281 seconds and completed all four immutable cores at
+51.386 seconds; same-language German first became useful at 15.857 seconds
+and completed at 54.617 seconds. Ordinary 1x playback advanced through
+71.387/74.619 seconds. Canonical leased readback observed useful current-core
+captions repeatedly in both the 30–60 and 60–90 second bands (9/3 English
+observations and 11/3 German observations). All eight range jobs and both real
+Install/Verify jobs succeeded. No competing owned compiler work ran during
+this qualification. The selected static engine SHA256 is
+`3beb7ff9ca5660306022a1acd0a9c30df431f1fff860722632997076415adbc4`.
+
+The full private receipt is retained outside compiler caches with the local
+runtime log and source review. This proves the controlled source, worker and
+readback path; physical Apple TV acceptance follows the user's deployment.
+The current-head main fast lane remains the merge blocker.
 
 ## Final adversarial review — 2026-10-26
 

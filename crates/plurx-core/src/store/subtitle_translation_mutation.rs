@@ -31,6 +31,8 @@ pub enum TranslationAction {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
     Demand {
         operation_id: String,
@@ -41,6 +43,8 @@ pub enum TranslationAction {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
     Release {
         operation_id: String,
@@ -62,6 +66,8 @@ pub enum TranslationAction {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
     /// Internal reconciliation of an already-authorized live demand; never changes its root epoch.
     Retarget {
@@ -81,6 +87,8 @@ pub enum TranslationAction {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
 }
 impl TranslationMutation {
@@ -93,6 +101,16 @@ impl TranslationMutation {
             || self.now_ms.checked_add(604800000).is_none()
             || self.intent_expires_at_ms < 0
         {
+            return Err(bad());
+        }
+        let continuity = match &self.action {
+            TranslationAction::Create { continuity_id, .. }
+            | TranslationAction::Demand { continuity_id, .. }
+            | TranslationAction::RetryOperation { continuity_id, .. }
+            | TranslationAction::RetryRange { continuity_id, .. } => continuity_id.as_deref(),
+            _ => None,
+        };
+        if continuity.is_some_and(|id| id.len() != 36 || uuid::Uuid::parse_str(id).is_err()) {
             return Err(bad());
         }
         let window = |position: &i64, rate: &f64, playback: &str| {

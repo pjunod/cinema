@@ -25,6 +25,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import tv.plurx.app.data.*
 import tv.plurx.app.player.captionRead
+import tv.plurx.app.player.captionSavedProfile
 import tv.plurx.app.ui.components.ChoicePicker
 import java.util.UUID
 
@@ -54,9 +55,10 @@ internal fun CaptionGenerationSettings(vm: AppViewModel) {
         if (!authorized()) return
         require(settings.version == 1 && models.version == 1 && models.profiles.size <= 16 && models.workers.size <= 32)
         saved = settings; catalog = models; enabled = settings.enabled
-        profile = models.profiles.firstOrNull { it.profile_id == settings.profile_id } ?: models.profiles.firstOrNull()
+        profile = captionSavedProfile(settings, models.profiles, models.default_profile_id)
         language = settings.preferred_spoken_language ?: profile?.input_languages?.firstOrNull() ?: "en"
-        message = "Model readiness is advisory. Download and test the selected task on this worker."
+        message = if (profile == null) "The saved caption model is unavailable. Choose a model and task below."
+            else "Model readiness is advisory. Download and test the selected task on this worker."
     }
     LaunchedEffect(authorization) {
         try { refresh() }
@@ -102,6 +104,11 @@ internal fun CaptionGenerationSettings(vm: AppViewModel) {
             Switch(checked = enabled, onCheckedChange = { enabled = it }, enabled = saved != null && !busy)
         }
         val profiles = catalog?.profiles.orEmpty()
+        if (profile == null) profiles.forEach { available ->
+            TextButton(onClick = { profile = available; language = available.input_languages.firstOrNull() ?: "en" }) {
+                Text(available.label ?: "${available.model_id} — ${available.task}")
+            }
+        }
         profile?.let { selected ->
             ChoicePicker("Model and task", selected, profiles, {
                 val model = catalog?.models?.firstOrNull { model -> model.id == it.model_id }

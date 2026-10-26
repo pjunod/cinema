@@ -20,7 +20,7 @@ struct ProgressiveCaptionControls: View {
                 Picker("Model and task", selection: $session.profileId) {
                     Text("Choose a model").tag("")
                     if !session.profileId.isEmpty, !session.profiles.contains(where: { $0.profileId == session.profileId }) { Text("Saved model · refresh status").tag(session.profileId) }
-                    ForEach(session.profiles) { profile in Text("\(profile.modelId) · \(profile.task.label)").tag(profile.profileId) }
+                    ForEach(session.profiles) { profile in Text("\(profile.label ?? profile.modelId) · \(profile.task.label)").tag(profile.profileId) }
                 }
                 Picker("Spoken language", selection: $session.spokenLanguage) {
                     Text("Choose spoken language").tag("")

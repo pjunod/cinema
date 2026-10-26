@@ -14,7 +14,7 @@ struct SharedCaptionAsset: Decodable, Identifiable {
     }
     var profile: CaptionProfile {
         CaptionProfile(profileId: profileId,modelId: modelId,modelSha256: modelSha256,task: task,
-            outputLanguage: outputLanguage,inputLanguages: [spokenLanguage],timelineContract: "source-audio-clock-v1",
+            label: nil,default: nil,outputLanguage: outputLanguage,inputLanguages: [spokenLanguage],timelineContract: "source-audio-clock-v1",
             limits: CaptionLimits(segmentBytes: 16384,segmentCues: 128,pageBytes: 65536,pageEntries: 64,
                 coverageIntervals: 8,concurrentFetches: 2,cueMemoryBytes: 524288,cueCount: 1024,
                 cueWindowBeforeMs: 30000,cueWindowAfterMs: 90000,pollMinMs: 1000,pollMaxMs: 5000,

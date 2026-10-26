@@ -12,6 +12,24 @@ function translationUuid(){
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 }
 function translationId(value){return typeof value==="string"&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);}
+// Continuity describes the viewer's source-clock path, not its moving position.
+function translationContinuity(state){return state.continuityId||(state.continuityId=translationUuid());}
+function translationRotateContinuity(state){state.continuityId=translationUuid();return state.continuityId;}
+function translationProducerGeneration(state){return state.producerGeneration||0;}
+function translationSeekWindow(state){
+  translationRotateContinuity(state);state.windowGeneration++;state.etag=null;state.lease=null;state.manifestWindow=null;state.coverage=[];
+  translationClearCues(state);
+}
+function translationSeekKey(pending){return pending?JSON.stringify([pending.sequence,pending.intentGeneration,pending.targetMs,!!pending.executed]):null;}
+function translationPlaybackSeek(player,pending){
+  const state=SUBTITLE_TRANSLATION;
+  if(!state||player!==state.player&&player!==state.handoffTarget&&player!==PLAYER||!translationSameSourceAudio(state,player)||!pending?.captionViewerSeek)return;
+  const key=translationSeekKey(pending);if(state.continuitySeekKey===key)return;
+  state.continuitySeekKey=key;translationSeekWindow(state);
+  // An accepted seek invalidates a running claim even while the decoder still
+  // shows its previous position. Attachment proof controls later reads/renewals.
+  if(state.current()&&!state.rebinding&&state.positionReady!==false&&state.demand&&!state.stopped)void translationHeartbeat(state).catch(()=>{});
+}
 function translationDigest(value){return typeof value==="string"&&/^[0-9a-f]{64}$/.test(value);}
 function translationCounter(value){return typeof value==="string"&&/^(0|[1-9][0-9]{0,18})$/.test(value)&&(value.length<19||value<="9223372036854775807");}
 function translationCompare(a,b){if(!translationCounter(a)||!translationCounter(b))throw Error("Invalid translation revision");return a.length-b.length||(a<b?-1:a>b?1:0);}
@@ -75,6 +93,7 @@ function translationAttachmentDidBegin(player,token){
 function translationAttachmentPositionReady(player,token){
   const state=SUBTITLE_TRANSLATION;if(!state||state.player!==player||state.attachment!==token||!state.current()||!token?.captionPositionReady||!state.sourceValidated)return;
   state.positionReady=true;state.rebinding=false;
+  if(state.createIntent){state.resumeProducerAfterHandoff=true;if(!state.starting){state.resumeProducerAfterHandoff=false;void translationStart(state);}}
   if(state.assetId||state.operation)void translationPoll(state,true);
   else translationRenderStatus(state);
   if(state.demand&&!state.stopped&&!state.stopIntent){void translationHeartbeat(state).catch(()=>{});translationArmHeartbeat(state);}
@@ -146,6 +165,7 @@ function translationRetire(reason="retired"){
   const state=SUBTITLE_TRANSLATION;if(!state)return;
   // Release is best effort; server TTL bounds work even after network/auth loss.
   if(translationCurrent(state)&&state.demand&&!state.stopped)void translationRelease(state).catch(()=>{});
+  translationRotateContinuity(state);state.producerGeneration=translationProducerGeneration(state)+1;
   state.retired=true;clearTimeout(state.timer);clearTimeout(state.heartbeatTimer);state.heartbeatTimer=null;for(const controller of state.controllers)controller.abort();
   state.controllers.clear();for(const [kind,handler]of state.listeners)state.video.removeEventListener(kind,handler);
   if(state.video._translationTrack)state.video._translationTrack.mode="disabled";
@@ -159,6 +179,22 @@ function translationTaskLabel(task){return task==="transcribe"?"Generate caption
 function translationTaskNoun(task){return task==="transcribe"?"captions":"translation";}
 function translationProfile(options,id){return (options.models||[]).find(profile=>profile.profile_id===id);}
 function translationTaskProfiles(options,task){return (options.models||[]).filter(profile=>translationTask(profile)===task);}
+function translationDefaultHint(options){
+  const id=options.default_profile_id;if(id==null)return null;
+  const profile=translationDigest(id)&&translationProfile(options,id);
+  if(!profile)throw Error("Invalid preferred speech profile");return profile;
+}
+function translationPreferredProfile(options,task,preferredId=null,preferredModel=null){
+  const hint=translationDefaultHint(options),rows=translationTaskProfiles(options,task);
+  if(preferredId){
+    const exact=translationProfile(options,preferredId);
+    if(!exact)throw Error(translationFailure("profile_unavailable"));
+    return rows.find(profile=>profile.profile_id===preferredId)||rows.find(profile=>profile.model_id===exact.model_id)||null;
+  }
+  if(preferredModel)return rows.find(profile=>profile.model_id===preferredModel)||null;
+  return rows.find(profile=>profile.profile_id===hint?.profile_id)||rows.find(profile=>profile.model_id===hint?.model_id)
+    ||rows.find(profile=>profile.default===true)||rows.find(profile=>profile.activation_state==="active")||rows[0]||null;
+}
 function translationProfileLimits(profile){
   const limits=profile?.limits;if(!limits)return null;
   const keys=["segment_bytes","segment_cues","page_bytes","page_entries","coverage_intervals","concurrent_fetches","cue_memory_bytes","cue_count","cue_window_before_ms","cue_window_after_ms","poll_min_ms","poll_max_ms","retry_max_ms","heartbeat_interval_ms"];
@@ -220,13 +256,16 @@ function translationClearCues(state){
   state.cues=new Map();const track=state.video._translationTrack;if(track){track.mode="hidden";try{while(track.cues?.length)track.removeCue(track.cues[0]);}catch(error){void error;}}
 }
 function translationSwitchAsset(state){
+  state.producerGeneration=translationProducerGeneration(state)+1;translationRotateContinuity(state);
   state.windowGeneration++;state.etag=null;state.lease=null;clearTimeout(state.timer);
   for(const controller of state.controllers)controller.abort();
   if(state.demand)void translationRelease(state).catch(()=>{});
+  state.demand=null;
   state.coverage=[];state.segments.clear();translationClearCues(state);state.operation=null;state.failurePage=null;state.assetId=null;state.contentRevision=null;state.spokenLanguage=null;state.outputLanguage=null;state.createIntent=null;state.createKey=null;state.stopIntent=null;state.resumeIntent=null;state.rangeIntent=null;state.stopKey=null;state.resumeKey=null;state.rangeKey=null;state.stopped=false;
 }
 function translationValidateOptions(options,state){
   if(options?.version!==1||options.file_id!==state.fileId||typeof options.source_size!=="string"||typeof options.source_mtime!=="string"||!translationMs(options.duration_ms)||!Array.isArray(options.audio_tracks)||!Array.isArray(options.models))throw Error(translationFailure("direct_audio_selection_unverified"));
+  translationDefaultHint(options);
   const matches=options.audio_tracks.filter(track=>track.audio_ordinal===state.audioIndex),selected=matches[0];if(matches.length!==1||!Number.isSafeInteger(selected.index)||selected.index<0)throw Error(translationFailure("direct_audio_selection_unverified"));
   if(selected.capability?.supported!==true)throw Error(translationFailure(selected.capability?.reason||"direct_audio_selection_unverified"));
   const sourceOriginMs=selected.source_origin_ms??options.source_origin_ms;if(sourceOriginMs!=null&&(!Number.isSafeInteger(sourceOriginMs)||Math.abs(sourceOriginMs)>604800000))throw Error(translationFailure("source_clock_unsupported"));
@@ -237,7 +276,7 @@ async function translationOpen(button){
   const previous=SUBTITLE_TRANSLATION;if(previous&&translationCurrent(previous)){previous.panel?.scrollIntoView({block:"nearest"});return;}
   translationRetire();
   const panel=document.getElementById("watch-subtitle-translation");if(!panel)return;
-  const state={capture:translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:String(player.fileId),audioChoice:player.curAudio,audioIndex:translationAttachedAudioOrdinal(player),positionReady:player.mediaAttachment.captionPositionReady!==false,presentationValidated:true,requestGeneration:0,task:"translate",controllers:new Set(),listeners:[],heartbeatTimer:null,heartbeatAttempt:0,segments:new Map(),cues:new Map(),coverage:[],operation:null,assetId:null,demand:null,playbackId:translationUuid(),queue:Promise.resolve(),timer:null,windowGeneration:0,retired:false,error:null};
+  const state={capture:translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:String(player.fileId),audioChoice:player.curAudio,audioIndex:translationAttachedAudioOrdinal(player),positionReady:player.mediaAttachment.captionPositionReady!==false,presentationValidated:true,requestGeneration:0,task:"translate",controllers:new Set(),listeners:[],heartbeatTimer:null,heartbeatAttempt:0,segments:new Map(),cues:new Map(),coverage:[],operation:null,assetId:null,demand:null,playbackId:translationUuid(),continuityId:translationUuid(),producerGeneration:0,queue:Promise.resolve(),timer:null,windowGeneration:0,retired:false,error:null};
   state.current=()=>translationCurrent(state);SUBTITLE_TRANSLATION=state;panel.hidden=false;panel.textContent="Loading AI caption choices…";
   try{
     const {data:options}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/options`);translationValidateOptions(options,state);state.options=options;
@@ -249,7 +288,7 @@ async function translationOpen(button){
     panel.innerHTML=`<div class="card" style="padding:16px"><h3 data-translation-heading>${translationTaskLabel(state.task)}</h3><p data-translation-description>AI captions are an estimate and may be wrong. The picture keeps playing; original captions and Off stay available.</p>${ME?.is_admin?'<p><a href="#/settings/playback/enable-subtitle-translation">AI caption settings</a></p>':""}<p>Spoken audio: ${esc(audio.title||audio.language||"Untagged audio")} · stream ${esc(String(state.audioIndex+1))}</p><label>Caption task <select data-translation-task>${availableTasks.map(task=>`<option value="${task}">${translationTaskLabel(task)}</option>`).join("")}</select></label><label>Speech model <select data-translation-profile></select></label><label>Spoken language <select data-translation-language></select></label><p class="hint">Confirm the language spoken in the attached audio. Metadata can be wrong; correct it here.</p><label class="chk"><input type="checkbox" data-translation-confirm> I confirm this is the spoken language.</label><button class="sm" data-translation-start>${translationTaskLabel(state.task)}</button> <button class="ghost sm" data-translation-use disabled>Use generated captions</button> <button class="ghost sm" data-translation-stop hidden>Stop caption work for everyone</button> <button class="ghost sm" data-translation-resume hidden>Resume caption work</button> <button class="ghost sm" data-translation-refresh>Refresh status</button><div data-translation-assets></div><div data-translation-failures></div><p data-translation-status role="status" aria-live="polite"></p><p class="hint" data-translation-clock aria-live="off"></p></div>`;
     const taskSelect=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-task]")),profiles=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-profile]"));
     const updateLanguage=()=>{const profile=translationProfile(options,profiles.value),select=panel.querySelector("[data-translation-language]"),previous=select.value,tag=audio.normalized_language,choices=profile?.input_languages||[],chosen=choices.includes(previous)?previous:choices.includes(tag)?tag:"";select.innerHTML=`<option value="">Choose spoken language</option>`+choices.map(code=>`<option value="${esc(code)}"${code===chosen?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");select.value=chosen;panel.querySelector("[data-translation-heading]").textContent=translationTaskLabel(state.task);panel.querySelector("[data-translation-start]").textContent=translationTaskLabel(state.task);};
-    const updateProfiles=(preferred)=>{const rows=translationTaskProfiles(options,state.task),active=rows.find(profile=>profile.profile_id===preferred)||rows.find(profile=>profile.activation_state==="active")||rows[0];profiles.innerHTML=rows.map(profile=>`<option value="${esc(profile.profile_id)}">${esc(profile.label||profile.model_id)}</option>`).join("");profiles.value=active?.profile_id||"";updateLanguage();};
+    const updateProfiles=(preferred)=>{const rows=translationTaskProfiles(options,state.task),active=translationPreferredProfile(options,state.task,preferred);profiles.innerHTML=rows.map(profile=>`<option value="${esc(profile.profile_id)}">${esc(profile.label||profile.model_id)}</option>`).join("");profiles.value=active?.profile_id||"";updateLanguage();};
     updateProfiles(null);
     taskSelect.value=state.task;
     taskSelect.addEventListener("change",()=>{const prior=profiles.value;state.task=taskSelect.value;translationSwitchAsset(state);updateProfiles(prior);translationRenderStatus(state);});
@@ -300,13 +339,23 @@ function translationValidateFailures(rows,cursor){
   if(!Array.isArray(rows)||rows.length>16||cursor!=null&&(typeof cursor!=="string"||cursor.length>1024))throw Error("Invalid failed range page");
   for(const range of rows)if(!Number.isSafeInteger(range.core_index)||range.core_index<0||!translationCounter(range.range_revision)||typeof range.retryable!=="boolean")throw Error("Invalid failed range identity");
 }
-function translationAdoptReceipt(state,receipt){
+function translationAdoptReceipt(state,receipt,sent=null){
+  if(sent?.continuity_id!=null&&(!translationId(sent.continuity_id)||receipt?.continuity_id!==sent.continuity_id))throw Error("Caption receipt continuity does not match its request");
   if(receipt?.version!==1||!translationId(receipt.operation_id)||!translationCounter(receipt.operation_epoch)||!translationCounter(receipt.view_revision)||receipt.asset_id!=null&&!translationDigest(receipt.asset_id)||receipt.task!=null&&receipt.task!==translationTask(state.profile)||receipt.output_language!=null&&receipt.output_language!==translationOutputLanguage(state.profile,receipt.spoken_language||state.spokenLanguage))throw Error("Invalid caption operation receipt");
   if(state.operation&&receipt.operation_id!==state.operation.operation_id)throw Error("Translation receipt belongs to another operation");
-  if(state.operation&&(translationCompare(receipt.operation_epoch,state.operation.operation_epoch)<0||receipt.operation_epoch===state.operation.operation_epoch&&translationCompare(receipt.view_revision,state.operation.view_revision)<0))return false;
+  if(receipt.demand_id&&(!translationId(receipt.demand_id)||!translationCounter(receipt.demand_generation)))throw Error("Invalid translation demand receipt");
+  const demand=receipt.demand_id?{id:receipt.demand_id,generation:receipt.demand_generation,epoch:receipt.operation_epoch}:null;
+  if(state.operation&&(translationCompare(receipt.operation_epoch,state.operation.operation_epoch)<0||receipt.operation_epoch===state.operation.operation_epoch&&translationCompare(receipt.view_revision,state.operation.view_revision)<0)){
+    // A newer read view must not hide an acknowledged mutation's demand CAS.
+    // Its operation presentation stays current, and older epochs stay fenced.
+    if(sent?.continuity_id&&demand&&receipt.operation_epoch===state.operation.operation_epoch&&state.operation.state!=="stopped"){
+      state.demand=demand;return true;
+    }
+    return false;
+  }
   state.operation={...state.operation,...receipt};state.stopped=receipt.state==="stopped";
   if(receipt.asset_id)state.assetId=receipt.asset_id;
-  if(receipt.demand_id){if(!translationId(receipt.demand_id)||!translationCounter(receipt.demand_generation))throw Error("Invalid translation demand receipt");state.demand={id:receipt.demand_id,generation:receipt.demand_generation,epoch:receipt.operation_epoch};}
+  if(demand)state.demand=demand;
   if(state.stopped)state.demand=null;
   return true;
 }
@@ -317,16 +366,16 @@ async function translationStart(state){
   const task=state.panel.querySelector("[data-translation-task]").value,outputLanguage=translationOutputLanguage(profile,language);
   if(!profile||translationTask(profile)!==task||profile.activation_state!=="active"||!translationProfileLimits(profile)){state.error=translationFailure("profile_unavailable");translationRenderStatus(state);return;}
   if(!profile.input_languages.includes(language)||!state.panel.querySelector("[data-translation-confirm]").checked){state.error="Choose and confirm the language spoken in this audio stream.";translationRenderStatus(state);return;}
-  if(state.starting)return;state.starting=true;state.error=null;let generation=state.windowGeneration;
+  if(state.starting)return;state.starting=true;state.error=null;let generation=translationProducerGeneration(state);
   try{
     const intentKey=JSON.stringify([state.fileId,state.options.source_size,state.options.source_mtime,state.audioIndex,task,language,outputLanguage,profile.profile_id]);
-    if(state.createKey!==intentKey){const changed=state.createKey!=null;if(changed&&(state.operation||state.assetId))translationSwitchAsset(state);state.createIntent=null;state.createKey=intentKey;}
-    state.task=task;state.profile=profile;state.spokenLanguage=language;state.outputLanguage=outputLanguage;state.limits=translationProfileLimits(profile);generation=state.windowGeneration;
-    const body=state.createIntent||(state.createIntent={...translationEnvelope(state),source_size:state.options.source_size,source_mtime:state.options.source_mtime,audio_index:state.audioIndex,spoken_language:language,output_language:outputLanguage,task,model_id:profile.model_id,profile_id:profile.profile_id,playback_id:state.playbackId,position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
+    if(state.createKey!==intentKey){const changed=state.createKey!=null||state.profile&&state.profile.profile_id!==profile.profile_id||state.spokenLanguage!=null&&state.spokenLanguage!==language;if(changed)translationSwitchAsset(state);state.createIntent=null;state.createKey=intentKey;}
+    state.task=task;state.profile=profile;state.spokenLanguage=language;state.outputLanguage=outputLanguage;state.limits=translationProfileLimits(profile);generation=translationProducerGeneration(state);
+    const body=state.createIntent||(state.createIntent={...translationEnvelope(state),source_size:state.options.source_size,source_mtime:state.options.source_mtime,audio_index:state.audioIndex,spoken_language:language,output_language:outputLanguage,task,model_id:profile.model_id,profile_id:profile.profile_id,playback_id:state.playbackId,continuity_id:translationContinuity(state),position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
     const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-translation`,{method:"POST",body});
-    if(!state.current()||state.windowGeneration!==generation)return;translationAdoptReceipt(state,data);state.error=null;state.createIntent=null;await translationPoll(state,true);
-  }catch(error){if(state.current()&&state.windowGeneration===generation){translationRejectIntent(state,"createIntent",error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
-  finally{state.starting=false;}
+    if(!state.current()||translationProducerGeneration(state)!==generation)return;translationAdoptReceipt(state,data,body);state.error=null;state.createIntent=null;translationRenewContinuity(state,body);await translationPoll(state,true);
+  }catch(error){if(state.current()&&translationProducerGeneration(state)===generation){translationRejectIntent(state,"createIntent",error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
+  finally{state.starting=false;if(state.resumeProducerAfterHandoff&&state.current()&&state.positionReady!==false&&!state.rebinding){state.resumeProducerAfterHandoff=false;if(state.createIntent)void translationStart(state);}}
 }
 function translationValidateOperation(state,operation){
   if(operation?.version!==1||operation.operation_id!==state.operation.operation_id||operation.file_id!==state.fileId||operation.source_size!==state.options.source_size||operation.source_mtime!==state.options.source_mtime||operation.audio_index!==state.audioIndex||operation.output_language!==translationOutputLanguage(state.profile,operation.spoken_language)||operation.task!==translationTask(state.profile)||operation.profile_id!==state.profile.profile_id||!translationCounter(operation.operation_epoch)||!translationCounter(operation.view_revision))throw Error("Caption operation identity changed");
@@ -477,8 +526,9 @@ function translationMediaEvent(state,kind){
   if(!state.current()){if(state.handoffTarget||translationOwnsPlayer(state))return;translationRetire("playback changed");return;}
   if(state.rebinding||state.positionReady===false)return;
   if(kind==="seeking"){
-    state.windowGeneration++;state.etag=null;state.coverage=[];state.cues=new Map();
-    if(state.video._translationTrack){const track=state.video._translationTrack;track.mode="hidden";try{while(track.cues?.length)track.removeCue(track.cues[0]);}catch(error){void error;}}
+    const pending=state.player.controlSeek;
+    if(pending?.captionViewerSeek&&pending.executed)translationPlaybackSeek(state.player,pending);
+    else translationSeekWindow(state);
   }
   if(kind!=="timeupdate"){
     if(state.demand&&!state.stopped)void translationHeartbeat(state).catch(()=>{});
@@ -486,18 +536,25 @@ function translationMediaEvent(state,kind){
   }
   translationRenderStatus(state);
 }
+function translationRenewContinuity(state,sent){
+  if(state.demand&&sent.continuity_id!==translationContinuity(state)&&!state.heartbeatTask)void translationHeartbeat(state).catch(()=>{});
+  translationArmHeartbeat(state);
+}
 async function translationHeartbeat(state){
   if(!state.current()||state.rebinding||state.positionReady===false||!ME?.is_admin||!state.options.permissions?.demand||!state.demand||state.stopped||state.pendingStop||state.stopIntent)return;
-  // Coalesce media-event storms into the one current mutation. The next poll
-  // samples the latest media clock; it never queues an unbounded seek history.
   if(state.heartbeatTask)return state.heartbeatTask;
+  let acknowledged=false,sentContinuity=null;
   const task=state.queue.catch(()=>{}).then(async()=>{
-    if(!state.current()||!state.demand||state.stopped||state.pendingStop||state.stopIntent)return;
+    if(!state.current()||state.rebinding||state.positionReady===false||!state.demand||state.stopped||state.pendingStop||state.stopIntent)return;
     const demand=state.demand;
     try{
-      const body=demand.intent||(demand.intent={...translationEnvelope(state),expected_operation_epoch:demand.epoch,demand_generation:translationNext(demand.generation),playback_id:state.playbackId,position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
+      const body=demand.intent||(demand.intent={...translationEnvelope(state),expected_operation_epoch:demand.epoch,demand_generation:translationNext(demand.generation),playback_id:state.playbackId,continuity_id:translationContinuity(state),position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
+      sentContinuity=body.continuity_id;
       const {data}=await translationRequest(state,`/subtitle-translation/operations/${state.operation.operation_id}/demands/${demand.id}`,{method:"PUT",body});
-      if(state.current()&&state.demand===demand&&data.operation_epoch===demand.epoch){translationAdoptReceipt(state,data);demand.intent=null;state.lastHeartbeat=performance.now();}
+      if(state.current()&&state.demand===demand&&data.operation_epoch===demand.epoch){
+        if(data.demand_id!==demand.id||data.demand_generation!==body.demand_generation)throw Error("Caption receipt demand does not match its request");
+        acknowledged=translationAdoptReceipt(state,data,body);demand.intent=null;state.lastHeartbeat=performance.now();
+      }
     }catch(error){if(state.current()&&state.demand===demand){
       if(!translationAmbiguous(error))demand.intent=null;
       if(error.code==="operation_stopped"){state.demand=null;state.stopped=true;}
@@ -507,7 +564,12 @@ async function translationHeartbeat(state){
     }}
   });
   state.queue=task;state.heartbeatTask=task;
-  try{await task;}finally{if(state.heartbeatTask===task)state.heartbeatTask=null;}
+  try{await task;}finally{
+    if(state.heartbeatTask===task)state.heartbeatTask=null;
+    // A seek during an in-flight/uncertain request keeps the local new token.
+    // First acknowledge the old CAS generation, then send one latest renewal.
+    if(acknowledged&&state.demand&&sentContinuity!==translationContinuity(state))void translationHeartbeat(state).catch(()=>{});
+  }
 }
 // The demand has its own cadence: read failures back off reads only, so a
 // slow manifest page or a 503 cannot let a watched operation's demand lapse.
@@ -524,31 +586,31 @@ async function translationRelease(state){
 }
 async function translationStop(state){
   if(!state.current()||!ME?.is_admin||!state.options.permissions?.stop||!state.operation||state.pendingStop)return;
-  state.pendingStop=true;const generation=state.windowGeneration,operationId=state.operation.operation_id;
+  state.pendingStop=true;translationRotateContinuity(state);const generation=translationProducerGeneration(state),operationId=state.operation.operation_id;
   const key=JSON.stringify([state.operation.operation_id,state.operation.operation_epoch]);if(state.stopKey!==key){state.stopKey=key;state.stopIntent=null;}
-  try{const body=state.stopIntent||(state.stopIntent={...translationEnvelope(state),expected_operation_epoch:state.operation.operation_epoch});const {data}=await translationRequest(state,`/subtitle-translation/operations/${state.operation.operation_id}/stop`,{method:"POST",body});if(state.current()&&state.windowGeneration===generation&&state.operation?.operation_id===operationId){if(!translationAdoptReceipt(state,data))return;state.stopped=true;state.demand=null;state.stopIntent=null;state.error=null;translationRenderStatus(state);}}
-  catch(error){if(state.current()&&state.windowGeneration===generation&&state.operation?.operation_id===operationId){translationRejectIntent(state,"stopIntent",error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
+  try{const body=state.stopIntent||(state.stopIntent={...translationEnvelope(state),expected_operation_epoch:state.operation.operation_epoch});const {data}=await translationRequest(state,`/subtitle-translation/operations/${state.operation.operation_id}/stop`,{method:"POST",body});if(state.current()&&translationProducerGeneration(state)===generation&&state.operation?.operation_id===operationId){if(!translationAdoptReceipt(state,data))return;state.stopped=true;state.demand=null;state.stopIntent=null;state.error=null;translationRenderStatus(state);}}
+  catch(error){if(state.current()&&translationProducerGeneration(state)===generation&&state.operation?.operation_id===operationId){translationRejectIntent(state,"stopIntent",error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
   finally{state.pendingStop=false;}
 }
 async function translationResume(state){
   if(!state.current()||!ME?.is_admin||!state.options.permissions?.resume||!state.operation||!["stopped","failed"].includes(state.operation.state))return;
   const operation=state.operation;
   const key=JSON.stringify([operation.operation_id,operation.operation_epoch,operation.view_revision,operation.state]);if(state.resumeKey!==key){state.resumeKey=key;state.resumeIntent=null;}
-  try{const body=state.resumeIntent||(state.resumeIntent={...translationEnvelope(state),scope:"operation",expected_operation_epoch:operation.operation_epoch,expected_view_revision:operation.view_revision,expected_state:operation.state,playback_id:state.playbackId,position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
+  try{const body=state.resumeIntent||(state.resumeIntent={...translationEnvelope(state),scope:"operation",expected_operation_epoch:operation.operation_epoch,expected_view_revision:operation.view_revision,expected_state:operation.state,playback_id:state.playbackId,continuity_id:translationContinuity(state),position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
     await translationRetry(state,body,"resumeIntent");
   }catch(error){if(state.current()){state.error=error.message;translationRenderStatus(state);}}
 }
 async function translationRetryRange(state,range){
   if(!state.current()||!ME?.is_admin||!state.options.permissions?.demand||state.operation?.state!=="partial"||!range.retryable)return;
   const key=JSON.stringify([state.operation.operation_id,state.operation.operation_epoch,range.core_index,range.range_revision]);if(state.rangeKey!==key){state.rangeKey=key;state.rangeIntent=null;}
-  try{const body=state.rangeIntent||(state.rangeIntent={...translationEnvelope(state),scope:"range",expected_operation_epoch:state.operation.operation_epoch,expected_operation_state:"partial",core_index:range.core_index,expected_range_revision:range.range_revision,expected_range_state:"failed",playback_id:state.playbackId,position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
+  try{const body=state.rangeIntent||(state.rangeIntent={...translationEnvelope(state),scope:"range",expected_operation_epoch:state.operation.operation_epoch,expected_operation_state:"partial",core_index:range.core_index,expected_range_revision:range.range_revision,expected_range_state:"failed",playback_id:state.playbackId,continuity_id:translationContinuity(state),position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
     await translationRetry(state,body,"rangeIntent");
   }catch(error){if(state.current()){state.error=error.message;translationRenderStatus(state);}}
 }
 async function translationRetry(state,body,key){
-  const generation=state.windowGeneration,operationId=state.operation.operation_id;
-  try{const {data}=await translationRequest(state,`/subtitle-translation/operations/${state.operation.operation_id}/retry`,{method:"POST",body});if(!state.current()||state.windowGeneration!==generation||state.operation?.operation_id!==operationId)return;translationAdoptReceipt(state,data);state[key]=null;state.error=null;await translationPoll(state,true);}
-  catch(error){if(state.current()&&state.windowGeneration===generation&&state.operation?.operation_id===operationId){translationRejectIntent(state,key,error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
+  const generation=translationProducerGeneration(state),operationId=state.operation.operation_id;
+  try{const {data}=await translationRequest(state,`/subtitle-translation/operations/${state.operation.operation_id}/retry`,{method:"POST",body});if(!state.current()||translationProducerGeneration(state)!==generation||state.operation?.operation_id!==operationId)return;translationAdoptReceipt(state,data,body);state[key]=null;state.error=null;translationRenewContinuity(state,body);await translationPoll(state,true);}
+  catch(error){if(state.current()&&translationProducerGeneration(state)===generation&&state.operation?.operation_id===operationId){translationRejectIntent(state,key,error);state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);}}
 }
 async function translationPoll(state,force=false){
   if(!state.current()||state.rebinding||state.positionReady===false||!state.limits)return;const generation=state.windowGeneration;if(state.polling){state.pollAgain=state.pollAgain||force;return;}
@@ -581,7 +643,12 @@ function translationProfileChoices(profiles,selected){
 function translationSetupChoices(setup){
   const profiles=setup.catalog?.profiles||[],profileInput=translationInput(setup.panel,"[data-translation-setting-profile]"),languageInput=translationInput(setup.panel,"[data-translation-setting-language]");
   let selected=profileInput.value;
-  if(!setup.choicesLoaded&&!setup.edit&&!setup.saved.profile_id&&!selected){const active=profiles.filter(row=>row.activation_state==="active");if(active.length===1)selected=active[0].profile_id;}
+  const options={models:profiles,default_profile_id:setup.catalog?.default_profile_id};translationDefaultHint(options);
+  if(!setup.choicesLoaded&&!setup.edit&&!setup.saved.profile_id&&!selected){
+    const hinted=setup.saved.model_id||options.default_profile_id!=null||profiles.some(profile=>profile.default===true);
+    if(hinted)selected=translationPreferredProfile(options,"translate",null,setup.saved.model_id)?.profile_id||"";
+    else{const active=profiles.filter(row=>row.activation_state==="active");if(active.length===1)selected=active[0].profile_id;}
+  }
   const chosenProfile=profiles.find(row=>row.profile_id===selected),language=languageInput.value,languages=[...new Set((chosenProfile?.input_languages?.length?chosenProfile.input_languages:profiles.flatMap(row=>row.input_languages||[])))],keptLanguage=languages.includes(language)?language:!chosenProfile?language:"";if(keptLanguage&&!languages.includes(keptLanguage))languages.push(keptLanguage);
   profileInput.innerHTML=translationProfileChoices(profiles,selected);profileInput.value=selected;
   languageInput.innerHTML='<option value="">Choose for each movie</option>'+languages.map(code=>`<option value="${esc(code)}"${code===keptLanguage?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");languageInput.value=keptLanguage;

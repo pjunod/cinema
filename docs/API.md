@@ -2304,17 +2304,20 @@ codeless 503 on `overlay.json` as a wait, for older servers.
 
 ### Progressive English translation
 
-The initial experimental route uses the attached web direct player with one
-unambiguous source audio stream. Spoken-language confirmation may correct the
-metadata tag. Small multilingual produces independent 30-second cores with
-five seconds of left/right context; clipped boundary repetition and grammar or
-meaning errors remain possible. Native, encoded and multi-audio playback are
-not qualified by this route.
+The speech API exposes same-language transcription and English translation
+for the selected attached audio ordinal on web and native clients. Source
+clock normalization is independent of direct, remux or encoded delivery.
+The two registered Small profiles produce independent30second cores with5seconds
+of left/right context. Transcription and English translation each require their
+own qualification; saved Small choices and immutable profile identities remain
+valid. The optional `default_profile_id` discovery hint reflects the saved
+profile/task choice and defaults to Small English translation when unset.
+Discovery does not grant producer authority or override the saved enable choice.
 
 | Method | Path | Credential | Meaning |
 |---|---|---|---|
 | GET, PUT | `/api/v1/subtitle-translation` | admin bearer | Saved enable/model/profile/language preferences with opaque revision CAS. Readiness never rejects Save. |
-| GET | `/api/v1/subtitle-translation/models` | admin bearer | Immutable profile, bounds and distinct English-translation worker qualification. |
+| GET | `/api/v1/subtitle-translation/models` | admin bearer | The two immutable Small task profiles, bounds, saved-choice hint and independent speech-task qualification. |
 | GET | `/api/v1/files/{id}/subtitle-translation/options` | bearer | Current source revision, supported profile and bounded cached asset list; no work. |
 | POST | `/api/v1/files/{id}/subtitle-translation` | admin bearer | Durable operation and expiring playback demand before source hashing; exact request replay. |
 | GET | `/api/v1/files/{id}/subtitle-translation/assets` | bearer | Explicit cursor page of cached assets. |
@@ -2327,6 +2330,19 @@ not qualified by this route.
 | GET | `/api/v1/subtitle-translation/assets/{id}/segments` | bearer | Scoped cursor page inside the requested playback window. |
 | GET | `/api/v1/subtitle-translation/assets/{id}/coverage` | bearer | Scoped cursor page of accepted overlapping core intervals. |
 | GET | `/api/v1/subtitle-translation/assets/{id}/segments/{segment}` | bearer | Exact bounded canonical UTF-8 JSON bytes; verify the manifest digest before decoding. |
+
+Create, demand renewal and both Retry variants accept an optional UUID
+`continuity_id`, echoed on their demand receipt. Clients retain it during
+ordinary clock advancement, pause/rate changes and continuous attachment
+handoffs; an actual seek/discontinuous traversal replaces it. Range claims
+capture at most16 currently authorizing demand identities. A running range
+may finish while one captured live traversal continues, even after its core
+leaves the scheduling window. A new seek, expired/released demand, Stop,
+source/producer replacement or lost claim/resource authority revokes that
+support. New queued claims still require useful current-window demand.
+Omitted continuity uses the legacy current-window-only lifetime. Exact replay
+includes the original UUID; a client resolves an uncertain renewal before
+sending the next generation with its new traversal identity.
 
 Existing model Install/Test routes also accept strict version 2 translation
 requests with request UUID, intent expiry, purpose, profile ID and named workers.

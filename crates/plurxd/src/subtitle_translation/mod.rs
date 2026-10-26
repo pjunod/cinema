@@ -98,9 +98,8 @@ struct Capability {
 }
 pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiError> {
     let now = crate::state::clock_ms();
-    let spec = profile::model_spec();
     let engine = artifacts::inspect_engine().await;
-    let model = artifacts::model_identity(&state.subtitle_models.root, &spec).await;
+    let mut models = std::collections::BTreeMap::new();
     let receipts = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         state.store.read_subtitle_translation(TranslationRead {
@@ -116,9 +115,20 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiEr
     let failures = state.subtitle_models.translation.failures.read().await;
     let mut capabilities = Vec::new();
     for selected in profile::profiles() {
+        let spec = profile::model_spec_for(&selected)?;
+        // Both tasks share immutable bytes, while readiness remains per profile.
+        // Observe each model separately once per response, never reuse Small's
+        // metadata for Base or vice versa.
+        if !models.contains_key(&spec.sha256) {
+            models.insert(
+                spec.sha256.clone(),
+                artifacts::model_identity(&state.subtitle_models.root, &spec).await,
+            );
+        }
+        let model = &models[&spec.sha256];
         let profile_id = selected.id()?;
         let mut verified = None;
-        if let (Ok(engine), Ok(model)) = (&engine, &model) {
+        if let (Ok(engine), Ok(model)) = (&engine, model) {
             for row in &receipts {
                 let Ok(receipt) = serde_json::from_value::<Capability>(row.clone()) else {
                     continue;
@@ -476,7 +486,7 @@ pub(crate) async fn model_operation(
         .into_iter()
         .find(|p| p.id().is_ok_and(|id| id == request.profile_id))
         .ok_or_else(|| ApiError::BadRequest("Choose a current speech profile".into()))?;
-    let spec = profile::model_spec();
+    let spec = profile::model_spec_for(&selected)?;
     let now = crate::state::clock_ms();
     let unique = request
         .node_ids

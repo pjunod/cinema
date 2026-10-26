@@ -2718,6 +2718,8 @@ final class PlayerController: ObservableObject {
         currentMs = target
         ttffMeasurement.rebasePosition(at: target)
         pgsOverlaySeeked(to: target)
+        // Every viewer, relative and marker discontinuity revokes the old
+        // caption traversal. Ordinary item/quality attachments keep it alive.
         progressiveCaptions.mediaChanged(seek: true, positionMs: target)
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
