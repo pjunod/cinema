@@ -1233,3 +1233,29 @@ async fn foreign_committed_fence_closes_same_finite_owner_after_stale_cancel_and
         )
         .await;
 }
+
+#[tokio::test]
+async fn selected_copy_request_uses_core_segment_cap_and_admits_same_original_owner() {
+    let fixture = finite_cancellation_fixture().await;
+    let base = fixture._base.path();
+    let manager = crate::transcode::TranscodeManager::new(
+        Arc::clone(&fixture.serve.shared.store),
+        base.join("profile-transcode"),
+        Default::default(),
+        plurx_core::transcode::Pipeline::Cpu,
+    )
+    .with_cache_layout(
+        base.join("profile-cache"),
+        base.join("profile-runtime"),
+        base.join("profile-subs"),
+        fixture.serve.shared.base.clone(),
+        "selected-copy-profile-test".into(),
+        fixture._selected_store.identity.node_id.clone(),
+        None,
+        Some(Arc::clone(&fixture.runtime)),
+    )
+    .with_copy_test_vod(Arc::clone(&fixture.serve));
+    manager
+        .selected_copy_profile_admission_regression(fixture.recipe.file.id)
+        .await;
+}

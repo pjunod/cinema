@@ -112,7 +112,10 @@ fn selected_copy_request(
     use plurx_core::adaptive_resources::{ResourceVector, WorkloadDemand};
     use plurx_core::process::observation::Metric;
     let max_segments = CopyVodRequest::maximum_segment_names();
-    let parser_limits = plurx_core::copy_segmenter::Limits::default();
+    let parser_limits = plurx_core::copy_segmenter::Limits {
+        max_bytes: plurx_core::adaptive_resources::runtime::copy_vod::COPY_VOD_MAX_SEGMENT_BYTES,
+        ..Default::default()
+    };
     if max_segments == 0 || parser_limits.max_bytes == 0 {
         return Err("selected copy has no bounded segment inventory".into());
     }
@@ -264,6 +267,131 @@ fn selected_copy_request(
     };
     resources.peak_memory_bytes = known_memory;
     Ok(request)
+}
+
+#[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
+impl TranscodeManager {
+    pub(crate) async fn selected_copy_profile_admission_regression(&self, file_id: i64) {
+        use plurx_core::adaptive_resources::runtime::copy_vod::COPY_VOD_MAX_SEGMENT_BYTES;
+        let runtime = self
+            .resource_runtime
+            .as_ref()
+            .expect("actual selected runtime");
+        let baseline = runtime.accounting().expect("real initial accounting");
+        let inputs = self
+            .rolling_start_inputs(file_id, None)
+            .await
+            .expect("actual source/probe/settings snapshot");
+        let options = CopySessionOptions {
+            transcode_audio: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let mut planning = self
+            .collect_selected_copy_planning(
+                &inputs.file,
+                inputs.probe_json.as_deref(),
+                None,
+                &options,
+            )
+            .await
+            .expect("actual original selected P and frozen inputs");
+        let accounting = runtime.accounting().expect("same observed capacity");
+        let request = selected_copy_request(
+            runtime,
+            &planning,
+            &inputs.file,
+            format!("copy-profile-{}", uuid::Uuid::new_v4()),
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+            None,
+            false,
+            plurx_core::transcode::Pacing::unpaced(),
+            None,
+            self.runtime_cache.clone(),
+            // No Session or external dynamic presentation payload is built by
+            // this boundary fixture. The production helper still projects its
+            // actual Session/control/core layouts and source/recipe capacity.
+            0,
+            accounting.limit_epoch,
+            accounting.capacity,
+        )
+        .expect("actual selected request");
+        assert_eq!(request.parser_limits.max_bytes, COPY_VOD_MAX_SEGMENT_BYTES);
+        assert!(
+            plurx_core::copy_segmenter::Limits::default().max_bytes
+                > request.parser_limits.max_bytes,
+            "legacy global default stays larger than the selected typed ceiling"
+        );
+        assert_eq!(
+            request.output.one_file_logical_bytes,
+            COPY_VOD_MAX_SEGMENT_BYTES as u64
+        );
+        assert_eq!(
+            request.output.one_io_payload_bytes,
+            COPY_VOD_MAX_SEGMENT_BYTES as u64
+        );
+        assert_eq!(
+            request.output.resident_logical_bytes,
+            u64::from(request.output.resident_file_objects) * COPY_VOD_MAX_SEGMENT_BYTES as u64
+        );
+        assert_eq!(
+            request.output.reserved_storage_bytes,
+            request.output.resident_logical_bytes
+                + u64::from(request.output.resident_file_objects) * 16 * 1024
+                + 128 * 1024
+        );
+        assert!(
+            runtime
+                .copy_vod_known_memory_bytes(&request)
+                .expect("actual fixed graph memory projection")
+                > 0
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        planning
+            .owner
+            .finish_native(deadline)
+            .await
+            .expect("positive original P native close");
+        let mut cleanup = planning.owner.into_cleanup();
+        drop(planning.report);
+        drop(planning.application);
+        cleanup
+            .finish_retirement(deadline)
+            .await
+            .expect("same original P application/journal retirement");
+        let path_id = request.rendition_id.clone();
+        let mut original = runtime
+            .prepare_copy_vod(request, deadline)
+            .await
+            .expect("selected request crosses the actual core pre-R cap validation");
+        assert_eq!(
+            runtime
+                .accounting()
+                .expect("actual R charged")
+                .unknown_peak_producers,
+            baseline.unknown_peak_producers + 1
+        );
+        assert!(original.directory_path().ends_with(&path_id));
+        assert!(
+            !original.directory_path().exists(),
+            "no output/native entry was requested"
+        );
+        let mut ticket = original
+            .prepare_retirement(true, deadline)
+            .await
+            .expect("same original positive no-entry copy closure");
+        drop(original);
+        ticket
+            .finish_retirement(deadline)
+            .await
+            .expect("same original typed native/app terminal retirement");
+        let settled = runtime.accounting().expect("actual known terminal refund");
+        assert_eq!(settled.used, baseline.used);
+        assert_eq!(
+            settled.unknown_peak_producers,
+            baseline.unknown_peak_producers
+        );
+    }
 }
 
 /// Everything a rolling start reads from the Store — the file, its stored

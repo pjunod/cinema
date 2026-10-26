@@ -26,6 +26,11 @@ use v2::scratch::{
     AllocationAccountingV1, OutputKey, OutputNamesV1, OutputNamingV1, ScratchLimitsV1,
 };
 
+/// Hard per-segment ceiling of the selected typed copy graph. Legacy
+/// copy segmenting may use a larger global default; selected planners must
+/// derive parser, output storage and memory from this same admitted bound.
+pub const COPY_VOD_MAX_SEGMENT_BYTES: usize = 48 * 1024 * 1024;
+
 fn id() -> v2::Id {
     v2::Id::new(Uuid::new_v4()).expect("new UUID")
 }
@@ -791,7 +796,7 @@ impl NodeResourceRuntime {
             || request.recipe_source_binding.len() > 4096
             || request.operation_timeout.is_zero()
             || request.parser_limits.max_bytes == 0
-            || request.parser_limits.max_bytes > 48 * 1024 * 1024
+            || request.parser_limits.max_bytes > COPY_VOD_MAX_SEGMENT_BYTES
             || request.reader_bounds.validate().is_err()
             || request.max_pending_fragments == 0
             || request.max_pending_fragments > 65_536
