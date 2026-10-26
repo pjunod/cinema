@@ -94,9 +94,9 @@ def workflow_commands() -> str:
     files = sorted((ROOT / ".github" / "workflows").glob("*.yml")) + sorted(
         (ROOT / ".github" / "actions").glob("**/*.yml")
     )
-    return "\n".join(
-        line for path in files for line in uncommented(path.read_text(encoding="utf-8"))
-    )
+    commands = [line for path in files for line in uncommented(path.read_text(encoding="utf-8"))]
+    commands.extend(fast_lane_commands())
+    return "\n".join(commands)
 
 
 MAKE_CALL = re.compile(r"(?:\bmake|\$\(MAKE\))((?:\s+-\S+)*)\s+([a-z][\w.-]*)")
@@ -141,18 +141,21 @@ def web_commands() -> list[str]:
     )
 
 
-def lane_node_test_commands() -> list[str]:
-    """What a pull request executes: web-unit-check, which the fast lane's web
-    job runs, plus that job's own `node` lines."""
+def fast_lane_commands() -> list[str]:
+    """Resolve only the exact authenticated wrapper's actual fresh branch."""
+    from validation import web_cohort_retention as retention
     job = fast_lane_web_job()
-    assert re.search(r"(?m)^\s+run: make web-unit-check\s*$", job), (
-        f"{FAST_LANE} {WEB_JOB} no longer runs make web-unit-check"
+    assert "  web_compile:\n" + job == retention.adapted_job(), (
+        "The web inventory recognizes only the reviewed cohort wrapper, not an arbitrary module invocation"
     )
-    own = [
-        re.sub(r"^run:\s*", "", line.strip())
-        for line in uncommented(job)
-        if re.search(r"\bnode ", line)
-    ]
+    assert retention.COMMANDS[-1] == "make web-unit-check"
+    return "\n".join(retention.COMMANDS).splitlines()
+
+
+def lane_node_test_commands() -> list[str]:
+    """The exact fresh cohort commands and Make target; retention authenticates
+    this same complete inventory instead of fabricating new Node events."""
+    own = [line for line in fast_lane_commands() if re.search(r"\bnode ",line)]
     return command_lines(target_recipe(makefile_text(), "web-unit-check")) + own
 
 

@@ -199,6 +199,33 @@ class RustCommandDiagnostics(OwnedScratch):
         self.assertTrue(not state or state.startswith('Z'),f'owned child remains live: {state}')
 
 
+    def test_prefix_phase_uses_registry_boundary_and_preserves_later_untrusted_rows(self):
+        names = list(runner.CASES)
+        self.assertEqual(runner.prefix_cases(),names[:names.index('graph-product')])
+        parsed = runner.parser().parse_args(['build-prefix','--output-dir',str(self.directory)])
+        self.assertTrue(parsed.prefix);self.assertIsNone(parsed.case)
+        sources,tools = {'fixture':'a'*64},{'rust':'pinned'}
+        later = {'accepted':True,'fixture':'later still requires reusable_case'}
+        journal = {'schema_version':2,'complete':True,'rust_toolchain':tools,
+            'source_sha256':sources,'cases':{'first':{'accepted':True},'later':later},'graphs':{}}
+        args = argparse.Namespace(output_dir=self.directory,case=None,prefix=True)
+        with patch.object(runner,'CASES',{'first':['not-executed'],'graph-product':['not-executed'],'later':['not-executed']}), \
+             patch.object(runner,'source_identity',return_value=sources),patch.object(runner,'rust_identity',return_value=tools), \
+             patch.object(runner,'read_journal',return_value=journal),patch.object(runner,'refresh_graphs'), \
+             patch.object(runner,'reusable_case',return_value=True) as reuse,patch.object(runner,'run_rust_case') as execute:
+            runner.build_inputs(args)
+            result = json.loads((self.directory/'provenance.json').read_text())
+            self.assertFalse(result['complete']);self.assertEqual(result['cases']['later'],later)
+            self.assertEqual({call.args[0] for call in reuse.call_args_list},{'first'})
+            execute.assert_not_called()
+            reuse.side_effect = [True,False]
+            with self.assertRaisesRegex(runner.c.Invalid,'Prefix checkpoint lacks'):
+                runner.build_inputs(args)
+            execute.assert_not_called()
+        with patch.object(runner,'CASES',{'graph-product':['never']}):
+            with self.assertRaisesRegex(runner.c.Invalid,'graph-product boundary'):runner.prefix_cases()
+
+
 class InvocationTrust(OwnedScratch):
     def git(self,*args):
         return subprocess.check_output(['git',*args],cwd=self.directory,stderr=subprocess.DEVNULL).decode().strip()
@@ -695,3 +722,152 @@ class ExplicitTransportAuthentication(unittest.TestCase):
         with patch.object(shared,'MAX_ARCHIVE_BYTES',17):
             self.assertEqual(shared.legacy_transport_spec().max_archive_bytes,17)
             self.assertEqual(shared.legacy_extraction_spec().max_archive_bytes,17)
+
+
+    def test_async_current_context_binds_positive_attempt_to_its_live_proof_job(self):
+        commit = 'a'*40;repo = {'id':1,'full_name':'example/project'}
+        pull = {'number':2,'draft':False,'state':'open','head':{'sha':commit,'ref':'topic','repo':{'id':1}},
+            'base':{'sha':'b'*40,'ref':'main','repo':{'id':1}}}
+        event = {'repository':repo,'number':2,'action':'synchronize','pull_request':pull}
+        current = {'id':11,'commit_sha':commit,'workflow_id':'main-fast-lane.yml','prettyref':'#2',
+            'event':'pull_request','event_payload':json.dumps(event),'repository':repo}
+        job = {'id':12,'repo_id':1,'run_id':11,'name':adapter.PROOF_JOB,'attempt':2,'task_id':13,'status':'running'}
+        class API:
+            def get(self,path):
+                return repo if path=='' else pull if path.startswith('/pulls/') else current
+            def pages(self,path,query=None,field=None):return [job]
+        scratch = ROOT/'target/async-refinement-resume-fixtures';scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            event_path = Path(directory)/'event.json';event_path.write_text(json.dumps(event))
+            env = {'GITHUB_EVENT_NAME':'pull_request','GITHUB_EVENT_PATH':str(event_path),'GITHUB_JOB':adapter.JOB_ID,
+                'GITHUB_REPOSITORY':'example/project','GITHUB_SHA':commit,'GITHUB_RUN_ATTEMPT':'2',
+                'GITHUB_API_URL':'https://ci.example/api/v1','GITHUB_SERVER_URL':'https://ci.example'}
+            with patch.dict(os.environ,env),patch.object(adapter.receipts,'API',return_value=API()), \
+                 patch.object(adapter.subprocess,'check_output',side_effect=lambda argv,**kw:commit+'\n' if argv[1]=='rev-parse' else b''):
+                self.assertEqual(adapter.current_context(ROOT,11,2)[4],job)
+                for attempt in (0,-1,True,3):
+                    with self.subTest(attempt=attempt),self.assertRaises(receipts.ReceiptError):adapter.current_context(ROOT,11,attempt)
+                for change in ({'name':'fast Rust gate'},{'status':'success'},{'repo_id':4}):
+                    saved = job.copy();job.update(change)
+                    with self.subTest(change=change),self.assertRaisesRegex(receipts.ReceiptError,'current proof job/attempt'):
+                        adapter.current_context(ROOT,11,2)
+                    job.clear();job.update(saved)
+                with patch.dict(os.environ,{'GITHUB_JOB':'rust_compile'}):
+                    with self.assertRaisesRegex(receipts.ReceiptError,'positive current job attempt'):adapter.current_context(ROOT,11,2)
+                pull['head']['sha'] = 'c'*40
+                with self.assertRaisesRegex(receipts.ReceiptError,'Main receipt must match'):adapter.current_context(ROOT,11,2)
+
+    def test_async_phase_envelope_refuses_wrong_phase_ids_source_files_and_unsafe_zip(self):
+        commit = 'a'*40;run = {'id':11,'commit_sha':commit};job = {'id':12,'attempt':1,'task_id':13}
+        log = b'{"schema_version":2,"complete":false,"cases":{}}'
+        origin = {'schema_version':2,'current_run_id':11,'current_attempt':1,'current_job_id':12,'current_task_id':13,
+            'current_job_name':adapter.PROOF_JOB,'candidate_commit':commit,'working_dir':'/work/async'}
+        origin_raw = json.dumps(origin).encode()
+        identity = {'schema_version':2,'phase':'prefix','checkout_sha':commit,'current_run_id':11,'current_attempt':1,
+            'current_job_id':12,'current_task_id':13,'current_job_name':adapter.PROOF_JOB,'created_at':'2026-10-26T00:00:00+00:00',
+            'working_dir':'/work/async','origin_sha256':hashlib.sha256(origin_raw).hexdigest(),
+            'files_sha256':{'provenance.json':hashlib.sha256(log).hexdigest()},'hydrated_acceptance':False}
+        def packed(value=identity,extra=()):
+            return archive([('provenance.json',log,stat.S_IFREG|0o644),
+                ('resume-origin.json',origin_raw,stat.S_IFREG|0o644),
+                ('snapshot-identity.json',json.dumps(value).encode(),stat.S_IFREG|0o644),*extra])
+        self.assertFalse(adapter.validate_snapshot_archive(packed(),{},job,run,1,'prefix')['case_acceptance'])
+        for update in ({'phase':'final'},{'current_attempt':True},{'current_job_id':99},{'checkout_sha':'b'*40},
+                       {'files_sha256':{}},{'origin_sha256':'0'*64}):
+            with self.subTest(update=update),self.assertRaisesRegex(receipts.ReceiptError,'identity differs'):
+                adapter.validate_snapshot_archive(packed({**identity,**update}),{},job,run,1,'prefix')
+        for extra in ([('../escape',b'bad',stat.S_IFREG|0o644)],
+                      [('unknown.txt',b'bad',stat.S_IFREG|0o644)],
+                      [('alias',b'bad',stat.S_IFLNK|0o777)],
+                      [('provenance.json',log,stat.S_IFREG|0o644)]):
+            with self.subTest(extra=extra[0][0]),self.assertRaises(receipts.ReceiptError):
+                adapter.validate_snapshot_archive(packed(extra=extra),{},job,run,1,'prefix')
+        with patch.object(adapter,'MAX_SMALL_BYTES',32):
+            with self.assertRaisesRegex(receipts.ReceiptError,'expanded bound'):
+                adapter.validate_snapshot_archive(packed(),{},job,run,1,'prefix')
+
+    def test_async_same_run_uses_only_earlier_terminal_attempt_and_falls_back_to_prefix(self):
+        api,scope,run,job,unused = self.fixture()
+        job.update(name=adapter.PROOF_JOB,status='running',attempt=2,task_id=20)
+        commit = run['commit_sha'];blobs={};artifacts=[]
+        for phase,prefix in adapter.ARTIFACT_PHASES:
+            origin = {'schema_version':2,'current_run_id':11,'current_attempt':1,'current_job_id':12,'current_task_id':13,
+                'current_job_name':adapter.PROOF_JOB,'candidate_commit':commit,'working_dir':'/work/async'}
+            origin_raw = json.dumps(origin).encode();journal = b'{"complete":false,"cases":{}}'
+            identity = {'schema_version':2,'phase':phase,'checkout_sha':commit,'current_run_id':11,'current_attempt':1,
+                'current_job_id':12,'current_task_id':13,'current_job_name':adapter.PROOF_JOB,'created_at':'2026-10-26T00:00:00+00:00',
+                'working_dir':'/work/async','origin_sha256':hashlib.sha256(origin_raw).hexdigest(),
+                'files_sha256':{'provenance.json':hashlib.sha256(journal).hexdigest()},'hydrated_acceptance':False}
+            data = archive([('provenance.json',journal,stat.S_IFREG|0o644),('resume-origin.json',origin_raw,stat.S_IFREG|0o644),
+                ('snapshot-identity.json',json.dumps(identity).encode(),stat.S_IFREG|0o644)])
+            aid = 14+len(artifacts);blobs[aid]=data
+            artifacts.append({'id':aid,'name':f'{prefix}-11-1','run_id':11,'size_in_bytes':len(data),'expired':False})
+        def upload(item):
+            name,aid,size=item['name'],item['id'],item['size_in_bytes']
+            return ['With the provided path, there will be 3 files uploaded','Artifact name is valid!',
+                'Root directory input is valid!','Beginning upload of artifact content to blob storage',
+                f'Uploaded bytes {size}','Finished uploading artifact content to blob storage!',
+                'SHA256 hash of uploaded artifact zip is '+hashlib.sha256(blobs[aid]).hexdigest(),'Finalizing artifact upload',
+                f'Artifact {name}.zip successfully finalized. Artifact ID {aid}',
+                f'Artifact {name} has been successfully uploaded! Final size is {size} bytes. Artifact ID is {aid}']
+        lines = ['Runner 00000000-0000-0000-0000-000000000001 (version:v1) received task 13 of job async_refinement, triggered by event: pull_request',
+            f'{commit}:refs/remotes/pull/2/head','[command]/usr/bin/git log -1 --format=%H',commit,
+            *upload(artifacts[1]),*upload(artifacts[0])]
+        class API:
+            def get(self,path):return run
+            def pages(self,path,query=None,field=None):
+                if path.endswith('/jobs'):return [job]
+                if path.endswith('/artifacts'):return artifacts
+                if path=='/actions/artifacts':return [a for a in artifacts if a['name']==query['name']]
+                return [run]
+            def bytes(self,path,query=None):
+                assert query == {'attempt':1}
+                return ('\n'.join(lines)+'\n').encode()
+        with patch.object(adapter,'identical_invocation',return_value={'decision':'identical_invocation'}), \
+             patch.object(shared,'archive_bytes',side_effect=lambda api,aid,**kw:blobs[aid]):
+            spec = adapter.transport_spec(2)
+            final = shared.find_prior(API(),scope,11,commit,ROOT,spec=spec)
+            self.assertEqual(final['artifact_phase'],'final');self.assertEqual(final['attempt'],1)
+            self.assertIsNone(final['job_result']);self.assertEqual(final['historical_task_id'],13)
+            self.assertEqual(final['terminal_basis'],'superseded_by_authenticated_later_attempt')
+            blobs[14] = blobs[14][:-1]+b'!'
+            prefix = shared.find_prior(API(),scope,11,commit,ROOT,spec=spec)
+            self.assertEqual(prefix['artifact_phase'],'prefix')
+            self.assertIsNone(shared.artifact_for_run(API(),scope,run,11,commit,ROOT,spec=adapter.transport_spec(1)))
+            job.update(attempt=1,task_id=13,status='running')
+            self.assertIsNone(shared.artifact_for_run(API(),scope,run,11,commit,ROOT,spec=spec))
+            self.assertIsNone(shared.artifact_for_run(API(),scope,run,11,commit,ROOT))
+
+    def test_scoped_upload_digest_refuses_missing_duplicate_wrong_id_and_mixed_transaction(self):
+        def transaction(name,aid,sha,size=10):
+            return ['With the provided path, there will be 2 files uploaded','Artifact name is valid!',
+                'Root directory input is valid!','Beginning upload of artifact content to blob storage',
+                f'Uploaded bytes {size}','Finished uploading artifact content to blob storage!',
+                'SHA256 hash of uploaded artifact zip is '+sha,'Finalizing artifact upload',
+                f'Artifact {name}.zip successfully finalized. Artifact ID {aid}',
+                f'Artifact {name} has been successfully uploaded! Final size is {size} bytes. Artifact ID is {aid}']
+        prefix=transaction('async-driver-refinement-prefix-11-1',14,'a'*64)
+        final=transaction('async-driver-refinement-11-1',15,'b'*64)
+        self.assertEqual(shared.upload_transaction_sha256(prefix+final,'async-driver-refinement-prefix-11-1',14,10),'a'*64)
+        self.assertEqual(shared.upload_transaction_sha256(prefix+final,'async-driver-refinement-11-1',15,10),'b'*64)
+        for changed in (prefix+[line for line in final if not line.startswith('SHA256 hash')],
+                        prefix+final[:7]+[final[6]]+final[7:],
+                        prefix+[line.replace('Artifact ID 15','Artifact ID 99') for line in final],
+                        prefix+final[:7]+[prefix[-2]]+final[7:],prefix+final+final):
+            with self.subTest(changed=changed),self.assertRaisesRegex(receipts.ReceiptError,'Scoped artifact upload'):
+                shared.upload_transaction_sha256(changed,'async-driver-refinement-11-1',15,10)
+
+    def test_historical_attempt_log_never_borrows_latest_task_status_or_unknown_preamble(self):
+        latest={'id':12,'name':adapter.PROOF_JOB,'repo_id':1,'run_id':11,'attempt':3,'task_id':30,'status':'running'}
+        first='Runner 00000000-0000-0000-0000-000000000001 (version:v1) received task 10 of job async_refinement, triggered by event: pull_request'
+        api=unittest.mock.Mock();api.bytes.return_value=(first+'\nworkflow prepared\n').encode()
+        job,lines=adapter.attempt_log(api,latest,1)
+        api.bytes.assert_called_once_with('/actions/jobs/12/logs',{'attempt':1})
+        self.assertEqual(job['task_id'],10);self.assertIsNone(job['status']);self.assertNotIn('handle',job)
+        self.assertEqual(job['terminal_basis'],'superseded_by_authenticated_later_attempt')
+        for raw in ('test output\n'+first+'\n',first+'\n'+first+'\n',first.replace('async_refinement','rust_compile')+'\n'):
+            api.bytes.return_value=raw.encode()
+            with self.subTest(raw=raw),self.assertRaisesRegex(receipts.ReceiptError,'preamble missing/ambiguous'):
+                adapter.attempt_log(api,latest,1)
+        with self.assertRaisesRegex(receipts.ReceiptError,'not terminal'):adapter.attempt_log(api,latest,3)
+        with self.assertRaisesRegex(receipts.ReceiptError,'attempt differs'):adapter.attempt_log(api,latest,4)

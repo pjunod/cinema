@@ -829,6 +829,14 @@ def refresh_graphs(journal,out,sources):
             filename = 'driver-graph.json' if kind == 'driver' else 'product-bundle.json'
             journal['graphs'][kind] = {'sha256':c.sha(out/filename)}
 
+def prefix_cases():
+    """The durable phase boundary is derived from the single ordered registry."""
+    names = list(CASES)
+    c.require('graph-product' in names and names.index('graph-product') > 0,
+              'Async prefix requires the existing graph-product boundary')
+    return names[:names.index('graph-product')]
+
+
 def build_inputs(args):
     out = args.output_dir.resolve(); out.mkdir(parents=True,exist_ok=True)
     sources, tools = source_identity(False), rust_identity()
@@ -837,7 +845,9 @@ def build_inputs(args):
     if journal.get('rust_toolchain') != tools:
         journal = {'schema_version':2,'complete':False,'source_sha256':sources,'rust_toolchain':tools,'cases':{},'graphs':{}}
     journal['source_sha256'] = sources
-    selected = [args.case] if args.case else list(CASES)
+    prefix = getattr(args,'prefix',False)
+    c.require(not prefix or args.case is None,'Prefix phase cannot select a different case boundary')
+    selected = prefix_cases() if prefix else ([args.case] if args.case else list(CASES))
     for name in selected:
         argv = rendered_command(name,out); log = out/f'rust-{name}.log'
         prior = journal['cases'].get(name,{})
@@ -882,9 +892,15 @@ def build_inputs(args):
         write(journal_path,journal)
         print(json.dumps({'case':name,'status':'passed','log':str(log)}),flush=True)
     refresh_graphs(journal,out,sources)
-    journal['complete'] = set(journal['cases']) == set(CASES) and all(reusable_case(name,journal['cases'][name],out,sources) for name in CASES)
+    if prefix:
+        c.require(all(reusable_case(name,journal['cases'].get(name,{}),out,sources) for name in selected),
+                  'Prefix checkpoint lacks a complete accepted current case')
+    # Keep later rows for strict future reuse, but a prefix phase never claims
+    # whole completion. Every row is reparsed by reusable_case before acceptance.
+    journal['complete'] = not prefix and set(journal['cases']) == set(CASES) and all(reusable_case(name,journal['cases'][name],out,sources) for name in CASES)
     write(journal_path,journal)
-    print(json.dumps({'provenance':str(journal_path),'complete':journal['complete']}))
+    print(json.dumps({'provenance':str(journal_path),'complete':journal['complete'],
+      'phase':'prefix' if prefix else 'full','selected_cases':selected}))
 
 def validate_provenance(path,driver_path,product_path):
     p = read_journal(path,'rust')
@@ -1025,6 +1041,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__); sub = p.add_subparsers(dest='command',required=True)
     a = sub.add_parser('affected'); a.add_argument('--base')
     b = sub.add_parser('build-inputs'); b.add_argument('--output-dir',type=Path,required=True); b.add_argument('--case',choices=tuple(CASES))
+    b.set_defaults(prefix=False)
+    b = sub.add_parser('build-prefix'); b.add_argument('--output-dir',type=Path,required=True); b.set_defaults(case=None,prefix=True)
     for name in ('inventory','qualify'):
         a = sub.add_parser(name)
         for flag in ('driver-graph','product-bundle','output-dir'): a.add_argument('--'+flag,type=Path,required=True)
@@ -1041,7 +1059,7 @@ def main():
     if hasattr(args,'output_dir'): TASK_SCRATCH = args.output_dir.resolve()/'scratch'
     try:
         if args.command == 'affected': affected(args)
-        elif args.command == 'build-inputs': build_inputs(args)
+        elif args.command in ('build-inputs','build-prefix'): build_inputs(args)
         elif args.command == 'inventory':
             out,_ = prepare(args); print(json.dumps({'inventory':str(out/'inventory.json'),'acceptance':False}))
         else: qualify(args)

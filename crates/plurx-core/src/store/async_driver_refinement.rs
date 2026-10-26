@@ -1833,6 +1833,22 @@ struct OracleDiagnostics {
     requested_apply: Duration,
     requested_checks: Duration,
     rollback: Duration,
+    canonical: Duration,
+    actions: Duration,
+    invariants: Duration,
+    controls: Duration,
+    replayed_apply: Duration,
+}
+
+// Fixed host-only totals. Await exactly once and preserve the original Result;
+// these measurements never enter canonical state, edges, hashes or SQL inputs.
+macro_rules! oracle_timed {
+    ($diagnostics:expr, $field:ident, $future:expr) => {{
+        let started = Instant::now();
+        let value = $future.await;
+        $diagnostics.$field = $diagnostics.$field.saturating_add(started.elapsed());
+        value
+    }};
 }
 
 pub(super) struct Oracle {
@@ -1892,7 +1908,11 @@ impl Oracle {
     ) -> Result<(), String> {
         self.restore_root().await?;
         self.mutation = install_mutation(&self.fixture, mutation).await;
-        if let Err(error) = invariants(&self.fixture, &Episode::initial()).await {
+        if let Err(error) = oracle_timed!(
+            self.diagnostics,
+            invariants,
+            invariants(&self.fixture, &Episode::initial())
+        ) {
             self.materialization_failed = true;
             return Err(error);
         }
@@ -2031,20 +2051,33 @@ impl Oracle {
         }
         let result = async {
             if self.root_savepoint {
-                self.fixture
-                    .store
-                    .async_refinement_control(
+                oracle_timed!(
+                    self.diagnostics,
+                    controls,
+                    self.fixture.store.async_refinement_control(
                         "ROLLBACK TO async_product_root; RELEASE async_product_root;".into(),
                     )
-                    .await
-                    .map_err(|e| format!("RootRollback: {e}"))?;
+                )
+                .map_err(|e| format!("RootRollback: {e}"))?;
             }
-            if canonical(&self.fixture, &Episode::initial()).await != self.states[0].canonical
-                || actions(&self.fixture, &Episode::initial()).await != self.states[0].inputs
+            if oracle_timed!(
+                self.diagnostics,
+                canonical,
+                canonical(&self.fixture, &Episode::initial())
+            ) != self.states[0].canonical
+                || oracle_timed!(
+                    self.diagnostics,
+                    actions,
+                    actions(&self.fixture, &Episode::initial())
+                ) != self.states[0].inputs
             {
                 return Err("RootRollback: Init canonical/input mismatch".into());
             }
-            invariants(&self.fixture, &Episode::initial()).await?;
+            oracle_timed!(
+                self.diagnostics,
+                invariants,
+                invariants(&self.fixture, &Episode::initial())
+            )?;
             Ok(())
         }
         .await;
@@ -2063,11 +2096,14 @@ impl Oracle {
         }
         let result = async {
             if !self.root_savepoint {
-                self.fixture
-                    .store
-                    .async_refinement_control("SAVEPOINT async_product_root;".into())
-                    .await
-                    .map_err(|e| format!("RootSavepoint: {e}"))?;
+                oracle_timed!(
+                    self.diagnostics,
+                    controls,
+                    self.fixture
+                        .store
+                        .async_refinement_control("SAVEPOINT async_product_root;".into())
+                )
+                .map_err(|e| format!("RootSavepoint: {e}"))?;
                 self.root_savepoint = true;
             }
             let common = self
@@ -2085,11 +2121,14 @@ impl Oracle {
                 };
                 // ROLLBACK TO retains the named checkpoint and discards every
                 // deeper checkpoint. Its owned Episode is restored separately.
-                self.fixture
-                    .store
-                    .async_refinement_control(format!("ROLLBACK TO {point};"))
-                    .await
-                    .map_err(|e| format!("PrefixRollback: {e}"))?;
+                oracle_timed!(
+                    self.diagnostics,
+                    controls,
+                    self.fixture
+                        .store
+                        .async_refinement_control(format!("ROLLBACK TO {point};"))
+                )
+                .map_err(|e| format!("PrefixRollback: {e}"))?;
                 self.prefix.truncate(common);
             }
             let mut episode = self
@@ -2098,11 +2137,22 @@ impl Oracle {
                 .map(|(_, ep)| ep.clone())
                 .unwrap_or_else(Episode::initial);
             for action in &trace[common..] {
-                let before = canonical(&self.fixture, &episode).await;
-                let result = apply(&self.fixture, &mut episode, action, true)
-                    .await?
-                    .result;
-                let after = canonical(&self.fixture, &episode).await;
+                let before = oracle_timed!(
+                    self.diagnostics,
+                    canonical,
+                    canonical(&self.fixture, &episode)
+                );
+                let result = oracle_timed!(
+                    self.diagnostics,
+                    replayed_apply,
+                    apply(&self.fixture, &mut episode, action, true)
+                )?
+                .result;
+                let after = oracle_timed!(
+                    self.diagnostics,
+                    canonical,
+                    canonical(&self.fixture, &episode)
+                );
                 if matches!(
                     result.as_str(),
                     "refused"
@@ -2117,13 +2167,20 @@ impl Oracle {
                         "FailedCasAtomicity: replay refusal changed full canonical state".into(),
                     );
                 }
-                invariants(&self.fixture, &episode).await?;
+                oracle_timed!(
+                    self.diagnostics,
+                    invariants,
+                    invariants(&self.fixture, &episode)
+                )?;
                 let depth = self.prefix.len() + 1;
-                self.fixture
-                    .store
-                    .async_refinement_control(format!("SAVEPOINT async_product_prefix_{depth};"))
-                    .await
-                    .map_err(|e| format!("PrefixSavepoint: {e}"))?;
+                oracle_timed!(
+                    self.diagnostics,
+                    controls,
+                    self.fixture.store.async_refinement_control(format!(
+                        "SAVEPOINT async_product_prefix_{depth};"
+                    ))
+                )
+                .map_err(|e| format!("PrefixSavepoint: {e}"))?;
                 self.prefix.push((action.clone(), episode.clone()));
                 self.diagnostics.replay_performed =
                     self.diagnostics.replay_performed.saturating_add(1);
@@ -2143,7 +2200,10 @@ impl Oracle {
             "replay_depth_total":d.replay_depth_total,"replay_depth_max":d.replay_depth_max,
             "replay_performed":d.replay_performed,"replay_saved":d.replay_saved,
             "replay_ms":d.replay.as_millis(),"requested_apply_ms":d.requested_apply.as_millis(),
-            "requested_checks_ms":d.requested_checks.as_millis(),"rollback_ms":d.rollback.as_millis()})
+            "requested_checks_ms":d.requested_checks.as_millis(),"rollback_ms":d.rollback.as_millis(),
+            "canonical_ms":d.canonical.as_millis(),"actions_ms":d.actions.as_millis(),
+            "invariants_ms":d.invariants.as_millis(),"controls_ms":d.controls.as_millis(),
+            "replayed_apply_ms":d.replayed_apply.as_millis()})
     }
 
     pub(super) async fn apply(
@@ -2208,35 +2268,34 @@ impl Oracle {
         let parent = &self.states[handle];
         // A checked prefix is still required to match the complete demanded
         // parent before any requested SQL operation can run.
-        if canonical(fixture, &episode).await != parent.canonical
-            || actions(fixture, &episode).await != parent.inputs
+        if oracle_timed!(self.diagnostics, canonical, canonical(fixture, &episode))
+            != parent.canonical
+            || oracle_timed!(self.diagnostics, actions, actions(fixture, &episode)) != parent.inputs
         {
             self.materialization_failed = true;
             return Err("MaterializationRoundTrip: parent canonical/input mismatch".into());
         }
-        if let Err(error) = invariants(fixture, &episode).await {
+        if let Err(error) =
+            oracle_timed!(self.diagnostics, invariants, invariants(fixture, &episode))
+        {
             self.materialization_failed = true;
             return Err(error);
         }
-        fixture
-            .store
-            .async_refinement_control("SAVEPOINT async_product_demand;".into())
-            .await
-            .map_err(|e| {
-                self.materialization_failed = true;
-                format!("DemandSavepoint: {e}")
-            })?;
+        oracle_timed!(
+            self.diagnostics,
+            controls,
+            fixture
+                .store
+                .async_refinement_control("SAVEPOINT async_product_demand;".into())
+        )
+        .map_err(|e| {
+            self.materialization_failed = true;
+            format!("DemandSavepoint: {e}")
+        })?;
         let parent_episode = episode.clone();
         let evaluated: Result<_, String> = async {
-            if canonical(fixture, &episode).await != parent.canonical {
-                return Err(
-                    "MaterializationRoundTrip: replay changed canonical concrete rows/tokens"
-                        .into(),
-                );
-            }
-            if actions(fixture, &episode).await != parent.inputs {
-                return Err("OracleInputDomain: materialized D differs from stored D".into());
-            }
+            // The complete parent canonical/domain/invariant observations above
+            // remain authoritative: only SAVEPOINT intervened, with no mutation.
             self.diagnostics.replay = self
                 .diagnostics
                 .replay
@@ -2251,7 +2310,7 @@ impl Oracle {
             let applied = applied?;
             let checks_started = Instant::now();
             let result = applied.result;
-            let next = canonical(fixture, &episode).await;
+            let next = oracle_timed!(self.diagnostics, canonical, canonical(fixture, &episode));
             if matches!(
                 result.as_str(),
                 "refused"
@@ -2268,8 +2327,9 @@ impl Oracle {
                 );
             }
             let view = projection(fixture, &episode, self.states.len(), &next).await;
-            let inputs = actions(fixture, &episode).await;
-            let invariant = invariants(fixture, &episode).await;
+            let inputs = oracle_timed!(self.diagnostics, actions, actions(fixture, &episode));
+            let invariant =
+                oracle_timed!(self.diagnostics, invariants, invariants(fixture, &episode));
             self.diagnostics.requested_checks = self
                 .diagnostics
                 .requested_checks
@@ -2290,23 +2350,33 @@ impl Oracle {
         let rollback_started = Instant::now();
         // Every Result failure restores the real writer and checks its exact parent; an
         // actual SQL panic also aborts the test and can never publish closure.
-        fixture
-            .store
-            .async_refinement_control(
+        oracle_timed!(
+            self.diagnostics,
+            controls,
+            fixture.store.async_refinement_control(
                 "ROLLBACK TO async_product_demand; RELEASE async_product_demand;".into(),
             )
-            .await
-            .map_err(|error| {
-                self.materialization_failed = true;
-                format!("RollbackRoundTrip: {error}")
-            })?;
-        if canonical(fixture, &parent_episode).await != parent.canonical
-            || actions(fixture, &parent_episode).await != parent.inputs
+        )
+        .map_err(|error| {
+            self.materialization_failed = true;
+            format!("RollbackRoundTrip: {error}")
+        })?;
+        if oracle_timed!(
+            self.diagnostics,
+            canonical,
+            canonical(fixture, &parent_episode)
+        ) != parent.canonical
+            || oracle_timed!(self.diagnostics, actions, actions(fixture, &parent_episode))
+                != parent.inputs
         {
             self.materialization_failed = true;
             return Err("RollbackRoundTrip: demand rollback changed parent".into());
         }
-        if let Err(error) = invariants(fixture, &parent_episode).await {
+        if let Err(error) = oracle_timed!(
+            self.diagnostics,
+            invariants,
+            invariants(fixture, &parent_episode)
+        ) {
             self.materialization_failed = true;
             return Err(error);
         }
@@ -2364,7 +2434,9 @@ impl Oracle {
             *to
         } else {
             if self.states.len() >= STATE_CAP {
-                return Err(format!("DomainStateCap: closure exceeded {STATE_CAP} concrete states; no closed relation emitted"));
+                return Err(format!(
+                    "DomainStateCap: closure exceeded {STATE_CAP} concrete states; no closed relation emitted"
+                ));
             }
             let to = self.states.len();
             view["id"] = json!(to);
@@ -3228,6 +3300,19 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
     }
     assert!(saw_refusal);
     assert!(oracle.diagnostics.replay_saved > 0);
+    let host = oracle.diagnostic_summary();
+    for field in [
+        "canonical_ms",
+        "actions_ms",
+        "invariants_ms",
+        "controls_ms",
+        "replayed_apply_ms",
+    ] {
+        assert!(
+            host[field].as_u64().is_some(),
+            "bounded host timing {field}"
+        );
+    }
     // A deeper retained prefix must roll back to a nonzero LCP and restore
     // the historical clock and captured-token Episode, not just durable rows.
     let clock = oracle

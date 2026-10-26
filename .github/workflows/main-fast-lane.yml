@@ -349,11 +349,11 @@ jobs:
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
     container: ubuntu:24.04
-    # Compile all targets and enforce workspace/vendor Clippy here, then run
-    # the affected async-driver graph and bounded TLC qualification. A cold
-    # Rust run spent 21m36s provisioning before compilation; leave room for
-    # that setup, the all-target check, and the bounded formal lane.
+    # Compilation/lint owns this 90-minute budget. The dependent async proof
+    # job has a separate 90-minute budget; no individual proof limit is raised.
     timeout-minutes: 90
+    outputs:
+      async_driver_affected: ${{ steps.async-driver-inputs.outputs.affected }}
     env:
       # Keep compilation within the shared guest's memory budget.
       CARGO_BUILD_JOBS: "1"
@@ -401,17 +401,92 @@ jobs:
           mkdir -p target
           python3 scripts/check-async-driver-refinement affected --base "$PR_BASE_SHA" > target/async-driver-affected.json
           python3 -c 'import json, os; from pathlib import Path; value=json.loads(Path("target/async-driver-affected.json").read_text()); assert type(value.get("affected")) is bool; print("affected=" + str(value["affected"]).lower(), file=open(os.environ["GITHUB_OUTPUT"], "a"))'
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+
+  async_refinement:
+    name: fast async driver refinement gate
+    needs: [scope, preflight, rust_compile]
+    if: needs.scope.outputs.rust == 'true' && needs.rust_compile.outputs.async_driver_affected == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    container: ubuntu:24.04
+    # Prefix upload finishes before graph-product. Cancellation of expensive
+    # qualification cannot overwrite or retract that immutable checkpoint.
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "1"
+    steps:
+      - name: Install Rust gate prerequisites
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
+      - name: Check out the candidate
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install the pinned Rust toolchain
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Install the pinned FFmpeg
+        uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
+      - name: Restore the main fast Rust cache
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: main-fast-rust
       - name: Prepare authenticated same-PR async driver proof resumption
         id: async-driver-resume
-        if: steps.async-driver-inputs.outputs.affected == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.async_refinement_resume prepare
       - name: Provision the pinned TLC toolchain for async driver refinement
-        if: steps.async-driver-inputs.outputs.affected == 'true'
         run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+      - name: Build deterministic async driver prefix checkpoint
+        env:
+          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
+        run: |
+          set -euo pipefail
+          test -n "$ASYNC_DRIVER_WORKING"
+          python3 scripts/check-async-driver-refinement build-prefix --output-dir "$ASYNC_DRIVER_WORKING"
+      - name: Snapshot immutable async driver prefix checkpoint
+        env:
+          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
+          ASYNC_DRIVER_ORIGIN: ${{ steps.async-driver-resume.outputs.origin_path }}
+          ASYNC_DRIVER_PREFIX: ${{ github.workspace }}/target/verification/async-driver-refinement-prefix-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test ! -e "$ASYNC_DRIVER_PREFIX"
+          python3 -m validation.async_refinement_resume snapshot \
+            --working-dir "$ASYNC_DRIVER_WORKING" \
+            --output-dir "$ASYNC_DRIVER_PREFIX" \
+            --origin "$ASYNC_DRIVER_ORIGIN" --phase prefix
+      - name: Preserve immutable async driver prefix checkpoint
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: async-driver-refinement-prefix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/verification/async-driver-refinement-prefix-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 90
       - name: Build async driver refinement graph and control inputs
-        if: steps.async-driver-inputs.outputs.affected == 'true'
         env:
           ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
         run: |
@@ -419,7 +494,6 @@ jobs:
           test -n "$ASYNC_DRIVER_WORKING"
           python3 scripts/check-async-driver-refinement build-inputs --output-dir "$ASYNC_DRIVER_WORKING"
       - name: Qualify async driver refinement with pinned TLC
-        if: steps.async-driver-inputs.outputs.affected == 'true'
         env:
           ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
         run: >-
@@ -430,7 +504,7 @@ jobs:
           --output-dir "$ASYNC_DRIVER_WORKING/tlc"
           --cache-dir target/formal-toolchain
       - name: Snapshot compact async driver refinement evidence
-        if: always() && steps.async-driver-inputs.outputs.affected == 'true' && steps.async-driver-resume.outputs.working_dir != ''
+        if: always() && steps.async-driver-resume.outputs.working_dir != ''
         env:
           ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
           ASYNC_DRIVER_ORIGIN: ${{ steps.async-driver-resume.outputs.origin_path }}
@@ -442,9 +516,9 @@ jobs:
           python3 -m validation.async_refinement_resume snapshot \
             --working-dir "$ASYNC_DRIVER_WORKING" \
             --output-dir "$ASYNC_DRIVER_SNAPSHOT" \
-            --origin "$ASYNC_DRIVER_ORIGIN"
+            --origin "$ASYNC_DRIVER_ORIGIN" --phase final
       - name: Preserve async driver refinement evidence
-        if: always() && steps.async-driver-inputs.outputs.affected == 'true' && steps.async-driver-resume.outputs.working_dir != ''
+        if: always() && steps.async-driver-resume.outputs.working_dir != ''
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
@@ -482,32 +556,19 @@ jobs:
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-      - name: Parse every shipped JavaScript surface
-        run: |
-          scripts/js-check
-          git ls-files -z 'crates/plurxd/src/web/*.js' | xargs -0 -n1 node --check
-      # TypeScript's checker over the same rows, against tests/web/
-      # tsc-baseline.tsv: the counts must match exactly, so a new or raised
-      # diagnostic fails and so does one that fell without the baseline being
-      # lowered. --base also refuses a count the pull request raised in the
-      # TSV without a new `# accepted` line for that key. The script runs
-      # `npm ci` into tools/web-types from its lockfile (one package, no
-      # dependencies) when the pinned tsc is not already there.
-      - name: Type-check the web shell against its baseline
+      - name: Retain or execute the reviewed whole web cohort
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          node tests/web/jsconfig-generated.test.js
-          scripts/web-types --base "$PR_BASE_SHA"
-          node tests/web/player-typedef.test.js
-      # Every Node web and playback test, the same list `make web-check` runs
-      # minus its two real-browser scripts. Until 2026-10-04 a pull request ran
-      # two of them here and the rest ran only when someone typed make; a stale
-      # assertion sat red on main for two days that way.
-      - name: Run every Node web and playback test
-        env:
-          TMPDIR: /tmp
-        run: make web-unit-check
+        run: python3 -m validation.web_cohort_retention --fresh-on-new-inputs
+      - name: Preserve whole web cohort evidence
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: web-cohort-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/validation/web-cohort-retention/
+          if-no-files-found: error
+          retention-days: 90
 
   apple_compile:
     name: Apple compile and native TV navigation
@@ -626,6 +687,7 @@ jobs:
       - preflight
       - worker_control_proof
       - rust_compile
+      - async_refinement
       - web_compile
       - apple_compile
       - android_compile
@@ -639,6 +701,8 @@ jobs:
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
+          ASYNC_DRIVER_RESULT: ${{ needs.async_refinement.result }}
+          ASYNC_DRIVER_AFFECTED: ${{ needs.rust_compile.outputs.async_driver_affected }}
           WEB_RESULT: ${{ needs.web_compile.result }}
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
@@ -652,9 +716,13 @@ jobs:
             echo "The required production worker controller proof ended with: $WORKER_CONTROL_RESULT"
             exit 1
           fi
+          if [ "$ASYNC_DRIVER_AFFECTED" = true ] && [ "$ASYNC_DRIVER_RESULT" != success ]; then
+            echo "The selected async refinement proof ended with: $ASYNC_DRIVER_RESULT"
+            exit 1
+          fi
           for result in \
             "$SCOPE_RESULT" "$PREFLIGHT_RESULT" \
-            "$RUST_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
+            "$RUST_RESULT" "$ASYNC_DRIVER_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
             "$ANDROID_RESULT"; do
             case "$result" in
               success|skipped) ;;

@@ -254,7 +254,11 @@ class Wired(unittest.TestCase):
         job = lane.split("\n  web_compile:\n", 1)[1].split("\n  apple_compile:\n", 1)[0]
         self.assertIn("fetch-depth: 0", job)
         self.assertIn("PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}", job)
-        self.assertIn('scripts/web-types --base "$PR_BASE_SHA"', job)
+        from validation import web_cohort_retention as retention
+        self.assertEqual("  web_compile:\n"+job+"\n",retention.adapted_job())
+        self.assertIn('run: python3 -m validation.web_cohort_retention --fresh-on-new-inputs',job)
+        self.assertIn('GITHUB_TOKEN: ${{ github.token }}',job)
+        self.assertIn('scripts/web-types --base "$PR_BASE_SHA"','\n'.join(retention.COMMANDS))
 
 
 class Pinned(unittest.TestCase):

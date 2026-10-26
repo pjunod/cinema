@@ -51,6 +51,13 @@ class TransportSpec:
     max_archive_bytes: int = MAX_ARCHIVE_BYTES
     label: str = "worker proof"
     eligible_archive: object = None
+    # Explicit async-only opt-in. Legacy worker/preflight callers retain their
+    # current-run exclusion and single-artifact/single-hash behavior.
+    artifact_phases: tuple = ()
+    same_run_attempt: int = 0
+    upload_sha256: object = None
+    validate_archive: object = None
+    attempt_log: object = None
 
 
 @dataclass(frozen=True)
@@ -312,97 +319,177 @@ def archive_bytes(api: receipts.API, artifact_id: int, *, spec=None) -> bytes:
     return data
 
 
-def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int,
-                     current_commit: str, workspace: Path, *, spec=None):
-    spec = legacy_transport_spec() if spec is None else spec
+def upload_transaction_sha256(lines, name, artifact_id, size):
+    """One bounded pinned-uploader transaction, independent of other uploads."""
+    summary = f"Artifact {name} has been successfully uploaded! Final size is {size} bytes. Artifact ID is {artifact_id}"
+    finalized = f"Artifact {name}.zip successfully finalized. Artifact ID {artifact_id}"
+    ends = [i for i,line in enumerate(lines) if line.startswith(f"Artifact {name} has been successfully uploaded!")]
+    receipts.require(len(ends) == 1 and lines[ends[0]] == summary and lines.count(finalized) == 1,
+                     "Scoped artifact upload identity missing/ambiguous")
+    starts = [i for i in range(ends[0]) if re.fullmatch(r"With the provided path, there will be [1-9][0-9]* files? uploaded",lines[i])]
+    receipts.require(starts, "Scoped artifact upload start missing")
+    section = lines[starts[-1]:ends[0]+1]
+    receipts.require(len(section) <= 256 and sum(len(line.encode())+1 for line in section) <= 64*1024,
+                     "Scoped artifact upload section exceeds bound")
+    markers = ["Artifact name is valid!","Root directory input is valid!",
+      "Beginning upload of artifact content to blob storage","Finished uploading artifact content to blob storage!",
+      "Finalizing artifact upload",finalized,summary]
+    receipts.require(all(section.count(line) == 1 for line in markers), "Scoped artifact upload incomplete/ambiguous")
+    positions = [section.index(line) for line in markers]
+    hashes = [(i,m[1]) for i,line in enumerate(section)
+      if (m := re.fullmatch(r"SHA256 hash of uploaded artifact zip is ([0-9a-f]{64})",line))]
+    progress = [(i,int(m[1])) for i,line in enumerate(section)
+      if (m := re.fullmatch(r"Uploaded bytes ([0-9]+)",line))]
+    receipts.require(positions == sorted(positions) and len(hashes) == 1
+      and sum(line.startswith("SHA256 hash of uploaded artifact zip is ") for line in section) == 1
+      and positions[3] < hashes[0][0] < positions[4]
+      and progress and progress[-1][1] == size
+      and all(positions[2] < i < positions[3] and 0 < count <= size for i,count in progress)
+      and [count for _,count in progress] == sorted({count for _,count in progress})
+      and sum(line.startswith("Artifact ") and ("successfully finalized." in line or "successfully uploaded!" in line)
+              for line in section) == 2, "Scoped artifact upload digest/order differs")
+    return hashes[0][1]
+
+
+def artifact_candidates_for_run(api, scope, run, current_run, current_commit, workspace, *, spec):
     run_id = receipts.positive(run.get("id"))
-    if run_id == current_run:
-        return None
+    scoped = bool(spec.artifact_phases)
+    receipts.require(not spec.same_run_attempt or (scoped and type(spec.same_run_attempt) is int
+      and spec.same_run_attempt > 0 and spec.upload_sha256 is not None and spec.validate_archive is not None),
+      "Earlier-attempt adoption requires the explicit scoped async contract")
+    if run_id == current_run and not spec.same_run_attempt:
+        return
     prior = api.get(f"/actions/runs/{run_id}")
     if prior.get("id") != run_id or prior.get("workflow_id") != spec.workflow:
-        return None
+        return
     if prior.get("repository", {}).get("id") != scope["repository"]:
-        return None
+        return
     main_unit_receipts.authenticate_run(scope, prior)
     trust = (invocation_trust if spec.trust is None else spec.trust)(prior["commit_sha"], current_commit, workspace)
     jobs = api.pages(f"/actions/runs/{run_id}/jobs")
+    if scoped:
+        # Forgejo lists the latest task only. Discover bounded older attempts
+        # from authenticated run artifacts, never range(latest_attempt).
+        selected = [job for job in jobs if job.get("name") == spec.proof_job
+          and job.get("repo_id") == scope["repository"] and job.get("run_id") == run_id]
+        receipts.require(len(selected) == 1 and type(selected[0].get("attempt")) is int
+          and selected[0]["attempt"] > 0 and spec.attempt_log is not None,
+          "Scoped proof latest job identity/attempt differs")
+        latest = selected[0]
+        receipts.require(type(latest.get("repo_id")) is int and type(latest.get("run_id")) is int,
+          "Scoped proof job numeric identity differs")
+        receipts.positive(latest.get("id"));receipts.positive(latest.get("task_id"))
+        artifacts = api.pages(f"/actions/runs/{run_id}/artifacts")
+        for phase,prefix in spec.artifact_phases:
+            matches = {}
+            for item in artifacts:
+                match = re.fullmatch(re.escape(prefix)+"-"+str(run_id)+r"-([1-9][0-9]*)",str(item.get("name","")))
+                if match and type(item.get("run_id")) is int and item["run_id"] == run_id and item.get("expired") is False:
+                    attempt = int(match[1])
+                    if attempt <= latest["attempt"] and (run_id != current_run or attempt < spec.same_run_attempt):
+                        matches.setdefault(attempt,[]).append(item)
+            for attempt in sorted(matches,reverse=True):
+                if len(matches[attempt]) != 1:continue
+                artifact = matches[attempt][0];size = artifact.get("size_in_bytes")
+                if type(size) is not int or not 0 < size <= spec.max_archive_bytes:continue
+                try:
+                    job,lines = spec.attempt_log(api,latest,attempt)
+                    uploaded = spec.upload_sha256(lines,artifact['name'],receipts.positive(artifact.get('id')),size,prior,job,scope)
+                except (receipts.ReceiptError,KeyError,TypeError,ValueError):continue
+                yield artifact,job,prior,attempt,uploaded,trust
+        return
     valid_jobs = [job for job in jobs if job.get("name") == spec.proof_job
                   and job.get("repo_id") == scope["repository"] and job.get("run_id") == run_id
                   and type(job.get("attempt")) is int and job["attempt"] > 0
-                  and type(job.get("task_id")) is int and job["task_id"] > 0]
+                  and type(job.get("task_id")) is int and job["task_id"] > 0
+                  and (run_id != current_run or job["attempt"] < spec.same_run_attempt)]
     for attempt in sorted({job["attempt"] for job in valid_jobs}, reverse=True):
         proof_jobs = [job for job in valid_jobs if job["attempt"] == attempt]
         if len(proof_jobs) != 1:
             continue
         job = proof_jobs[0]
-        # A cancelled job is eligible only as a container; strict per-target
-        # parsing still rejects missing, truncated or unsuccessful evidence.
         if job.get("status") not in {"success", "failure", "cancelled"}:
             continue
-        name = f"{spec.artifact_prefix}-{run_id}-{attempt}"
-        artifacts = [item for item in api.pages("/actions/artifacts", {"name": name})
-                     if item.get("name") == name and item.get("run_id") == run_id
-                     and not item.get("expired")]
-        if len(artifacts) != 1:
-            continue
-        artifact = artifacts[0]
-        size = artifact.get("size_in_bytes")
-        if type(size) is not int or size <= 0 or size > spec.max_archive_bytes:
-            continue
-        log_lines = main_unit_receipts.log_lines(
-            api.bytes(f"/actions/jobs/{receipts.positive(job.get('id'))}/logs"))
-        log = "\n".join(log_lines)
-        if f"{prior['commit_sha']}:refs/remotes/pull/{scope['pr']}/head" not in log:
-            continue
-        artifact_id = receipts.positive(artifact.get("id"))
-        upload_lines = [re.search(
-            rf"^Artifact {re.escape(name)} has been successfully uploaded! Final size is ([0-9]+) bytes\. Artifact ID is ([1-9][0-9]*)$",
-            line) for line in log.splitlines()]
-        upload_lines = [match for match in upload_lines if match]
-        zip_hashes = re.findall(r"^SHA256 hash of uploaded artifact zip is ([0-9a-f]{64})$",
-                                log, flags=re.MULTILINE)
-        if (len(upload_lines) != 1 or int(upload_lines[0][1]) != size
-                or int(upload_lines[0][2]) != artifact_id or len(zip_hashes) != 1):
-            continue
-        return artifact, job, prior, attempt, zip_hashes[0], trust
-    return None
+        log_lines = None
+        for phase,prefix in (spec.artifact_phases or (("final",spec.artifact_prefix),)):
+            name = f"{prefix}-{run_id}-{attempt}"
+            artifacts = [item for item in api.pages("/actions/artifacts", {"name": name})
+                         if item.get("name") == name and item.get("run_id") == run_id
+                         and not item.get("expired")]
+            if len(artifacts) != 1:
+                continue
+            artifact = artifacts[0];size = artifact.get("size_in_bytes")
+            if type(size) is not int or size <= 0 or size > spec.max_archive_bytes:
+                continue
+            if log_lines is None:
+                log_lines = main_unit_receipts.log_lines(api.bytes(f"/actions/jobs/{receipts.positive(job.get('id'))}/logs"))
+            log = "\n".join(log_lines)
+            if f"{prior['commit_sha']}:refs/remotes/pull/{scope['pr']}/head" not in log:
+                continue
+            artifact_id = receipts.positive(artifact.get("id"))
+            if spec.upload_sha256 is not None:
+                try:
+                    uploaded = spec.upload_sha256(log_lines,name,artifact_id,size,prior,job,scope)
+                except (receipts.ReceiptError,KeyError,TypeError,ValueError):
+                    continue
+            else:
+                uploads = [re.search(rf"^Artifact {re.escape(name)} has been successfully uploaded! Final size is ([0-9]+) bytes\. Artifact ID is ([1-9][0-9]*)$",line) for line in log_lines]
+                uploads = [match for match in uploads if match]
+                hashes = re.findall(r"^SHA256 hash of uploaded artifact zip is ([0-9a-f]{64})$",log,flags=re.MULTILINE)
+                if len(uploads) != 1 or int(uploads[0][1]) != size or int(uploads[0][2]) != artifact_id or len(hashes) != 1:
+                    continue
+                uploaded = hashes[0]
+            yield artifact,job,prior,attempt,uploaded,trust
+
+
+def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int,
+                     current_commit: str, workspace: Path, *, spec=None):
+    policy = legacy_transport_spec() if spec is None else spec
+    return next(artifact_candidates_for_run(api,scope,run,current_run,current_commit,workspace,spec=policy),None)
 
 
 def find_prior(api: receipts.API, scope: dict, current_run: int, current_commit: str, workspace: Path, *, spec=None):
     policy = legacy_transport_spec() if spec is None else spec
-    runs = api.pages("/actions/runs", {
-        "workflow_id": policy.workflow,
-        "ref": f"refs/pull/{scope['pr']}/head",
-    }, "workflow_runs")
+    runs = api.pages("/actions/runs", {"workflow_id":policy.workflow,"ref":f"refs/pull/{scope['pr']}/head"}, "workflow_runs")
+    if policy.same_run_attempt > 1 and not any(run.get("id") == current_run for run in runs):
+        runs = [*runs,api.get(f"/actions/runs/{current_run}")]
     for run in sorted(runs, key=lambda item: item.get("id", 0), reverse=True):
         if run.get("prettyref") != f"#{scope['pr']}" or run.get("event") != "pull_request":
             continue
         try:
-            candidate = (artifact_for_run(api, scope, run, current_run, current_commit, workspace) if spec is None
-                         else artifact_for_run(api, scope, run, current_run, current_commit, workspace, spec=spec))
-            if candidate is None:
-                continue
-            artifact, job, prior, attempt, uploaded_sha256, trust = candidate
-            data = (archive_bytes(api, receipts.positive(artifact.get("id"))) if spec is None
-                    else archive_bytes(api, receipts.positive(artifact.get("id")), spec=spec))
-            archive_sha256 = hashlib.sha256(data).hexdigest()
-            receipts.require(archive_sha256 == uploaded_sha256,
-                            "downloaded proof archive SHA differs from its upload receipt")
-            if policy.eligible_archive is not None and not policy.eligible_archive(data):
-                print(f"Prior {policy.label} artifact has no complete reusable target pair; checking older evidence")
-                continue
-            return {
-                "data": data,
-                "artifact_id": receipts.positive(artifact["id"]),
-                "run_id": receipts.positive(prior["id"]),
-                "attempt": attempt,
-                "job_id": receipts.positive(job["id"]),
-                "job_result": job["status"],
-                "source_commit": prior["commit_sha"],
-                "archive_sha256": archive_sha256,
-                "invocation_trust": trust,
-            }
-        except (receipts.ReceiptError, KeyError, TypeError, ValueError, zipfile.BadZipFile) as error:
+            if policy.artifact_phases:
+                candidates = artifact_candidates_for_run(api,scope,run,current_run,current_commit,workspace,spec=policy)
+            else:
+                candidate = (artifact_for_run(api,scope,run,current_run,current_commit,workspace) if spec is None
+                  else artifact_for_run(api,scope,run,current_run,current_commit,workspace,spec=spec))
+                candidates = [] if candidate is None else [candidate]
+            for artifact,job,prior,attempt,uploaded,trust in candidates:
+                try:
+                    data = (archive_bytes(api,receipts.positive(artifact.get("id"))) if spec is None
+                      else archive_bytes(api,receipts.positive(artifact.get("id")),spec=spec))
+                    archive_sha256 = hashlib.sha256(data).hexdigest()
+                    receipts.require(archive_sha256 == uploaded,
+                                     "downloaded proof archive SHA differs from its upload receipt")
+                    if policy.artifact_phases:
+                        receipts.require(len(data) == artifact['size_in_bytes'],
+                                         "Scoped proof archive size differs from upload receipt")
+                    if policy.eligible_archive is not None and not policy.eligible_archive(data):
+                        print(f"Prior {policy.label} artifact has no complete reusable target pair; checking older evidence")
+                        continue
+                    phase = next((phase for phase,prefix in policy.artifact_phases
+                      if artifact['name'] == f"{prefix}-{prior['id']}-{attempt}"),None)
+                    identity = (policy.validate_archive(data,artifact,job,prior,attempt,phase)
+                      if policy.validate_archive is not None else None)
+                    result = {"data":data,"artifact_id":receipts.positive(artifact['id']),
+                      "run_id":receipts.positive(prior['id']),"attempt":attempt,"job_id":receipts.positive(job['id']),
+                      "job_result":job['status'],"source_commit":prior['commit_sha'],
+                      "archive_sha256":archive_sha256,"invocation_trust":trust}
+                    if phase is not None:result.update(artifact_phase=phase,archive_identity=identity,
+                      historical_task_id=job['task_id'],terminal_basis=job.get('terminal_basis','authenticated_terminal_job_status'))
+                    return result
+                except (receipts.ReceiptError,KeyError,TypeError,ValueError,zipfile.BadZipFile) as error:
+                    print(f"Prior {policy.label} artifact not adopted ({type(error).__name__}); checking older evidence")
+        except (receipts.ReceiptError,KeyError,TypeError,ValueError,zipfile.BadZipFile) as error:
             print(f"Prior {policy.label} candidate not adopted ({type(error).__name__}); checking older evidence")
     return None
 
