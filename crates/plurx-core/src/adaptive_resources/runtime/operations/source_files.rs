@@ -1740,6 +1740,24 @@ impl SourceCell {
         self.finite_closed_fact_with(FiniteProcessClosedProof::RootOnly(closure))
     }
 
+    /// Read-only sticky failure classification, never close/refund evidence.
+    /// A cancelled waiter leaves its SAME opener/closer handle retained and
+    /// remains retryable. Only consumed join failure or terminal close failure
+    /// is permanent; retrying a failed numeric close could hit a recycled fd.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn copy_cleanup_permanently_unknown(&self) -> bool {
+        if self.pending.is_some()
+            || matches!(&self.parent_close, ParentCloseState::Registered { .. })
+        {
+            return false;
+        }
+        self.failed_join
+            || matches!(
+                &self.parent_close,
+                ParentCloseState::Failed(_) | ParentCloseState::Unknown
+            )
+    }
+
     /// The SAME copy root's native closure, with no registered parser, closes
     /// only the inventoried inherited copy after this cell's checked parent
     /// close. Unobserved root-copy enrichment still must match its exact slot.
