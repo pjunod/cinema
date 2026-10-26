@@ -310,6 +310,17 @@ fixes before it: 0001 sends no zero MaxCLL/MaxFALL in the Wayland image
 description (Weston 16 ends the connection on one), and 0002 splits the EL
 without FFmpeg 9's `dovi_split` BSF (Ubuntu ships FFmpeg 8.1).
 
+libplacebo is linked into mpv statically, its global symbols renamed
+`plurx_pl_*` and hidden. Ubuntu's FFmpeg (`libavfilter`) loads the system
+libplacebo, another major version, into the same process, and libplacebo's
+symbols are unversioned, so a private `libplacebo.so` would take over every
+call `libavfilter` makes into libplacebo, with the wrong ABI. The linker
+refuses to hide a symbol a linked library references, so the names are
+changed (`objcopy --redefine-syms`; mpv sees them through the staged
+`libplacebo/config.h`). The build and the package verification fail if mpv
+needs a shared libplacebo, exports a libplacebo symbol or imports a `pl_*`
+one.
+
 1. **The equations are the server's.** The package build copies
    `tools/dv_processing/dv_dm.h` and `dm_closed_form.h` into mpv's tree, so
    the player compiles exactly the code the plurx helper renders with, and
@@ -385,11 +396,22 @@ v2.9 about 0.14–0.46). The remaining equation outliers belong to the
 HDR10-E session; their fixes reach the player through
 `tools/dv_processing`.
 
-**Found on the way:** a float render target with `.bits.color_depth = 32`
-is scaled as 32-bit integer samples by libplacebo 7.360.1 (values around
-1e7 instead of PQ). The helper's `base_dv_renderer.h` sets that on its
-libplacebo `0d043c7`, where its controls pass; moving the helper to a newer
-libplacebo needs that field dropped.
+**Found on the way:**
+
+- A float render target with `.bits.color_depth = 32` is scaled as 32-bit
+  integer samples by libplacebo 7.360.1 (values around 1e7 instead of PQ).
+  The helper's `base_dv_renderer.h` sets that on its libplacebo `0d043c7`,
+  where its controls pass; moving the helper to a newer libplacebo needs
+  that field dropped.
+- On the ROG's Intel Arc iGPU, CM v2.9 cost 34 ms per 4K frame (CM v4.0
+  16 ms), and a 4K CM v2.9 title dropped a quarter of its frames. The final
+  pass evaluated eight output-lattice vertices per pixel, in one shader that
+  also held all of CM v4.0. `dv_dm.h` now evaluates the frame's lattice once
+  (vertices outside the table's chroma reach still per pixel) and compiles
+  each method's passes separately: 19 ms, with the same float32 vertex
+  computation. `run_dm_parity.py` passes, and the patched mpv's 16-bit
+  screenshot of the Dumb Money frame is bit-identical before and after. The
+  server's display-targeted renders use the same code.
 
 ## 6. Non-goals for v1
 
