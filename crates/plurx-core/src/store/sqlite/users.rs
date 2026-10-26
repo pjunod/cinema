@@ -362,6 +362,15 @@ impl UserStore for SqliteStore {
         token_hash: &str,
         audience: crate::store::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
+        // A handoff token is never a row in `tokens`; its own table answers.
+        if audience == crate::store::TokenAudience::PlaybackHandoff {
+            return Ok(
+                match self.authenticate_playback_handoff(token_hash).await? {
+                    Some(user) => TokenAuthentication::Authenticated(user),
+                    None => TokenAuthentication::Unknown,
+                },
+            );
+        }
         let audience = audience.as_str();
         let token_hash = token_hash.to_owned();
         let read_hash = token_hash.clone();
@@ -382,21 +391,8 @@ impl UserStore for SqliteStore {
                      FROM users u
                      JOIN tokens t ON t.user_id = u.id
                      WHERE t.token_hash = ?1
-                       AND CASE ?5
-                         WHEN 'native' THEN NOT EXISTS (
-                             SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)
-                           AND NOT EXISTS (
-                             SELECT 1 FROM playback_handoffs_tokens h WHERE h.token_hash = t.token_hash)
-                         WHEN 'jellyfin' THEN EXISTS (
-                             SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)
-                         WHEN 'playback_handoff' THEN EXISTS (
-                             SELECT 1 FROM playback_handoffs_tokens h
-                             WHERE h.token_hash = t.token_hash AND h.user_id = t.user_id
-                               AND h.expires_at > unixepoch()
-                               AND EXISTS (SELECT 1 FROM tokens s
-                                           WHERE s.token_hash = h.source_token_hash
-                                             AND s.user_id = h.user_id))
-                         ELSE 0 END";
+                       AND (?5 = 'native') = NOT EXISTS (
+                         SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)";
                 super::trace_statement("authenticate_token", SQL);
                 Ok(conn
                     .query_row(
@@ -490,12 +486,15 @@ impl UserStore for SqliteStore {
             let mut statement = conn.prepare(
                 "SELECT substr(token_hash, 1, 8), substr(device, 1, ?2), \
                         created_at, last_seen_at \
-                 FROM tokens WHERE user_id = ?1 \
-                   AND NOT EXISTS (SELECT 1 FROM playback_handoffs_tokens h \
-                     WHERE h.token_hash = tokens.token_hash \
-                       AND (h.expires_at <= unixepoch() OR NOT EXISTS ( \
-                         SELECT 1 FROM tokens s WHERE s.token_hash = h.source_token_hash \
-                           AND s.user_id = h.user_id))) \
+                 FROM (SELECT token_hash, device, created_at, last_seen_at \
+                       FROM tokens WHERE user_id = ?1 \
+                       UNION ALL \
+                       SELECT h.token_hash, h.device, h.created_at, h.created_at \
+                       FROM playback_handoffs_tokens h \
+                       WHERE h.user_id = ?1 AND h.expires_at > unixepoch() \
+                         AND EXISTS (SELECT 1 FROM tokens s \
+                                     WHERE s.token_hash = h.source_token_hash \
+                                       AND s.user_id = h.user_id)) \
                  ORDER BY created_at, token_hash LIMIT ?3",
             )?;
             let rows = statement.query_map(

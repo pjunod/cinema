@@ -18325,8 +18325,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
     // v102–v103).
     // Plus the item ratings and per-person lists (SQLite v113).
-    // Plus the playback handoff codes and their token markers (SQLite v115):
-    // a marker must travel with its `tokens` row.
+    // Plus the playback handoff codes and tokens (SQLite v115).
     let mut imported_tables = report
         .tables
         .iter()

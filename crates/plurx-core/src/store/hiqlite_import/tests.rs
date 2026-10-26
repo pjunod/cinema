@@ -442,8 +442,7 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     assert!(names.contains(&"jellyfin_login_tokens"));
     assert!(names.contains(&"jellyfin_entity_ids"));
     assert!(names.contains(&"jellyfin_plays"));
-    // A playback handoff token's audience marker must travel with its
-    // `tokens` row, or the imported row would be a native account bearer.
+    // Playback handoff codes and tokens are durable account state.
     assert!(names.contains(&"playback_handoffs"));
     assert!(names.contains(&"playback_handoffs_tokens"));
     // 95 with the three item-annotation tables (SQLite v113), 97 with the

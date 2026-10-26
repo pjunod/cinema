@@ -208,6 +208,41 @@ async fn handoff_mint_redeem_hands_off_one_file_once_and_lists_the_device() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// The pre-play picker sends subtitles Off as `-1`, which `/decision` also
+/// reads as Off; the handoff carries it through. Other negatives are refused.
+#[tokio::test]
+async fn handoff_carries_subtitles_off_as_minus_one() {
+    let (app, state, _fixture) = test_app_with_fixture_store();
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let (status, minted) = call(
+        &app,
+        post(
+            "/api/v1/playback-handoffs",
+            Some(&admin),
+            json!({"file_id": seed.file, "audio": 0, "subtitle": -1}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{minted}");
+    let (status, redeemed) = redeem(&app, minted["code"].as_str().expect("code")).await;
+    assert_eq!(status, StatusCode::OK, "{redeemed}");
+    assert_eq!(redeemed["subtitle"], -1);
+    assert_eq!(redeemed["audio"], 0);
+    for body in [
+        json!({"file_id": seed.file, "subtitle": -2}),
+        json!({"file_id": seed.file, "audio": -1}),
+        json!({"file_id": seed.file, "start_ms": -1}),
+    ] {
+        let (status, _) = call(
+            &app,
+            post("/api/v1/playback-handoffs", Some(&admin), body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
 #[tokio::test]
 async fn handoff_token_is_accepted_only_on_its_own_files_playback_routes() {
     let (app, state, _fixture) = test_app_with_fixture_store();

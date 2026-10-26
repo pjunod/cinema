@@ -9,6 +9,7 @@ use super::{
     bounded_device_label, NewPlaybackHandoff, PlaybackHandoff, PlaybackHandoffRedeemOutcome,
     PlaybackHandoffRedemption, PlaybackHandoffStore, PlaybackHandoffTokenScope,
 };
+use crate::domain::User;
 use crate::error::StoreError;
 
 struct HandoffRow(PlaybackHandoff, i64);
@@ -30,6 +31,20 @@ impl From<&mut hiqlite::Row<'_>> for HandoffRow {
             },
             row.get("redeemed_here"),
         )
+    }
+}
+
+struct HandoffUserRow(User);
+
+impl From<&mut hiqlite::Row<'_>> for HandoffUserRow {
+    fn from(row: &mut hiqlite::Row<'_>) -> Self {
+        Self(User {
+            id: row.get("id"),
+            username: row.get("username"),
+            password_hash: row.get("password_hash"),
+            is_admin: row.get::<i64>("is_admin") != 0,
+            created_at: row.get("created_at"),
+        })
     }
 }
 
@@ -99,24 +114,19 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
     ) -> Result<PlaybackHandoffRedeemOutcome, StoreError> {
         let r = redemption;
         let device = bounded_device_label(r.device.clone());
-        // One Raft transaction: claim, token, marker, and the guard that
-        // aborts it all if a token row would be left without its marker.
+        // One Raft transaction: the claim and the token it mints.
         self.credential_mutation(vec![
             (ph::CLAIM_SQL, params!(r.now, r.code_hash.clone())),
             (
                 ph::MINT_TOKEN_SQL,
-                params!(r.token_hash.clone(), device, r.now, r.code_hash.clone()),
-            ),
-            (
-                ph::MARK_TOKEN_SQL,
                 params!(
                     r.token_hash.clone(),
+                    device,
+                    r.now,
                     r.token_expires_at,
-                    r.code_hash.clone(),
-                    r.now
+                    r.code_hash.clone()
                 ),
             ),
-            (ph::MARKER_GUARD_SQL, params!(r.token_hash.clone())),
         ])
         .await?;
         validate_sql(ph::OUTCOME_SQL)?;
@@ -150,6 +160,24 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
             .map(|row| row.0))
     }
 
+    async fn revoke_playback_handoff_token(&self, token_hash: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .credential_mutation(vec![(ph::REVOKE_SQL, params!(token_hash))])
+            .await?[0]
+            > 0)
+    }
+
+    async fn revoke_playback_handoff_token_by_prefix(
+        &self,
+        user_id: i64,
+        prefix: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .credential_mutation(vec![(ph::REVOKE_PREFIX_SQL, params!(user_id, prefix))])
+            .await?[0]
+            > 0)
+    }
+
     async fn prune_playback_handoffs(
         &self,
         now: i64,
@@ -158,10 +186,32 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
         let changed = self
             .credential_mutation(vec![
                 (ph::PRUNE_TOKENS_SQL, params!(now)),
-                (ph::PRUNE_MARKERS_SQL, params!()),
                 (ph::PRUNE_CODES_SQL, params!(codes_before)),
             ])
             .await?;
         Ok(changed.into_iter().map(|count| count as u64).sum())
+    }
+}
+
+impl HiqliteAuthStore {
+    /// `TokenAudience::PlaybackHandoff`: the user of a live handoff token.
+    /// Read from its own table, never from `tokens`.
+    pub(super) async fn authenticate_playback_handoff(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<User>, StoreError> {
+        validate_sql(ph::AUTHENTICATE_SQL)?;
+        let now = self.now()?;
+        Ok(self
+            .client()
+            // authority: a handoff token is revoked with its minting token; a stale replica would keep accepting it.
+            .query_consistent_map::<HandoffUserRow, _>(
+                ph::AUTHENTICATE_SQL,
+                params!(token_hash, now),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0))
     }
 }

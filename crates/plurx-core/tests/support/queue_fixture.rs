@@ -686,9 +686,7 @@ fn validated_handoff_rewind(connection: &rusqlite::Connection) -> (String, i64) 
     );
     let expected = rusqlite::Connection::open_in_memory().expect("handoff shape witness");
     expected
-        .execute_batch(
-            "CREATE TABLE users(id INTEGER PRIMARY KEY); CREATE TABLE tokens(token_hash TEXT PRIMARY KEY);",
-        )
+        .execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY);")
         .expect("handoff witness dependencies");
     expected
         .execute_batch(include_str!("../../src/store/playback_handoffs.sql"))

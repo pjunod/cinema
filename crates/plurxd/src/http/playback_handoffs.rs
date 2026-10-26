@@ -6,7 +6,9 @@
 //! of its own audience (`TokenAudience::PlaybackHandoff`). That token is
 //! accepted only by the handlers in the last section of this file, and only
 //! for the handed-off file; every other user route authenticates the native
-//! audience, which refuses it. It expires six hours after redemption and is
+//! audience, which refuses it: the token lives in its own table, never in
+//! `tokens`, so no native lookup (on this binary or an older one during a
+//! rolling upgrade) can find it. It expires six hours after redemption and is
 //! revoked with the token that minted it, so signing out of the web app stops
 //! the player too. Modelled on `file_grants.rs`, which binds the same way.
 
@@ -31,12 +33,13 @@ use super::error::ApiError;
 use super::extract::{
     authenticate_token_digest, authenticate_user_token, token_from_parts, AuthUser, RawToken,
 };
-use super::internal_auth_revocation::ClusterCacheRevocation;
 use super::network::RemoteAddress;
 use crate::state::AppState;
 
 /// The sessions-list label when the redeeming app names none.
 const DEFAULT_DEVICE: &str = "Playback handoff";
+/// The subtitle selection that means "off", as `/decision` defines it.
+const SUBTITLE_OFF: i64 = -1;
 /// Longest origin recorded from a mint request.
 const MAX_ORIGIN_BYTES: usize = 256;
 
@@ -107,14 +110,16 @@ pub async fn mint(
     headers: HeaderMap,
     Json(request): Json<MintRequest>,
 ) -> Result<(StatusCode, Json<MintResponse>), ApiError> {
-    for (name, value) in [
-        ("start_ms", request.start_ms),
-        ("audio", request.audio),
-        ("subtitle", request.subtitle),
-    ] {
+    for (name, value) in [("start_ms", request.start_ms), ("audio", request.audio)] {
         if value.is_some_and(|value| value < 0) {
             return Err(ApiError::BadRequest(format!("{name} must not be negative")));
         }
+    }
+    // `-1` is "subtitles off", exactly as `/decision` reads it.
+    if request.subtitle.is_some_and(|value| value < SUBTITLE_OFF) {
+        return Err(ApiError::BadRequest(
+            "subtitle must be a stream index or -1 (off)".into(),
+        ));
     }
     state
         .store
@@ -302,9 +307,17 @@ pub async fn revoke_self(
     handoff: HandoffToken,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
-    let revocation = ClusterCacheRevocation::begin_digest(&state, &handoff.digest).await?;
-    super::auth::revoke_token_under_exclusion(&state, &handoff.digest, revocation).await?;
-    Ok(StatusCode::NO_CONTENT)
+    // A handoff token is never a cached admin proof and never a `tokens`
+    // row, so its own table is the whole revocation.
+    if state
+        .store
+        .revoke_playback_handoff_token(&handoff.digest)
+        .await?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::Unauthorized)
+    }
 }
 
 /// A caller of a route a handoff token may use: a native user, or a handoff

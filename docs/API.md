@@ -109,7 +109,7 @@ prefix, not by the carrier:
 |---|---|---|---|
 | Login token | 64 hex chars (32 random bytes) | `POST /api/v1/auth/login`, `POST /api/v1/setup` | SHA-256 of the secret, in `tokens` |
 | API key | `plx_` + 32 hex chars (16 random bytes) | `POST /api/v1/keys` | SHA-256 of the secret, in `api_keys` |
-| Playback handoff token | 64 hex chars, like a login token | `POST /api/v1/playback-handoffs/redeem` (§13.2) | SHA-256 in `tokens`, plus an audience marker in `playback_handoffs_tokens` |
+| Playback handoff token | 64 hex chars, like a login token | `POST /api/v1/playback-handoffs/redeem` (§13.2) | SHA-256 in `playback_handoffs_tokens` — never in `tokens` |
 
 The `plx_` prefix says which table to look in *before* any lookup, so a key
 and a token are never tried against each other's store and "not found" keeps
@@ -128,19 +128,20 @@ exactly once, at creation.
 Admin-ness is re-read from the store on **every** request, so demoting a user
 takes effect on their next request without revoking their token.
 
-**Token audiences.** A row in `tokens` authenticates for exactly one audience
-(`TokenAudience` in `crates/plurx-core/src/store/mod.rs`), decided in the same
-statement that finds the row:
+**Token audiences.** A login-token-shaped bearer authenticates for exactly one
+audience (`TokenAudience` in `crates/plurx-core/src/store/mod.rs`):
 
 | Audience | Row | Accepted by |
 |---|---|---|
-| `Native` | no marker row | `AuthUser` and every extractor built on it |
-| `JellyfinCompatibility` | a `jellyfin_login_tokens` row | the Jellyfin façade only (§22) |
-| `PlaybackHandoff` | a `playback_handoffs_tokens` row, unexpired, whose minting token still exists | `PlaybackPrincipal` (the decision, HLS create, direct play, text subtitle, item progress and client-log routes, for one file) and `HandoffToken` (`DELETE /api/v1/playback-handoffs/self`) — §13.2 |
+| `Native` | a `tokens` row with no Jellyfin marker | `AuthUser` and every extractor built on it |
+| `JellyfinCompatibility` | a `tokens` row with a `jellyfin_login_tokens` marker | the Jellyfin façade only (§22) |
+| `PlaybackHandoff` | a `playback_handoffs_tokens` row (not in `tokens`), unexpired, whose minting token still exists | `PlaybackPrincipal` (the decision, HLS create, direct play, text subtitle, item progress and client-log routes, for one file) and `HandoffToken` (`DELETE /api/v1/playback-handoffs/self`) — §13.2 |
 
 `AuthUser` asks for the native audience, so a Jellyfin login or a playback
 handoff token is an unknown bearer there: 401, exactly as for a token that was
-never minted.
+never minted. A handoff token is kept out of `tokens` on purpose: every native
+lookup reads only that table, so even a binary older than the handoff tables,
+still serving during a rolling upgrade, finds nothing and answers 401.
 
 `ScopedKey` returns 401 rather than 403 for a login token because the
 credential is the wrong *kind*, and 403 would suggest the right token could
@@ -2589,7 +2590,7 @@ row updates nothing and returns the existing winning row.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
-| POST | `/api/v1/playback-handoffs` | bearer (native) | Mint a one-time code for one file. Body `{file_id, start_ms?, audio?, subtitle?}` (`audio` and `subtitle` are the stream indexes HLS create takes); 201 `{id, code, expires_in: 120}`. Unknown file 404; a negative value 400 |
+| POST | `/api/v1/playback-handoffs` | bearer (native) | Mint a one-time code for one file. Body `{file_id, start_ms?, audio?, subtitle?}` (`audio` and `subtitle` are the stream indexes HLS create takes; `subtitle: -1` is Off, as the decision route reads it); 201 `{id, code, expires_in: 120}`. Unknown file 404; a negative `start_ms` or `audio`, or a `subtitle` below -1, 400 |
 | POST | `/api/v1/playback-handoffs/redeem` | **none** — the code is the credential | Body `{code, device?}`; 200 `{token, handoff_id, file_id, item_id, start_ms, audio, subtitle, user, origin, expires_at}` (`item_id` is the file's item, for progress). A code never minted (or not code-shaped) 404; a code already redeemed, past its 120 s, or minted by a token since revoked 410 `handoff_gone` |
 | GET | `/api/v1/playback-handoffs/{id}` | the minting bearer | `{redeemed: bool}`. Any other bearer, even the same user's, 404 |
 | DELETE | `/api/v1/playback-handoffs/self` | playback handoff token only | Revoke the presented handoff token; 204. A native bearer 401 |
@@ -2605,12 +2606,13 @@ bearer, which is how the web app tells "the player opened" from "the player is
 not installed".
 
 **The token.** Redemption mints a 64-hex token whose audience is
-`PlaybackHandoff` (§2.2): a row in `tokens`, labelled with `device` (default
-`Playback handoff`, at most 256 bytes), so it is listed by `GET
-/api/v1/me/devices` and can be revoked there; plus a marker row holding its
-file, expiry and minting token. The claim, the token row and the marker are
-written in one transaction, and a guard statement aborts it if a token row
-would be left without its marker. It lives six hours from redemption and dies
+`PlaybackHandoff` (§2.2), stored as its SHA-256 in `playback_handoffs_tokens`
+with its file, expiry, minting token and `device` label (default `Playback
+handoff`, at most 256 bytes). It is never a row in `tokens`, so no native
+lookup can accept it (§2.2). `GET /api/v1/me/devices` unions the table in, so
+the token is listed there and `DELETE /api/v1/me/devices/{prefix}` revokes it.
+The code's claim and the token are written in one transaction on both stores.
+It lives six hours from redemption and dies
 with the token that minted it — logout, a password change, revoking that
 device — so signing out of the web app stops the player too.
 
