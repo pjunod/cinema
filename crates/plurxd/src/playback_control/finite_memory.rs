@@ -660,6 +660,20 @@ impl RollingLeaseSnapshot {
 }
 
 impl RollingControlOutcome {
+    pub(crate) fn requested_result_fields_bytes(&self) -> Option<usize> {
+        let mut bytes = add(
+            std::mem::size_of::<LocalControlResult>(),
+            self.action.requested_heap_bytes()?,
+        )?;
+        bytes = add(
+            bytes,
+            self.preparation_directive
+                .as_ref()
+                .map_or(0, PreparationDirective::requested_heap_bytes),
+        )?;
+        add(bytes, self.selection.requested_heap_bytes()?)
+    }
+
     pub(crate) fn requested_clone_heap_bytes(&self) -> Option<usize> {
         let RollingControlOutcome {
             disposition: _,
@@ -672,6 +686,7 @@ impl RollingControlOutcome {
             flow_ticket: _,
             selection,
             allocation: _,
+            consumer_allocation: _,
         } = self;
         let mut bytes = add(std::mem::size_of::<Self>(), action.requested_heap_bytes()?)?;
         bytes = add(
@@ -947,6 +962,8 @@ pub(super) struct PreparedActorAccounting {
     pub(super) state: ActorPayloadAllocation,
     pub(super) reply: ActorPayloadAllocation,
     pub(super) terminal: Option<ActorPayloadAllocation>,
+    pub(super) consumer: Option<ActorPayloadAllocation>,
+    pub(super) terminal_consumer: Option<ActorPayloadAllocation>,
     pub(super) preparation: Option<ActorPayloadAllocation>,
 }
 
@@ -1007,6 +1024,28 @@ impl RollingControlActor {
             self.finite_snapshot_control_bound(request).ok_or(())?,
         )
         .ok_or(())?;
+        // Immutable Session metadata is borrowed before request construction;
+        // the producer strings come from this SAME accepted snapshot source.
+        let metadata = request.consumer_metadata_bytes.ok_or(())?;
+        let consumer_bytes = add(
+            add(
+                std::mem::size_of::<LocalControlResult>(),
+                std::mem::size_of::<crate::transcode::SessionInfo>(),
+            )
+            .ok_or(())?,
+            add(
+                add(metadata, external).ok_or(())?,
+                self.finite_operational_snapshot_bound().ok_or(())?,
+            )
+            .ok_or(())?,
+        )
+        .ok_or(())?;
+        let consumer = Some(budget.reserve(consumer_bytes)?);
+        let terminal_consumer = if terminal {
+            Some(budget.reserve(consumer_bytes)?)
+        } else {
+            None
+        };
         let reply = budget.reserve(reply_bytes)?;
         let terminal = if terminal {
             Some(budget.reserve(reply_bytes)?)
@@ -1027,6 +1066,8 @@ impl RollingControlActor {
             state,
             reply,
             terminal,
+            consumer,
+            terminal_consumer,
             preparation,
         }))
     }
@@ -1121,5 +1162,55 @@ mod allocation_layout_tests {
             ControlDisposition::Accepted
         );
         assert_eq!(state.last_sequence, 1);
+    }
+
+    #[test]
+    fn final_result_projection_counts_owned_action_capacity_without_copying_lease() {
+        // Pure DTO accounting; this actor has no native/app allocation authority.
+        let now = Instant::now();
+        let actor =
+            RollingControlActor::new(now, "projection fixture", Arc::new(AtomicBool::new(false)));
+        let mut outcome = RollingControlOutcome {
+            disposition: ControlDisposition::Accepted,
+            accepted_sequence: 1,
+            action: ControlAction::None,
+            action_suppressed: false,
+            preparation_directive: None,
+            platform: ClientPlatform::Web,
+            lease: actor.snapshot_at(now),
+            flow_ticket: 0,
+            selection: SelectionObservation::default(),
+            allocation: None,
+            consumer_allocation: None,
+        };
+        let moved = outcome
+            .requested_result_fields_bytes()
+            .expect("moved fields");
+        let cloned = outcome
+            .requested_clone_heap_bytes()
+            .expect("complete clone");
+        let mut fingerprint = String::with_capacity(4096);
+        fingerprint.push_str("accepted snapshot source");
+        let source_capacity = fingerprint.capacity();
+        outcome
+            .lease
+            .producer_control
+            .presentation_contract_fingerprint = Some(fingerprint);
+        assert_eq!(outcome.requested_result_fields_bytes(), Some(moved));
+        assert_eq!(
+            outcome.requested_clone_heap_bytes(),
+            cloned.checked_add(source_capacity)
+        );
+        let mut message = String::with_capacity(2048);
+        message.push_str("terminal action");
+        let action_capacity = message.capacity();
+        outcome.action = ControlAction::Terminal {
+            code: ProducerDecisionReason::Unsupported,
+            message,
+        };
+        assert_eq!(
+            outcome.requested_result_fields_bytes(),
+            moved.checked_add(action_capacity)
+        );
     }
 }

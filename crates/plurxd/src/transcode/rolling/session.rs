@@ -1965,13 +1965,19 @@ impl Session {
             crate::playback_control::ControlStateError,
         >,
     > {
+        let metadata_bytes = request
+            .session_id
+            .len()
+            .checked_add(self.item_title.capacity())
+            .and_then(|bytes| bytes.checked_add(self.user_name.capacity()));
         let outcome = match self
             .control
-            .control_before(
+            .control_before_with_consumer(
                 request,
                 deadline_unix_ms,
                 terminal_admission,
                 preparation_admission,
+                metadata_bytes,
             )
             .await
         {
@@ -2828,6 +2834,7 @@ pub(super) async fn session_info(
         global_live_bytes,
         global_ahead_bytes,
         None,
+        None,
         0,
     )
     .await
@@ -2846,11 +2853,6 @@ pub(super) struct OwnedSessionInfo {
     pub(super) allocation: Option<crate::playback_control::ActorPayloadAllocation>,
 }
 
-struct OwnedStatusSegments {
-    values: Vec<(i64, i64)>,
-    _allocation: Option<crate::playback_control::ActorPayloadAllocation>,
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn session_info_owned(
     id: &str,
@@ -2858,19 +2860,23 @@ pub(super) async fn session_info_owned(
     limits: AheadLimits,
     global_live_bytes: i64,
     global_ahead_bytes: i64,
-    allocation_source: Option<&crate::playback_control::ActorPayloadAllocation>,
+    lease_source: Option<&crate::playback_control::RollingLeaseSnapshot>,
+    allocation: Option<crate::playback_control::ActorPayloadAllocation>,
     moved_result_bytes: usize,
 ) -> Result<OwnedSessionInfo, crate::playback_control::ControlStateError> {
     #[cfg(not(target_os = "linux"))]
-    let _ = (allocation_source, moved_result_bytes);
+    let _ = moved_result_bytes;
     let observed_at = Instant::now();
-    let lease = s.control.snapshot().await;
-    let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
+    let lease = match lease_source {
+        Some(lease) => Some(std::borrow::Cow::Borrowed(lease)),
+        None => s.control.snapshot().await.map(std::borrow::Cow::Owned),
+    };
+    let demand = lease.as_deref().and_then(|lease| lease.demand.as_ref());
     let media_origin_ms = (s.media_origin_seconds * 1_000.0).round() as i64;
     let ready_anchor_ms =
         demand.map(crate::playback_control::PlaybackDemandSnapshot::buffer_anchor_ms);
     s.hooks.get().after_activity_snapshot().await;
-    let (fetched_end_ms, published_end_ms) = delivery_frontier(s, lease.as_ref()).await;
+    let (fetched_end_ms, published_end_ms) = delivery_frontier(s, lease.as_deref()).await;
     let (
         ahead,
         first_retained_segment,
@@ -2878,43 +2884,8 @@ pub(super) async fn session_info_owned(
         produced_end_ms,
         advertised_bytes,
         grace_bytes,
-        produced_segments,
     ) = {
         let index = s.segments.lock().await;
-        // Reserve from the original role before collect allocates. This is
-        // the actual number of retained index records, not mailbox capacity.
-        #[cfg(target_os = "linux")]
-        let allocation = allocation_source
-            .map(|source| {
-                let bytes = index
-                    .segs
-                    .len()
-                    .checked_mul(std::mem::size_of::<(i64, i64)>())
-                    .ok_or(())?;
-                source.reserve_related(bytes)
-            })
-            .transpose()
-            .map_err(|_| crate::playback_control::ControlStateError::Unavailable)?;
-        #[cfg(not(target_os = "linux"))]
-        let allocation = None;
-        let values = index
-            .segs
-            .iter()
-            .map(|segment| (segment.start_ms, segment.bytes))
-            .collect::<Vec<_>>();
-        #[cfg(target_os = "linux")]
-        if let Some(allocation) = allocation.as_ref() {
-            allocation
-                .validate_actual(
-                    values
-                        .capacity()
-                        .checked_mul(std::mem::size_of::<(i64, i64)>())
-                        .ok_or(crate::playback_control::ControlStateError::Unavailable)?,
-                )
-                .expect(
-                    "slice-map collect exceeded its pre-reserved source-backed segment projection",
-                );
-        }
         (
             ahead_of(&index, fetched_end_ms.max(0)),
             index.first_retained_index(),
@@ -2924,10 +2895,6 @@ pub(super) async fn session_info_owned(
             index.produced_playable_end_ms(),
             index.advertised_bytes(),
             index.grace_bytes(),
-            OwnedStatusSegments {
-                values,
-                _allocation: allocation,
-            },
         )
     };
     let (
@@ -2936,7 +2903,6 @@ pub(super) async fn session_info_owned(
         last_segment_advanced_idle_ms,
         next_publication_in_ms,
         publication_deadline_remaining_ms,
-        staged_bytes,
         budget_anchor_sequence,
         allowed_end_ms,
         carried_surplus_ms,
@@ -2944,12 +2910,6 @@ pub(super) async fn session_info_owned(
     ) = {
         let publication = s.publication.lock().await;
         let served_end_ms = publication.served.as_ref().map(|served| served.end_ms);
-        let staged_bytes = produced_segments
-            .values
-            .iter()
-            .filter(|(start_ms, _)| *start_ms >= served_end_ms.unwrap_or(0))
-            .map(|(_, bytes)| *bytes)
-            .sum();
         (
             served_end_ms,
             publication.served.as_ref().map(|served| served.revision),
@@ -2969,7 +2929,6 @@ pub(super) async fn session_info_owned(
                 i64::try_from(deadline.saturating_duration_since(observed_at).as_millis())
                     .unwrap_or(i64::MAX)
             }),
-            staged_bytes,
             publication.budget_anchor_sequence,
             publication.allowed_end_ms,
             publication
@@ -2979,22 +2938,35 @@ pub(super) async fn session_info_owned(
             publication.demand_observation_age_ms,
         )
     };
+    // Both served boundary and revision above came from one publication
+    // borrow. Segment statistics were always an independent observation;
+    // summing their current scalar values avoids owning a heap snapshot or
+    // holding either lock while waiting for the other.
+    let staged_bytes = {
+        let index = s.segments.lock().await;
+        index
+            .segs
+            .iter()
+            .filter(|segment| segment.start_ms >= served_end_ms.unwrap_or(0))
+            .map(|segment| segment.bytes)
+            .sum()
+    };
     let idle_seconds = lease
-        .as_ref()
+        .as_deref()
         .map_or(SESSION_IDLE_SECS, |lease| lease.idle_for.as_secs());
     let last_request_kind = lease
-        .as_ref()
+        .as_deref()
         .map_or("control-unavailable", |lease| lease.last_renewal_kind);
-    let lease_mode = match lease.as_ref().map(|lease| lease.mode) {
+    let lease_mode = match lease.as_deref().map(|lease| lease.mode) {
         Some(crate::playback_control::RollingLeaseMode::Explicit) => "explicit",
         Some(crate::playback_control::RollingLeaseMode::Legacy) => "legacy",
         None => "unavailable",
     };
-    let lease_state = match lease.as_ref() {
+    let lease_state = match lease.as_deref() {
         Some(lease) => lease.terminal.map_or("active", |cause| cause.status()),
         None => "unavailable",
     };
-    let delivery = lease.as_ref().map(|lease| &lease.delivery);
+    let delivery = lease.as_deref().map(|lease| &lease.delivery);
     let control_demand = demand.map(|demand| match demand.demand {
         crate::playback_control::PlaybackDemand::Active => "active",
         crate::playback_control::PlaybackDemand::Hold => "hold",
@@ -3013,7 +2985,7 @@ pub(super) async fn session_info_owned(
     let staged_publication_seconds = s
         .staged_publication_seconds(s.control.current_producer_attempt())
         .await;
-    let flow = lease.as_ref().map(|lease| {
+    let flow = lease.as_deref().map(|lease| {
         evaluate_flow(FlowInputs {
             physical_ahead: ahead,
             produced_end_ms,
@@ -3072,7 +3044,7 @@ pub(super) async fn session_info_owned(
     } else {
         "unavailable"
     };
-    let actor_producer = lease.as_ref().map(|lease| &lease.producer_control);
+    let actor_producer = lease.as_deref().map(|lease| &lease.producer_control);
     let http_waits = s.http_waits.snapshot();
     let producer_state = if s.failed.load(Relaxed) {
         "failed"
@@ -3095,29 +3067,22 @@ pub(super) async fn session_info_owned(
         "waiting"
     };
     #[cfg(target_os = "linux")]
-    let allocation = allocation_source
-        .map(|source| {
-            // Every heap field below is a clone of these exact retained sources.
-            // Include the moved actor result so its old slot can end after the
-            // complete final response carrier has been assembled.
-            let bytes = std::mem::size_of::<SessionInfo>()
-                .checked_add(moved_result_bytes)
-                .and_then(|value| value.checked_add(id.len()))
-                .and_then(|value| value.checked_add(s.item_title.capacity()))
-                .and_then(|value| value.checked_add(s.user_name.capacity()))
-                .ok_or(())?;
-            let producer = lease
-                .as_ref()
-                .map_or(Some(0), |lease| {
+    if let Some(allocation) = allocation.as_ref() {
+        let bytes = std::mem::size_of::<SessionInfo>()
+            .checked_add(moved_result_bytes)
+            .and_then(|value| value.checked_add(id.len()))
+            .and_then(|value| value.checked_add(s.item_title.capacity()))
+            .and_then(|value| value.checked_add(s.user_name.capacity()))
+            .and_then(|value| {
+                value.checked_add(lease.as_deref().map_or(Some(0), |lease| {
                     lease.producer_control.requested_heap_bytes()
-                })
-                .ok_or(())?;
-            source.reserve_related(bytes.checked_add(producer).ok_or(())?)
-        })
-        .transpose()
-        .map_err(|_| crate::playback_control::ControlStateError::Unavailable)?;
-    #[cfg(not(target_os = "linux"))]
-    let allocation = None;
+                })?)
+            })
+            .expect("immutable preflight status layout");
+        allocation
+            .validate_actual(bytes)
+            .expect("accepted snapshot status exceeded pre-adoption consumer credit");
+    }
     let status = SessionInfo {
         vod_observation: None,
         id: id.to_owned(),
@@ -3135,16 +3100,16 @@ pub(super) async fn session_info_owned(
         last_request: last_request_kind,
         lease_mode,
         lease_state,
-        lease_timeout_ms: lease.as_ref().map(|lease| lease.timeout_ms()),
-        startup_state: lease.as_ref().map(|lease| lease.startup.status()),
-        startup_remaining_ms: lease.as_ref().and_then(|lease| {
+        lease_timeout_ms: lease.as_deref().map(|lease| lease.timeout_ms()),
+        startup_state: lease.as_deref().map(|lease| lease.startup.status()),
+        startup_remaining_ms: lease.as_deref().and_then(|lease| {
             lease
                 .startup
                 .remaining
                 .map(|remaining| i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX))
         }),
         presentation_progress_seen: lease
-            .as_ref()
+            .as_deref()
             .map(|lease| lease.startup.presentation_progress_seen),
         produced_end_ms,
         served_end_ms,
@@ -3169,13 +3134,13 @@ pub(super) async fn session_info_owned(
         },
         rate_estimate_source,
         estimate_active_speed: recent_speed.or(cumulative_speed),
-        pause_grace_remaining_ms: lease.as_ref().and_then(|lease| {
+        pause_grace_remaining_ms: lease.as_deref().and_then(|lease| {
             lease
                 .pause_remaining
                 .map(|remaining| i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX))
         }),
         retirement_reason: lease
-            .as_ref()
+            .as_deref()
             .and_then(|lease| lease.terminal.map(|cause| cause.status())),
         advertised_bytes,
         grace_bytes,
@@ -3198,7 +3163,7 @@ pub(super) async fn session_info_owned(
         production_policy: flow.map_or("unavailable", |flow| flow.policy),
         production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
         production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
-        producer_control: lease.as_ref().map(|lease| lease.producer_control.clone()),
+        producer_control: lease.as_deref().map(|lease| lease.producer_control.clone()),
         producer_state,
         producer_attempt: Some(status_owner_attempt),
         playlist_ready: delivery.map(|delivery| delivery.playlist_ready),
@@ -3215,7 +3180,7 @@ pub(super) async fn session_info_owned(
         producer_exit_idle_ms: producer_exit.as_ref().map(|exit| exit.observed_idle_ms),
         published_end_ms,
         fetched_end_ms,
-        fetched_segment: lease.as_ref().map_or_else(
+        fetched_segment: lease.as_deref().map_or_else(
             || Some(s.high_segment.load(Relaxed)).filter(|index| *index >= 0),
             |lease| lease.delivery.fetched_segment,
         ),

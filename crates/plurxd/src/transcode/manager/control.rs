@@ -714,7 +714,7 @@ impl TranscodeManager {
         let result = async move {
             // Capture the complete carrier, not disjoint heap fields whose
             // accounting guard could be dropped before a remaining snapshot.
-            let outcome = outcome;
+            let mut outcome = outcome;
             session.hooks.get().after_control_applied().await;
             // The actor also tickets replayed sequences. A caller whose first
             // response was lost can therefore wait for physical convergence.
@@ -744,17 +744,19 @@ impl TranscodeManager {
             }
             #[cfg(target_os = "linux")]
             let moved_result_bytes = outcome
-                .requested_clone_heap_bytes()
+                .requested_result_fields_bytes()
                 .ok_or(crate::playback_control::ControlStateError::Unavailable)?;
             #[cfg(not(target_os = "linux"))]
             let moved_result_bytes = 0;
+            let selected_consumer = outcome.consumer_allocation.is_some();
             let owned_status = session_info_owned(
                 &session_id,
                 &session,
                 limits,
                 global_live_bytes,
                 global_ahead_bytes,
-                outcome.allocation.as_ref(),
+                selected_consumer.then_some(&outcome.lease),
+                outcome.consumer_allocation.take(),
                 moved_result_bytes,
             )
             .await?;

@@ -7458,12 +7458,14 @@ pub(crate) struct RollingControlOutcome {
     pub selection: SelectionObservation,
     // Process-only role accounting; never a request/receipt capability.
     pub(crate) allocation: Option<ActorPayloadAllocation>,
+    pub(crate) consumer_allocation: Option<ActorPayloadAllocation>,
 }
 
 impl RollingControlOutcome {
     fn clone_with_allocation(
         &self,
         allocation: Option<ActorPayloadAllocation>,
+        consumer_allocation: Option<ActorPayloadAllocation>,
     ) -> Result<Self, ()> {
         #[cfg(target_os = "linux")]
         if let Some(allocation) = allocation.as_ref() {
@@ -7471,6 +7473,7 @@ impl RollingControlOutcome {
         }
         let mut cloned = self.clone();
         cloned.allocation = allocation;
+        cloned.consumer_allocation = consumer_allocation;
         Ok(cloned)
     }
 }
@@ -8656,6 +8659,8 @@ struct OwnedLocalControlRequest {
     sequence: u64,
     snapshot: PlaybackDemandSnapshot,
     prepared_successor: PreparedSuccessorObservation,
+    #[cfg(target_os = "linux")]
+    consumer_metadata_bytes: Option<usize>,
     // Last: queued cancellation destroys payload before its original slot.
     _allocation: Option<ActorPayloadAllocation>,
 }
@@ -10476,6 +10481,7 @@ impl RollingControlActor {
                 ));
             };
             return Ok(RollingControlOutcome {
+                consumer_allocation: None,
                 allocation: None,
                 disposition,
                 accepted_sequence,
@@ -10605,6 +10611,7 @@ impl RollingControlActor {
             self.last_flow_ticket
         };
         Ok(RollingControlOutcome {
+            consumer_allocation: None,
             allocation: None,
             disposition,
             accepted_sequence,
@@ -12830,6 +12837,7 @@ impl RollingControlActor {
                                     )
                                     .expect("pre-reserved source control output bound");
                                 outcome.allocation = Some(accounting.reply.clone());
+                                outcome.consumer_allocation = accounting.consumer.take();
                             }
                         }
 
@@ -12849,9 +12857,15 @@ impl RollingControlActor {
                                     accounting.as_mut().and_then(|value| value.terminal.take());
                                 #[cfg(not(target_os = "linux"))]
                                 let allocation = None;
+                                #[cfg(target_os = "linux")]
+                                let consumer_allocation = accounting
+                                    .as_mut()
+                                    .and_then(|value| value.terminal_consumer.take());
+                                #[cfg(not(target_os = "linux"))]
+                                let consumer_allocation = None;
                                 admission.accepted(
                                     outcome
-                                        .clone_with_allocation(allocation)
+                                        .clone_with_allocation(allocation, consumer_allocation)
                                         .expect("pre-reserved terminal control clone bound"),
                                 );
                             }
@@ -14555,6 +14569,7 @@ impl RollingControlHandle {
         self.control_before(request, i64::MAX, None, None).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn control_before(
         &self,
         request: LocalControlRequest<'_>,
@@ -14562,6 +14577,26 @@ impl RollingControlHandle {
         terminal_admission: Option<Arc<dyn RollingTerminalAdmission>>,
         preparation_admission: Option<Arc<dyn PreparationSettlementAdmission>>,
     ) -> Result<RollingControlOutcome, ControlStateError> {
+        self.control_before_with_consumer(
+            request,
+            deadline_unix_ms,
+            terminal_admission,
+            preparation_admission,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn control_before_with_consumer(
+        &self,
+        request: LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+        terminal_admission: Option<Arc<dyn RollingTerminalAdmission>>,
+        preparation_admission: Option<Arc<dyn PreparationSettlementAdmission>>,
+        consumer_metadata_bytes: Option<usize>,
+    ) -> Result<RollingControlOutcome, ControlStateError> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = consumer_metadata_bytes;
         let response = self
             .request_allocated_control(
                 #[cfg(target_os = "linux")]
@@ -14574,6 +14609,8 @@ impl RollingControlHandle {
                         sequence: request.sequence,
                         snapshot: request.snapshot,
                         prepared_successor: request.prepared_successor,
+                        #[cfg(target_os = "linux")]
+                        consumer_metadata_bytes,
                         _allocation: allocation,
                     }),
                     deadline_unix_ms,

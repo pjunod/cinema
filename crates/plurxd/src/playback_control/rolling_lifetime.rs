@@ -31,11 +31,6 @@ impl PartialEq for ActorPayloadAllocation {
 impl Eq for ActorPayloadAllocation {}
 #[cfg(target_os = "linux")]
 impl ActorPayloadAllocation {
-    pub(crate) fn reserve_related(&self, bytes: usize) -> Result<Self, ()> {
-        Ok(Self {
-            slot: self.slot.reserve_related(bytes).map_err(|_| ())?,
-        })
-    }
     pub(crate) fn validate_actual(&self, bytes: usize) -> Result<(), ()> {
         self.slot.validate_actual(bytes).map_err(|_| ())
     }
