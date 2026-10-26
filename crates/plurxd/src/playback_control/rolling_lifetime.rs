@@ -10,8 +10,29 @@ pub(super) type ActorApplication =
 pub(super) struct ActorApplication;
 
 pub(super) struct OriginalRollingActorTask {
+    #[cfg_attr(
+        all(not(target_os = "linux"), not(test)),
+        expect(
+            dead_code,
+            reason = "retain original actor task and conservative join state on every platform; production native retirement selectors are Linux-only"
+        )
+    )]
     task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg_attr(
+        all(not(target_os = "linux"), not(test)),
+        expect(
+            dead_code,
+            reason = "retain original actor task and conservative join state on every platform; production native retirement selectors are Linux-only"
+        )
+    )]
     registered: bool,
+    #[cfg_attr(
+        all(not(target_os = "linux"), not(test)),
+        expect(
+            dead_code,
+            reason = "retain original actor task and conservative join state on every platform; production native retirement selectors are Linux-only"
+        )
+    )]
     failed: AtomicBool,
     // Last: queued actor payloads and its completed JoinHandle allocation
     // remain within the original application's charged lifetime until the
@@ -19,6 +40,7 @@ pub(super) struct OriginalRollingActorTask {
     _application: Option<ActorApplication>,
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) struct RollingControlActorJoin {
     original: Arc<OriginalRollingActorTask>,
 }
@@ -50,6 +72,7 @@ impl OriginalRollingActorTask {
         })
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn select(original: &Arc<Self>) -> RollingControlActorJoin {
         RollingControlActorJoin {
             original: Arc::clone(original),
@@ -57,6 +80,7 @@ impl OriginalRollingActorTask {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl RollingControlActorJoin {
     /// Join only the original registered actor. Timeout/cancellation leaves
     /// its handle in place; panic remains a permanent uncertain result. This
@@ -143,6 +167,7 @@ pub(super) async fn run_original_actor(
 
 /// Only the task's fixed requested layout. Actor payloads, mailbox blocks,
 /// command heaps, Tokio task allocation and runtime baseline are separate.
+#[cfg(target_os = "linux")]
 pub(super) fn original_actor_frame_bytes() -> Option<usize> {
     std::mem::size_of_val(&run_original_actor(None, None))
         .checked_add(std::mem::size_of::<OriginalRollingActorTask>())?

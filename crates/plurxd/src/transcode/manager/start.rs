@@ -87,6 +87,10 @@ impl OptionalCopyStartSettlement for Option<PrepublicationStartSettlement> {
 /// lifetime segment-name range; a full window backpressures the original
 /// pipe until the rolling actor approves a typed prefix removal.
 #[cfg(target_os = "linux")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bind the selected copy graph to its original planning owner, exact recipe inputs, application charge, and authoritative epoch/capacity in one pure preparation step"
+)]
 fn selected_copy_request(
     runtime: &Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
     planning: &SelectedCopyPlanning,
@@ -533,6 +537,7 @@ impl TranscodeManager {
         })
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
     pub async fn start(
         &self,
@@ -1965,8 +1970,6 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             takeover,
             first_slide_logged: AtomicBool::new(false),
-            #[cfg(target_os = "linux")]
-            core_copy_app: None,
         });
         start_settlement.attach(&session);
         if let Err(reason) = executor_registration.register().await {
@@ -2920,8 +2923,6 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             takeover,
             first_slide_logged: AtomicBool::new(false),
-            #[cfg(target_os = "linux")]
-            core_copy_app: None,
         });
         // Selected output is core-owned: construct this existing cancellation
         // owner only with a rich Session attached, so its raw-directory branch

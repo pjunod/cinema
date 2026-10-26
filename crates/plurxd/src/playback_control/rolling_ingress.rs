@@ -38,8 +38,14 @@ impl RollingProducerIngressBlocks {
         for end in 1..self.len {
             let mut index = end;
             while index != 0
-                && self.slots[index - 1].as_ref().unwrap().order_key()
-                    > self.slots[index].as_ref().unwrap().order_key()
+                && self.slots[index - 1]
+                    .as_ref()
+                    .expect("initialized producer ingress prefix")
+                    .order_key()
+                    > self.slots[index]
+                        .as_ref()
+                        .expect("initialized producer ingress prefix")
+                        .order_key()
             {
                 self.slots.swap(index - 1, index);
                 index -= 1;
@@ -119,6 +125,10 @@ pub(super) async fn next_before_cutoff<T>(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "private transport fixture setup and expected outcomes deliberately assert success or refusal"
+)]
 mod tests {
     use super::*;
 

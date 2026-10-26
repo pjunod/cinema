@@ -345,6 +345,12 @@ pub(crate) struct PreparedFiniteControl {
     directive: Option<PreparationDirective>,
 }
 
+type AdoptedFiniteControl = (
+    Result<DispositionTuple, ControlStateError>,
+    SelectionObservation,
+    Option<PreparationDirective>,
+);
+
 impl PreparedFiniteControl {
     pub(crate) fn returns_result(&self) -> bool {
         self.result.is_ok()
@@ -380,14 +386,7 @@ impl PreparedFiniteControl {
         )
     }
 
-    pub(crate) fn adopt(
-        self,
-        published: &mut ControlState,
-    ) -> (
-        Result<(ControlDisposition, u64, ControlAction, ClientPlatform, bool), ControlStateError>,
-        SelectionObservation,
-        Option<PreparationDirective>,
-    ) {
+    pub(crate) fn adopt(self, published: &mut ControlState) -> AdoptedFiniteControl {
         let Self {
             mut next,
             result,

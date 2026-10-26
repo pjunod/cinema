@@ -1,6 +1,7 @@
 use super::*;
 
 #[path = "control/terminal_memory.rs"]
+#[cfg(target_os = "linux")]
 mod terminal_memory;
 
 #[cfg(target_os = "linux")]
@@ -1477,6 +1478,7 @@ pub(super) async fn persist_terminal_ack_with_faults(
 }
 
 impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommitter {
+    #[cfg(target_os = "linux")]
     fn requested_heap_bytes(&self) -> Option<usize> {
         terminal_memory::committer(self)
     }

@@ -18,6 +18,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::transcode::{HlsSessionInfo, SessionKind};
 
+#[cfg(target_os = "linux")]
 #[path = "playback_control/finite_memory.rs"]
 mod finite_memory;
 
@@ -2603,9 +2604,12 @@ impl TerminalResponseHandoff {
     }
 }
 
+type TerminalCommitValue = Option<Result<Arc<TerminalControlAnswer>, ()>>;
+type TerminalCommitSender = tokio::sync::watch::Sender<TerminalCommitValue>;
+
 #[derive(Clone)]
 pub(crate) struct TerminalCommitReceipt {
-    result: tokio::sync::watch::Receiver<Option<Result<Arc<TerminalControlAnswer>, ()>>>,
+    result: tokio::sync::watch::Receiver<TerminalCommitValue>,
     retry: Option<Arc<TerminalCommitRetry>>,
     expiry: Arc<TerminalCommitExpiry>,
 }
@@ -2620,6 +2624,7 @@ pub(crate) struct TerminalControlAnswer {
 }
 
 impl TerminalControlAnswer {
+    #[cfg(any(target_os = "linux", test))]
     fn plain(response: ControlResponseV1) -> Self {
         Self {
             response,
@@ -2715,6 +2720,7 @@ impl TerminalCommitAttempt {
         self.expiry.set(expires_at_unix_ms);
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn complete(self, outcome: Result<ControlResponseV1, ()>) {
         self.complete_answer(outcome.map(TerminalControlAnswer::plain));
     }
@@ -2761,10 +2767,7 @@ impl TerminalCommitRetry {
 }
 
 impl TerminalCommitReceipt {
-    pub(crate) fn pending() -> (
-        Self,
-        tokio::sync::watch::Sender<Option<Result<Arc<TerminalControlAnswer>, ()>>>,
-    ) {
+    pub(crate) fn pending() -> (Self, TerminalCommitSender) {
         let (sender, result) = tokio::sync::watch::channel(None);
         (
             Self {
@@ -3155,6 +3158,7 @@ pub(crate) trait TerminalControlCommitter: Send + Sync {
     /// Requested heap retained by this committer after the exchange. A finite
     /// session requires an explicit measurement before accepting End; unknown
     /// implementations may still serve the legacy unbudgeted path.
+    #[cfg(target_os = "linux")]
     fn requested_heap_bytes(&self) -> Option<usize> {
         None
     }
@@ -8549,12 +8553,20 @@ pub(crate) struct RollingControlHandle {
     /// final handle must close the actor rather than leave a self-owned task.
     #[allow(dead_code)]
     decision_transport: Arc<RollingDecisionTransport>,
+    #[cfg_attr(
+        all(not(target_os = "linux"), not(test)),
+        expect(
+            dead_code,
+            reason = "the original actor task remains owned on every platform; production native retirement selectors are Linux-only"
+        )
+    )]
     original_actor: Arc<rolling_lifetime::OriginalRollingActorTask>,
 }
 
 mod rolling_ingress;
 mod rolling_lifetime;
 use rolling_ingress::RollingProducerIngressBlocks;
+#[cfg(any(target_os = "linux", test))]
 pub(crate) use rolling_lifetime::RollingControlActorJoin;
 
 struct OwnedLocalControlRequest {
@@ -13520,10 +13532,12 @@ impl RollingControlHandle {
         )
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn original_actor_join(&self) -> RollingControlActorJoin {
         rolling_lifetime::OriginalRollingActorTask::select(&self.original_actor)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn original_actor_frame_bytes() -> Option<usize> {
         rolling_lifetime::original_actor_frame_bytes()
     }

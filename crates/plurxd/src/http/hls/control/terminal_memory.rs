@@ -95,10 +95,11 @@ fn device_caps(v: &plurx_core::playback::DeviceCaps) -> Option<usize> {
     for values in [
         &v.progressive_hevc_sample_entries,
         &v.hls_hevc_sample_entries,
-    ] {
-        if let Some(values) = values {
-            n = add(n, strings(values)?)?;
-        }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        n = add(n, strings(values)?)?;
     }
     n = add(n, opt_string(&v.dv_transport))?;
     n = add(n, vec_bytes(&v.learned_limits)?)?;

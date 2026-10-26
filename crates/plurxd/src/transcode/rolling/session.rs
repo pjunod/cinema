@@ -350,12 +350,6 @@ pub(super) struct Session {
     /// playlist reload may observe that state hundreds of times; only the
     /// transition records retention starting to advance the visible window.
     pub(super) first_slide_logged: AtomicBool,
-    /// Last for any Session-owned application lease. Selected copy moves its
-    /// lease into the original actor owner, so queued actor work and the
-    /// original join selector remain charged after the Session drops.
-    #[cfg(target_os = "linux")]
-    pub(super) core_copy_app:
-        Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease>,
 }
 
 /// The points of a rolling [`Session`] that a race test can pause at, and the
@@ -1000,12 +994,12 @@ impl Session {
         if raw.is_empty() {
             return Ok(());
         }
-        let text = std::str::from_utf8(&raw)
+        let text = std::str::from_utf8(raw)
             .map_err(|_| "rolling writer playlist was not UTF-8".to_owned())?;
         if !text.lines().any(|line| line.trim().starts_with("#EXTINF:")) {
             return Ok(());
         }
-        validate_rolling_target(&raw)?;
+        validate_rolling_target(raw)?;
         #[cfg(target_os = "linux")]
         let parsed = if copy_output.is_some() {
             parse_selected_copy_playlist(text,
@@ -2612,7 +2606,7 @@ impl Session {
                 Err(_) => return,
             }
         } else {
-            parse_playlist(&String::from_utf8_lossy(&raw))
+            parse_playlist(&String::from_utf8_lossy(raw))
         };
         #[cfg(not(target_os = "linux"))]
         let parsed = parse_playlist(&String::from_utf8_lossy(&raw));
