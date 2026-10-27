@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "f995909b567454a284eea4f25856ef5a115af542ac06bf4650076612d5083634"
+        "sha256": "f99b4fe84dc2423cc6812ef85bd4f9eb00fe5c3b5e817fea52d9c50027f3c137"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "f995909b567454a284eea4f25856ef5a115af542ac06bf4650076612d5083634"
+        "sha256": "f99b4fe84dc2423cc6812ef85bd4f9eb00fe5c3b5e817fea52d9c50027f3c137"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "f995909b567454a284eea4f25856ef5a115af542ac06bf4650076612d5083634"
+        "sha256": "f99b4fe84dc2423cc6812ef85bd4f9eb00fe5c3b5e817fea52d9c50027f3c137"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "d313eba2e3122c36253d5b44b2fc9e2295718b25ccf37ad9be9b9a14783a7ff4"
+        "sha256": "e56c276cff0f5afafe32928aeb665c6023ff6de634d2af32df6949c36def6872"
       },
       {
         "table": "31 authority implementation",
@@ -249,7 +249,7 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "b3833f46bf3eb64b9d2a1c5ab6eac4b9de450ab453d4304d437d6a38a02b3809"
+        "sha256": "271d3b42069fcb2bfbe8471ce569e5f46025240be9e2eaffb0451ddfe7d9254b"
       },
       {
         "table": "42 daemon schedule loop no token",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "c6238c9b67b24d984269d6e703c6123a0c89d404781f62e9dfa6656ba03dac0c"
+        "sha256": "638f99b24aaf64eb7fcfbb07c260ca4d518e0a66b2425c5ab70f24ee01bc402e"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -288,7 +288,7 @@
         "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
       }
     ],
-    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. Source-binding audit at 22630e27a7bb96fb99a6bd43bdb157fcca563569 by direct Codex root and bounded read-only preparation_controller_resume: selected predicates/authority remain; original retained heartbeat registration/join and token-preserving retirement replace earlier move-out cleanup. This refresh inventories source and gaps, not theorem transfer or execution. Failed join skips retirement; ambiguous settlement retains the original token. Model FinishRetire covers only acknowledged/resolved normal outcomes. A local admission Arc drop is not last-alias release or native closure. Historical model/test results retain their original source; no model or behavioral tests ran for this refresh."
+    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. Source-binding audit at 22630e27a7bb96fb99a6bd43bdb157fcca563569 by direct Codex root and bounded read-only preparation_controller_resume: selected predicates/authority remain; original retained heartbeat registration/join and token-preserving retirement replace earlier move-out cleanup. This refresh inventories source and gaps, not theorem transfer or execution. Failed join skips retirement; ambiguous settlement retains the original token. Model FinishRetire covers only acknowledged/resolved normal outcomes. A local admission Arc drop is not last-alias release or native closure. Historical model/test results retain their original source; no model or behavioral tests ran for this refresh. Main/effort source union reviewed at 2dc07bd0995f07f26281c72de80117f2c9afa9f0: retained heartbeat/token mutex and Unknown limits remain explicit. Main FEL store methods, handoff schema/queries and prune task remain outside the selected library scope; the selected unextended FragmentAdmission has unchanged idle predicates. Requalification checks active title work in a separate preflight read before bind and does not establish an atomic no-in-flight guarantee. Final resolved source bytes are rebound after source review; no models/configurations, validators, test inventory or qualification claims change."
   },
   "configs": {
     "progress.cfg": {

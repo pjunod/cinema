@@ -1105,7 +1105,7 @@ mod tests {
     ) {
         let dir = crate::test_tempdir().expect("scratch");
         let (state, file, document) = qualification_fixture(dir.path()).await;
-        let admission = Arc::new(
+        let admission = std::sync::Arc::new(
             state
                 .transcode
                 .admit_dv_title()
