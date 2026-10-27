@@ -1007,6 +1007,12 @@ mod tests {
         use plurx_core::store::{SqliteStore, Store};
         use std::sync::Arc;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        // One title worker (1) plus its simulated GPU graph (4 + 3).
+        // This fixture tests custody, not the host's physical CPU capacity.
+        store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "8")
+            .await
+            .expect("synthetic title and GPU graph budget");
         let caps = plurx_core::transcode::EncoderCaps {
             vaapi: true,
             vaapi_hdr_policy: Some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
@@ -1038,6 +1044,7 @@ mod tests {
             )
             .with_hdr10_passthrough_vaapi(true),
         );
+        assert_eq!(state.transcode.software_budget().await, 8);
         std::fs::create_dir_all(dir.join("runtime")).expect("runtime");
         for key in [
             plurx_core::store::keys::DV_HDR_PROCESSING,
