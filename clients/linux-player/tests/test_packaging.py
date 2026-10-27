@@ -270,6 +270,24 @@ def diff(old, new):
 
 
 @unittest.skipUnless(shutil.which("git"), "needs git")
+class WaylandColourSurface(unittest.TestCase):
+    """mpv, not the Vulkan driver, owns the window's colour description."""
+
+    def test_the_first_wayland_swapchain_is_pass_through(self):
+        # NVIDIA's WSI keeps the colour surface it made for an sRGB swapchain
+        # after that swapchain is gone, and mpv's own request then ends the
+        # Wayland connection ("surface already requested").
+        series = read("packaging/patches/mpv/series")
+        patch = "0004-vulkan-context-start-Wayland-swapchains-pass-through.patch"
+        self.assertIn(patch, series)
+        text = read(f"packaging/patches/mpv/{patch}")
+        self.assertIn("+++ b/video/out/vulkan/context.c", text)
+        hunk = text.split("        goto error;\n \n+    // A Wayland surface can have only one", 1)[1]
+        self.assertIn("+    if (owns_wayland_color(sw))", hunk)
+        self.assertIn("+        pl_swapchain_colorspace_hint(vk->swapchain, &(struct pl_color_space){0});", hunk)
+        self.assertIn("@@ bool ra_vk_ctx_init(", text)
+
+
 class PatchSeries(unittest.TestCase):
     """packaging/apply-series.sh applies the series exactly, in series order."""
 
