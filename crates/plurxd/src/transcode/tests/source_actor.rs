@@ -172,6 +172,18 @@ async fn source_original_p_native_collector_cancellation_joins_same_cleanup_befo
     Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(2))).await;
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_actual_expired_planning_and_stale_direct_refusals_hold_no_reservation() {
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(3))).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_actual_application_lease_refusal_retires_same_original_planning_owner() {
+    Box::pin(source_copy_preadmission_fixture_with_fixed(12, Some(4))).await;
+}
+
 async fn source_copy_preadmission_fixture(mode: u8) {
     source_copy_preadmission_fixture_with_fixed(mode, None).await;
 }
@@ -661,6 +673,8 @@ async fn source_copy_preadmission_fixture_with_restart(
             match fixed_case {
                 0 => super::super::source_preparation::source_fixed_planning_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
                 2 => super::super::source_preparation::source_native_cancelled_collector_cleanup_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                3 => super::super::source_preparation::source_before_reservation_refusal_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
+                4 => super::super::source_preparation::source_application_lease_refusal_cleanup_fixture(Arc::clone(&runtime), &manager, &prepared, &assignment).await,
                 _ => panic!("unknown fixed Source fixture case"),
             }
             store
