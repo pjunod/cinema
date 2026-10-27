@@ -6592,13 +6592,14 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
   // Anchored inside the branch: `player.prepare()` appears at eight other
   // sites in that file, so asserting the bare call pinned nothing. What has to
   // be true is that the owner hands the recovery a seek target on the PLAYER's
-  // timeline and the player's own seek and prepare. This source inventory can
+  // timeline and the player's own seek and prepare. Caption ownership keeps
+  // recovery from becoming a viewer discontinuity. This source inventory can
   // establish ownership and call shape, but not frame continuity or
   // cancellation cleanup. BehindLiveWindowRecoveryTest drives `attached()`
   // behaviorally and proves that a spent budget gets exactly one fresh use.
   assert.match(
     androidController,
-    /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> player\.seekTo\(target\) \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
+    /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> progressiveCaptions\.ownedMediaMutation \{ player\.seekTo\(target\) \} \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
     "the recovery seeks on the player's timeline and prepares again",
   );
   assert.match(
