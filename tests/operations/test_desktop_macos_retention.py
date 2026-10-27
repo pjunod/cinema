@@ -582,13 +582,14 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
                     if commit == native.PRODUCER:return self.entries,self.contents
                     guard_calls.append(commit)
                     if len(guard_calls) == 2:
-                        rows['Makefile'] = ('100644',revised_make if drift=='equivalent' else rows['Makefile'][1]+b'\nquiet: outside-helper\n')
+                        rows['Makefile'] = ('100644',revised_make if drift=='equivalent' else rows['Makefile'][1]+b'\ninclude outside-helper.mk\n')
                     return real_manifest(ROOT,commit)
                 def guarded_git(workspace,*args,**kwargs):
                     return git_value(workspace,*args,**kwargs) if args[0] in ('show','rev-parse') else read_git(workspace,*args,**kwargs)
                 with mock.patch.object(native,'manifest',side_effect=guarded_manifest), \
                      mock.patch.object(native,'git',side_effect=guarded_git):
-                    refusal = 'guarded source closure changed' if drift=='equivalent' else 'closure review required'
+                    refusal = ('Native guarded source closure changed before execution' if drift=='equivalent'
+                        else 'Unsupported native Makefile syntax; closure review required')
                     with self.subTest(drift=drift),self.assertRaisesRegex(native.receipts.ReceiptError,refusal):
                         native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},True)
                     self.assertEqual(len(guard_calls),2);make.assert_not_called()

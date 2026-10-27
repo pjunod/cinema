@@ -229,8 +229,33 @@ class KnownRedContractTest(unittest.TestCase):
             additional_fixture_reasons,
         )
         self.assertEqual(len(additional_fixtures), 14)
-        # HDR/DV and the explicit Mac graph check are operator-run fixtures.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 38)
+        # The product runner already executes these six source-bound fixtures
+        # explicitly with --ignored. Inventory their exact reasons without
+        # adding debt, an admitted exclusion or a new opt-in configuration.
+        source_bound_product_reasons = {
+            "crates/plurx-core/src/store/async_driver_product.rs::"
+            "store::async_driver_product::" + name:
+                "requires source-bound driver input; run scripts/check-async-driver-refinement"
+            for name in (
+                "actual_sql_two_worker_product_is_closed",
+                "product_prefix_completion_mutation_fails_last_request_atomic_retirement",
+                "product_prefix_reservation_mutation_fails_reservation_conservation",
+                "actual_ordinary_settlement_payload_and_time_conformance",
+                "actual_ordinary_local_guard_and_response_conformance",
+                "actual_queued_eligibility_progress_witness",
+            )
+        }
+        product_fixtures = tuple(
+            item for item in ignored if item.identity in source_bound_product_reasons
+        )
+        self.assertEqual(
+            {item.identity: item.reason for item in product_fixtures},
+            source_bound_product_reasons,
+        )
+        self.assertEqual(len(product_fixtures), 6)
+        # Keep all six in the residual inventory: the historical38 plus the
+        # source-bound graph/control/conformance fixtures above makes44.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 44)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

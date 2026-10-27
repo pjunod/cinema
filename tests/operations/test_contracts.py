@@ -2516,11 +2516,11 @@ assert.equal(context.ACT_TIMER, null);
         effort = read(".github/workflows/effort-ci.yml")
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
-        # Whole-job budget includes checkout/toolchain/cache setup plus the
-        # unchanged all-target compile and vendored denied-warning Clippy.
+        # Effort also owns bounded qualification on non-compile-only dispatches;
+        # the full compiler owns setup, all-target compilation and vendor Clippy.
         full_jobs = workflow_job_blocks(".github/workflows/ci.yml")
         for lane, rust_job, minutes in (
-            ("effort", effort_jobs["rust_compile"], 30),
+            ("effort", effort_jobs["rust_compile"], 60),
             ("full compiler", full_jobs["rust_compile"], 30),
         ):
             with self.subTest(lane=lane):
@@ -2658,6 +2658,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(list(async_steps),[
             "Install Rust gate prerequisites","Check out the candidate","Install the pinned Rust toolchain",
             "Install the pinned FFmpeg","Restore the main fast Rust cache",
+            "Provision locked dependencies for offline async qualification",
             "Prepare authenticated same-PR async driver proof resumption",
             "Provision the pinned TLC toolchain for async driver refinement",
             "Build deterministic async driver prefix checkpoint","Snapshot immutable async driver prefix checkpoint",
@@ -2665,6 +2666,18 @@ assert.equal(context.ACT_TIMER, null);
             "Qualify async driver refinement with pinned TLC","Snapshot compact async driver refinement evidence",
             "Preserve async driver refinement evidence","Enforce persistent Cargo bounds",
             "Restore persistent runner workspace ownership"])
+        self.assertEqual(
+            workflow_step_literal(
+                async_steps["Provision locked dependencies for offline async qualification"],
+                "run",
+            ),
+            [
+                "set -euo pipefail",
+                "cargo +1.97.1 fetch --locked --manifest-path Cargo.toml",
+                "cargo +1.97.1 fetch --locked --offline --manifest-path Cargo.toml",
+                "git diff --exit-code -- Cargo.lock",
+            ],
+        )
         fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
         playback_contracts = workflow_step_scalar(
             fast_preflight["Check the shared player input contract"], "run"
