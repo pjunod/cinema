@@ -474,11 +474,13 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
             .await
             .expect("probe")
             .expect("probe");
-        let admission = state
-            .transcode
-            .admit_dv_title()
-            .await
-            .expect("title admission");
+        let admission = Arc::new(
+            state
+                .transcode
+                .admit_dv_title()
+                .await
+                .expect("title admission"),
+        );
         let token = CancellationToken::new();
         let outcome = super::super::run_admitted_probe(
             &state.transcode,
