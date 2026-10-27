@@ -7851,3 +7851,12 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = 'and not t.get("albumart")'
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_mpvs_vo_error_line_is_a_failure_too(self):"
+
+# From main (PR #1134): the launcher seek test runs its seek through the real event handlers on virtual time.
+[[fixes]]
+id = "pjunod.linux-player-seek-test-on-virtual-time"
+commits = ["7bec1b236eb7c2acd590d7ad20890ac73d3f2501"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def on_seek(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_seek_inside_the_range_stays_in_the_session(self):"
