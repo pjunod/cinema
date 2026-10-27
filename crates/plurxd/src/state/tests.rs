@@ -5265,7 +5265,7 @@ fn budget_exceeded(
     }
 }
 
-/// lab5's Avatar remux (79 GB, 197 min): killed by a 1511 s budget at 64% of
+/// a lab5 remux (79 GB, 197 min): killed by a 1511 s budget at 64% of
 /// the film. Its retry is budgeted from that measured rate, past the old
 /// 30-minute ceiling, instead of repeating the same kill.
 #[test]
@@ -5297,8 +5297,8 @@ fn a_budget_failure_budgets_the_retry_from_the_rate_it_measured() {
 /// too: 79 GB at the slowest planned read rate, not 197 minutes at 8x.
 #[test]
 fn a_first_attempt_on_a_large_remux_is_budgeted_from_its_size() {
-    let avatar = index_file_budget(Some(11_820_000), 79_000_000_000, None);
-    assert!(avatar >= Duration::from_secs(2_300), "{avatar:?}");
+    let remux = index_file_budget(Some(11_820_000), 79_000_000_000, None);
+    assert!(remux >= Duration::from_secs(3_000), "{remux:?}");
     // A small file keeps the duration budget.
     assert_eq!(
         index_file_budget(Some(11_820_000), 4_000_000_000, None),

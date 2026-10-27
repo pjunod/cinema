@@ -2315,8 +2315,10 @@ const INDEX_FILE_HEADROOM_SECS: u64 = 30;
 /// The slowest whole-file read rate a first attempt plans for. A duration-only
 /// budget assumes the read keeps up with eight times real time, which a
 /// 50-90 Mb/s remux on a network mount does not: lab5 measured 33-40 MB/s and
-/// killed every 70-80 GB remux it tried at 40-64% (Avatar, Twilight).
-const INDEX_EXPECTED_MIN_READ_BYTES_PER_SEC: u64 = 32 * 1024 * 1024;
+/// killed every 70-80 GB remux it tried at 40-64%. 24 MiB/s leaves a margin
+/// under the slowest disk rate measured there, so a healthy first read is not
+/// cut off at the very end.
+const INDEX_EXPECTED_MIN_READ_BYTES_PER_SEC: u64 = 24 * 1024 * 1024;
 /// The ceiling a budget derived from the file's size or from a measured read
 /// may reach. The 30-minute ceiling is a guess about time; these budgets are
 /// derived from what the file and this node actually are, and both local and
