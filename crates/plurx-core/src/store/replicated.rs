@@ -1438,7 +1438,9 @@ mod tests {
         // Root removal adds one guarded delete/prune boundary, named once.
         // v113 adds the atomic annotation rating replacement/fetch marker.
         // Playback handoff redemption adds one fixed claim/mint batch.
-        assert_eq!(methods.len(), 116);
+        // Node removal retires the removed node's analysis requests and their
+        // attempts in one batch (`retire_analysis_requests_for_node`).
+        assert_eq!(methods.len(), 117);
     }
 
     mod source_inventory {
