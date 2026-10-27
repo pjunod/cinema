@@ -303,6 +303,20 @@ class WaylandColourSurface(unittest.TestCase):
         self.assertIn("@@ bool ra_vk_ctx_init(", text)
 
 
+class EnhancementLayerOverHls(unittest.TestCase):
+    """Profile 7's enhancement layer is split from streams demux_lavf reads."""
+
+    def test_the_split_reads_the_hvcc_that_demux_lavf_keeps(self):
+        # Every plurx stream comes through demux_lavf (HLS), which leaves the
+        # hvcC in lav_codecpar. Read from extradata alone, the length-prefixed
+        # samples were scanned as Annex B, no layer was found, and mpv
+        # buffered ~150 MB before showing the base layer alone.
+        text = read("packaging/patches/mpv/0002-demux-dovi_split-split-the-enhancement-layer-without.patch")
+        hunk = text.split("+static int hvcc_nal_length(const struct mp_codec_params *c)", 1)[1].split("+}", 1)[0]
+        self.assertIn("c->lav_codecpar->extradata", hunk)
+        self.assertIn("c->lav_codecpar->extradata_size", hunk)
+
+
 class PatchSeries(unittest.TestCase):
     """packaging/apply-series.sh applies the series exactly, in series order."""
 
