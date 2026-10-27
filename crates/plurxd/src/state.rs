@@ -2407,6 +2407,10 @@ fn measured_index_budget_secs(
 /// The read runs under `admission`, its turn on the heavy-background lane,
 /// so the pool is never idle while it runs: what preempts it is foreground
 /// demand beyond that admission's own claim, not the claim itself.
+///
+/// Known limit: only work that holds an admission is visible here. A
+/// copy-mode or VOD viewer reading the source without one does not preempt
+/// the read, and a preempted read starts over from the beginning next time.
 pub(crate) async fn local_index_until_foreground<T>(
     transcode: &TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
@@ -8290,6 +8294,11 @@ impl JobManager {
         let mut attempted = 0usize;
         let mut last_examined = None;
         let mut cursor_at = None;
+        // The heavy lane has one permit, and every other heavy worker
+        // try-acquires it, so a waiter would win every turn. The pass waits
+        // for the lane once; after that it takes the lane only when it is
+        // free and nobody is queued for it, and otherwise ends here.
+        let mut took_queued_turn = false;
         for (examined, (file_id, _path, backlog)) in paths.into_iter().enumerate() {
             // Both bounds stop different runaways: attempts bound the
             // whole-file reads a pass will start, while examined bounds a
@@ -8410,18 +8419,25 @@ impl JobManager {
             if missing.is_empty() {
                 continue;
             }
-            // One read of the source builds every missing identity (§5.4).
-            // It first takes this node's heavy-background turn: queued FIFO
-            // behind background work already holding the lane (a Dolby Vision
-            // title scan) rather than abandoning the pass whenever the pool is
-            // not idle, and still refused when foreground work holds the pool
-            // once the turn comes. Deliberately a return: it skips the cursor
-            // stamp, so a preempted pass leaves the file due rather than half
-            // done.
-            let Some(admission) = transcode.admit_fragment_queued().await else {
+            // One read of the source builds every missing identity (§5.4),
+            // under this node's heavy-background lane, held for this file
+            // only. The pass's first read waits for the lane in its FIFO queue
+            // behind whoever holds it (a Dolby Vision title scan) instead of
+            // abandoning the pass whenever the pool is not idle; later reads
+            // in the same pass take it only if it is free with nobody queued
+            // (a speech pass waiting goes first). Either is still refused when
+            // foreground work holds the pool. Deliberately a return: it skips
+            // the cursor stamp, so the file stays due rather than half done.
+            let admission = if took_queued_turn {
+                transcode.admit_fragment().await
+            } else {
+                took_queued_turn = true;
+                transcode.admit_fragment_queued().await
+            };
+            let Some(admission) = admission else {
                 tracing::info!(
                     file_id,
-                    "local fragment index yielded to foreground work before its read"
+                    "local fragment index left the heavy lane to other work before its read"
                 );
                 return;
             };

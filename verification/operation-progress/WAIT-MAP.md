@@ -9,9 +9,13 @@ This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMP
 `construct.rs` adds `admit_fragment_queued`, a FIFO wait on the shared heavy
 gate followed by the same `admit_source_work_with_heavy` refusal, used only by
 the node-local fragment index pass, plus `fragment_must_yield` and
-`background_yield_reason` predicates for that pass. Like the speech queue, it
-is a competitor on the heavy gate, outside this model, and establishes no
-admission fairness for the selected library worker. `admit_fragment`
+`background_yield_reason` predicates for that pass. The gate has one permit
+and other heavy workers only try-acquire it, so a waiter takes the next turn
+ahead of all of them: the pass waits once per pass, holds the gate for one
+file at a time, and otherwise try-acquires like the rest (a queued speech pass
+goes first). Like the speech queue, it is a competitor on the heavy gate,
+outside this model, and establishes no admission fairness for the selected
+library worker. `admit_fragment`
 (Table 41) is byte-identical and still try-only. `state.rs` changes the local
 index pass, the analysis-request resolver (learners resolve targeted
 requests) and copy-preparation priority; `membership.rs` retires a removed

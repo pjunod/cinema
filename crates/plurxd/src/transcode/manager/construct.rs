@@ -1317,11 +1317,13 @@ impl TranscodeManager {
         self.admit_source_work(1).await
     }
 
-    /// The node-local fragment index pass's turn on the heavy lane. It waits
-    /// behind background work already holding the lane (a Dolby Vision title
-    /// scan, a speech pass) in the lane's FIFO order instead of abandoning
-    /// the pass, and is still refused when foreground work holds the pool
-    /// once its turn comes. Dropping the future leaves the queue.
+    /// The node-local fragment index pass's queued turn on the heavy lane.
+    /// It waits in the lane's FIFO queue behind the holder (a Dolby Vision
+    /// title scan) and any earlier waiter (a speech pass), and is still
+    /// refused when foreground work holds the pool once its turn comes.
+    /// Workers that only try-acquire never get ahead of a waiter, so the
+    /// pass takes this once per pass and uses [`Self::admit_fragment`] for
+    /// the rest of it. Dropping the future leaves the queue.
     pub(crate) async fn admit_fragment_queued(&self) -> Option<FragmentAdmission> {
         let heavy = Arc::clone(&self.background_heavy)
             .acquire_owned()

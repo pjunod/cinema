@@ -4370,6 +4370,73 @@ async fn a_queued_local_index_pass_yields_to_a_waiting_viewer() {
     assert!(built().await, "the next pass builds the file it left due");
 }
 
+/// Review of #1299: the heavy lane has one permit and everything else
+/// try-acquires it, so a pass that waited for the lane before every file won
+/// every turn and held the lane for the whole pass. It waits once; after its
+/// file it releases the lane, and a speech pass queued meanwhile goes next
+/// while the pass stops instead of re-taking the lane.
+#[tokio::test]
+async fn a_local_index_pass_waits_for_the_heavy_lane_once_and_lets_a_queued_worker_go_next() {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::FragmentIndexStore as _;
+    let first = fixture(0, &[Sub::Pgs]);
+    let second = fixture(1, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let files = [
+        catalogued_fixture(&store, &first).await,
+        catalogued_fixture(&store, &second).await,
+    ];
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = manager(store.clone(), artwork.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let scan = transcode
+        .admit_fragment()
+        .await
+        .expect("the scan's background admission");
+    let pass = tokio::spawn(Arc::clone(&jobs).build_fragment_indexes(Arc::clone(&transcode)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let speech = tokio::spawn({
+        let transcode = Arc::clone(&transcode);
+        async move {
+            transcode
+                .admit_speech_queued(&tokio_util::sync::CancellationToken::new())
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(scan);
+    tokio::time::timeout(Duration::from_secs(60), pass)
+        .await
+        .expect("the pass ends")
+        .expect("the pass");
+    let speech = tokio::time::timeout(Duration::from_secs(10), speech)
+        .await
+        .expect("the queued speech pass gets its turn")
+        .expect("speech task")
+        .expect("a speech admission");
+    let mut built = 0;
+    for file in &files {
+        if store
+            .holds_fragment_index_for_source(file.id, file.size, file.mtime)
+            .await
+            .expect("read")
+        {
+            built += 1;
+        }
+    }
+    assert_eq!(
+        built, 1,
+        "one file under the queued turn, then the lane went on"
+    );
+    drop(speech);
+}
+
 /// Lab N4 (2026-10-11): a changed title waited for the round-robin
 /// cursor to wrap the whole library, 4 files a pass. A file a scan just
 /// added or changed is now examined before the backlog, under the same
