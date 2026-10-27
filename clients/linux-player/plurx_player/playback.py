@@ -43,6 +43,10 @@ class PlaybackError(Exception):
     """This playback cannot continue; the message is for the viewer."""
 
 
+class NoVideoWindow(PlaybackError):
+    """mpv has no window to show the message in, so the launcher's dialog says it."""
+
+
 def _track(value):
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
@@ -404,6 +408,13 @@ class Playback:
                       "target_gamma": target.get("gamma") if isinstance(target, dict) else None,
                       "target_primaries": target.get("primaries") if isinstance(target, dict) else None}
 
+    def require_video_output(self):
+        """A title with video that mpv could not open a window for is a failure, not audio only."""
+        tracks = self.mpv.get("track-list") or []
+        video = any(isinstance(t, dict) and t.get("type") == "video" and t.get("selected") for t in tracks)
+        if video and self.mpv.get("vo-configured") is False:
+            raise NoVideoWindow("mpv could not open a video window: is a graphical session running?")
+
     def log_mapper(self):
         """One /client-log line per playback: the DV profile, the mapper and the target."""
         if self.mapper_logged:
@@ -440,6 +451,7 @@ class Playback:
             first = not self.started
             self.started, self.loading, self.seeking = True, False, False
             if first:
+                self.require_video_output()
                 self.capture_facts()
             else:
                 self.progress("seek")
@@ -495,6 +507,9 @@ class Playback:
             self.sleep(self.timing.stop_osd_s)
             self.mpv.quit()
             return 0
+        except NoVideoWindow as error:
+            self.failure = str(error)
+            raise
         except PlaybackError as error:
             self.failure = str(error)
             self.log(str(error))

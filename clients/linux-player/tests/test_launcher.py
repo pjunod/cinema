@@ -137,6 +137,10 @@ class ControlContract(LauncherCase):
             fixture = json.load(handle)
         self.assertEqual(first["sequence"], 1)
         ids = {key: fixture[key] for key in ("client_instance_id", "generation")}  # per-run UUIDs
+        # The first heartbeat races mpv's first playback-restart; the server
+        # validates both states, and the fixture carries one of them.
+        self.assertIn(first["render_state"], ("starting", "rendering"))
+        ids["render_state"] = fixture["render_state"]
         self.maxDiff = None
         self.assertEqual({**first, **ids}, fixture)
 
@@ -498,3 +502,64 @@ class NoTokenOnDisk(LauncherCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+DISPLAY_VARS = ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP")
+SESSION = ("PATH=/home/someone/bin:/usr/bin\nWAYLAND_DISPLAY=wayland-0\nDISPLAY=:0\n"
+           "XAUTHORITY=/run/user/1000/.mutter-Xwaylandauth.ABC\nXDG_SESSION_TYPE=wayland\n"
+           "XDG_CURRENT_DESKTOP=ubuntu:GNOME\nLD_PRELOAD=/home/someone/evil.so\n")
+
+
+class SessionDisplay(LauncherCase):
+    """Started by xdg-desktop-portal without a display, the launcher takes the session's."""
+
+    def run_without_display(self, session):
+        self.close_at(4)
+        bare = {key: value for key, value in os.environ.items() if key not in DISPLAY_VARS}
+        with mock.patch.dict(os.environ, bare, clear=True):
+            code = self.run_launcher(session_environment=session)
+        return code
+
+    def test_a_portal_started_launcher_gives_mpv_the_sessions_display(self):
+        self.assertEqual(self.run_without_display(SESSION), 0)
+        self.assertEqual(self.mpv.display(), {
+            "WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0",
+            "XAUTHORITY": "/run/user/1000/.mutter-Xwaylandauth.ABC",
+            "XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "ubuntu:GNOME"})
+        self.assertEqual(self.mpv.env(), {}, "only display variables are taken from the session")
+        self.assertNotIn("/home/someone/bin", os.environ.get("PATH", ""))
+
+    def test_a_launcher_with_a_display_keeps_its_own(self):
+        environ = {"WAYLAND_DISPLAY": "wayland-1"}
+        self.assertEqual(launcher_module.adopt_session_display(environ, lambda: SESSION), [])
+        self.assertEqual(environ, {"WAYLAND_DISPLAY": "wayland-1"})
+
+    def test_a_session_without_a_display_changes_nothing(self):
+        environ = {}
+        self.assertEqual(launcher_module.adopt_session_display(
+            environ, lambda: "XDG_SESSION_TYPE=tty\nXAUTHORITY=/x\n"), [])
+        self.assertEqual(environ, {})
+
+    def test_an_escaped_value_is_not_taken(self):
+        environ = {}
+        launcher_module.adopt_session_display(environ, lambda: "DISPLAY=$'\\033:0'\nWAYLAND_DISPLAY=wayland-0\n")
+        self.assertEqual(environ, {"WAYLAND_DISPLAY": "wayland-0"})
+
+
+class VideoWindow(LauncherCase):
+    def test_a_title_with_video_but_no_window_fails_instead_of_playing_audio_only(self):
+        self.mpv.props(track_list=[{"type": "video", "selected": True}], vo_configured=False)
+        self.clock.at(30, self.mpv.close)
+        self.assertEqual(self.run_launcher(), launcher_module.EXIT_PLAYBACK)
+        self.assertEqual(self.errors, ["plurx Player: mpv could not open a video window: "
+                                       "is a graphical session running?"])
+        failures = [r["body"] for r in self.server.calls("POST", "/api/v1/client-log")
+                    if r["body"]["event"] == "playback_failed"]
+        self.assertEqual(len(failures), 1)
+        self.assertTrue(self.server.revoked)
+
+    def test_a_title_with_a_window_plays(self):
+        self.mpv.props(track_list=[{"type": "video", "selected": True}], vo_configured=True)
+        self.close_at(4)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.errors, [])
