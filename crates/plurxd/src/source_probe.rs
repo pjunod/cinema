@@ -7,7 +7,7 @@ pub(crate) mod fel_qualification;
 mod title_work;
 
 #[cfg(all(test, target_os = "linux"))]
-pub(crate) use dv_title::publish_title_for_control;
+pub(crate) use dv_title::{publish_title_for_control, publish_title_with_tools_for_control};
 
 use crate::state::AppState;
 use plurx_core::store::background_jobs_probe::{ProbeOutput, MAX_PROBE_RESULT_BYTES};

@@ -1,7 +1,4 @@
 //! Daemon-owned, private DV window execution. No helper JSON field grants a route.
-use crate::transcode::source_preparation::{
-    source_mastering_from_frames, source_mastering_minimum_from_frames,
-};
 use plurx_core::transcode::dv_processing::{DvBackendIdentity, DvDigest};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -72,6 +69,19 @@ pub(crate) struct ToolSet {
 
 #[cfg(all(test, target_os = "linux"))]
 impl ToolSet {
+    /// An explicitly controlled scanner result with the ordinary executable
+    /// artifact-current check, used only by admitted lifecycle fixtures.
+    pub(crate) fn lifecycle_fixture_with_scanner(
+        identity: DvBackendIdentity,
+        scanner: PathBuf,
+    ) -> Result<Self, String> {
+        let digest = hash_file(&scanner)?;
+        let mut tools = Self::lifecycle_fixture(identity);
+        tools.scanner = scanner.clone();
+        tools.artifacts = Arc::new(vec![(scanner, digest)]);
+        Ok(tools)
+    }
+
     /// Lifecycle fixtures never launch this renderer: they hold the exclusive
     /// worker claim while exercising attachment of a checked completed plan.
     pub(crate) fn lifecycle_fixture(identity: DvBackendIdentity) -> Self {
@@ -598,6 +608,10 @@ pub(crate) fn completed_window_encoder(
         Encoder::Software
     }
 }
+
+use crate::decode_facts::mastering::{
+    source_mastering_from_frames, source_mastering_minimum_from_frames,
+};
 
 #[cfg(target_os = "linux")]
 pub(crate) async fn held_source_minimum(

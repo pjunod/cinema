@@ -478,6 +478,7 @@ paths = [
   # each plan and its cold and warm timings on both backends' schemas.
   "crates/plurx-core/examples/query_plans/{main,calls,bench}.rs",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
+  "crates/plurx-core/src/config/**",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/scan_identity_repair.rs",
@@ -854,6 +855,7 @@ paths = [
   "crates/plurxd/src/http/extract.rs",
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/system.rs",
+  "crates/plurxd/src/http/https_admin.rs",
   "scripts/cluster-page-latency",
   "tests/benchmark/test_cluster_page_latency.py",
 ]
@@ -877,10 +879,11 @@ paths = [
   "crates/plurxd/src/telemetry/tests.rs",
   "crates/plurxd/Cargo.toml",
   "crates/plurxd/src/availability.rs",
+  "crates/plurxd/src/{cachekeep,https,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
+  "crates/plurxd/src/https/**",
   "crates/plurxd/src/subtitle_models/*.rs",
   "crates/plurxd/src/http/tests/subtitle_generation.rs",
   "tests/fixtures/subtitle-recognition/{base-film.raw.vtt,base-film.provenance.json}",
-  "crates/plurxd/src/{cachekeep,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/media_sessions/**",

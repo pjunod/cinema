@@ -1811,7 +1811,8 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertEqual(pick(processed(sustainable: false)), 2160)
         XCTAssertEqual(pick(processed(compatible: false)), 2160)
         XCTAssertEqual(pick(processed(codec: "h264")), 2160)
-        XCTAssertEqual(pick(processed(grade: "sdr")), 2160)
+        XCTAssertEqual(pick(processed(grade: "sdr")), 720)
+        XCTAssertEqual(pick(processed(grade: "dolby_vision")), 2160)
     }
 
     func testRuntimeDecoderSnapshotUsesStrictServerVocabulary() throws {

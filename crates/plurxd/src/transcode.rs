@@ -557,6 +557,7 @@ pub(crate) const LIVE_RECONSTRUCTION_SLOTS: usize = 1;
 /// What the reconstructed 8.1 route does for one title on one node.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq)]
+#[cfg(target_os = "linux")]
 pub(crate) enum FelGate {
     Serve,
     /// The play keeps the plain conversion, with this reason.

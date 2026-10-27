@@ -30,6 +30,9 @@ mod macos_wasm;
 #[cfg(target_os = "linux")]
 mod pi_namespace;
 
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod mastering;
+
 /// Internal synchronous launcher dispatch; normal daemon startup stays unchanged.
 pub(crate) fn dispatch_probe_bootstrap() -> Option<std::io::Result<()>> {
     #[cfg(target_os = "linux")]

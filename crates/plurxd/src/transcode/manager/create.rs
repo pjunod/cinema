@@ -1303,7 +1303,7 @@ impl TranscodeManager {
                                     })
                                 })
                             })
-                            .map(crate::transcode::source_preparation::source_mastering_minimum)
+                            .map(crate::decode_facts::mastering::source_mastering_minimum)
                             .transpose()?
                             .flatten()
                             .or(held_minimum)
@@ -1354,7 +1354,7 @@ impl TranscodeManager {
                             })
                         });
                     stream
-                        .map(crate::transcode::source_preparation::source_mastering_metadata)
+                        .map(crate::decode_facts::mastering::source_mastering_metadata)
                         .transpose()?
                         .flatten()
                         .or(held_mastering)
@@ -1434,7 +1434,7 @@ impl TranscodeManager {
             });
         if sdr {
             let minimum = stream
-                .map(crate::transcode::source_preparation::source_mastering_minimum)
+                .map(crate::decode_facts::mastering::source_mastering_minimum)
                 .transpose()?
                 .flatten();
             if minimum.is_some() {
@@ -1444,7 +1444,7 @@ impl TranscodeManager {
             return Self::display_target_policy_with_source(enabled, display, probe, None, minimum);
         }
         let mastering = stream
-            .map(crate::transcode::source_preparation::source_mastering_metadata)
+            .map(crate::decode_facts::mastering::source_mastering_metadata)
             .transpose()?
             .flatten();
         if mastering.is_some() {
@@ -3107,8 +3107,8 @@ impl TranscodeManager {
                         std::path::Path::new(&plurx_core::transcode::vaapi_device()).exists(),
                         crate::ffmpeg::has_hevc_main10_vaapi_decode().await,
                     );
-                    let source_mastering = crate::transcode::source_preparation::source_mastering_metadata(stream);
-                    let source_mastering_minimum = crate::transcode::source_preparation::source_mastering_minimum(stream);
+                    let source_mastering = crate::decode_facts::mastering::source_mastering_metadata(stream);
+                    let source_mastering_minimum = crate::decode_facts::mastering::source_mastering_minimum(stream);
                     let display_target = req.candidate_context.as_ref().filter(|_| processed_trial).and_then(|context| context.display_target);
                     // Recheck against the exact stored document compared with
                     // this held source. A title scan replacement cannot reuse
@@ -4795,8 +4795,10 @@ impl TranscodeManager {
                             .map(|facts| facts.response_owner.clone()),
                     )),
                 };
-                #[cfg(all(test, target_os = "linux"))]
-                Self::processed_preparation_test_boundary(session_id, "replay-owner").await;
+                self.hooks
+                    .get()
+                    .processed_preparation_boundary(session_id, "replay-owner")
+                    .await;
                 // A retry after an interrupted first attempt seals the existing actual
                 // attachment, including None; it never upgrades/replaces that choice.
                 if existing_facts.is_none()
@@ -4831,8 +4833,10 @@ impl TranscodeManager {
                 }) else {
                     return false;
                 };
-                #[cfg(all(test, target_os = "linux"))]
-                Self::processed_preparation_test_boundary(session_id, "facts").await;
+                self.hooks
+                    .get()
+                    .processed_preparation_boundary(session_id, "facts")
+                    .await;
                 // Replay retains the initially checked owner; a new attachment
                 // installs its exact owner synchronously at registry commit.
                 // Never acquire cleanup authority from a later by-id lookup.
@@ -4864,8 +4868,10 @@ impl TranscodeManager {
                     return false;
                 }
                 let output = preparation_owner.retained_output_facts();
-                #[cfg(all(test, target_os = "linux"))]
-                Self::processed_preparation_test_boundary(session_id, "before-seal").await;
+                self.hooks
+                    .get()
+                    .processed_preparation_boundary(session_id, "before-seal")
+                    .await;
                 let seal = plurx_core::store::PreparedOutputSeal {
                     incarnation_id: route.incarnation_id,
                     session_id: session_id.to_owned(),
@@ -4896,8 +4902,10 @@ impl TranscodeManager {
                     return false;
                 }
                 trace_prepared_capture(&seal, Some(true), true);
-                #[cfg(all(test, target_os = "linux"))]
-                Self::processed_preparation_test_boundary(session_id, "sealed").await;
+                self.hooks
+                    .get()
+                    .processed_preparation_boundary(session_id, "sealed")
+                    .await;
                 cleanup
                     .owner
                     .lock()
@@ -5191,8 +5199,10 @@ impl TranscodeManager {
                 .await
             {
                 Ok(_) => {
-                    #[cfg(all(test, target_os = "linux"))]
-                    Self::processed_preparation_test_boundary(session_id, "attached").await;
+                    self.hooks
+                        .get()
+                        .processed_preparation_boundary(session_id, "attached")
+                        .await;
                     let Some(captured_owner) = attachment_owner
                         .lock()
                         .expect("first preparation owner")
@@ -5731,7 +5741,9 @@ pub(super) fn constrain_finite_vod_rate(
 #[cfg(test)]
 mod retained_recovery_tests;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+#[path = "processed_reuse_tests.rs"]
 mod processed_reuse_tests;
 
 #[cfg(test)]
@@ -5884,7 +5896,7 @@ mod display_target_policy_tests {
         };
         let display = DisplayCaps::default();
         let document = serde_json::json!({"frames":[{"stream_index":7,"side_data_list":[{"side_data_type":"Mastering display metadata","min_luminance":"1/10000"}]}]});
-        let minimum = crate::transcode::source_preparation::source_mastering_minimum_from_frames(
+        let minimum = crate::decode_facts::mastering::source_mastering_minimum_from_frames(
             &serde_json::Value::Null,
             &document,
             7,
@@ -6083,7 +6095,7 @@ mod display_target_policy_tests {
             "red_x":"34000/50000","red_y":"16000/50000","green_x":"13250/50000","green_y":"34500/50000",
             "blue_x":"7500/50000","blue_y":"3000/50000","white_point_x":"15635/50000","white_point_y":"16450/50000",
             "min_luminance":"1/10000","max_luminance":"10000000/10000"}]});
-        let source = crate::transcode::source_preparation::source_mastering_from_frames(
+        let source = crate::decode_facts::mastering::source_mastering_from_frames(
             &serde_json::Value::Null,
             &serde_json::json!({"frames":[frame]}),
             7,

@@ -4026,8 +4026,10 @@ dependencies = [
  "sha2 0.10.9",
  "syn 2.0.119",
  "tempfile",
+ "time",
  "tokenizers",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "toml 0.8.23",
  "tower",
@@ -4039,6 +4041,8 @@ dependencies = [
  "wat",
  "windows-service",
  "windows-sys 0.61.2",
+ "x509-parser 0.18.1",
+ "zeroize",
  "zip",
 ]
 

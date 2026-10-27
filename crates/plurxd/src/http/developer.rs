@@ -1786,6 +1786,7 @@ async fn dolby_vision_fel_reencode(
 /// What this node knows about the per-title FEL qualification.
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone)]
+#[cfg(any(target_os = "linux", test))]
 struct FelQualityFacts {
     /// radeonsi VA-API with its Main10 graph: the only encoder the route's
     /// recipe and its verdicts are measured on.

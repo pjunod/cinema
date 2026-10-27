@@ -7,6 +7,94 @@ use plurx_core::domain::PretranscodeRequirements;
 use plurx_core::store::background_jobs::*;
 
 #[tokio::test]
+async fn fragment_admission_receipts_cannot_bypass_analysis_or_source_fences() {
+    for_each_backend(|store, backend| async move {
+        for scenario in ["replay", "cancelled", "reclaimed", "source_changed"] {
+            let prefix = format!("fragment-receipt-{scenario}");
+            let (_, file_id) = seed_file(&store, &prefix).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let source = "a".repeat(64);
+            let pipeline = "b".repeat(64);
+            let cache_key = plurx_core::store::cluster_fragment_index_key(
+                file_id, file.size, file.mtime, &source, &pipeline,
+            ).expect("fragment identity");
+            let mut stale = None;
+            let mut now_ms = 1_000;
+            let analysis_request = if scenario == "source_changed" {
+                None
+            } else {
+                let request = plurx_core::store::NewAnalysisRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(), file_id,
+                    source_size: file.size, source_mtime: file.mtime,
+                    component: "fragment_index".into(), pipeline_version: pipeline.clone(),
+                    video_identity: String::new(), requested_generation: prefix.clone(),
+                    priority: "normal".into(), trigger: "background".into(),
+                    force_rebuild: false, target_node_id: "node-a".into(),
+                    not_before_ms: now_ms, created_at_ms: now_ms,
+                };
+                store.enqueue_analysis_request(&request).await.expect("analysis request");
+                let first = store.claim_analysis_request("node-a", now_ms, now_ms + 20)
+                    .await.expect("claim").expect("claim");
+                stale = Some(first.clone());
+                if scenario == "reclaimed" {
+                    assert!(store.claim_analysis_request("node-a", now_ms + 20, now_ms + 1_020)
+                        .await.expect("expire analysis owner").is_none());
+                    now_ms += 20 + plurx_core::store::analysis_backoff_ms(
+                        &request.request_id, 1, 5_000, 300_000,
+                    );
+                    let current = store.claim_analysis_request("node-a", now_ms, now_ms + 1_000)
+                        .await.expect("reclaim").expect("current claim");
+                    assert!(current.fence > first.fence);
+                    Some(current)
+                } else { Some(first) }
+            };
+            let mut input = EnqueueFragmentJob {
+                job: plurx_core::store::NewClusterFragmentIndexJob {
+                    cache_key: cache_key.clone(), file_id, source_size: file.size,
+                    source_mtime: file.mtime, source_sha256: source, pipeline_sha256: pipeline,
+                    priority: "normal".into(), trigger: "background".into(),
+                    target_node_id: "node-a".into(), not_before_ms: now_ms, created_at_ms: now_ms,
+                }, analysis_request, repair: false, now_ms,
+            };
+            let EnqueueOutcome::Accepted { job_id, .. } = store.enqueue_fragment_job(input.clone())
+                .await.expect("valid initial handoff") else { panic!("{backend}/{scenario}: initial handoff refused") };
+            if scenario == "source_changed" {
+                assert!(matches!(store.enqueue_fragment_job(input.clone()).await.expect("ordinary replay"),
+                    EnqueueOutcome::Existing { cancelled: false, .. }));
+                store.upsert_file(file.item_id, &format!("/{prefix}/movie.mkv"), file.size,
+                    file.mtime + 1, &plurx_core::domain::ProbeResult::default())
+                    .await.expect("replace source generation");
+            } else {
+                input.analysis_request = stale;
+                if scenario == "cancelled" {
+                    store.cancel_analysis_request_admin(
+                        &input.analysis_request.as_ref().expect("analysis").request_id, now_ms + 1,
+                    ).await.expect("cancel submitted analysis");
+                }
+                // Receipt reuse used to let a stale caller raise both priorities.
+                input.analysis_request.as_mut().expect("analysis").priority = "foreground".into();
+            }
+            input.job.priority = "foreground".into();
+            let before = serde_json::json!({
+                "job": store.background_job(&job_id).await.expect("before job"),
+                "waiters": store.job_waiters(WaiterQuery { job_id: job_id.clone(), after: None, limit: 100 }).await.expect("before waiters").waiters,
+                "domain": store.cluster_fragment_index_job(&cache_key, "node-a").await.expect("before domain"),
+            });
+            let outcome = store.enqueue_fragment_job(input).await.expect("fenced replay verdict");
+            assert!(matches!((&outcome, scenario), (EnqueueOutcome::SourceChanged, "source_changed")
+                | (EnqueueOutcome::RequestFenced, "replay" | "cancelled" | "reclaimed")),
+                "{backend}/{scenario}: {outcome:?}");
+            let after = serde_json::json!({
+                "job": store.background_job(&job_id).await.expect("after job"),
+                "waiters": store.job_waiters(WaiterQuery { job_id: job_id.clone(), after: None, limit: 100 }).await.expect("after waiters").waiters,
+                "domain": store.cluster_fragment_index_job(&cache_key, "node-a").await.expect("after domain"),
+            });
+            assert_eq!(after, before, "{backend}/{scenario}: fenced replay mutated durable state");
+        }
+    }).await;
+}
+
+#[tokio::test]
 async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_fenced() {
     for_each_backend(|store, backend| async move {
         for (index, scenario) in ["published", "source_replaced", "cancelled"]

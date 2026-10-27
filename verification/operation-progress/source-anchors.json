@@ -111,13 +111,13 @@
     "table": "19 atomic publication transaction",
     "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
     "anchor": "pub(super) async fn atomic_publication(",
-    "sha256": "bc3a510b6300a551ef39fd19ed60ab7a7cfc8013512722f1d9796594b37ffc26"
+    "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a"
   },
   {
     "table": "20 fenced insert collision loop",
     "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
     "anchor": "for attempt in 0..4 {",
-    "sha256": "bc3a510b6300a551ef39fd19ed60ab7a7cfc8013512722f1d9796594b37ffc26"
+    "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a"
   },
   {
     "table": "21 timed client transaction",
@@ -177,7 +177,7 @@
     "table": "30 authority job-kind boundary",
     "source": "crates/plurx-core/src/store/background_jobs.rs",
     "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-    "sha256": "df34b10cacf3f5c03ddc2cdb30a334190ae6718c938fdf739d1d9743221f7b35"
+    "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12"
   },
   {
     "table": "31 authority implementation",
@@ -249,19 +249,19 @@
     "table": "42 daemon schedule loop no token",
     "source": "crates/plurxd/src/state.rs",
     "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-    "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2"
+    "sha256": "b800ba362d1f0570712c79fc3d6b7443f75765301427f08cfd5434b6ca15240f"
   },
   {
     "table": "43 daemon worker loop no token",
     "source": "crates/plurxd/src/state.rs",
     "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-    "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2"
+    "sha256": "b800ba362d1f0570712c79fc3d6b7443f75765301427f08cfd5434b6ca15240f"
   },
   {
     "table": "44 main worker spawn no shutdown arg",
     "source": "crates/plurxd/src/main.rs",
     "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-    "sha256": "c02c7838ecb94d4bb1f594096f4bc340805908ecd257377ea42259e9e60ce233"
+    "sha256": "44ebf717c9f9a772375968fed3c292aeb43eba2ccf565e6058c297487975cb80"
   },
   {
     "table": "45 completion trigger updates waiter and parent job",
