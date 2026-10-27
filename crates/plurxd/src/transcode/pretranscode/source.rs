@@ -675,7 +675,7 @@ impl FragmentAdmission {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn has_extension(&self) -> bool {
         self.extension
             .lock()
@@ -683,6 +683,7 @@ impl FragmentAdmission {
             .is_some()
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn install_extension(&self, permit: crate::admission::TranscodePermit) -> bool {
         let resources = permit.retained_resources();
         let extension = FragmentExtension {
@@ -704,6 +705,7 @@ impl FragmentAdmission {
     }
 
     /// Release the extension's capacity (the job's heavier step is over).
+    #[cfg(target_os = "linux")]
     pub(crate) fn release_extension(&self) {
         self.extension
             .lock()

@@ -9,26 +9,32 @@ on:
   workflow_dispatch:
     inputs:
       retained_units_sha256:
+        type: string
         description: "Authenticated digest-addressed retained unit proof; no suite replay"
         required: false
         default: ""
       retained_units_attachment_id:
+        type: string
         description: "Private promotion PR evidence attachment ID"
         required: false
         default: ""
       retained_units_attachment_uuid:
+        type: string
         description: "Private promotion PR evidence attachment UUID"
         required: false
         default: ""
       promotion_pr:
+        type: string
         description: "Optional open same-repo effort/integration promotion PR to main"
         required: false
         default: ""
       promotion_head_sha:
+        type: string
         description: "Immutable promotion head SHA; dispatch on that head branch"
         required: false
         default: ""
       promotion_base_sha:
+        type: string
         description: "Immutable current main SHA already merged into the promotion head"
         required: false
         default: ""
@@ -343,7 +349,7 @@ jobs:
     # Share the existing larger-memory topology queue; keep its host bounds.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     container: ubuntu:24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
@@ -393,10 +399,11 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --cpus 3 --memory 16g --memory-swap 18g --pids-limit 4096
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
@@ -405,6 +412,9 @@ jobs:
     # Preserve every command with a finite 120m cap. Passing full-gate duration
     # remains unmeasured; this budget is not a completion guarantee.
     timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RUST_TEST_THREADS: "2"
     steps:
       - name: Capture mounted runner workspace owner
         run: |
@@ -1210,7 +1220,8 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    timeout-minutes: 30
+    # Cold builds, fixture setup and 104 captures need room for later browser gates.
+    timeout-minutes: 45
     steps:
       - name: Capture mounted runner workspace owner
         run: |
@@ -1510,7 +1521,8 @@ jobs:
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
-    timeout-minutes: 60
+    # Full mobile units precede the same mandatory native suite as the fast lane.
+    timeout-minutes: 120
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       # The Apple runner is a launch daemon with a deliberately narrow PATH.
@@ -1553,20 +1565,8 @@ jobs:
           simulator_runtimes="$(xcrun simctl list runtimes)"
           grep -Fq "iOS 26.5 (26.5 - 23F77)" <<< "$simulator_runtimes"
           grep -Fq "tvOS 26.5 (26.5 - 23L470)" <<< "$simulator_runtimes"
-      # Warm Swift incrementals: the Makefile builds into
-      # clients/apple/build/DerivedData precisely so this cache can restore it.
-      # restore-keys accepts the newest prior entry when sources moved — an
-      # incremental rebuild from a near miss still beats a cold compile, and a
-      # poisoned cache only ever costs the rebuild we paid before caching.
-      - name: Cache DerivedData
-        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
-        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: clients/apple/build/DerivedData
-          key: apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
-          restore-keys: |
-            apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-
-            apple-dd-xcode-27A9275-ios27.1-tvos27.0-
+      # Keep DerivedData local to this checkout across build/test steps.
+      # Its absolute-path build state is not transferred between job roots.
       - name: Create isolated iPhone, iPad, and Apple TV simulators
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |

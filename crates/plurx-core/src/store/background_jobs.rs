@@ -278,6 +278,26 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_type(body,'$.repair_id') IS NOT NULL AND prior_job IS NULL AND active_job IS NULL
       AND (SELECT COUNT(*) FROM background_job_waiters WHERE request_scope = 'artifact-repair'
         AND state IN ('pending','awaiting_hydration')) >= 64 THEN 'queue_full'
+    -- An existing receipt cannot authorize a consumed/stale analysis claim or
+    -- a source generation that no longer exists. Fence both atomically before
+    -- receipt reuse can report success or raise job/waiter priority.
+    WHEN json_type(body, '$.analysis_request') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM analysis_requests WHERE request_id = json_extract(body, '$.analysis_request.request_id')
+        AND state = 'running' AND component = 'fragment_index' AND cancel_requested = 0
+        AND owner_node_id = json_extract(body, '$.analysis_request.owner_node_id')
+        AND fence = json_extract(body, '$.analysis_request.fence') AND lease_expires_ms > json_extract(body, '$.now_ms')
+        AND file_id = json_extract(body, '$.fragment_domain.file_id')
+        AND source_size = json_extract(body, '$.fragment_domain.source_size')
+        AND source_mtime = json_extract(body, '$.fragment_domain.source_mtime')
+        AND target_node_id = json_extract(body, '$.fragment_domain.target_node_id')
+        AND force_rebuild = json_extract(body, '$.analysis_request.force_rebuild')
+        AND requested_generation = json_extract(body, '$.analysis_request.requested_generation')
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
+    ) THEN 'request_fenced'
+    WHEN json_type(body, '$.fragment_domain') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM files WHERE id = json_extract(body, '$.fragment_domain.file_id')
+        AND size = json_extract(body, '$.fragment_domain.source_size') AND mtime = json_extract(body, '$.fragment_domain.source_mtime')
+    ) THEN 'source_changed'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
     WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND NOT EXISTS (SELECT 1 FROM job_leases lease
@@ -402,10 +422,6 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
         AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms'))
         AND CASE WHEN json_valid(result_ref) THEN COALESCE(CASE json_extract(result_ref, '$.artifact_kind') WHEN 'fragment_index' THEN 'fragment:' WHEN 'artwork' THEN 'artwork:' END || json_extract(result_ref, '$.artifact_key'), 'transcode:' || json_extract(result_ref,'$.recipe_hash') || ':' || json_extract(result_ref,'$.manifest_digest')) END = json_extract(body, '$.payload.artifact_key')
     ) THEN 'no_demand'
-    WHEN json_type(body, '$.fragment_domain') IS NOT NULL AND NOT EXISTS (
-      SELECT 1 FROM files WHERE id = json_extract(body, '$.fragment_domain.file_id')
-        AND size = json_extract(body, '$.fragment_domain.source_size') AND mtime = json_extract(body, '$.fragment_domain.source_mtime')
-    ) THEN 'source_changed'
     WHEN json_extract(body, '$.fragment_repair') = 1 AND NOT EXISTS (
       SELECT 1 FROM cluster_fragment_index_artifacts WHERE cache_key = json_extract(body, '$.fragment_domain.cache_key')
         AND file_id = json_extract(body, '$.fragment_domain.file_id')
@@ -414,19 +430,6 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
         AND source_sha256 = json_extract(body, '$.fragment_domain.source_sha256')
         AND pipeline_sha256 = json_extract(body, '$.fragment_domain.pipeline_sha256')
     ) THEN 'conflict'
-    WHEN json_type(body, '$.analysis_request') IS NOT NULL AND NOT EXISTS (
-      SELECT 1 FROM analysis_requests WHERE request_id = json_extract(body, '$.analysis_request.request_id')
-        AND state = 'running' AND component = 'fragment_index' AND cancel_requested = 0
-        AND owner_node_id = json_extract(body, '$.analysis_request.owner_node_id')
-        AND fence = json_extract(body, '$.analysis_request.fence') AND lease_expires_ms > json_extract(body, '$.now_ms')
-        AND file_id = json_extract(body, '$.fragment_domain.file_id')
-        AND source_size = json_extract(body, '$.fragment_domain.source_size')
-        AND source_mtime = json_extract(body, '$.fragment_domain.source_mtime')
-        AND target_node_id = json_extract(body, '$.fragment_domain.target_node_id')
-        AND force_rebuild = json_extract(body, '$.analysis_request.force_rebuild')
-        AND requested_generation = json_extract(body, '$.analysis_request.requested_generation')
-        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
-    ) THEN 'request_fenced'
     WHEN json_type(body, '$.fragment_domain') IS NOT NULL
       AND COALESCE(json_extract(body, '$.analysis_request.force_rebuild'), 0) = 0
       AND json_extract(body, '$.fragment_domain.cache_key') != COALESCE((

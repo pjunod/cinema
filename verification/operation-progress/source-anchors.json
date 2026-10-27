@@ -177,7 +177,7 @@
     "table": "30 authority job-kind boundary",
     "source": "crates/plurx-core/src/store/background_jobs.rs",
     "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-    "sha256": "84613148019e9f7f9141d4adccaa46dd533cdb1e3bc560a2fe2277c2877c0523"
+    "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12"
   },
   {
     "table": "31 authority implementation",
@@ -243,7 +243,7 @@
     "table": "41 fragment admission try-only",
     "source": "crates/plurxd/src/transcode/manager/construct.rs",
     "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-    "sha256": "ca38c481f36b6c09c82ffaa95ce679e81e3a47a1c0bea16d0cf123cc97ccf827"
+    "sha256": "16491b46e6cb9cd1fc744c99af8509277a54770373618fa33f317ac2fc659121"
   },
   {
     "table": "42 daemon schedule loop no token",
@@ -261,7 +261,7 @@
     "table": "44 main worker spawn no shutdown arg",
     "source": "crates/plurxd/src/main.rs",
     "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-    "sha256": "59d0c6168706d38fa1fc148c21b120fc32f4ab1e6d04f0bed36a72e8f6666573"
+    "sha256": "44ebf717c9f9a772375968fed3c292aeb43eba2ccf565e6058c297487975cb80"
   },
   {
     "table": "45 completion trigger updates waiter and parent job",

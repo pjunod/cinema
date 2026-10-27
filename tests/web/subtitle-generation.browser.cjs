@@ -40,9 +40,9 @@ test("managed subtitle setup and generation work through browser controls withou
     for(const file of ["core/file-context.js","pages/settings-panels.js","pages/settings-developer.js","detail/preplay-selection.js","pages/activity.js"])await page.addScriptTag({path:path.join(WEB,file)});
     await page.evaluate(()=>{document.getElementById("surface").innerHTML=subtitleTranscriptionCard();window.prePlayPreview=()=>{};});
     await page.getByRole("button",{name:"Configure transcription",exact:true}).click();
-    await page.getByRole("button",{name:"Install selected model",exact:true}).waitFor();
+    await page.getByRole("button",{name:"Download and test",exact:true}).waitFor();
     assert.equal(await page.getByLabel("Media worker",{exact:true}).isChecked(),true);
-    await page.getByRole("button",{name:"Install selected model",exact:true}).click();
+    await page.getByRole("button",{name:"Download and test",exact:true}).click();
     await page.locator("#st-language").selectOption("sv");
     await page.waitForFunction(()=>fixture.verified);
     assert.equal(await page.locator("#st-language").inputValue(),"sv","worker status does not erase a newer language draft");

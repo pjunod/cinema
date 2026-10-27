@@ -242,6 +242,7 @@ pub(crate) fn held_source_clock(
 /// Exact selected-video origin from this held probe, bound to the FORMAT
 /// clock already frozen for soundtrack production. Never infer it from the
 /// first picture returned by a window seek.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn held_dv_source_origin(
     stream: &serde_json::Value,
     tick: (u32, u32),

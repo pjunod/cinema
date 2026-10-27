@@ -247,3 +247,14 @@ All owners work in the independent task clone. File ownership is exclusive: the 
 ## Current construction evidence
 
 The initial shared progressive Rust snapshot compiled on pinned Linux Rust1.97.1. Native iOS/tvOS app and test targets and Android main/JVM test sources compile; no tests have executed. Apple construction targets compiled at build276; the current merge candidate uses build277 after reconciling main. Android versionCode182 is a construction counter, not release qualification. The text-MT engine, pinned multipart model bundle and durable eight-cue job slices are implemented and undergoing integrated compilation. New text partials stay in bounded authoritative storage; the queue checkpoint holds counts/references, not subtitle text. Native text translation completion never changes caption selection; explicit Use refreshes caption identity before ordinary selection. Physical device, packaged model, long-film, fleet and deployment evidence remains open.
+
+## Current-main integration — 2026-10-26
+
+The final landing candidate incorporates the HTTPS work from main `656a85540`.
+Subtitle producer-incarnation admission and fragment replay/source fencing both
+remain in the shared queue; the schema stays append-only through v119. The
+combined API has 403 routes. Nine Apple caption continuation checks now use
+the existing named Attempt fences with unchanged viewer-action scopes; all
+16 focused census checks and six affected simulator methods pass. Integrated
+source review, affected checks and the exact-head fast lane are tracked on
+PR #1292. Existing real inference evidence remains separately attributable.

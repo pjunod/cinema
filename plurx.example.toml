@@ -21,6 +21,17 @@ trusted_proxies = []
 # 0 turns this listener off; /jellyfin on the main port always works.
 jellyfin_port = 8096
 
+# Optional HTTPS serves the same public router as HTTP after restart.
+# Settings → Developer edits this node’s saved configuration and certificate names.
+[server.https]
+enabled = false
+port = 32443
+# Both empty generate a persistent self-signed identity; otherwise absolute
+# leaf-first PEM chain and unencrypted PEM key paths are required.
+cert_file = ""
+key_file = ""
+sans = ["localhost", "127.0.0.1", "::1"]
+
 [storage]
 # Authoritative database, node identity, and compatibility root. Created if
 # missing. Empty cache/transcode overrides preserve the legacy child layout.

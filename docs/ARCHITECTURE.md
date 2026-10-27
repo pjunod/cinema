@@ -30,7 +30,7 @@ relay but hold no vote and may not open a tuner.
                         ▼                           ▼
         ┌──────────────────────── plurxd node (×1 or ×3+) ─────────────────┐
         │                                                                   │
-        │   axum HTTP  ──▶  auth (Argon2id, bearer tokens)                  │
+        │   axum HTTP(S) ─▶ auth (Argon2id, bearer tokens)                  │
         │      │                                                            │
         │      ├──▶ decision engine ─▶ stream server ─┬─ range (direct)    │
         │      │      (pure fn)                        ├─ remux  (fMP4)     │
@@ -477,9 +477,14 @@ doesn't triple-hit the providers.
 
 ## 5. API design — one service, two façades
 
-**Native API** (`/api/v1`) — JSON over HTTP, enumerated route by route in
+**Native API** (`/api/v1`) — JSON over HTTP or optional native HTTPS, enumerated route by route in
 [API.md](API.md). Auth: opaque bearer tokens from local login, plus scoped
 `plx_` keys for machine callers; Argon2id at rest, SHA-256 token lookup.
+HTTPS is additive, off by default and configured per node for restart. Both
+listeners use the same router; loaded identity and desired configuration are
+separate, and certificate/key material never enters the replicated Store.
+Discovery and internal peer addresses stay unchanged. See
+[OPERATIONS.md](OPERATIONS.md#optional-https-and-persistent-identity).
 There is no WebSocket or SSE push channel. Most client state is polled, while
 the playback-control exchange is a bounded long poll the server may hold for
 `` `EXCHANGE_DEADLINE` = 4 `` seconds, defined in
