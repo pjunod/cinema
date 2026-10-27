@@ -1338,6 +1338,8 @@ async fn fixture_with_audio(
         preferences,
         destination,
         mode: DvProcessingMode::Fel,
+        decode: crate::dv_segment::RendererDecode::Software,
+        reconstruction_slot: None,
         encoder: Encoder::Software,
         vaapi_hdr_policy: None,
         runtime_cache: root.path().join("runtime"),
@@ -1711,17 +1713,19 @@ async fn staged_processed_second_successor_survives_normal_commit_and_parent_ret
                 .vod
                 .dv_effective_report(&session, &incarnation)
                 .await;
+            let report = report.expect("actual-owner-bound control publication");
+            assert!(report.fel_contributed());
+            let wire = serde_json::to_value(&report).expect("public processing report");
+            assert_eq!(wire["generation"].as_str(), Some(incarnation.as_str()));
             if destination == DvDestination::Hdr10 {
-                let report = report.expect("actual-owner-bound control publication");
-                assert!(report.fel_contributed());
-                let wire = serde_json::to_value(&report).expect("public processing report");
                 assert_eq!(wire["hdr10_enhanced"], serde_json::json!(true));
-                assert_eq!(wire["generation"].as_str(), Some(incarnation.as_str()));
+                assert!(wire.get("profile81_reconstructed").is_none());
             } else {
-                assert!(
-                    report.is_none(),
-                    "P81 reports its actual DV carrier, never HDR10-E"
-                );
+                // P81 reports its actual DV carrier, never HDR10-E: the
+                // served window's receipt says the FEL was composed.
+                assert_eq!(wire["hdr10_enhanced"], serde_json::json!(false));
+                assert_eq!(wire["profile81_reconstructed"], serde_json::json!(true));
+                assert!(report.profile81_reconstructed());
             }
             let (_, root) = f
                 .manager

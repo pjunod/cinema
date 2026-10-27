@@ -182,6 +182,10 @@ function activityStreamCell(de,session,open){
     .filter(Boolean).join(" · ");
   const head=`<div class="stream-head">${presentation?`<span class="mode-chip ${de.presentation==="vod"?'vod':'live'}">${esc(presentation)}</span>`:""}${
     state?`<span class="stream-state ${state.cls}">${esc(state.label)}${state.why?` <span class="why">· ${esc(state.why)}</span>`:""}</span>`:""}<span class="stream-method">${esc(activityMethodLabel(de.method,encoder))}${sub?` <span class="sub">· ${esc(sub)}</span>`:""}</span></div>`;
+  // What the GPU is doing for this stream and why, in plain view: the
+  // attribution a processed graph owes the operator (Stop playback ends it).
+  const proc=(session&&session.vod_observation&&session.vod_observation.processing)||(de.vod_observation&&de.vod_observation.processing);
+  const processing=proc?`<div class="stream-processing" data-processing="${esc(proc.delivered)}"><b>${esc(proc.delivered)}</b> <span class="sub">· ${esc(proc.work)}</span><div class="muted">Why: ${esc(proc.reason)}${proc.live_rendering?" · live rendering":""}${proc.fel_composed?" · FEL composed":""}</div></div>`:"";
   const meters=activityStreamMeters(de,session);
   const strip=meters.length?`<div class="stream-meters">${meters.map(meter=>`<div class="stream-meter ${meter.tone||""}"><span class="k">${esc(meter.k)}</span><span class="v">${esc(meter.v)}${meter.of?`<span class="of">${esc(meter.of)}</span>`:""}</span>${
     meter.bar!=null?`<span class="stream-bar" aria-hidden="true"><i style="width:${Math.round(meter.bar*100)}%"></i></span>`:""}</div>`).join("")}</div>`:"";
@@ -189,7 +193,7 @@ function activityStreamCell(de,session,open){
   const key=de.session_id?String(de.session_id):"";
   const diag=details.length?`<details class="stream-diag" data-stream="${esc(key)}"${open&&open.has(key)?" open":""}><summary>Technical details</summary><div class="stream-diag-grid">${
     details.map(([label,value])=>`<div><b>${esc(label)}</b><span>${esc(value)}</span></div>`).join("")}</div></details>`:"";
-  return head+strip+diag;
+  return head+processing+strip+diag;
 }
 async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity"||document.visibilityState==="hidden"||ACTIVITY_DETAIL_BUSY===generation) return;

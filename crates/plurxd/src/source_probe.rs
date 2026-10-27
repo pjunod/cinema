@@ -2,6 +2,8 @@
 #[cfg(target_os = "linux")]
 mod dv_title;
 #[cfg(target_os = "linux")]
+pub(crate) mod fel_qualification;
+#[cfg(target_os = "linux")]
 mod title_work;
 
 #[cfg(all(test, target_os = "linux"))]

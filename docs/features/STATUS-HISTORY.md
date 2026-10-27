@@ -11,7 +11,7 @@ describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
 
-## Live TV station logos on Apple TV, iOS and Android
+## 2026-10-04 · Live TV station logos on Apple TV, iOS and Android
 
 **Branch `fix/live-tv-station-logos-native`, issue
 [#815](http://forge.lan:3000/noirr/plurx/issues/815).** Paul reported

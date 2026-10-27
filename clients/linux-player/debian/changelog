@@ -1,0 +1,61 @@
+plurx-player (0.3.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Profile 7 FEL titles play with their full enhancement layer, composed
+    on the laptop's GPU before the closed-form mapping: plurx sends the
+    original stream (the caps claim Dolby Vision profile 7), so nothing is
+    re-encoded.
+  * Private libplacebo 7.387.0 and mpv master e59d90c84 (2026-10-26),
+    the first with FEL composition, plus a split of the enhancement layer
+    that works with Ubuntu's FFmpeg 8.1, and no zero MaxCLL/MaxFALL in the
+    Wayland image description.
+  * dv-brightness=relative|absolute (mpv.conf): follow the desktop's HDR
+    brightness setting (default), or map for the panel's real luminance.
+  * libplacebo is linked into mpv statically, its symbols renamed
+    plurx_pl_* and hidden, because the system FFmpeg's libavfilter loads
+    the system libplacebo
+    (another major version) into the same process and a private shared
+    libplacebo would take over its unversioned pl_* calls.
+  * Closed-form equations: tools/dv_processing dm 193c40343ebf (sha256 of
+    dm_closed_form.h then dv_dm.h, first 12 hex digits). CM v2.9 evaluates
+    its output lattice once per frame, and each method's passes are their
+    own shaders: a 4K CM v2.9 frame's mapping takes 19 ms instead of 34 ms
+    on an Intel Arc iGPU.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 18:00:00 +0000
+
+plurx-player (0.2.0+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
+
+  * mpv maps Dolby Vision profile 5 and 8 with plurx's closed-form CM v4.0
+    and CM v2.9 display management (tools/dv_processing/dv_dm.h, the
+    server's own code), for the compositor's preferred luminance and the
+    largest named gamut inside the panel's primaries, and logs one
+    "plurx mapper:" line per configuration.
+  * Build-Depends on libdovi-dev for the RPU parser; its C API header is
+    the pinned copy in packaging/libdovi.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 12:00:00 +0000
+
+plurx-player (0.1.1+lp7.360.1.mpv0.41.0-1) stonking; urgency=medium
+
+  * Launcher (milestone M4): redeem, decide, play in mpv, heartbeat,
+    progress, seek re-creation, teardown.
+  * Package a private libplacebo 7.360.1 and mpv 0.41.0, the versions
+    Ubuntu 26.10 ships, under /usr/lib/plurx-player (milestone M5
+    packaging). mpv is linked with DT_RPATH $ORIGIN/../lib and leaves no
+    build path behind.
+  * Build from a Debian source package (3.0 (quilt)): the launcher is the
+    main orig tarball and the pinned libplacebo and mpv tarballs are its
+    component orig tarballs, so the corresponding source of the GPL mpv and
+    LGPL libplacebo binaries is published beside the .deb.
+  * Apply the patch series from packaging/patches/<name>/series, exactly.
+    It is empty until the Dolby Vision closed-form patches land.
+  * Run mpv with plurx Player's own --config-dir
+    ($XDG_CONFIG_HOME/plurx-player/mpv), never the general ~/.config/mpv,
+    with --ytdl=no, and without LD_LIBRARY_PATH, LD_PRELOAD or LD_AUDIT.
+  * Byte-compile the launcher with dh_python3, whose prerm removes every
+    .pyc, so removal leaves nothing behind.
+  * Add the plurx-player(1) manual page. Recommend desktop-file-utils and a
+    Vulkan driver; record the statically linked glslang and SPIRV-Tools in
+    Built-Using and debian/copyright.
+
+ -- plurx maintainers <noreply@plurx.invalid>  Mon, 26 Oct 2026 03:00:00 +0000

@@ -2208,6 +2208,108 @@ mod tests {
     }
 
     #[test]
+    fn the_reconstructed_profile81_rate_is_the_source_average_capped_at_60_mbps() {
+        let (mut source, ..) = encoded_recipe_fixture(true);
+        source.bitrate = Some(48_000_000);
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            48_000
+        );
+        source.bitrate = Some(95_000_000);
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            60_000
+        );
+        // No container bitrate: the whole file over its duration.
+        source.bitrate = None;
+        source.size = 45_000_000_000;
+        source.duration_ms = Some(7_200_000);
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            50_000
+        );
+        source.duration_ms = None;
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            60_000
+        );
+        source.bitrate = Some(200_000);
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            1_000,
+            "floor"
+        );
+    }
+
+    #[test]
+    fn the_reconstructed_profile81_route_alone_drops_vbaq_and_never_caps_qp() {
+        use crate::transcode::*;
+        let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
+        let recipe = |output: &CompletedReconstructedOutputPlan<'_>| {
+            vod_completed_reconstructed_pipe_args(
+                &source,
+                output,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("grid"),
+                0.25,
+                "/dev/fd/3",
+                "/dev/fd/4",
+                VodSourceClock::ReportedOrigin(0),
+            )
+            .expect("actual graph")
+        };
+        let value = |args: &[String], flag: &str| {
+            args.windows(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>()
+        };
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("completed VAAPI")
+            .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
+        let ordinary = recipe(&output);
+        let profile81 = recipe(&output.with_reconstructed_profile81());
+        assert_eq!(value(&ordinary, "-compression_level"), ["19"]);
+        assert_eq!(value(&profile81, "-compression_level"), ["0"]);
+        // radeonsi obeys -qmax over -maxrate: a QP cap would break the VBV
+        // the variant's advertised peak is computed from.
+        assert!(!profile81.iter().any(|arg| arg == "-qmax"));
+        assert_eq!(value(&profile81, "-bf"), ["0"]);
+        let rate = |flag: &str| {
+            value(&profile81, flag)[0]
+                .trim_end_matches('k')
+                .parse::<u32>()
+                .expect("kbit/s")
+        };
+        let bitrate = rate("-b:v");
+        assert_eq!(
+            rate("-maxrate"),
+            vbv_maxrate_kbps(bitrate),
+            "the advertised peak"
+        );
+        assert_eq!(rate("-bufsize"), bitrate * 2);
+        // Only the policy flags differ.
+        let strip = |args: &[String]| {
+            args.join(" ")
+                .replace("-compression_level 19", "")
+                .replace("-compression_level 0", "")
+        };
+        assert_eq!(strip(&ordinary), strip(&profile81));
+        // Other encoders are untouched by the route.
+        for encoder in [Encoder::Software, Encoder::Nvenc] {
+            let output = plan
+                .completed_reconstructed_output(encoder)
+                .expect("supported encoder")
+                .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
+            assert_eq!(
+                recipe(&output),
+                recipe(&output.with_reconstructed_profile81())
+            );
+        }
+    }
+
+    #[test]
     fn reconstructed_vaapi_keeps_p010_upload_clock_and_levels_its_raster_and_cadence() {
         use crate::transcode::*;
         let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
