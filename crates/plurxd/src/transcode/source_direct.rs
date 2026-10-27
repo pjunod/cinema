@@ -505,7 +505,7 @@ impl TranscodeManager {
                 }
                 Transition::Remove => {
                     // This is the positive join of the SAME ticket finalizer,
-                    // after original native closure, Source SQL and R release.
+                    // after original native closure, permitted Source disposition and R release.
                     if let Some(SourceDirectRecord::Settling {
                         restart_admission, ..
                     }) = slot
@@ -1124,9 +1124,13 @@ impl TranscodeManager {
                     .lock()
                     .expect("Source worker state")
                     .retirement_mode;
-                let result = if unowned_existing {
-                    Err(SourceSettlementFault::Mismatch)
-                } else if crate::http::shared_source_playback::settle_ingress_custody(
+                // No route activation occurred under this owner. There is
+                // no Source route it may release, but the SAME sealed native
+                // ticket must still reach typed settlement after worker join.
+                if unowned_existing {
+                    break;
+                }
+                let result = if crate::http::shared_source_playback::settle_ingress_custody(
                     &state,
                     &owner.assignment,
                     Instant::now() + Duration::from_secs(305),
@@ -1153,7 +1157,11 @@ impl TranscodeManager {
             }
             {
                 let mut current = owner.state.lock().expect("Source worker state");
-                current.settled = Some(Ok(()));
+                current.settled = Some(if unowned_existing {
+                    Err(SourceWorkerError::Unresolved)
+                } else {
+                    Ok(())
+                });
                 current.finished = true;
             }
             owner.changed.notify_waiters();

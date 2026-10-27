@@ -296,6 +296,18 @@ enum SourcePhysicalSettlement {
         SourcePreparationSettlements,
     ),
 }
+impl SourcePhysicalSettlement {
+    /// Original producer/preparation closure only. A Source SQL refusal is
+    /// separate; this never certifies another assignment or a lost native job.
+    fn matches(&self, assignment: &SourceDispatchAssignment) -> bool {
+        match self {
+            Self::NoProducer(preparations) => preparations.matches(assignment),
+            Self::Registered(receipt, preparations) => {
+                receipt.matches(assignment) && preparations.matches(assignment)
+            }
+        }
+    }
+}
 struct SourceViewerState {
     // Only this redundant actor alias retires at the original joined worker's
     // ticket handoff. Actual body/open/read aliases still own their application.
@@ -1966,10 +1978,22 @@ impl TranscodeManager {
                 "Source owner left its settlement unresolved; the session lease sweep reclaims its row"
             );
         }
-        // Linux direct custody moves into the SAME retained typed ticket after
-        // the original worker joins. HLS and the legacy direct worker disarm
-        // only after their exact physical and final Source settlement succeeds.
-        if settlement.is_ok() && (!owner.direct || !cfg!(target_os = "linux")) {
+        // SQL failure leaves the row to its lease sweep; it is not evidence
+        // of unknown native work. Only matching ORIGINAL physical/preparation
+        // closure disarms this factory admission. Keep the existing body
+        // barrier even when SQL failed before reaching it.
+        // Preserve ingress-before-producer ordering on the normal path.
+        // If SQL prevented that path, still drive the original native owner
+        // now; a SQL error itself neither proves nor forbids native closure.
+        let native_cleanup = self
+            .settle_source_physical(owner, &mut reserved, &mut physical, &mut preparations)
+            .await;
+        let native_settled = native_cleanup.is_ok()
+            && physical
+                .as_ref()
+                .is_some_and(|proof| proof.matches(&owner.assignment));
+        if native_settled && (!owner.direct || !cfg!(target_os = "linux")) {
+            Self::wait_source_bodies(owner).await;
             #[cfg(not(target_os = "linux"))]
             drop(
                 owner
@@ -2003,7 +2027,18 @@ impl TranscodeManager {
         }
         owner.changed.notify_waiters();
     }
-    async fn settle_source_owner(
+    async fn wait_source_bodies(owner: &Arc<SourceViewerInner>) {
+        loop {
+            let notification = owner.changed.notified();
+            tokio::pin!(notification);
+            notification.as_mut().enable();
+            if owner.state.lock().expect("Source worker state").bodies == 0 {
+                break;
+            }
+            notification.await;
+        }
+    }
+    async fn settle_source_physical(
         &self,
         owner: &Arc<SourceViewerInner>,
         reserved: &mut Option<crate::vodserve::ReservedSourceVodRendition>,
@@ -2026,17 +2061,23 @@ impl TranscodeManager {
                 SourcePhysicalSettlement::NoProducer(std::mem::take(preparations))
             });
         }
-        if matches!(physical, Some(SourcePhysicalSettlement::Registered(receipt, _)) if !receipt.matches(&owner.assignment))
+        if !physical
+            .as_ref()
+            .is_some_and(|proof| proof.matches(&owner.assignment))
         {
             return Err(SourceSettlementFault::Mismatch);
         }
-        let preparations = match physical.as_ref().expect("Source physical settlement") {
-            SourcePhysicalSettlement::NoProducer(preparations)
-            | SourcePhysicalSettlement::Registered(_, preparations) => preparations,
-        };
-        if !preparations.matches(&owner.assignment) {
-            return Err(SourceSettlementFault::Mismatch);
-        }
+        Ok(())
+    }
+    async fn settle_source_owner(
+        &self,
+        owner: &Arc<SourceViewerInner>,
+        reserved: &mut Option<crate::vodserve::ReservedSourceVodRendition>,
+        physical: &mut Option<SourcePhysicalSettlement>,
+        preparations: &mut SourcePreparationSettlements,
+    ) -> Result<(), SourceSettlementFault> {
+        self.settle_source_physical(owner, reserved, physical, preparations)
+            .await?;
         let incarnation = owner.assignment.binding().incarnation_id().to_string();
         let route = self
             .store
@@ -2081,15 +2122,7 @@ impl TranscodeManager {
         } else {
             None
         };
-        loop {
-            let notification = owner.changed.notified();
-            tokio::pin!(notification);
-            notification.as_mut().enable();
-            if owner.state.lock().expect("Source worker state").bodies == 0 {
-                break;
-            }
-            notification.await;
-        }
+        Self::wait_source_bodies(owner).await;
         let released = if let Some(terminal) = terminal {
             self.store
                 .settle_source_terminal_worker(&owner.assignment, &terminal)
