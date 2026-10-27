@@ -1105,11 +1105,13 @@ mod tests {
     ) {
         let dir = crate::test_tempdir().expect("scratch");
         let (state, file, document) = qualification_fixture(dir.path()).await;
-        let admission = state
-            .transcode
-            .admit_dv_title()
-            .await
-            .expect("title admission");
+        let admission = Arc::new(
+            state
+                .transcode
+                .admit_dv_title()
+                .await
+                .expect("title admission"),
+        );
         let renderer_path = dir.path().join("renderer");
         let renderer = Renderer {
             scanner: "a".repeat(64),

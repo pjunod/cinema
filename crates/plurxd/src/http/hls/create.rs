@@ -4718,7 +4718,7 @@ async fn create_with_purpose_inner(
             let info = selection.preview.clone();
             let generation = selection.worker.serving_generation;
             adaptive_selection = Some(selection);
-            started = Some((candidate, info, None, Some(generation), None));
+            started = Some((candidate, info, None, Some(generation), (None, None)));
             break;
         }
         #[cfg(target_os = "linux")]
