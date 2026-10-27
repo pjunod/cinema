@@ -1398,7 +1398,7 @@ fn every_hold_reason_has_its_own_counter_slot() {
     // The withheld exposition indexes the same discriminant, so it moves
     // with the same variants and is pinned by the same assertion.
     assert_eq!(CONTROL_RECOVERY_WITHHELD.len(), 7);
-    assert_eq!(CONTROL_RECOVERY_WITHHELD[0].len(), 3);
+    assert_eq!(CONTROL_RECOVERY_WITHHELD[0].len(), CLIENT_PLATFORMS);
 }
 
 #[test]
@@ -9163,7 +9163,7 @@ fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
         "plurx_playback_preparation_decisions_total",
         "plurx_playback_preparation_counterfactual_total",
     ] {
-        for platform in ["web", "apple", "android"] {
+        for platform in CLIENT_PLATFORM_LABELS {
             for axis in [
                 PreparationAxis::ResolutionOrBitrate,
                 PreparationAxis::AudioTrackOrOffset,
@@ -9456,7 +9456,7 @@ fn metrics_expose_bounded_platform_and_relay_dimensions() {
         "working_set",
         "no_room",
     ] {
-        for platform in ["web", "apple", "android"] {
+        for platform in CLIENT_PLATFORM_LABELS {
             assert!(
                 metrics.contains(&format!(
                     "plurx_playback_control_recovery_withheld_total{{reason=\"{reason}\",platform=\"{platform}\"}}"
@@ -17443,4 +17443,22 @@ fn accept_step_retires_outstanding_fences_only_on_adoption() {
         !latest.still_live(),
         "the fence is still attached to the adopted state's token"
     );
+}
+
+/// plurx Player's first control exchange, as its own test suite pins it
+/// (`clients/linux-player/tests/test_launcher.py::ControlContract`). The
+/// launcher once sent no capabilities: the server answered its first exchange
+/// 400 and every later one 409, so the control plane never saw it play.
+#[test]
+fn the_linux_player_first_exchange_is_a_valid_v1_request() {
+    let request: ControlRequestV1 = serde_json::from_str(include_str!(
+        "../../../../clients/linux-player/tests/fixtures/control-request-v1.json"
+    ))
+    .expect("the launcher's control body parses as a v1 request");
+    assert_eq!(request.sequence, 1);
+    assert_eq!(
+        request.capabilities.as_ref().map(|caps| caps.platform),
+        Some(ClientPlatform::Linux)
+    );
+    assert_eq!(request.validate(Some(7_200_000), 6_000), Ok(()));
 }

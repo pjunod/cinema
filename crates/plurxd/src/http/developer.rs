@@ -2537,7 +2537,7 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
             evidence: format!(
                 "{partial} exchange(s) since this process started came from a client that did not \
                  declare all of hold, terminal and retry_resource, so at least one client in the \
-                 fleet has no complete passive reporter. By platform (web/apple/android): partial \
+                 fleet has no complete passive reporter. By platform (web/apple/android/linux): partial \
                  {:?}, complete {:?}.",
                 vocabulary.passive_partial, vocabulary.passive_complete
             ),
@@ -2551,7 +2551,7 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
                 "{complete} exchange(s) since this process started declared all of hold, terminal \
                  and retry_resource, and none were partial \u{2014} but a client with no reporter \
                  never performs an exchange at all, so this cannot speak for clients it has not \
-                 heard from. By platform (web/apple/android): complete {:?}.",
+                 heard from. By platform (web/apple/android/linux): complete {:?}.",
                 vocabulary.passive_complete
             ),
         }

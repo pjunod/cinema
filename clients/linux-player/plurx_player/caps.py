@@ -4,8 +4,9 @@ Field names are crates/plurx-core/src/playback/caps.rs `DeviceCaps`; the
 shape follows the Apple template (clients/apple/Sources/Caps.swift) except
 where docs/clients/LINUX-PLAYER-PLAN.md section 3.2 says otherwise:
 
-* HEVC claims Dolby Vision profiles 5 and 8 only. mpv/libplacebo rebuild P5
-  and P8 from the RPU; Profile 7 is left to the server's P7 -> P8.1 routes.
+* HEVC claims Dolby Vision profiles 5, 7 and 8. mpv/libplacebo rebuild P5
+  and P8 from the RPU, and compose P7's full enhancement layer, so the
+  server sends the original stream (plan section 3.3).
 * ``display`` carries no ``max_nits``: on the preserved route the player maps
   locally at the compositor's target, so the server never display-targets
   this client, and a guessed peak would be an over-claim.
@@ -20,6 +21,19 @@ AUDIO_CODECS = ["aac", "ac3", "eac3", "alac", "mp3", "opus", "flac", "vorbis", "
 SAMPLE_RATES_HZ = [32000, 44100, 48000, 88200, 96000, 176400, 192000]
 CONTAINERS = ["mkv", "mp4", "webm", "mov", "m4v", "ts", "m4a", "m4b", "mp3", "aac",
               "flac", "ogg", "opus", "wav"]
+
+
+def control_capabilities():
+    """The `capabilities` object of a playback-control exchange.
+
+    crates/plurxd/src/playback_control.rs `DynamicCapabilities`. The server
+    requires it on an exchange's first sequence and refuses the exchange
+    without it, so it is sent on every exchange. No dual-player preparation:
+    the launcher drives one mpv.
+    """
+    return {"platform": "linux", "max_height": 2160, "codecs": ["h264", "hevc", "av1"],
+            "dynamic_ranges": ["sdr", "hdr10", "hlg", "dolby_vision"],
+            "dual_player_preparation": False}
 
 
 def device_caps(build):

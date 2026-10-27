@@ -123,6 +123,24 @@ class Position(LauncherCase):
         self.assertEqual(control["render_state"], "rendering")
 
 
+class ControlContract(LauncherCase):
+    def test_the_first_control_exchange_is_the_one_the_server_validates(self):
+        # tests/fixtures/control-request-v1.json is also parsed and validated by
+        # the server's own ControlRequestV1 (crates/plurxd/src/playback_control/
+        # tests.rs), so a body the server would refuse cannot pass here. The
+        # first exchange must carry capabilities: without them the server
+        # answers 400 and every later exchange 409 (the launcher shipped so).
+        self.close_at(8)
+        self.run_launcher()
+        first = self.server.calls("POST", pattern=r"/control$")[0]["body"]
+        with open(os.path.join(support.PACKAGE_ROOT, "tests", "fixtures", "control-request-v1.json")) as handle:
+            fixture = json.load(handle)
+        self.assertEqual(first["sequence"], 1)
+        ids = {key: fixture[key] for key in ("client_instance_id", "generation")}  # per-run UUIDs
+        self.maxDiff = None
+        self.assertEqual({**first, **ids}, fixture)
+
+
 class Seeking(LauncherCase):
     def test_seek_outside_the_range_recreates_the_session(self):
         self.server.origins = [60_000, 559_000]

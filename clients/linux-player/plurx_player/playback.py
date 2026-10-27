@@ -13,6 +13,7 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass
 
+from .caps import control_capabilities
 from .api import ApiError, error_text
 from .mpv import CLOSED, MpvError
 
@@ -341,7 +342,7 @@ class Playback:
             "selection": {"quality": {"mode": "original"} if self.mode == "remux" else {"mode": "auto"},
                           "audio_track": self.audio, "subtitle": subtitle, "audio_offset_ms": 0,
                           "codec": "auto", "dynamic_range": "auto"},
-            "capabilities": None, "observation": None, "acknowledgement": None,
+            "capabilities": control_capabilities(), "observation": None, "acknowledgement": None,
         }
 
     def heartbeat(self):
