@@ -1,6 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Main 7bec1b23: source/test identity only; behavioral execution is separate.
+[[fixes]]
+id = "linux-player.seek-control-acknowledged-events"
+commits = ["7bec1b236eb7c2acd590d7ad20890ac73d3f2501"]
+source = "clients/linux-player/tests/test_launcher.py"
+source_anchor = 'self.assertTrue(playback.on_event({"event": "seek"}))'
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_seek_inside_the_range_stays_in_the_session(self):"
+
 # HTTPS qualification: current Apple unit contracts, with execution recorded separately.
 [[fixes]]
 id = "https.apple-unit-current-contracts"
