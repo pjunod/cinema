@@ -57,6 +57,8 @@ impl TitleTask {
         let demands = state.store.dv_title_demands(&scanner, *after).await?;
         if demands.is_empty() {
             *after = 0;
+            #[cfg(target_os = "linux")]
+            requalify_stale_fel_titles(state, &tools, &scanner).await;
             return Ok(None);
         }
         for mut demand in demands {
@@ -250,6 +252,37 @@ impl TitleTask {
         self.cancel.cancel();
         // Never drop the child future to release the lane: reap, settle, finish.
         self.work.as_mut().await
+    }
+}
+
+/// A renderer, recipe or encoder change leaves every FEL verdict measured
+/// under the old identity. While no title work waits, ask for a bounded batch
+/// of those titles again: their demand is rebound, and the title job rescans
+/// and re-qualifies them. Title demand no longer follows the renderer, so this
+/// is what keeps "a changed renderer re-qualifies every title" true; the
+/// request is throttled per title like a play's.
+#[cfg(target_os = "linux")]
+async fn requalify_stale_fel_titles(state: &AppState, tools: &ToolSet, scanner: &str) {
+    if !state.transcode.fel_qualification_capable() {
+        return;
+    }
+    let identity = match state.transcode.fel_identity(&tools.backend_digest()).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::debug!(%error, "FEL identity unavailable for re-qualification");
+            return;
+        }
+    };
+    match state.store.dv_fel_stale_titles(&identity, 16).await {
+        Ok(titles) => {
+            for file_id in titles {
+                state
+                    .transcode
+                    .request_fel_qualification(file_id, scanner, &identity)
+                    .await;
+            }
+        }
+        Err(error) => tracing::warn!(%error, "listing FEL titles to re-qualify"),
     }
 }
 

@@ -1670,6 +1670,11 @@ impl IntegrationMetrics {
     }
 }
 
+/// How long a fresh title's Dolby Vision scan waits for the node-local index
+/// pass, which reads fresh files ahead of its backlog and scans the title in
+/// the same read. Past it, the title job reads the file itself.
+pub(crate) const TITLE_SCAN_INDEX_WAIT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 pub struct JobManager {
     store: Arc<dyn Store>,
     /// Bounded, node-local repair previews. A plan ID is a lookup handle, not
@@ -1775,6 +1780,9 @@ pub struct JobManager {
     /// does `fresh_index_files` drain, so only then may a Dolby Vision title
     /// scan wait for the pass that would read its title anyway.
     local_index_pass: std::sync::atomic::AtomicBool,
+    /// When each fresh file was noted: a title scan waits for the pass only
+    /// for [`TITLE_SCAN_INDEX_WAIT`] after that.
+    fresh_noted_at: std::sync::Mutex<std::collections::HashMap<i64, std::time::Instant>>,
     /// Process-local discovery count shown in the Developer backfill item.
     subtitle_backfill_enqueued_process: AtomicU64,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
@@ -3661,6 +3669,7 @@ impl JobManager {
             subtitle_sidecar_sweep_cursor: Mutex::new(None),
             fresh_index_files: std::sync::Mutex::new(std::collections::VecDeque::new()),
             local_index_pass: std::sync::atomic::AtomicBool::new(false),
+            fresh_noted_at: std::sync::Mutex::new(std::collections::HashMap::new()),
             subtitle_backfill_enqueued_process: AtomicU64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
@@ -8188,7 +8197,8 @@ impl JobManager {
         }
     }
 
-    /// Whether a Dolby Vision title scan for `file_id` should wait: the
+    /// Whether a Dolby Vision title scan for `file_id` should wait: within
+    /// [`TITLE_SCAN_INDEX_WAIT`] of the file being noted, the
     /// node-local index pass has the file at the front of its queue and its
     /// ride-along reads the title's RPUs in the same read. Once the pass has
     /// examined the file, built or not, the scan no longer waits.
@@ -8204,6 +8214,12 @@ impl JobManager {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .contains(&file_id)
+            && self
+                .fresh_noted_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&file_id)
+                .is_some_and(|noted| noted.elapsed() < TITLE_SCAN_INDEX_WAIT)
     }
 
     /// Offer an index pass's Dolby Vision title aggregate to the title's
@@ -8242,6 +8258,10 @@ impl JobManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|fresh| *fresh != file_id);
+        self.fresh_noted_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&file_id);
     }
 
     /// Queue the files a scan added or changed for the local index pass.
@@ -8251,6 +8271,10 @@ impl JobManager {
     /// pass runs the cluster queue instead, nothing consumes this and the
     /// bound is all that keeps it.
     pub(crate) fn note_fresh_index_files(&self, changed: Vec<i64>) {
+        self.note_fresh_index_files_at(changed, std::time::Instant::now());
+    }
+
+    pub(crate) fn note_fresh_index_files_at(&self, changed: Vec<i64>, at: std::time::Instant) {
         const FRESH_INDEX_CAP: usize = 4_096;
         if changed.is_empty() {
             return;
@@ -8259,10 +8283,19 @@ impl JobManager {
             .fresh_index_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut noted = self
+            .fresh_noted_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         fresh.retain(|file_id| !changed.contains(file_id));
+        for file_id in &changed {
+            noted.insert(*file_id, at);
+        }
         fresh.extend(changed);
         while fresh.len() > FRESH_INDEX_CAP {
-            fresh.pop_front();
+            if let Some(dropped) = fresh.pop_front() {
+                noted.remove(&dropped);
+            }
         }
     }
 

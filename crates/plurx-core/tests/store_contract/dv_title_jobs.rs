@@ -806,6 +806,18 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
                 .expect("counts"),
             (0, 0)
         );
+        // A verdict measured under this identity is current; under any other
+        // it is what a renderer change re-qualifies.
+        assert!(
+            store.dv_fel_stale_titles(&identity, 16).await.expect("current").is_empty(),
+            "{backend}"
+        );
+        assert_eq!(
+            store.dv_fel_stale_titles(&"b".repeat(64), 16).await.expect("stale"),
+            vec![file.id],
+            "{backend}"
+        );
+        assert!(store.dv_fel_stale_titles(&identity, 0).await.is_err());
         // The settled title has no demand until a play asks for it again.
         assert!(store
             .dv_title_demands(&scanner, 0)
@@ -935,6 +947,27 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
             .expect("rotated");
         assert_ne!(rotated, open.probe_revision, "{backend}");
         assert_eq!(stored_aggregate(&store, file.id).await, None, "{backend}");
+
+        // That scanner's queued job keeps its generation: the pass does not
+        // rotate it away, and the job publishes its own answer.
+        let other_demand = demand(&store, file.id, &other).await;
+        assert!(matches!(
+            enqueue(&store, &other_demand, &other, 4_000).await,
+            EnqueueOutcome::Accepted { .. }
+        ));
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .await
+                .expect("busy"),
+            AnalysisTitleOutcome::Busy,
+            "{backend}"
+        );
+        assert_eq!(
+            demand(&store, file.id, &scanner).await.probe_revision,
+            rotated,
+            "{backend}: not rotated"
+        );
 
         // A job's completed answer for this scanner is not replaced.
         let (job_demand, job) = active(&store, file.id, &scanner, 5_000).await;

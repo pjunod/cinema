@@ -3073,7 +3073,12 @@ mod title_scanner_identity_tests {
             ("dv_title.rs", include_str!("source_probe/dv_title.rs")),
         ] {
             assert!(source.contains("title_scanner_digest()"), "{name}");
-            assert!(!source.contains("backend_digest()"), "{name}");
+            // The backend key appears only as the FEL identity it measures.
+            assert_eq!(
+                source.matches("backend_digest()").count(),
+                source.matches("fel_identity(&tools.backend_digest())").count(),
+                "{name}"
+            );
         }
         let create = include_str!("transcode/manager/create.rs");
         assert!(create.contains("self.fel_identity(&tools.backend_digest())"));

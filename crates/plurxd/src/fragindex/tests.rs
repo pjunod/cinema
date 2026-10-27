@@ -1008,7 +1008,6 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
             source_object_version: "budget".to_owned(),
         },
         None,
-        None,
     );
     // Paced to real time, a twelve-second film cannot be read in one.
     let input = pass.args.iter().position(|arg| arg == "-i").expect("-i");
@@ -1988,77 +1987,8 @@ async fn a_landing_in_a_real_index_resolves_uniquely() {
 }
 
 #[cfg(target_os = "linux")]
-mod dv_title_ride {
+mod dv_title_companion {
     use super::*;
-    use plurx_core::transcode::dv_processing::{DvBackendIdentity, DvDigest};
-
-    fn ride(stream_index: u32) -> DvTitleRide {
-        let digest = |bytes: &[u8]| {
-            DvDigest::new(hex::encode(sha2::Sha256::digest(bytes))).expect("digest")
-        };
-        let backend = DvBackendIdentity::new(
-            digest(b"renderer"),
-            digest(b"libraries"),
-            digest(b"parser"),
-            digest(b"sources"),
-            1,
-            digest(b"manifest"),
-        )
-        .expect("backend");
-        DvTitleRide {
-            tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(backend)),
-            stream_index,
-        }
-    }
-
-    fn dv_file() -> MediaFile {
-        let mut file = hevc_file(Some("dolby_vision"), Some("Dolby Vision · Profile 7"));
-        file.dolby_vision.profile = Some(7);
-        file.dolby_vision.rpu_present = Some(true);
-        file.dolby_vision.el_present = Some(true);
-        file
-    }
-
-    /// The scanner must see what the file carries: the selected stream,
-    /// copied with no bitstream filter, behind every index output, on its
-    /// own descriptor, through a tee that can only drop itself.
-    #[test]
-    fn the_ride_along_copies_the_selected_stream_unfiltered_after_every_output() {
-        let file = dv_file();
-        let videos = video_identities(&file, None, true, true);
-        assert!(videos.len() > 1, "a FEL title indexes several identities");
-        let pass = shared_index_pass(
-            &file,
-            videos
-                .iter()
-                .map(|video| IndexOutput::new(&file, *video).expect("describable"))
-                .collect(),
-            Some("/dev/fd/3"),
-            VideoCompletionExpectation {
-                stream_index: 2,
-                duration_num: 12,
-                duration_den: 1,
-                provenance: CompletionProvenance::StreamSeconds,
-                source_object_version: "ride".to_owned(),
-            },
-            None,
-            Some(ride(2)),
-        );
-        let ride_args = ride(2).args();
-        let tail = &pass.args[pass.args.len() - ride_args.len()..];
-        assert_eq!(tail, ride_args.as_slice(), "the ride-along is the last output");
-        let without = shared_index_argv(&file, &videos, Some("/dev/fd/3"), None);
-        assert_eq!(&pass.args[..without.len()], without.as_slice(), "index argv unchanged");
-        assert!(without.iter().any(|arg| arg == "-bsf:v"), "the index outputs filter");
-        assert!(!ride_args.iter().any(|arg| arg.starts_with("-bsf")), "{ride_args:?}");
-        let map = ride_args.iter().position(|arg| arg == "-map").expect("hard map");
-        assert_eq!(ride_args[map + 1], "0:2", "the probed selected stream");
-        assert_eq!(
-            ride_args.last().map(String::as_str),
-            Some("[f=matroska:onfail=ignore]pipe:7|[f=null]-")
-        );
-        assert_eq!(DV_TITLE_FD, 3 + MAX_PASS_OUTPUTS as SourceFd);
-    }
 
     fn output(code: i32, stdout: &str, stderr: &str) -> plurx_core::process::bounded::Output {
         use std::os::unix::process::ExitStatusExt;
@@ -2069,29 +1999,115 @@ mod dv_title_ride {
         }
     }
 
-    const AGGREGATE: &str = r#"{"schema":1,"complete":true,"decoded_frames":3,"valid_l1_frames":3,"missing_l1_frames":0,"invalid_l1_frames":0,"max_l1_pq":3000,"mastering_luminance":{"state":"unknown"},"mastering_primaries":{"state":"unknown"},"ride_along_packets":3}"#;
+    const AGGREGATE: &str = r#"{"schema":1,"complete":true,"decoded_frames":3,"valid_l1_frames":3,"missing_l1_frames":0,"invalid_l1_frames":0,"max_l1_pq":3000,"mastering_luminance":{"state":"unknown"},"mastering_primaries":{"state":"unknown"}}"#;
 
-    /// A ride-along is a complete-title claim only when the scanner read every
-    /// packet the lead output indexed: a slave that failed part-way leaves a
-    /// well-formed prefix, and only the count tells.
+    /// The companion scan is judged as the title job judges its own: a
+    /// refusal, a scanner that changed under the pass, or an incomplete or
+    /// inconsistent aggregate keeps nothing.
     #[test]
-    fn the_ride_along_aggregate_needs_every_indexed_sample() {
-        let stats = dv_title_aggregate(&output(0, AGGREGATE, ""), 3, true).expect("complete");
+    fn the_companion_scan_is_judged_like_the_title_job() {
+        let stats = dv_title_aggregate(&output(0, AGGREGATE, ""), true).expect("complete");
         assert_eq!(stats.decoded_frames, 3);
         assert_eq!(stats.max_l1_pq, Some(3000));
-        let short = dv_title_aggregate(&output(0, AGGREGATE, ""), 4, true).expect_err("short");
-        assert!(short.contains("3 packets") && short.contains("4 samples"), "{short}");
-        assert!(dv_title_aggregate(&output(0, AGGREGATE, ""), 3, false).is_err());
+        assert!(dv_title_aggregate(&output(0, AGGREGATE, ""), false).is_err());
         let refused = dv_title_aggregate(
-            &output(1, "", "DV title scan refused: corrupt demux packet\n"),
-            3,
+            &output(1, "", "DV title scan refused: contiguous decoded title coverage\n"),
             true,
         )
         .expect_err("refused");
-        assert!(refused.contains("corrupt demux packet"), "{refused}");
-        let uncounted = AGGREGATE.replace(r#","ride_along_packets":3"#, "");
-        assert!(dv_title_aggregate(&output(0, &uncounted, ""), 3, true).is_err());
+        assert!(refused.contains("contiguous decoded title coverage"), "{refused}");
         let incomplete = AGGREGATE.replace(r#""complete":true"#, r#""complete":false"#);
-        assert!(dv_title_aggregate(&output(0, &incomplete, ""), 3, true).is_err());
+        assert!(dv_title_aggregate(&output(0, &incomplete, ""), true).is_err());
+        assert!(dv_title_aggregate(&output(0, "{}", ""), true).is_err());
+    }
+
+    /// The scan never enters the pass: same argv, same descriptors, so a scan
+    /// that fails cannot fail or slow the index.
+    #[test]
+    fn the_companion_scan_leaves_the_index_pass_untouched() {
+        let source = include_str!("../fragindex.rs");
+        let pass_start = source.find("fn shared_index_pass(").expect("pass");
+        let pass_end = pass_start + source[pass_start..].find("\n}\n").expect("end");
+        assert!(!source[pass_start..pass_end].contains("dv_title"), "argv carries no scan");
+        let spawn = source.find("Some(ride) => ride.spawn(source, budget)").expect("spawn");
+        let finish = source.find("let pending = ride.finish(file.id, task, lead_built, wait).await;").expect("finish");
+        let build = source.find("let built = build_with_args_shared(").expect("build");
+        assert!(spawn < build && build < finish, "spawned before the pass, judged after it");
+    }
+
+    /// The daemon's own index pass on a real title, with an installed
+    /// processing bundle, yields the aggregate the standalone scan published.
+    #[tokio::test]
+    #[ignore = "physical: a processing bundle (PLURX_DV_PROCESSING_DIR), a Dolby Vision title and its standalone aggregate"]
+    async fn physical_the_index_pass_reads_the_standalone_title_aggregate() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+        use plurx_core::store::{SqliteStore, Store};
+        let source = std::path::PathBuf::from(
+            std::env::var("PLURX_DV_RIDE_SOURCE").expect("PLURX_DV_RIDE_SOURCE"),
+        );
+        let expected: plurx_core::scan::dv_title::DvTitleStats = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::env::var("PLURX_DV_RIDE_EXPECTED").expect("PLURX_DV_RIDE_EXPECTED"),
+            )
+            .expect("expected aggregate"),
+        )
+        .expect("aggregate");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "ride".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![source.parent().expect("parent").into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "ride".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = plurx_core::scan::probe::probe(&source).await.expect("probe");
+        let metadata = std::fs::metadata(&source).expect("metadata");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64;
+        let id = store
+            .upsert_file(item, source.to_str().expect("path"), metadata.len() as i64, mtime, &probe)
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("file").expect("file");
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture()
+            .await
+            .expect("bundle")
+            .expect("bundle installed");
+        let videos = video_identities(&file, None, true, false);
+        let cache = crate::test_tempdir().expect("cache");
+        let started = Instant::now();
+        let builds =
+            build_riding_shared(&file, &videos, cache.path(), Duration::from_secs(7200), None, None)
+                .await;
+        let lead = builds.into_iter().next().expect("lead");
+        assert!(matches!(lead.outcome, IndexOutcome::Built(_)), "{:?}", lead.outcome);
+        let pending = lead.dv_title.expect("the companion scan kept its aggregate");
+        assert_eq!(pending.stats, expected);
+        assert_eq!(pending.scanner_digest, tools.title_scanner_digest());
+        println!(
+            "companion scan on {}: {} identities, {} s, {} pictures",
+            source.display(),
+            videos.len(),
+            started.elapsed().as_secs(),
+            pending.stats.decoded_frames
+        );
     }
 }

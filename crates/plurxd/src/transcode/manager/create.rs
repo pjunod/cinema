@@ -1613,7 +1613,12 @@ impl TranscodeManager {
     /// that cannot measure (no capable GPU) may pick the job up, and a play
     /// must not turn that into repeated full-title rescans.
     #[cfg(target_os = "linux")]
-    async fn request_fel_qualification(&self, file_id: i64, scanner: &str, identity: &str) {
+    pub(crate) async fn request_fel_qualification(
+        &self,
+        file_id: i64,
+        scanner: &str,
+        identity: &str,
+    ) {
         {
             let mut requests = self
                 .fel_requalification_requests

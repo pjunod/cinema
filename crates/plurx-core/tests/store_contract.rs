@@ -599,6 +599,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "put_dv_fel_verdict",
     "request_dv_fel_requalification",
     "dv_fel_verdict_counts",
+    "dv_fel_stale_titles",
     "dv_title_readiness",
     "dv_title_demands",
     "bind_dv_title_demand",

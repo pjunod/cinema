@@ -45,6 +45,9 @@ pub enum AnalysisTitleOutcome {
     Published,
     /// That revision already holds this scanner's completed answer.
     Current,
+    /// Another scanner's job is working on the title: its generation is not
+    /// rotated away from under it. The job publishes its own answer.
+    Busy,
     /// The catalogue row no longer describes the source the pass read, or the
     /// title is not one the scanner covers.
     NoDemand,
@@ -176,6 +179,7 @@ pub(super) async fn publish_from_analysis<T: QueueSql>(
         match (verdict.outcome.as_str(), verdict.revision) {
             ("published", _) => return Ok(AnalysisTitleOutcome::Published),
             ("current", _) => return Ok(AnalysisTitleOutcome::Current),
+            ("busy", _) => return Ok(AnalysisTitleOutcome::Busy),
             ("unbound", Some(revision)) => {
                 if bind(store, revision, &output.scanner_digest).await?.is_none() {
                     return Ok(AnalysisTitleOutcome::NoDemand);
@@ -197,8 +201,12 @@ WITH input AS (SELECT json($1) AS body), verdict AS (
    OR f.mtime IS NOT json_extract(body,'$.output.source_mtime')
    OR NOT (f.video_codec='hevc' AND f.dv_profile IN (5,7,8) AND f.dv_rpu_present=1
     AND json_valid(f.probe_json)) THEN 'no_demand'
+  WHEN d.scanner_digest IS NOT json_extract(body,'$.output.scanner_digest')
+   AND EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+    AND job.state IN ('queued','running','cancelling')
+    AND json_extract(job.payload_json,'$.file_id')=d.file_id) THEN 'busy'
   WHEN d.scanner_digest IS NOT json_extract(body,'$.output.scanner_digest') THEN 'unbound'
-  WHEN d.terminal=1 THEN 'current'
+  WHEN d.terminal=1 AND json_type(f.probe_json,'$.plurx_dv_title_v1') IS NOT NULL THEN 'current'
   ELSE 'published' END AS outcome
  FROM input LEFT JOIN dv_title_jobs_demand d ON d.file_id=json_extract(body,'$.output.file_id')
  LEFT JOIN files f ON f.id=d.file_id
@@ -412,6 +420,46 @@ WHERE d.file_id=json_extract($1,'$.file_id')
     };
     let revision = decode::<Revision>(row)?.revision;
     Ok(bind(store, revision, binding).await?.is_some())
+}
+
+/// Settled Profile 7 FEL titles whose stored verdict was measured under
+/// another FEL identity (renderer, recipe or encoder), with no title job in
+/// flight: what a renderer change has to re-qualify. Bounded, oldest
+/// generation first.
+pub(super) async fn stale_fel_titles<T: QueueSql>(
+    store: &T,
+    identity: &str,
+    limit: u32,
+) -> Result<Vec<i64>, StoreError> {
+    if !digest(identity) || limit == 0 || limit > 128 {
+        return Err(StoreError::Task("invalid FEL staleness query".into()));
+    }
+    #[derive(Deserialize)]
+    struct Title {
+        file_id: i64,
+    }
+    let rows = store
+        .queue_sql(
+            format!(
+                "SELECT json_object('file_id',f.id) AS result_json
+FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+WHERE d.terminal=1 AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+ AND json_type(f.probe_json,'$.{key}')='object'
+ AND json_extract(f.probe_json,'$.{key}.identity') IS NOT json_extract($1,'$.identity')
+ AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
+  AND job.state IN ('queued','running','cancelling')
+  AND json_extract(job.payload_json,'$.file_id')=f.id)
+ORDER BY d.revision LIMIT json_extract($1,'$.limit')",
+                key = crate::transcode::dv_fel_qualification::PROBE_KEY
+            ),
+            encode(&serde_json::json!({"identity": identity, "limit": limit}))?,
+            false,
+            true,
+        )
+        .await?;
+    rows.iter()
+        .map(|row| decode::<Title>(row).map(|title| title.file_id))
+        .collect()
 }
 
 /// How many titles hold a FEL verdict for `identity`, and how many of those

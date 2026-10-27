@@ -141,42 +141,57 @@ in software on one thread: hours of one core per title, with 835 titles queued
 on lab5. Each access unit is judged by the rules the renderer's pipeline
 applies (`dovi_split` `bl_rpu`, then the HEVC decoder), so the counts describe
 the pictures the renderer will see:
-- enhancement-layer NALs (UNSPEC63) are removed first;
-- an access unit with no base-layer VCL NAL yields no picture;
-- RASL pictures after an IRAP with NoRaslOutputFlag are not output;
-- a picture's RPU is the last UNSPEC62 NAL after the first one, with layer 0,
-  temporal id 0 and more than its two header bytes.
+- NALs are split as `ff_h2645_packet_split` splits them. Input must be
+  length-prefixed; every catalogued DV title is Matroska or MP4.
+- Enhancement-layer NALs (UNSPEC63) never reach the decoder.
+- A packet with a base-layer VCL NAL of a decodable type is a picture.
+- RASL pictures after an IRAP with NoRaslOutputFlag are not output.
+- A picture's RPU is the last UNSPEC62 NAL after the first one, with layer 0,
+  temporal id 0 and more than its two header bytes. An RPU in a packet that
+  produced no picture carries to the next picture.
 
-The one accepted difference: the decoder drops an RPU its own parser rejects,
-and the scanner can only ask libdovi. The renderer still refuses any picture
-that arrives without a fresh RPU. Parity: on eight titles the old scanner had
-already published (P5, P7 FEL, P8 remux and WEB-DL), the new scanner's
-aggregate is identical, at 3–28 s of CPU per title, limited by the NAS.
+Where the decoder would refuse a picture or withhold pictures from output, the
+scan refuses, as the decoding scanner did. That covers a missing or repeated
+first slice, an unknown PPS, a picture over 4096×2160, pictures discarded at a
+new sequence (`no_output_of_prior_pics_flag`, forced for a CRA after an EOS),
+and a PPS with `output_flag_present_flag`. The one accepted difference: the
+decoder drops an RPU its own parser rejects, and the scanner can only ask
+libdovi. The renderer still refuses any picture that arrives without a fresh
+RPU. Parity: on eight titles the old scanner had already published (P5, P7
+FEL, P8 remux and WEB-DL), the new scanner's aggregate is identical, at 3–31 s
+of CPU per title, limited by the NAS.
 
 It runs two ways, with one aggregate:
-- **Standalone:** the `dv_title_scan` job reads the held source (`scan_title
-  HELD_SOURCE VIDEO_INDEX`). It also qualifies a Profile 7 FEL title while it
-  holds it.
-- **Inside content analysis:** the fragment-index pass adds one more ffmpeg
-  output, after every index output and the PGS ride-along. It is the selected
-  stream, copied with no bitstream filter (the index outputs strip or rewrite
-  RPUs; this copy keeps what the file carries), sent as Matroska through an
-  `onfail=ignore` tee slave behind a `null` sentinel to `scan_title --ride-along`
-  on fd 7. The result is kept only when the child exited, the lead output
-  built, and the scanner read exactly as many packets as that output has
-  samples: a remux re-times packets, so the count, not timestamps, proves the
-  copy complete. It is stored through the same `publish_dv_title` command a job
-  uses, under the title's current demand generation, with no job attached. The
-  demand stays open; the title job finds that generation's aggregate already
+- **Standalone:** the `dv_title_scan` job reads its own open of the source. It
+  also qualifies a Profile 7 FEL title while it holds it.
+- **With content analysis:** while the fragment-index pass reads the file, the
+  same scanner, in the same mode, reads a duplicate of the pass's held source.
+  It sees the same unfiltered access units and runs the same checks, and the
+  two read the same pages in step, so the page cache serves the slower one.
+  The scan never touches the pass's argv, descriptors or exit status. It is
+  kept only when the pass's lead output built, and killed otherwise, including
+  when the pass future is dropped. The aggregate is stored through the same
+  `publish_dv_title` command a job uses, under the title's current demand
+  generation, with no job attached:
+  - an unbound demand is bound to the pass's scanner first;
+  - a demand another scanner's job is working on is left to that job.
+
+  The demand stays open; the title job finds that generation's aggregate
   stored and settles without reading the file (and qualifies a FEL title). A
-  fresh title waits for the node-local pass that will read it anyway; once the
-  pass has examined it, built or not, the job runs.
+  fresh title's job waits up to an hour for the node-local pass that reads it
+  anyway.
 
 Title demand is keyed by the scanner executable alone
-(`ToolSet::title_scanner_digest`). It used to be the whole DV backend
-(renderer, libraries, parser, every helper source), so any renderer, shader
-or libplacebo change re-queued every title. FEL verdicts keep the backend key
-(`backend_digest`), because they measure the renderer.
+(`ToolSet::title_scanner_digest`; the scanner links ffmpeg and libdovi
+statically, so its digest covers its parser). It used to be the whole DV
+backend (renderer, libraries, parser, every helper source), so any renderer,
+shader or libplacebo change re-queued every title. FEL verdicts keep the
+backend key (`backend_digest`), because they measure the renderer. Since a
+renderer change no longer re-queues titles, the title worker re-qualifies
+them explicitly instead: on an idle tick it asks again, throttled per title,
+for settled FEL titles whose verdict another FEL identity measured. On the
+first deploy every demand rebinds once to the new key, so titles published
+under the old key are rescanned.
 
 **Bucket elision.** If the scanned title maximum is at or below the bucket,
 the target would change nothing above black. In that case the server uses

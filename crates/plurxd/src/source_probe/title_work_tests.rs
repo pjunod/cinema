@@ -719,4 +719,11 @@ fn a_fresh_title_waits_only_for_a_local_index_pass() {
     state.jobs.set_local_index_pass(true);
     assert!(state.jobs.title_scan_awaits_index_pass(5));
     assert!(!state.jobs.title_scan_awaits_index_pass(6));
+    // Never forever: a pass that has not reached the file reads it no later.
+    if let Some(long_ago) = std::time::Instant::now()
+        .checked_sub(crate::state::TITLE_SCAN_INDEX_WAIT + std::time::Duration::from_secs(1))
+    {
+        state.jobs.note_fresh_index_files_at(vec![7], long_ago);
+        assert!(!state.jobs.title_scan_awaits_index_pass(7));
+    }
 }

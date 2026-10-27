@@ -6,20 +6,21 @@
 // Each access unit is judged by the rules the renderer's own pipeline applies
 // (dovi_split bl_rpu, then the HEVC decoder), so the counts describe exactly
 // the pictures the renderer will see and the RPU each one is handed:
-//  - enhancement-layer NALs (UNSPEC63) are removed before anything else;
-//  - an access unit without a base-layer VCL NAL yields no picture;
+//  - NALs are split as ff_h2645_packet_split splits them (length-prefixed
+//    input only; every catalogued Dolby Vision title is Matroska or MP4);
+//  - enhancement-layer NALs (UNSPEC63) never reach the decoder;
+//  - a packet with a base-layer VCL NAL of a decodable type is a picture;
 //  - RASL pictures that follow an IRAP with NoRaslOutputFlag are not output;
 //  - a picture's RPU is the last UNSPEC62 NAL after the first NAL with
-//    nuh_layer_id 0, temporal id 0 and more than its two header bytes.
-// Display-order coverage is proven from the presentation timestamps, which are
-// the timestamps the decoder gives its frames.
-//
-// `scan_title --ride-along HELD_PIPE` reads the same selected stream from a
-// pipe instead: the content-analysis pass's ffmpeg copies it there, unfiltered,
-// as Matroska, while it reads the file for its index. A remux re-times packets
-// into milliseconds, so that mode proves nothing from timestamps; it reports
-// how many packets it read, and the daemon accepts the aggregate only when that
-// equals the samples of the complete index built from the same demux.
+//    nuh_layer_id 0, temporal id 0 and more than its two header bytes; an RPU
+//    in a packet that produced no picture is carried to the next picture.
+// Where the decoder would refuse a picture or withhold pictures from output,
+// the scan refuses, as the decoding scanner did: a first slice missing or
+// repeated, an unknown PPS, an oversize picture, pictures discarded at a new
+// sequence (no_output_of_prior_pics_flag), or a PPS that lets slices hide
+// their picture (output_flag_present_flag). Display-order coverage is proven
+// from the presentation timestamps, which are the timestamps the decoder gives
+// its frames.
 //
 // One difference is accepted: the decoder drops an RPU its own parser rejects,
 // and this scanner can only ask libdovi. Both parse the same syntax; the
@@ -38,11 +39,12 @@
 
 #define MAX_TITLE_FRAMES 100000000ULL
 #define MAX_UNIT_NALS 4096
+#define MAX_RPU_BYTES 4096
 
 enum {
-  NAL_RASL_N = 8, NAL_RASL_R = 9, NAL_BLA_W_LP = 16, NAL_BLA_N_LP = 18,
-  NAL_IDR_W_RADL = 19, NAL_IDR_N_LP = 20, NAL_CRA = 21, NAL_IRAP_END = 23,
-  NAL_EOS = 36, NAL_EOB = 37, NAL_RPU = 62, NAL_EL = 63,
+  NAL_RASL_N = 8, NAL_RASL_R = 9, NAL_BLA_W_LP = 16, NAL_IDR_W_RADL = 19,
+  NAL_IDR_N_LP = 20, NAL_CRA = 21, NAL_PPS = 34, NAL_EOS = 36, NAL_EOB = 37,
+  NAL_RPU = 62, NAL_EL = 63,
 };
 
 struct title_stats {
@@ -62,8 +64,7 @@ static struct title_stats stats;
 static struct picture_time *times;
 static size_t time_capacity;
 static struct nal nals[MAX_UNIT_NALS];
-static uint64_t packets;
-static bool ride_along;
+static bool known_pps[64];
 
 static void need(bool ok, const char *why) {
   if (!ok) {
@@ -79,60 +80,124 @@ static int nal_layer(const struct nal *nal) {
   return ((nal->data[0] & 1) << 5) | (nal->data[1] >> 3);
 }
 static int nal_temporal_plus1(const struct nal *nal) { return nal->data[1] & 7; }
+// Types the decoder decodes; reserved VCL types are skipped like any unknown NAL.
+static bool picture_type(int type) { return type <= 9 || (type >= 16 && type <= 21); }
 
-// A NAL whose two-byte header cannot be read is skipped, as the decoder's
-// packet splitter skips it. Trailing zero bytes are never part of a NAL.
+// RBSP bit reader over a NAL payload (after its header), skipping emulation
+// prevention bytes. Reads past the end yield zeros and mark the reader short.
+struct bits {
+  const uint8_t *data;
+  size_t size, at;
+  int bit, zeros;
+  bool short_read;
+};
+static unsigned bit1(struct bits *b) {
+  if (!b->bit) {
+    if (b->at < b->size && b->zeros >= 2 && b->data[b->at] == 3) {
+      b->at++;
+      b->zeros = 0;
+    }
+    if (b->at >= b->size) {
+      b->short_read = true;
+      return 0;
+    }
+    b->zeros = b->data[b->at] ? 0 : b->zeros + 1;
+  }
+  unsigned value = (b->data[b->at] >> (7 - b->bit)) & 1;
+  if (++b->bit == 8) {
+    b->bit = 0;
+    b->at++;
+  }
+  return value;
+}
+static uint32_t golomb(struct bits *b) {
+  int leading = 0;
+  while (!bit1(b) && !b->short_read)
+    if (++leading > 31) {
+      b->short_read = true;
+      return 0;
+    }
+  uint32_t value = 0;
+  for (int i = 0; i < leading; i++) value = (value << 1) | bit1(b);
+  return (UINT32_C(1) << leading) - 1 + value;
+}
+static struct bits payload_bits(const uint8_t *data, size_t size) {
+  struct bits b = {data + 2, size - 2, 0, 0, 0, false};
+  return b;
+}
+
+// A PPS the decoder could use: its id, and whether it lets slices withhold
+// their picture from output.
+static void observe_pps(const uint8_t *data, size_t size) {
+  if (size < 3) return;
+  struct bits b = payload_bits(data, size);
+  uint32_t id = golomb(&b);
+  (void)golomb(&b);
+  (void)bit1(&b);
+  unsigned output_flag_present = bit1(&b);
+  if (b.short_read || id >= 64) return;
+  need(!output_flag_present, "a PPS lets slices withhold pictures from output");
+  known_pps[id] = true;
+}
+
+// A NAL the decoder's splitter keeps: a readable header, forbidden bit clear,
+// temporal id present, nuh_layer_id below 63, and a payload. The enhancement
+// layer is removed here, before anything is counted, as dovi_split removes it.
 static size_t add_nal(size_t count, const uint8_t *data, size_t size) {
-  while (size && !data[size - 1]) size--;
-  if (size < 2 || (data[0] & 0x80) || !(data[1] & 7)) return count;
+  size_t trimmed = size;
+  while (trimmed > 2 && !data[trimmed - 1]) trimmed--;
+  if (size < 2 || trimmed < 2 || (data[0] & 0x80) || !(data[1] & 7)) return count;
+  struct nal nal = {data, size};
+  if (nal_layer(&nal) == 63 || nal_type(&nal) == NAL_EL) return count;
   need(count < MAX_UNIT_NALS, "bounded access-unit NAL count");
-  nals[count].data = data;
-  nals[count].size = size;
+  nals[count] = nal;
   return count + 1;
 }
+// ff_h2645_packet_split over length-prefixed input: a NAL needs at least four
+// bytes left to start, and a zero or overrunning length refuses the packet.
 static size_t split_length_prefixed(const uint8_t *data, size_t size, int length_size) {
   size_t count = 0, at = 0;
-  while (at < size) {
-    need(size - at >= (size_t)length_size, "complete NAL length");
+  while (size - at >= 4) {
+    need(size - at > (size_t)length_size, "complete NAL length");
     size_t length = 0;
     for (int i = 0; i < length_size; i++) length = (length << 8) | data[at++];
-    need(length <= size - at, "NAL inside its access unit");
+    need(length > 0 && length <= size - at, "NAL inside its access unit");
     count = add_nal(count, data + at, length);
     at += length;
   }
   return count;
 }
-static size_t next_start_code(const uint8_t *data, size_t size, size_t at) {
-  for (; at + 3 <= size; at++)
-    if (!data[at] && !data[at + 1] && data[at + 2] == 1) return at;
-  return size;
-}
-static size_t split_annex_b(const uint8_t *data, size_t size) {
-  size_t count = 0, at = next_start_code(data, size, 0);
-  while (at < size) {
-    size_t start = at + 3, end = next_start_code(data, size, start);
-    count = add_nal(count, data + start, end - start);
-    at = end;
-  }
-  return count;
+
+// The decoder's held RPU: raw bytes after the two-byte NAL header, emulation
+// prevention intact, exactly what it attaches to the next picture it starts.
+static struct {
+  bool held;
+  size_t size;
+  uint8_t bytes[MAX_RPU_BYTES];
+} rpu;
+
+static void hold_rpu(const struct nal *nal) {
+  rpu.held = true;
+  rpu.size = nal->size - 2;
+  if (rpu.size <= MAX_RPU_BYTES) memcpy(rpu.bytes, nal->data + 2, rpu.size);
 }
 
-// The RPU payload as the decoder attaches it: raw bytes after the two-byte
-// NAL header, emulation prevention intact. NULL when the picture gets none.
-static void observe_rpu(const struct nal *rpu) {
-  if (!rpu) {
+// One picture's metadata: the RPU the decoder attaches to it, if any.
+static void observe_rpu(void) {
+  if (!rpu.held) {
     stats.missing++;
     unknown_constants();
     return;
   }
-  size_t size = rpu->size - 2;
-  if (!size || size > 4096) {
+  rpu.held = false;
+  size_t size = rpu.size;
+  if (!size || size > MAX_RPU_BYTES) {
     stats.invalid++;
     unknown_constants();
     return;
   }
-  uint8_t nal[4098] = {0x7c, 0x01};
-  memcpy(nal + 2, rpu->data + 2, size);
+  uint8_t nal[MAX_RPU_BYTES + 2] = {0x7c, 0x01};
+  memcpy(nal + 2, rpu.bytes, size);
   DoviRpuOpaque *parsed = dovi_parse_unspec62_nalu(nal, size + 2);
   const DoviVdrDmData *dm = NULL;
   const DoviRpuDataHeader *header = NULL;
@@ -185,22 +250,27 @@ done:
 
 // The decoder starts as if after an end of sequence, and an EOS/EOB NAL
 // reaches only the next packet it is handed (or its own, at the front).
-static bool seen_irap, eos_pending = true, skip_rasl;
+static bool seen_picture, eos_pending = true, skip_rasl;
 
 // One demuxed access unit of the selected stream.
 static void observe_unit(const AVPacket *packet, int length_size) {
-  size_t count = length_size ? split_length_prefixed(packet->data, packet->size, length_size)
-                             : split_annex_b(packet->data, packet->size);
-  // dovi_split bl_rpu: the enhancement layer never reaches the decoder, and
-  // a packet left empty is never handed to it at all.
-  size_t kept = 0;
-  for (size_t i = 0; i < count; i++)
-    if (nal_type(&nals[i]) != NAL_EL) nals[kept++] = nals[i];
-  if (!kept) return;
+  size_t count = split_length_prefixed(packet->data, packet->size, length_size);
+  // dovi_split hands the decoder nothing for a packet it emptied.
+  if (!count) return;
   bool last_eos = eos_pending, at_start = true;
   eos_pending = false;
+  // The RPU: the last qualifying UNSPEC62 after the first NAL. It replaces
+  // one still held from a packet that produced no picture.
+  for (size_t i = count; i-- > 1;) {
+    if (nal_type(&nals[i]) == NAL_RPU && nals[i].size > 2 && !nal_layer(&nals[i]) &&
+        nal_temporal_plus1(&nals[i]) == 1) {
+      hold_rpu(&nals[i]);
+      break;
+    }
+  }
   int picture = -1;
-  for (size_t i = 0; i < kept; i++) {
+  bool no_output_of_prior_pics = false;
+  for (size_t i = 0; i < count; i++) {
     int type = nal_type(&nals[i]);
     if (type == NAL_EOS || type == NAL_EOB) {
       if (at_start) last_eos = true;
@@ -208,22 +278,47 @@ static void observe_unit(const AVPacket *packet, int length_size) {
     } else {
       at_start = false;
     }
-    if (picture < 0 && type < 32 && !nal_layer(&nals[i])) picture = type;
+    if (nal_layer(&nals[i])) continue;
+    if (type == NAL_PPS) {
+      observe_pps(nals[i].data, nals[i].size);
+      continue;
+    }
+    if (!picture_type(type)) continue;
+    struct bits b = payload_bits(nals[i].data, nals[i].size);
+    bool first_slice = bit1(&b);
+    bool irap = type >= NAL_BLA_W_LP;
+    if (picture < 0) {
+      need(first_slice, "first slice in a picture missing");
+      picture = type;
+      if (irap) no_output_of_prior_pics = bit1(&b);
+      uint32_t pps = golomb(&b);
+      need(!b.short_read && pps < 64 && known_pps[pps], "slice names an unknown PPS");
+    } else {
+      need(!first_slice, "two first slices in one picture");
+    }
   }
   if (picture < 0) return;
-  if (picture >= NAL_BLA_W_LP && picture <= NAL_IRAP_END) {
+  bool irap = picture >= NAL_BLA_W_LP;
+  // A new sequence outputs or discards the pictures still waiting: discarding
+  // them leaves a hole in the title the decoding scanner refused as one.
+  bool idr_or_bla = picture >= NAL_BLA_W_LP && picture <= NAL_IDR_N_LP;
+  bool new_sequence = idr_or_bla || last_eos;
+  if (seen_picture && new_sequence)
+    need(!(no_output_of_prior_pics || (picture == NAL_CRA && last_eos)),
+         "pictures discarded at a new sequence");
+  if (irap) {
     // NoRaslOutputFlag: always for IDR and BLA, for a CRA after an EOS.
     skip_rasl = picture <= NAL_IDR_N_LP || (picture == NAL_CRA && last_eos);
-    seen_irap = true;
   } else {
-    need(seen_irap, "title begins at a random access point");
+    need(seen_picture, "title begins at a random access point");
+    // The RPU stays held: the decoder never starts this picture.
     if ((picture == NAL_RASL_N || picture == NAL_RASL_R) && skip_rasl) return;
   }
-  need(stats.frames < MAX_TITLE_FRAMES, "bounded title display-frame count");
-  if (ride_along) goto timed;
+  seen_picture = true;
   need(packet->pts >= 0 && packet->duration > 0 &&
        packet->pts < INT64_MAX - packet->duration,
        "observed complete display-frame timing");
+  need(stats.frames < MAX_TITLE_FRAMES, "bounded title display-frame count");
   if (stats.frames == time_capacity) {
     size_t grown = time_capacity ? time_capacity * 2 : 65536;
     struct picture_time *resized = realloc(times, grown * sizeof(*times));
@@ -233,17 +328,8 @@ static void observe_unit(const AVPacket *packet, int length_size) {
   }
   times[stats.frames].pts = packet->pts;
   times[stats.frames].duration = packet->duration;
-timed:
   stats.frames++;
-  const struct nal *rpu = NULL;
-  for (size_t i = kept; i-- > 1;) {
-    if (nal_type(&nals[i]) == NAL_RPU && nals[i].size > 2 && !nal_layer(&nals[i]) &&
-        nal_temporal_plus1(&nals[i]) == 1) {
-      rpu = &nals[i];
-      break;
-    }
-  }
-  observe_rpu(rpu);
+  observe_rpu();
 }
 
 static int by_pts(const void *a, const void *b) {
@@ -252,26 +338,36 @@ static int by_pts(const void *a, const void *b) {
   return (x > y) - (x < y);
 }
 
-// The NAL length size of a length-prefixed (hvcC) stream, or 0 for Annex B,
-// decided the way the decoder decides it.
-static int nal_length_size(const AVCodecParameters *par) {
+// The NAL length size of a length-prefixed stream, from a version-1 HEVC
+// decoder configuration record; its parameter sets seed the known PPSs.
+static int configuration(const AVCodecParameters *par) {
   const uint8_t *extra = par->extradata;
-  if (par->extradata_size <= 3 || (!extra[0] && !extra[1] && extra[2] <= 1)) return 0;
-  need(par->extradata_size >= 23, "complete HEVC decoder configuration");
+  size_t size = (size_t)par->extradata_size;
+  need(size >= 23 && extra[0] == 1, "length-prefixed HEVC with a version-1 configuration");
+  size_t at = 23;
+  for (unsigned arrays = extra[22]; arrays; arrays--) {
+    need(size - at >= 3, "complete configuration array");
+    unsigned type = extra[at] & 0x3f, count = ((unsigned)extra[at + 1] << 8) | extra[at + 2];
+    at += 3;
+    for (; count; count--) {
+      need(size - at >= 2, "complete configuration NAL length");
+      size_t length = ((size_t)extra[at] << 8) | extra[at + 1];
+      at += 2;
+      need(length <= size - at, "configuration NAL inside its record");
+      if (type == NAL_PPS && length > 2) observe_pps(extra + at, length);
+      at += length;
+    }
+  }
   return (extra[21] & 3) + 1;
 }
 
 int main(int argc, char **argv) {
-  need(argc == 3, "usage: scan_title HELD_SOURCE VIDEO_INDEX | scan_title --ride-along HELD_PIPE");
-  ride_along = !strcmp(argv[1], "--ride-along");
-  long index = 0;
-  if (!ride_along) {
-    char *end;
-    errno = 0;
-    index = strtol(argv[2], &end, 10);
-    need(!errno && end != argv[2] && !*end && index >= 0 && index < 256,
-         "selected video index");
-  }
+  need(argc == 3, "usage: scan_title HELD_SOURCE VIDEO_INDEX");
+  char *end;
+  errno = 0;
+  long index = strtol(argv[2], &end, 10);
+  need(!errno && end != argv[2] && !*end && index >= 0 && index < 256,
+       "selected video index");
   av_log_set_level(AV_LOG_ERROR);
   av_max_alloc(64ULL * 1024 * 1024);
   AVFormatContext *input = avformat_alloc_context();
@@ -279,37 +375,32 @@ int main(int argc, char **argv) {
   input->max_streams = 256;
   input->probesize = 1024 * 1024;
   input->max_analyze_duration = AV_TIME_BASE;
-  const AVInputFormat *carrier = ride_along ? av_find_input_format("matroska") : NULL;
-  need(!ride_along || carrier, "ride-along demuxer");
-  need(avformat_open_input(&input, argv[ride_along ? 2 : 1], carrier, NULL) >= 0,
-       "source open");
-  need(!ride_along || input->nb_streams == 1, "one ride-along video stream");
+  need(avformat_open_input(&input, argv[1], NULL, NULL) >= 0, "source open");
   // Supported catalogue containers expose codec parameters on opening. Avoid
   // a second analysis pass and never seek past the start of the title.
   need((unsigned long)index < input->nb_streams, "selected stream exists");
   AVStream *stream = input->streams[index];
   need(stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
        stream->codecpar->codec_id == AV_CODEC_ID_HEVC, "selected HEVC video");
+  // The decoding scanner's max_pixels.
+  need(stream->codecpar->width > 0 && stream->codecpar->height > 0 &&
+       (int64_t)stream->codecpar->width * stream->codecpar->height <= 4096 * 2160,
+       "bounded picture size");
   for (unsigned i = 0; i < input->nb_streams; i++)
     if (i != (unsigned long)index) input->streams[i]->discard = AVDISCARD_ALL;
-  int length_size = nal_length_size(stream->codecpar);
+  int length_size = configuration(stream->codecpar);
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "bounded demux buffer");
   int ret;
   while ((ret = av_read_frame(input, packet)) >= 0) {
     if (packet->stream_index == index) {
       need(!(packet->flags & AV_PKT_FLAG_CORRUPT), "corrupt demux packet");
-      packets++;
       observe_unit(packet, length_size);
     }
     av_packet_unref(packet);
   }
   need(ret == AVERROR_EOF && (!input->pb || !input->pb->error ||
        input->pb->error == AVERROR_EOF), "complete demux EOF");
-  if (ride_along) {
-    need(stats.frames > 0, "complete declared frame coverage");
-    goto report;
-  }
   need(stats.frames > 0 && (stream->nb_frames <= 0 ||
        (uint64_t)stream->nb_frames == stats.frames), "complete declared frame coverage");
   // Pictures leave the decoder in presentation order; prove that order is
@@ -350,7 +441,6 @@ int main(int argc, char **argv) {
     endpoint_known = true;
   }
   need(endpoint_known, "independent complete selected-video endpoint unavailable");
-report:
   // `decoded_frames` keeps its schema-1 name: it counts the pictures the
   // decoder would output, established here without decoding them.
   printf("{\"schema\":1,\"complete\":true,\"decoded_frames\":%"PRIu64
@@ -373,9 +463,7 @@ report:
     } else printf("null");
     printf("}");
   } else printf("\"state\":\"%s\"", stats.mastering.l9_state == 3 ? "inconsistent" : "unknown");
-  printf("}");
-  if (ride_along) printf(",\"ride_along_packets\":%"PRIu64, packets);
-  printf("}\n");
+  printf("}}\n");
   need(!ferror(stdout) && fflush(stdout) == 0, "aggregate output");
   free(times);
   av_packet_free(&packet);
