@@ -3,7 +3,7 @@
 //! The ordinary topology mode intentionally stays loopback-only semantic CI.
 //! This module is the explicit hardware boundary: four named Linux hosts run
 //! fresh containerized voters, while the controller remains an external load
-//! generator. Raw pair artifacts keep the topology-v2 contract; this module
+//! generator. Raw pair artifacts keep the topology-v3 contract; this module
 //! adds the pre-registered 3--7-pair stopping rule and an aggregate campaign.
 
 use std::io::{Read, Write};
@@ -445,7 +445,7 @@ pub async fn run_named_campaign(
 
 /// Run P2f on the same four named machines and exact image as P0c. The state
 /// order and the topology order are independently counterbalanced. A control
-/// and instrumented arm each retain an ordinary topology-v2 artifact, which
+/// and instrumented arm each retain an ordinary topology-v3 artifact, which
 /// keeps all workload, corpus, placement, and resource validation shared with
 /// P0c while this wrapper evaluates only the Store instrumentation delta.
 pub async fn run_named_instrumentation_campaign(
@@ -3252,6 +3252,26 @@ mod tests {
             budgets: CampaignBudgets::default(),
         };
         validate_named_campaign(&campaign, None).expect("Rust campaign validator");
+
+        // The unchanged outer campaign v2 must still validate retained raw v3 bytes.
+        // A matching content hash must never let a legacy raw v2 pair through.
+        let root = tempfile::tempdir().expect("retained pair directory");
+        let mut legacy = super::super::topology::tests::fixture();
+        legacy.schema_version = 2;
+        legacy.workload.id = "settings-put-and-local-catalogue-read-v2".to_owned();
+        legacy.workload_sha256 = legacy.workload.sha256().expect("legacy workload digest");
+        for run in &mut legacy.runs {
+            run.workload_sha256 = legacy.workload_sha256.clone();
+            run.catalogue_read_non_consistent_query_calls = 256;
+        }
+        let bytes = serde_json::to_vec(&legacy).expect("legacy raw pair");
+        std::fs::write(root.path().join("pair-01.json"), &bytes).expect("retain legacy pair");
+        let mut legacy_campaign = campaign.clone();
+        legacy_campaign.raw_pairs[0].artifact_sha256 = hex::encode(Sha256::digest(&bytes));
+        assert!(validate_named_campaign(&legacy_campaign, Some(root.path()))
+            .expect_err("outer campaign refuses retained raw v2 evidence")
+            .to_string()
+            .contains("schema version 2"));
 
         let mut malformed = campaign.clone();
         malformed.raw_pairs.push(RawPairReference {

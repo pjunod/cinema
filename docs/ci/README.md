@@ -20,7 +20,7 @@ a document to this folder.
 | [RIPWIRE.md](RIPWIRE.md) | Explicit setup, bounded navigation, output meanings, and coverage limits. | live |
 | [RIPWIRE-STATUS.md](RIPWIRE-STATUS.md) | Ripwire implementation, measured evidence, decisions, and promotion progress. | open |
 | [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) | Fast failures, selective evidence, safe reuse. | open |
-| [APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md) | The M4 Apple primary, M3 Max standby, outage detection and installation. | live |
+| [APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md) | The M4 Apple primary, M3 Max standby, outage detection, installation and job-local DerivedData. | live |
 | [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md) · [review](CI_EXECUTION_ACCELERATION_REVIEW.md) | Persistent caches, native packaging, exact sharding. | open |
 | [AGENT-COMPILE-LOOP.md](AGENT-COMPILE-LOOP.md) | A compiler for a checkout that has none. | live |
 | [PAPERWORK.md](PAPERWORK.md) | Which bookkeeping rules run first — on push and as every pull request's first job — and the fix for each. | live |

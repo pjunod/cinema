@@ -64,6 +64,22 @@ pub(crate) async fn publish_title_for_control(
     store: &std::sync::Arc<dyn plurx_core::store::Store>,
     file: &MediaFile,
 ) -> Result<DvTitleStats, String> {
+    let tools = ToolSet::capture()
+        .await?
+        .ok_or("title scanner unavailable")?;
+    publish_title_with_tools_for_control(transcode, store, file, tools).await
+}
+
+/// Lifecycle controls supply a scoped, artifact-hashed scanner executable.
+/// The admitted durable job, held-source checks and publication fence remain
+/// identical; this does not qualify the installed physical scanner.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) async fn publish_title_with_tools_for_control(
+    transcode: &crate::transcode::TranscodeManager,
+    store: &std::sync::Arc<dyn plurx_core::store::Store>,
+    file: &MediaFile,
+    tools: std::sync::Arc<ToolSet>,
+) -> Result<DvTitleStats, String> {
     use plurx_core::store::{
         background_jobs::{ClaimJob, EnqueueJob, EnqueueOutcome, JobKind, JobPayload, JobRequest},
         dv_title_jobs::TitleOutput,
@@ -76,9 +92,6 @@ pub(crate) async fn publish_title_for_control(
         .admit_dv_title()
         .await
         .ok_or("title probe admission unavailable")?;
-    let tools = ToolSet::capture()
-        .await?
-        .ok_or("title scanner unavailable")?;
     let scanner = tools.scanner_digest();
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let mut demand = store

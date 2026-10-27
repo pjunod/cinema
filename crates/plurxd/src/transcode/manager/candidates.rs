@@ -3761,7 +3761,8 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             .await
             .expect("snapshot")
             .expect("source");
-        assert_eq!(QUALITY_PLANNING_KEYS.len(), 24);
+        assert_eq!(QUALITY_PLANNING_KEYS.len(), 25);
+        assert!(QUALITY_PLANNING_KEYS.contains(&keys::DV_DISPLAY_TARGET));
         assert!(
             QUALITY_PLANNING_KEYS.len() <= 32,
             "one settings statement binds at most 32 keys"

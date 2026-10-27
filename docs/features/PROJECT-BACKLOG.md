@@ -40,6 +40,16 @@ not an instruction to build in that order.
 
 ## 2. Concrete work to build or investigate
 
+| Project | State | Canonical ledger |
+|---|---|---|
+| Optional public HTTPS | Implementation built and locally verified through H1–H4 and current-main integration. Required exact-head qualification gates, receipts, review and merge outcome are tracked on [promotion PR #1134](http://forge.lan:3000/noirr/plurx/pulls/1134). Physical trust/playback acceptance remains open; HTTPS stays in Developer. Sol 6.1 builds and parent manages/reviews. | [HTTPS build](../server/HTTPS-BUILD.md) |
+
+HTTPS workflow amendment (2026-10-15): independently reviewed consolidation
+makes H1–H4 checkpoints of one cohesive task PR #1118, superseding separate
+checkpoint PRs before any H2–H4 landing. Combined-source local checks, a fresh
+final-head Effort gate, final adversarial code review and full exact-tree main
+promotion qualification remain required; this is not built-code approval.
+
 ### 2.1 Video, playback and client projects
 
 | ID / project | State and remaining scope | Next step and canonical plan |

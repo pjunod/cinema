@@ -1,6 +1,41 @@
 version = 1
 enforce_after = "e8a910f"
 
+# HTTPS qualification: current Apple unit contracts, with execution recorded separately.
+[[fixes]]
+id = "https.apple-unit-current-contracts"
+commits = ["88ab6e0d03e90e7e323495b9f3795160f20e68ff"]
+source = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+source_anchor = 'XCTAssertEqual(pick(processed(grade: "sdr")), 720)'
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testProcessedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+
+[[fixes]]
+id = "https.apple-developer-graduation-fixture"
+commits = []
+supplements = "https.apple-unit-current-contracts"
+source = "clients/apple/Tests/LiveTvTests.swift"
+source_anchor = 'XCTAssertTrue(card.contains("graduates from Developer after those checks pass"), title)'
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+[[fixes]]
+id = "https.apple-native-adaptive-sidebar-fixture"
+commits = []
+supplements = "https.apple-unit-current-contracts"
+source = "clients/apple/Tests/MeridianTests.swift"
+source_anchor = "let nativeSidebarHidden = nativeTabs.sidebar.isHidden"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
+
+# HTTPS qualification: retain one native accessibility snapshot per guide move.
+[[fixes]]
+id = "https.apple-guide-native-snapshot-poll"
+commits = ["13bb201e8f5672150867522d70ccac7db330593c"]
+source = "clients/apple/UITests/TVLiveNavigationTests.swift"
+source_anchor = 'guard let snapshot = try? target.snapshot() else { return false }'
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive"
 # PR #1286: native input authority must not invalidate the shell and all controls.
 [[fixes]]
 id = "apple.tv-focus-observation-isolation"
@@ -6430,7 +6465,7 @@ commits = ["8d6008c903bf644c223c7abcbd7c766d64e736fa"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "val processed = candidates.filter { it.processed_hdr10 && it.hasValidIdentity &&"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
-test_anchor = "processedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+test_anchor = "processedDvPreferenceRequiresQualifiedProductionAndCodecForBothGrades"
 
 [[fixes]]
 id = "apple.processed-hdr10-qualified-auto"
@@ -7220,6 +7255,73 @@ source_anchor = "case autoMissingCostCatalogRefresh"
 test = "clients/apple/Tests/AttemptScopesTests.swift"
 test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
 
+
+# Qualification commit 30a94b90 includes one Android behavior correction and
+# Apple registry/source-contract/callback-fixture corrections. The supplemental
+# fixture rows name the actual changed observation/holding code, not a new
+# production reporter behavior.
+[[fixes]]
+id = "https.qualification-client-corrections"
+commits = ["30a94b90456924f556be7903f7f92c960b9f8c34"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "// Keep the shared transport options contiguous in their contract"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "transportOptionsFollowTheSharedContractOrder"
+
+[[fixes]]
+id = "https.apple-developer-registry-matches-shipped-diagnostics"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Sources/LiveTvSettingsView.swift"
+source_anchor = '"Remote diagnostics · advisory readiness",'
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+[[fixes]]
+id = "https.apple-auto-tick-source-contract-retains-parameterized-function"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func tickDisplayAwareAuto(pressureOnly: Bool = false)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testArmedBoundaryReplanEndsWithStallRecoveryAndSkipsBlockedCandidates"
+
+[[fixes]]
+id = "https.apple-terminal-fixture-holds-actual-captured-response"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = 'XCTAssertEqual(controlExchanges.firstResponse(withReadiness: "ready"), 1)'
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard"
+
+# The duplicate helper blocked both full Swift unit-test targets; compile and
+# queued callback execution receipts are separate from these source anchors.
+[[fixes]]
+id = "https.apple-subtitle-callback-helper-defined-once"
+commits = ["ae0348cdc171d3448a7dbcd15dd7ad1e34931ef2"]
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = "func takeAll() -> [@MainActor @Sendable () -> Void] {"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testQueuedSubtitleFailureIsDeliveredOnlyToItsCurrentIntent"
+
+[[fixes]]
+id = "https.apple-subtitle-failure-fixture-holds-complete-readiness-batch"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = "let queuedBatch = callbacks.takeAll()"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testQueuedSubtitleFailureIsDeliveredOnlyToItsCurrentIntent"
+
+[[fixes]]
+id = "https.apple-subtitle-ready-fixture-holds-complete-readiness-batch"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = "let queuedBatch = callbacks.takeAll()"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testQueuedSubtitleReadinessIsDeliveredForItsCurrentSession"
 [[fixes]]
 id = "apple.tv-full-guide-lazy-viewport"
 commits = ["18577692c30128a49541d290d43463c2a7eeb11c"]

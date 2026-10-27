@@ -551,10 +551,12 @@ pub use rate_control::*;
 /// Phoenix iGPU (VA-API decode, Vulkan compose, hevc_vaapi Main10): one 4K
 /// FEL compose + encode sustains 1.4-1.7x real time. Concurrent graphs are not
 /// measured, so a second play takes its ordinary route with the reason.
+#[cfg(target_os = "linux")]
 pub(crate) const LIVE_RECONSTRUCTION_SLOTS: usize = 1;
 
 /// What the reconstructed 8.1 route does for one title on one node.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg(target_os = "linux")]
 pub(crate) enum FelGate {
     Serve,
     /// The play keeps the plain conversion, with this reason.
@@ -565,12 +567,14 @@ pub(crate) enum FelGate {
 }
 
 /// How often one node may ask for the same title's FEL qualification.
+#[cfg(target_os = "linux")]
 pub(crate) const FEL_REQUALIFICATION_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(6 * 60 * 60);
 
 /// How long a live reconstructed 8.1 waits for a FEL qualification it has
 /// asked to yield the worker's reconstruction slot. The qualification kills
 /// and reaps its window children on the signal; that is well under a second.
+#[cfg(target_os = "linux")]
 pub(crate) const QUALIFICATION_SLOT_YIELD: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The reconstruction slot as a FEL qualification holds it: preemptible. A

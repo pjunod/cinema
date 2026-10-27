@@ -602,7 +602,7 @@ impl TranscodeManager {
     ) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
         let (stream, frames) = self.held_mastering_probe_for_policy(file, stored).await?;
         crate::vodencode::dv_runtime::held_source_mastering(
-            crate::vodencode::dv_runtime::source_mastering_metadata(&stream),
+            crate::decode_facts::mastering::source_mastering_metadata(&stream),
             frames.as_deref(),
             None,
         )
@@ -617,7 +617,7 @@ impl TranscodeManager {
     ) -> Result<Option<u32>, String> {
         let (stream, frames) = self.held_mastering_probe_for_policy(file, stored).await?;
         crate::vodencode::dv_runtime::held_source_minimum(
-            crate::vodencode::dv_runtime::source_mastering_minimum(&stream),
+            crate::decode_facts::mastering::source_mastering_minimum(&stream),
             frames.as_deref(),
             None,
         )

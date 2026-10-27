@@ -1024,6 +1024,8 @@
   .subsrc-rides li{margin:2px 0;overflow-wrap:anywhere}
   .chk{display:inline-flex;align-items:center;gap:8px;font-size:13.5px;color:var(--text);margin:0;padding:8px 0}
   .chk input[type=checkbox]{width:18px;min-width:0;height:18px;margin:0;accent-color:var(--accent)}
+  #settings-https{overflow-wrap:anywhere}
+  #settings-https textarea{box-sizing:border-box;width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text);font:inherit;resize:vertical}
   @media(min-width:900px){ .adminwrap td.rowactions{white-space:nowrap} .adminwrap td.rowactions>.row{flex-wrap:nowrap!important} }
   .setgrid2>.card{margin:0;min-width:0}
   .pill.ok{color:var(--good);border-color:color-mix(in srgb,var(--good) 55%,var(--line))}
