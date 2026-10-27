@@ -233,3 +233,19 @@ The raw failed hook log and source-equality receipt are retained privately.
 
 This is a documentation/diagnostic checkpoint, not a passing Rust or release
 qualification. The failure is retained, not repaired by changing playback code.
+
+## Next checkpoint tests quantization policy at the retained rate budget
+
+The next fixed control uses target115/max125/buffer136 with the existing
+HDRopt0/chroma−9 policy. It disables RDOQ and its coupled `psy-rdoq` term,
+retaining `psy-rd=2` and all other requested settings. At level2, RDOQ can
+discard encoder prediction-residual coefficient groups; these are not
+identifiable FEL residual coefficients. This is a coupled quantization-policy
+test, not proof that one particular branch caused the measured error.
+
+The [committed protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-quantization-20261026.json)
+fixes both existing calibration windows, all four models, masks, rate screen
+and strict quality criterion before new outputs. The tool requires a separate
+output root. Results remain pending; no live or packaging change is proposed.
+A later two-pass comparison, if needed, will retain the same115/125 budget:
+125/125 would also change the encoder's internal rate-control regime.
