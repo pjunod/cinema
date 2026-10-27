@@ -12,19 +12,47 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+## Main and effort source binding — 2026-10-26
+
+Current source inspected: `2dc07bd0995f07f26281c72de80117f2c9afa9f0`,
+the resolved union of effort `647e4bb68` and Main `94da6eb93`. The accepted
+source/Unknown disclosures remain descriptive abstractions; this audit
+rechecks their actual retained guards and does not transfer a theorem to the
+merged source.
+
+Main adds FEL title-verdict/requalification methods, separate playback-handoff
+schema and queries, a handoff-pruning task and a detached startup decoder probe.
+Those application paths remain outside the selected `library_scan` and
+`metadata_refresh` model. The selected library admission never installs the
+FEL extension: its claimed resources remain `(0, threads)`, so the updated
+idle predicate is equivalent for that lane. A title requalification preflight
+read and its later `bind` are separate Store calls; they do not establish an
+atomic exclusion of a job queued between them.
+
+The source pins below bind the actual resolved files, including nested worker
+correspondence and the wait-map source-anchor companion. Models, configurations,
+validators and test inventory are unchanged. Only offline mapping checks are
+run for this audit; earlier model or behavioral results retain their original
+source and scope. No new native closure, progress or qualification is claimed.
+
 ## FEL qualification review fixes — scoped refresh on 2026-10-26 (2)
 
 The PR #1290 review delta changes two mapped files. In
 [dv_title_jobs.rs](../../crates/plurx-core/src/store/dv_title_jobs.rs) the
 re-qualification request now selects the title demand only when no
-`dv_title_scan` job for that file is queued, running or cancelling, so it can
-no longer rotate the demand under (and cancel) an in-flight attempt; it still
-calls the existing reviewed `bind` command otherwise. The verdict counts walk
+`dv_title_scan` job for that file is queued, running or cancelling in that
+preflight read. It then awaits a separate call to the existing reviewed `bind`
+command. A job can be queued or claimed between that read and `bind`; the bind
+command and trigger do not recheck active jobs. The added example covers an
+already-running job, not this interleaving. Atomic exclusion of a newly
+in-flight title attempt remains unresolved and outside this model. The verdict
+counts walk
 `dv_title_jobs_demand` (one row per DV title, `file_id` UNIQUE) and read each
 `files` row by key instead of scanning the catalogue; a read. The store
 contract gains one assertion block in the FEL example (the no-op while a job
-runs). No queue, waiter, fence, lease, reservation or publication transition
-changed and every anchor string is unchanged. **Model decision:** unchanged;
+runs). No selected-library queue, waiter, fence, lease, reservation or publication
+transition changed and every anchor string is unchanged. **Model decision:**
+unchanged;
 `DurableJobs.tla` still describes the selected library-worker scope, which
 these title-extension reads and the guarded `bind` call do not enter. Hashes
 rebound; no new qualification is claimed.

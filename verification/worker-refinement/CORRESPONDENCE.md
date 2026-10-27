@@ -29,6 +29,62 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Main and effort source binding — 2026-10-26
+
+Current source inspected: `2dc07bd0995f07f26281c72de80117f2c9afa9f0`,
+the resolved union of effort `647e4bb68` and Main `94da6eb93`. The accepted
+source/Unknown disclosures remain descriptive abstractions; this audit
+rechecks their actual retained guards and does not transfer a theorem to the
+merged source.
+
+Main adds FEL title-verdict/requalification methods, separate playback-handoff
+schema and queries, a handoff-pruning task and a detached startup decoder probe.
+Those application paths remain outside the selected `library_scan` and
+`metadata_refresh` model. The selected library admission never installs the
+FEL extension: its claimed resources remain `(0, threads)`, so the updated
+idle predicate is equivalent for that lane. A title requalification preflight
+read and its later `bind` are separate Store calls; they do not establish an
+atomic exclusion of a job queued between them.
+
+The source pins below bind the actual resolved files, including nested worker
+correspondence and the wait-map source-anchor companion. Models, configurations,
+validators and test inventory are unchanged. Only offline mapping checks are
+run for this audit; earlier model or behavioral results retain their original
+source and scope. No new native closure, progress or qualification is claimed.
+
+## Adaptive effort source binding and cleanup limits — 2026-10-26
+
+Source inspected: `22630e27a7bb96fb99a6bd43bdb157fcca563569`.
+All mapped source inputs are inherited unchanged from task base `647e4bb68`;
+this refresh repairs their drift in the continuing adaptive effort.
+
+The original heartbeat is now registered before entry and joined through its
+retained handle. Its mutex stays held across the original join, then releases
+before retirement. Retirement holds the token-state mutex across Store waits
+and retains the same token on ambiguous/error outcomes. Failed heartbeat join
+skips retirement. These facts differ from unconditional modeled `FinishRetire`
+claim/token removal: correspondence is restricted to acknowledged or resolved
+normal outcomes, with failed join and ambiguous settlement explicitly excluded.
+
+Worker correspondence records those guards and weakens the affected claims to
+explicit descriptive abstractions. It establishes no lock-order theorem,
+deadlock freedom, fairness, successful cleanup or native closure. Driver event
+schedules do not directly observe positive heartbeat join. Local admission
+`Arc` destruction can leave original worker/result aliases alive; last-owner
+release and persistent Unknown remain outside the modeled local-drop fact.
+
+Other inspected changes preserve selected library authority, claim/renewal and
+publication SQL predicates. Store additions concern adaptive/settings APIs;
+scanner/process changes retain original admissions; lockfile additions leave
+pinned Tokio/Hiqlite versions unchanged. The formal-publication fixture change
+relocates an import. Anchors and whole-file bindings are refreshed after that
+source review, rather than treating new hashes as semantic proof.
+
+Models, configurations, test inventory and validators are unchanged. Historical
+qualification retains its original source and scope. This source-binding audit
+runs no model or behavioral tests and grants no Fable approval. Complete
+adaptive-candidate review/fixes still precede behavioral qualification.
+
 ## Selected source binding refresh — 2026-10-22
 
 The 16 `background_jobs.rs` bindings were compared from their exact prior
