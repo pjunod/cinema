@@ -1,6 +1,6 @@
 # Linux player — Dolby Vision on Linux through plurx
 
-**Status:** M1–M5 merged (#1295); the owner's first real playback on the ROG (2026-10-26) found four faults, fixed in package 0.3.1 and its server change; M6 (acceptance on the ROG) next · **Owner:** Claude
+**Status:** open: M6 (acceptance on the ROG) next. M1–M5 are in (#1295), and package 0.3.1 with its server change fixes the four faults the owner's first real playback found (2026-10-26) · **Owner:** Claude
 (Opus 5.5, Linux Dolby Vision session) · **Written:** 2026-10-25
 
 Companion to [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) (the browser half) and
