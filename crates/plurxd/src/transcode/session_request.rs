@@ -1022,6 +1022,19 @@ pub enum SessionKind {
         /// writes. Only ever true when preserving is — there is nothing to
         /// rewrite in a stream the filter removed.
         convert_dolby_vision: bool,
+        /// The reviewed plan hands this client a dual-layer source (Profile 4
+        /// or 7) as copied — its configuration record, RPUs and enhancement
+        /// layer intact — because the client's own capabilities enumerate
+        /// that profile (plurx Player composes the enhancement layer itself).
+        ///
+        /// Without it a copy narrows every dual-layer source it does not
+        /// convert to its base layer (`served_copy_options`). Set only by
+        /// `apply_plan_review`, from the server's derivation, never from a
+        /// wire field; only ever true beside `preserve_dolby_vision` and
+        /// without `convert_dolby_vision`. Omitted when false, so a recipe
+        /// written by this build stays readable by one without the field.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dual_layer_as_copied: bool,
     },
 }
 
@@ -1058,6 +1071,8 @@ pub(super) struct CopySessionOptions {
     /// Rewrite Profile 7 RPUs to Profile 8.1 in the fragments the copy pipe
     /// writes. Only ever set beside `preserve_dolby_vision`.
     pub(super) convert_dolby_vision: bool,
+    /// See `SessionKind::Copy::dual_layer_as_copied`.
+    pub(super) dual_layer_as_copied: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1077,6 +1092,7 @@ impl SessionKind {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
             Self::Transcode { .. } => None,
         }
@@ -1160,15 +1176,20 @@ impl SessionRequest {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                dual_layer_as_copied,
             } => {
                 // A converted stream is different bytes, so it must not answer
-                // a replay for an unconverted one. Appended rather than folded
-                // into the existing digits so an unconverted request
-                // fingerprints to exactly the string it always did — a replay
-                // in flight across a deploy still recovers its session.
+                // a replay for an unconverted one, and a dual-layer source
+                // handed over as copied is different bytes from its base
+                // layer. Appended rather than folded into the existing digits
+                // so an unconverted request fingerprints to exactly the string
+                // it always did — a replay in flight across a deploy still
+                // recovers its session.
                 let base = format!("c{}d{}", u8::from(aac), u8::from(preserve_dolby_vision));
                 if convert_dolby_vision {
                     format!("{base}+p81")
+                } else if dual_layer_as_copied {
+                    format!("{base}+dl")
                 } else {
                     base
                 }
@@ -1525,6 +1546,7 @@ mod prepared_candidate_tests {
                 aac: false,
                 preserve_dolby_vision: native,
                 convert_dolby_vision: !native,
+                dual_layer_as_copied: false,
             };
             assert!(invalid.dv_processing_route().is_err());
             invalid.dv_processing_destination = None;

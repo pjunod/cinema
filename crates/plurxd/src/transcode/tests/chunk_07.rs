@@ -1781,6 +1781,7 @@ use crate::queue_fixture::QueueFixture;
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                 },
                 "paul",
                 "pb-copy",
@@ -3053,6 +3054,7 @@ use crate::queue_fixture::QueueFixture;
                 Some(1),
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: true,
                     preserve_dolby_vision: false,
                 },
@@ -3151,6 +3153,7 @@ use crate::queue_fixture::QueueFixture;
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                 },

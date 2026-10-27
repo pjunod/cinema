@@ -34,6 +34,7 @@ quality_catalog: None,
                 aac: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: convert,
+                dual_layer_as_copied: false,
             },
             automatic: false,
             subtitle_burn: None,
@@ -59,6 +60,19 @@ quality_catalog: None,
             plain.intent_fingerprint("paul")
         );
         assert!(!plain.intent_fingerprint("paul").contains("p81"));
+
+        // A dual-layer source handed over as copied is different bytes from
+        // the base layer an unflagged copy narrows it to.
+        let mut dual_layer = copy(false);
+        if let SessionKind::Copy { dual_layer_as_copied, .. } = &mut dual_layer.kind {
+            *dual_layer_as_copied = true;
+        }
+        assert!(dual_layer.intent_fingerprint("paul").contains("c0d1+dl"));
+        assert_ne!(
+            plain.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }),
+            dual_layer.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 })
+        );
+        assert!(!plain.intent_fingerprint("paul").contains("+dl"));
     }
 
     #[test]

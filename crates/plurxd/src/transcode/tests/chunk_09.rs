@@ -2910,6 +2910,7 @@ fn compatibility_finite_budget_contains_native_audio_and_video_peak_and_changes_
         aac: true,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     request.finite_bitrate_limit_bps = Some(750_000);
     assert!(super::manager_create::validate_finite_copy_rate(&request, &file).is_err());

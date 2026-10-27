@@ -1919,6 +1919,7 @@ impl TranscodeManager {
                 asked_preserve = asked.preserve_dolby_vision,
                 asked_convert = asked.convert_dolby_vision,
                 dual_layer = plurx_core::playback::dolby_vision_is_dual_layer(&file),
+                dual_layer_as_copied = asked.dual_layer_as_copied,
                 served_preserve = preserve,
                 "this copy cannot convert Dolby Vision, so it serves the source's base \
                  layer rather than a stream that names a profile it did not produce"
@@ -1968,6 +1969,7 @@ impl TranscodeManager {
                 aac: options.transcode_audio,
                 preserve_dolby_vision: options.preserve_dolby_vision,
                 convert_dolby_vision: options.convert_dolby_vision,
+                dual_layer_as_copied: options.dual_layer_as_copied,
             },
             "audio_index": audio_index,
             "audio": audio_delivery,
@@ -2060,6 +2062,7 @@ impl TranscodeManager {
             aac: served.transcode_audio,
             preserve_dolby_vision: served.preserve_dolby_vision,
             convert_dolby_vision: served.convert_dolby_vision,
+            dual_layer_as_copied: served.dual_layer_as_copied,
         };
         // Frozen with the rest of the presentation: this session's master
         // keeps one shape whatever the setting does later.
@@ -2547,6 +2550,7 @@ impl TranscodeManager {
                 aac: served.transcode_audio,
                 preserve_dolby_vision: served.preserve_dolby_vision,
                 convert_dolby_vision: served.convert_dolby_vision,
+                dual_layer_as_copied: served.dual_layer_as_copied,
             },
             encoder: "copy",
             // A copy session encodes nothing; its dynamic range is the

@@ -10040,6 +10040,7 @@ fn converting_copy() -> crate::transcode::SessionRequest {
         aac: false,
         preserve_dolby_vision: true,
         convert_dolby_vision: true,
+        dual_layer_as_copied: false,
     })
 }
 
@@ -10282,6 +10283,7 @@ fn a_rung_a_copy_cannot_serve_becomes_a_transcode() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     });
     let plain_candidate = candidate_request(
         &plain,
@@ -10665,6 +10667,7 @@ fn a_grade_intent_comes_off_the_request() {
                 aac: true,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: true,
+                dual_layer_as_copied: false,
             },
             false,
         )),
@@ -10683,6 +10686,7 @@ fn a_grade_intent_comes_off_the_request() {
                 aac: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             false,
         )),
@@ -10691,6 +10695,7 @@ fn a_grade_intent_comes_off_the_request() {
                 aac: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: true,
+                dual_layer_as_copied: false,
             },
             false,
         )),

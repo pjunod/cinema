@@ -1114,6 +1114,7 @@ impl TranscodeManager {
                     aac: copy_audio,
                     preserve_dolby_vision: copy_dv,
                     convert_dolby_vision: copy_conversion,
+                    dual_layer_as_copied: false,
                 },
                 CandidateRoute::Encode => SessionKind::Transcode {
                     height: i64::from(candidate.target_height),
@@ -1455,6 +1456,7 @@ impl TranscodeManager {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
             SessionKind::Transcode { .. } => None,
         };
@@ -1532,6 +1534,7 @@ impl TranscodeManager {
                     aac,
                     preserve_dolby_vision,
                     convert_dolby_vision,
+                    ..
                 } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
                 SessionKind::Transcode { .. } => None,
             };
@@ -2578,6 +2581,7 @@ mod snapshot_catalog_regression {
             aac: false,
             preserve_dolby_vision: true,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         assert!(manager.processed_hint_key(&snapshot, &query).is_none());
         assert!(matches!(
@@ -3657,6 +3661,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             aac: false,
             preserve_dolby_vision: true,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         assert!(matches!(
             TranscodeManager::vod_dv_processing_from_snapshot(&hdr, &request)
@@ -3667,6 +3672,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             aac: false,
             preserve_dolby_vision: true,
             convert_dolby_vision: true,
+            dual_layer_as_copied: false,
         };
         store
             .put_setting(keys::DV_FEL_REENCODE, "1")
@@ -4305,6 +4311,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         let unavailable = serde_json::to_value(unavailable_catalog).expect("bounded descriptor");
         let error = manager
@@ -4634,6 +4641,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         for contradictory in [
             wrong_offset,
@@ -4941,6 +4949,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
                     aac: true,
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                 },
             ] {
                 request.presentation = presentation;

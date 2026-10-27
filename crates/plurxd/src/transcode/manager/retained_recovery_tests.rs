@@ -285,6 +285,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds: 0.0,
         audio_index: None,

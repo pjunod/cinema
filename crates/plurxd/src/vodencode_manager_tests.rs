@@ -168,6 +168,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         kind: if profile81 {
             SessionKind::Copy {
                 convert_dolby_vision: true,
+                dual_layer_as_copied: false,
                 aac: true,
                 preserve_dolby_vision: false,
             }
@@ -2266,6 +2267,7 @@ async fn service_vod_only_refuses_unindexed_copy_before_rolling_allocation() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     request.vod_only = true;
     let error = create_local_vod(&manager, &request, "test")
@@ -2346,6 +2348,7 @@ async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() 
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     let pause = manager
         .test_hooks()
@@ -2542,6 +2545,7 @@ async fn a_candidate_rolling_fallback_refuses_a_source_replaced_after_the_vod_at
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     request.candidate_context = Some(Box::new(context));
     let pause = manager
@@ -2711,6 +2715,7 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     ordinary.candidate_context = Some(Box::new(ordinary_context));
     // The processed trial qualification would hand on: a Transcode HDR10
@@ -2892,6 +2897,7 @@ async fn finite_vod_bitrate_ceiling_is_shared_by_native_recipe_and_worker_identi
         aac: true,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     copy.finite_bitrate_limit_bps = Some(750_000);
     let mut copy_file = file.clone();

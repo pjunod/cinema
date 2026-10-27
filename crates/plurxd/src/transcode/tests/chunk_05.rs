@@ -1216,6 +1216,7 @@
         manager.record_retained_headroom(1 << 50);
         let options = CopySessionOptions {
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
             transcode_audio: false,
             preserve_dolby_vision: false,
         };
@@ -1278,6 +1279,7 @@
         manager.record_retained_headroom(1 << 50);
         let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "refused-proof").await.expect("ordinary copy");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("owner");
         let production = session.rolling_provenance.as_ref().expect("actual source binding");
@@ -1380,7 +1382,7 @@
         // No sampler runs in a test: publish the headroom it would have.
         manager.record_retained_headroom(1 << 50);
         let options = CopySessionOptions { convert_dolby_vision: false,
-            transcode_audio: false, preserve_dolby_vision: false };
+            transcode_audio: false, preserve_dolby_vision: false, dual_layer_as_copied: false };
         let first = manager.start_copy(file_id, 0.0, None, options, "owner", "integrity-first")
             .await.expect("real producer");
         let incumbent = manager.sessions.lock().await.get(&first.session_id).cloned().expect("first");
@@ -1447,6 +1449,7 @@
         manager.record_retained_headroom(1 << 50);
         let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "busy-proof").await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
         let collection = session.rolling_collection.as_ref().expect("optional reservation");
@@ -1506,6 +1509,7 @@
         manager.record_retained_headroom(1 << 50);
         let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "d3").await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
         (manager, session, info, file_id, media, work)
@@ -1664,6 +1668,7 @@
         manager.store.put_setting(keys::HLS_READRATE, "1").await.expect("paced");
         let second_info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "owner", "d3-second").await.expect("second start");
         let second = manager.sessions.lock().await.get(&second_info.session_id).cloned()
             .expect("second");
@@ -1897,6 +1902,7 @@
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                 },
@@ -2099,6 +2105,7 @@
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                 },

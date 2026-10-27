@@ -2389,6 +2389,7 @@ fn prepared_audio_inherits_the_snapshot_and_refuses_channel_changes() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     preserve_prepared_audio(&predecessor, &mut candidate, &source)
         .expect("copy video retains encoded audio");
@@ -2419,6 +2420,7 @@ fn prepared_full_encode_successor_of_a_copied_stereo_track_stages() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     predecessor.presentation = crate::transcode::Presentation::Vod;
     predecessor.audio_index = Some(0);
