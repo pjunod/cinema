@@ -278,8 +278,13 @@ async fn standalone_index_yields_to_foreground_and_removes_partial_stage() {
         .position(|arg| arg == "-i")
         .expect("an input");
     pass.args.insert(input, "-re".to_owned());
+    let admission = transcode
+        .admit_fragment()
+        .await
+        .expect("the pass's heavy-lane admission");
     let mut build = Box::pin(crate::state::local_index_until_foreground(
         &transcode,
+        &admission,
         build_with_args(
             &fixture.file,
             pass,
@@ -316,6 +321,7 @@ async fn standalone_index_yields_to_foreground_and_removes_partial_stage() {
     drop(waiting);
     let retry = crate::state::local_index_until_foreground(
         &transcode,
+        &admission,
         build_with_args(
             &fixture.file,
             pass_over(&fixture.source, &fixture.file, None),

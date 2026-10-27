@@ -277,7 +277,7 @@ pub(crate) async fn vod_index_coverage(
                 refusals.push(outcome.clone());
             }
         }
-        let refusal = index_refusal_summary(&refusals);
+        let refusal = index_refusal_summary(&refusals, crate::state::clock_ms());
         let status = if present == range.len() {
             "indexed"
         } else if present > 0 {
@@ -305,20 +305,22 @@ pub(crate) async fn vod_index_coverage(
 /// another merely truncated is a file an operator has to act on, and the badge
 /// that says "pending" for it is the one that never resolves. `None` when the
 /// indexer has not tried yet, which is the honest reading of `pending`.
-pub(super) fn index_refusal_summary(
+pub(crate) fn index_refusal_summary(
     outcomes: &[plurx_core::segplan::FragmentIndexOutcome],
+    now_ms: i64,
 ) -> Option<(bool, String)> {
     use plurx_core::segplan::IndexRefusal;
     let worst = outcomes
         .iter()
-        .max_by_key(|outcome| (u8::from(outcome.is_terminal()), outcome.updated_at_ms))?;
+        .max_by_key(|outcome| (u8::from(outcome.is_terminal(now_ms)), outcome.updated_at_ms))?;
     // From the typed decision when there is one, for the same reason the badge
     // is: the legacy refusal carries `Truncated` for every terminal code that
     // is not literally `Unsupported`, so a file that reached its attempt limit
     // was described as "incomplete after N fragments on attempt 5" — the
     // sentence for work still in progress, under a badge that now correctly
     // says it is not.
-    let detail = match (worst.typed_code, worst.is_terminal()) {
+    let terminal = worst.is_terminal(now_ms);
+    let detail = match (worst.typed_code, terminal) {
         (Some(code), true) => match worst.terminal_reason.as_deref() {
             Some(terminal) => format!("{}: {} ({terminal})", code.as_str(), worst.reason),
             None => format!("{}: {}", code.as_str(), worst.reason),
@@ -339,7 +341,7 @@ pub(super) fn index_refusal_summary(
             ),
         },
     };
-    Some((worst.is_terminal(), detail))
+    Some((terminal, detail))
 }
 
 /// Compare paths the way a listener reads numbered parts: Part 2 precedes
@@ -1623,7 +1625,9 @@ mod tests {
         assert_eq!(body["files"][0]["vod_index_status"], "refused");
         assert_eq!(
             body["files"][0]["vod_index_refusal"],
-            super::index_refusal_summary(&[outcome]).expect("summary").1
+            super::index_refusal_summary(&[outcome], 0)
+                .expect("summary")
+                .1
         );
     }
 
@@ -2155,13 +2159,20 @@ mod tests {
     /// something, and it was the one that looked like a wait.
     #[test]
     fn the_index_badge_says_whether_waiting_will_help() {
-        assert_eq!(index_refusal_summary(&[]), None, "not tried is not refused");
+        assert_eq!(
+            index_refusal_summary(&[], 0),
+            None,
+            "not tried is not refused"
+        );
 
-        let (terminal, detail) = index_refusal_summary(&[outcome(
-            IndexRefusal::Truncated { rows: 412 },
-            "budget expired",
-            10,
-        )])
+        let (terminal, detail) = index_refusal_summary(
+            &[outcome(
+                IndexRefusal::Truncated { rows: 412 },
+                "budget expired",
+                10,
+            )],
+            0,
+        )
         .expect("a truncated attempt is worth reporting");
         assert!(!terminal);
         assert_eq!(
@@ -2172,24 +2183,30 @@ mod tests {
         // A terminal refusal outranks a retryable one even when it is older:
         // a file with one pipeline that can never be indexed is a file
         // somebody has to look at, and "pending" for it never resolves.
-        let (terminal, detail) = index_refusal_summary(&[
-            outcome(IndexRefusal::Truncated { rows: 1 }, "budget expired", 99),
-            outcome(
-                IndexRefusal::Unsupported,
-                "the moov lost its video track",
-                10,
-            ),
-        ])
+        let (terminal, detail) = index_refusal_summary(
+            &[
+                outcome(IndexRefusal::Truncated { rows: 1 }, "budget expired", 99),
+                outcome(
+                    IndexRefusal::Unsupported,
+                    "the moov lost its video track",
+                    10,
+                ),
+            ],
+            0,
+        )
         .expect("a refusal is worth reporting");
         assert!(terminal);
         assert_eq!(detail, "cannot be indexed: the moov lost its video track");
 
         // Singular reads as English, because this string is shown to a person.
-        let (_, one) = index_refusal_summary(&[outcome(
-            IndexRefusal::Truncated { rows: 1 },
-            "budget expired",
-            10,
-        )])
+        let (_, one) = index_refusal_summary(
+            &[outcome(
+                IndexRefusal::Truncated { rows: 1 },
+                "budget expired",
+                10,
+            )],
+            0,
+        )
         .expect("one row is still a finding");
         assert!(one.contains("after 1 fragment on"), "{one}");
     }

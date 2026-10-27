@@ -5960,9 +5960,24 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
                 retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
             };
         }
+        // What the local indexer found can carry source paths and ffmpeg's
+        // stderr. The WARN above keeps it; the client is told what the code
+        // means and nothing of the indexer's log.
+        let reason = match code {
+            "vod_index_unavailable" => {
+                "this title has no fragment index on this node and will not get one \
+                 until its source changes; play it through another engine"
+            }
+            _ => reason,
+        };
         let (status, code) = match code {
             "vod_disabled" => (StatusCode::SERVICE_UNAVAILABLE, "vod_disabled"),
             "vod_index_pending" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
+            // Every shipped client answers `vod_index_pending` by falling
+            // back (a progressive remux on the web), and none knows the
+            // terminal code, so a VOD-only start keeps the public code with
+            // the generic message above.
+            "vod_index_unavailable" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
             "hevc_configuration_unverified" => {
                 (StatusCode::CONFLICT, "hevc_configuration_unverified")
             }

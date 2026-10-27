@@ -13,6 +13,7 @@ mod background_jobs;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
+pub(crate) use browse::index_refusal_summary;
 pub(crate) mod chapter_thumbs;
 mod cluster;
 pub(crate) mod cluster_operations;

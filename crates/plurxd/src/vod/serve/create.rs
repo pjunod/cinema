@@ -836,12 +836,20 @@ impl VodServe {
                     None => "this process has no cluster index identity".to_owned(),
                 }
             } else {
-                // The node-local pass builds this index; a viewer asking for
-                // it is the strongest reason to build it next.
-                self.shared.demand_local_index(file.id);
-                unavailable_reason.unwrap_or_else(|| {
-                    "shared preparation is disabled; no matching local index exists".to_owned()
-                })
+                // The node-local pass builds this index; what its last
+                // attempt found decides the refusal (`local_index_refusal`).
+                let (code, reason) = self
+                    .shared
+                    .local_index_refusal(
+                        file.id,
+                        &identity,
+                        unavailable_reason.unwrap_or_else(|| {
+                            "shared preparation is disabled; no matching local index exists"
+                                .to_owned()
+                        }),
+                    )
+                    .await;
+                return Err(crate::transcode::vod_refusal_error(code, reason));
             };
             // This is a prerequisite refusal, not a claim that a worker is
             // active. The durable analysis row and reason carry its actual
@@ -2760,12 +2768,20 @@ impl VodServe {
                     None => "this process has no cluster index identity".to_owned(),
                 }
             } else {
-                // The node-local pass builds this index; a viewer asking for
-                // it is the strongest reason to build it next.
-                self.shared.demand_local_index(file.id);
-                unavailable_reason.unwrap_or_else(|| {
-                    "shared preparation is disabled; no matching local index exists".to_owned()
-                })
+                // The node-local pass builds this index; what its last
+                // attempt found decides the refusal (`local_index_refusal`).
+                let (code, reason) = self
+                    .shared
+                    .local_index_refusal(
+                        file.id,
+                        &identity,
+                        unavailable_reason.unwrap_or_else(|| {
+                            "shared preparation is disabled; no matching local index exists"
+                                .to_owned()
+                        }),
+                    )
+                    .await;
+                return Err(crate::transcode::vod_refusal_error(code, reason));
             };
             // This is a prerequisite refusal, not a claim that a worker is
             // active. The durable analysis row and reason carry its actual

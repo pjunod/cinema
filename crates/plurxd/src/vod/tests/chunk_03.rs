@@ -5443,6 +5443,99 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         assert!(serve.local_index_demand().is_empty());
     }
 
+    /// Lab5 (2026-10-26): 83 titles whose index attempts had run out
+    /// answered `vod_index_pending` for good -- a refusal promising work the
+    /// indexer would never do -- and the start log said only "pending". An
+    /// outcome the indexer will not retry now refuses as unavailable, with
+    /// what the attempt found, and asks for no examination.
+    #[tokio::test]
+    async fn a_start_whose_index_attempts_are_exhausted_is_refused_as_unavailable() {
+        let base = crate::test_tempdir().expect("base");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), Arc::clone(&store));
+        let mut file = media_file_at(testfixtures::source("h264"), 12_000);
+        file.video_codec = Some("h264".into());
+        file.video_profile = Some("High".into());
+        let identity = crate::fragindex::identity_for(
+            &file,
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+        );
+        store
+            .record_fragment_index_outcome(
+                file.id,
+                &identity,
+                plurx_core::segplan::IndexRefusal::Unsupported,
+                "the video stream has no keyframes",
+            )
+            .await
+            .expect("record the exhausted outcome");
+        let error = serve
+            .try_create(
+                &request("exhausted", 0.0),
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "exhausted".into(),
+            )
+            .await
+            .expect_err("a file the indexer gave up on cannot start VOD");
+        let (code, reason) = crate::transcode::vod_refusal(&error).expect("a typed refusal");
+        assert_eq!(code, "vod_index_unavailable");
+        assert!(reason.contains("no keyframes"), "{reason}");
+        assert!(
+            serve.local_index_demand().is_empty(),
+            "a terminal outcome is not demand for another examination"
+        );
+        assert!(matches!(
+            crate::transcode::vod_refusal_class(code),
+            Some(crate::transcode::VodRefusalClass::LiveRecovery(
+                crate::transcode::LiveRecoveryReason::IndexUnavailable
+            ))
+        ));
+
+        // A typed outcome the indexer will not retry -- here its attempts ran
+        // out -- refuses the same way.
+        let typed = store
+            .record_fragment_index_typed_outcome(
+                file.id,
+                &identity,
+                plurx_core::content_analysis::IndexFailureCode::IndexProbeTimeout,
+                false,
+                "probe timed out",
+                0,
+                &plurx_core::content_analysis::IndexDiagnostic::default(),
+                1,
+            )
+            .await
+            .expect("record the attempt-limited outcome");
+        assert_eq!(typed.terminal_reason.as_deref(), Some("attempt_limit"));
+        let error = serve
+            .try_create(
+                &request("attempt-limited", 0.0),
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "attempt-limited".into(),
+            )
+            .await
+            .expect_err("an attempt-limited title cannot start VOD");
+        assert_eq!(
+            crate::transcode::vod_refusal(&error)
+                .expect("a typed refusal")
+                .0,
+            "vod_index_unavailable"
+        );
+        assert!(serve.local_index_demand().is_empty());
+    }
+
     /// Review of N2: a probe that could not answer once (its 5 s bound under
     /// load, a failed reopen) left its entry refused for the rendition's
     /// life. A refusal whose landing time was never measured is not kept.
