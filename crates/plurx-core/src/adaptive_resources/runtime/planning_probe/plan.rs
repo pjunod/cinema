@@ -29,11 +29,21 @@ pub(in crate::adaptive_resources::runtime) struct PlanningTaskPlan {
     pub(in crate::adaptive_resources::runtime) engine_plan: v2::FixedPlanningEngineTaskV1,
 }
 
+// All callers in this module precede the single initialized preparation
+// below. Its returned errors must retain their own post-reservation meaning.
 fn invalid() -> OperationError {
-    OperationError::State
+    OperationError::BeforeReservation(super::super::operations::PreReservationRefusal::Admission(
+        crate::adaptive_resources::AdmissionRefusal::InvalidBundle,
+    ))
+}
+fn before_reservation_error(error: OperationError) -> OperationError {
+    match error {
+        OperationError::BeforeReservation(_) => error,
+        _ => invalid(),
+    }
 }
 fn id() -> Result<v2::Id, OperationError> {
-    v2::Id::new(Uuid::new_v4()).map_err(Into::into)
+    v2::Id::new(Uuid::new_v4()).map_err(|_| invalid())
 }
 fn add(values: impl IntoIterator<Item = u64>) -> Result<u64, OperationError> {
     values.into_iter().try_fold(0u64, |sum, value| {
@@ -109,7 +119,7 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
         filesystem_domain: v2::FilesystemDomain {
             platform: v2::FilesystemPlatform::Linux,
             domain_id: id()?,
-            daemon_owner_id: v2::Id::new(runtime.owner.owner_id)?,
+            daemon_owner_id: v2::Id::new(runtime.owner.owner_id).map_err(|_| invalid())?,
             os_boot: runtime.owner.os_boot.clone(),
             mount_namespace: v2::NativeValue::Known {
                 value: mount_namespace,
@@ -282,7 +292,11 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
         u64::try_from(request.source.path.capacity()).map_err(|_| invalid())?,
         u64::try_from(request.source.media_file_id.capacity()).map_err(|_| invalid())?,
     ])?;
-    let epoch = runtime.ledger.snapshot()?.limit_epoch;
+    let epoch = runtime
+        .ledger
+        .snapshot()
+        .map_err(|_| invalid())?
+        .limit_epoch;
     let roles = [
         FamilyRoleDemand {
             role: FamilyRole::Video,
@@ -385,7 +399,7 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
         },
         request,
     );
-    let family = runtime.new_family()?;
+    let family = runtime.new_family().map_err(before_reservation_error)?;
     match runtime.prepare_typed_families_claiming_initialized(
         &[FamilyDemand {
             identity: family,
@@ -434,3 +448,7 @@ pub(in crate::adaptive_resources::runtime) fn original_preparation_for_test(
         .expect("original constructor selector")
         .clone()
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "plan/tests.rs"]
+mod tests;

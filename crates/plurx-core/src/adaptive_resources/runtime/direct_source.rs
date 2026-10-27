@@ -58,8 +58,21 @@ const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
 fn invalid() -> DirectSourceError {
     DirectSourceError(OperationError::State)
 }
+// Used only while constructing the direct plan, before either branch calls
+// prepare_typed_families. Never use this classifier on a preparation result.
+fn invalid_before_reservation() -> DirectSourceError {
+    DirectSourceError(OperationError::BeforeReservation(
+        super::operations::PreReservationRefusal::Admission(AdmissionRefusal::InvalidBundle),
+    ))
+}
+fn before_reservation_error(error: OperationError) -> DirectSourceError {
+    match error {
+        OperationError::BeforeReservation(_) => DirectSourceError(error),
+        _ => invalid_before_reservation(),
+    }
+}
 fn id() -> Result<v2::Id, DirectSourceError> {
-    v2::Id::new(Uuid::new_v4()).map_err(|error| DirectSourceError(error.into()))
+    v2::Id::new(Uuid::new_v4()).map_err(|_| invalid_before_reservation())
 }
 
 #[derive(Debug)]
@@ -432,7 +445,7 @@ impl NodeResourceRuntime {
             outstanding_chunks,
             application_owner_bytes,
         } = request;
-        let path_text = path.to_str().ok_or_else(invalid)?;
+        let path_text = path.to_str().ok_or_else(invalid_before_reservation)?;
         let minimum_memory = DirectSourceRequest::minimum_memory_bytes(
             path_text.len(),
             media_file_id.len(),
@@ -441,12 +454,12 @@ impl NodeResourceRuntime {
             outstanding_chunks,
             application_owner_bytes,
         )
-        .ok_or_else(invalid)?;
+        .ok_or_else(invalid_before_reservation)?;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-            .ok_or_else(invalid)?;
+            .ok_or_else(invalid_before_reservation)?;
         if Instant::now() >= deadline
             || !path.is_absolute()
             || media_file_id.capacity() > MAX_MEDIA_ID_BYTES
@@ -454,7 +467,7 @@ impl NodeResourceRuntime {
             || !matches!(&self.owner.os_boot,
                 BootIdentity::Known { provider, .. } if provider.len() <= MAX_BOOT_PROVIDER_BYTES)
         {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let (provenance, expectation) = match binding {
             DirectSourceBinding::Sharing(assignment) => {
@@ -462,7 +475,7 @@ impl NodeResourceRuntime {
                     || assignment.binding().is_released()
                     || assignment.validate_observation_freshness(now_ms).is_err()
                 {
-                    return Err(invalid());
+                    return Err(invalid_before_reservation());
                 }
                 (
                     v2::DirectSourceProvenanceV1::Sharing {
@@ -479,7 +492,7 @@ impl NodeResourceRuntime {
                     || file_id <= 0
                     || media_file_id != file_id.to_string()
                 {
-                    return Err(invalid());
+                    return Err(invalid_before_reservation());
                 }
                 (
                     v2::DirectSourceProvenanceV1::Local {
@@ -499,12 +512,12 @@ impl NodeResourceRuntime {
                     || file_id <= 0
                     || media_file_id != file_id.to_string()
                 {
-                    return Err(invalid());
+                    return Err(invalid_before_reservation());
                 }
                 (
                     v2::DirectSourceProvenanceV1::FileGrant {
                         verified_grant_id: v2::Id::new(verified_grant_id)
-                            .map_err(|error| DirectSourceError(error.into()))?,
+                            .map_err(|_| invalid_before_reservation())?,
                         user_id,
                         file_id,
                     },
@@ -514,9 +527,9 @@ impl NodeResourceRuntime {
         };
         let partition =
             FiniteResponseBuffer::required_partition_bytes(chunk_bytes, outstanding_chunks)
-                .ok_or_else(invalid)?;
+                .ok_or_else(invalid_before_reservation)?;
         let Metric::Known(resources) = demand.resources else {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         };
         if demand.trial
             || resources.handles < 1
@@ -527,18 +540,18 @@ impl NodeResourceRuntime {
             || resources.tuner_slots != 0
             || resources.scratch_bytes != 0
         {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         // All variable input lengths and the demanded complete component fit
         // before these direct-plan strings are cloned or native source entry
         // can occur. Caller-owned input allocations predate this request.
         let path_string = path_text.to_owned();
         if path_string.capacity() > MAX_PATH_BYTES {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let retained_path = PathBuf::from(path_string.clone());
         if retained_path.capacity() > MAX_PATH_BYTES {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         // The request's possibly over-capacity PathBuf is not retained by the
         // prepaid SourceCell; only this measured canonical copy is installed.
@@ -551,19 +564,22 @@ impl NodeResourceRuntime {
             outstanding_chunks,
             application_owner_bytes,
         )
-        .ok_or_else(invalid)?;
+        .ok_or_else(invalid_before_reservation)?;
         if resources.peak_memory_bytes < actual_component {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
-        let budget = ResponseBudget::new(usize::try_from(partition).map_err(|_| invalid())?)?;
-        let namespace = std::fs::metadata("/proc/self/ns/mnt")
-            .map_err(|error| DirectSourceError(OperationError::Physical(error)))?;
+        let budget = ResponseBudget::new(
+            usize::try_from(partition).map_err(|_| invalid_before_reservation())?,
+        )
+        .map_err(|_| invalid_before_reservation())?;
+        let namespace =
+            std::fs::metadata("/proc/self/ns/mnt").map_err(|_| invalid_before_reservation())?;
         use std::os::unix::fs::MetadataExt;
         let domain = v2::FilesystemDomain {
             platform: v2::FilesystemPlatform::Linux,
             domain_id: id()?,
             daemon_owner_id: v2::Id::new(self.owner.owner_id)
-                .map_err(|error| DirectSourceError(error.into()))?,
+                .map_err(|_| invalid_before_reservation())?,
             os_boot: self.owner.os_boot.clone(),
             mount_namespace: v2::NativeValue::Known {
                 value: namespace.ino(),
@@ -571,12 +587,15 @@ impl NodeResourceRuntime {
         };
         let assignment_identity = provenance
             .binding()
-            .map_err(|error| DirectSourceError(error.into()))?;
+            .map_err(|_| invalid_before_reservation())?;
         if assignment_identity.len() != 64 || assignment_identity.capacity() > 64 {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let member = id()?;
-        let mut domains = self.direct_read_domain.lock().map_err(|_| invalid())?;
+        let mut domains = self
+            .direct_read_domain
+            .lock()
+            .map_err(|_| invalid_before_reservation())?;
         let existing = domains.as_ref().cloned();
         if existing.as_ref().is_some_and(|domain| {
             domain.state.lock().map_or(true, |state| {
@@ -588,18 +607,18 @@ impl NodeResourceRuntime {
                         .any(|entry| *entry == Some(member.uuid()))
             })
         }) {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let snapshot = self
             .ledger
             .snapshot()
-            .map_err(|error| DirectSourceError(error.into()))?;
+            .map_err(|_| invalid_before_reservation())?;
         if snapshot.limit_epoch != demand.limit_epoch {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
         let domain_cpu = match snapshot.capacity.cpu_ns_per_second {
             Metric::Known(value) if value > 0 => value.min(1_000_000_000),
-            _ => return Err(invalid()),
+            _ => return Err(invalid_before_reservation()),
         };
         let new_domain_ids = if existing.is_none() {
             Some((id()?, id()?))
@@ -633,7 +652,7 @@ impl NodeResourceRuntime {
         };
         let boot_capacity = match &source.filesystem_domain.os_boot {
             BootIdentity::Known { provider, .. } => provider.capacity(),
-            BootIdentity::Unknown { .. } => return Err(invalid()),
+            BootIdentity::Unknown { .. } => return Err(invalid_before_reservation()),
         };
         if source.media_file_id.capacity() > MAX_MEDIA_ID_BYTES
             || source.absolute_path.capacity() > MAX_PATH_BYTES
@@ -641,9 +660,9 @@ impl NodeResourceRuntime {
             || provenance_capacity > 64
             || boot_capacity > MAX_BOOT_PROVIDER_BYTES
         {
-            return Err(invalid());
+            return Err(invalid_before_reservation());
         }
-        let source_family = self.new_family()?;
+        let source_family = self.new_family().map_err(before_reservation_error)?;
         let source_roles = [FamilyRoleDemand {
             role: FamilyRole::Companion,
             demand,
@@ -679,9 +698,11 @@ impl NodeResourceRuntime {
             };
             (preparation, 0, domain)
         } else {
-            let (domain_member, domain_id) = new_domain_ids.ok_or_else(invalid)?;
-            let domain_family = self.new_family()?;
-            let domain_memory = DirectReadDomain::minimum_memory_bytes().ok_or_else(invalid)?;
+            let (domain_member, domain_id) =
+                new_domain_ids.ok_or_else(invalid_before_reservation)?;
+            let domain_family = self.new_family().map_err(before_reservation_error)?;
+            let domain_memory =
+                DirectReadDomain::minimum_memory_bytes().ok_or_else(invalid_before_reservation)?;
             let domain_roles = [FamilyRoleDemand {
                 role: FamilyRole::Companion,
                 demand: WorkloadDemand {

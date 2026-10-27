@@ -342,3 +342,282 @@ pub(in crate::transcode) async fn source_native_cancelled_collector_cleanup_fixt
         ResourceVector::default()
     );
 }
+
+async fn original_source_request(
+    runtime: &Arc<NodeResourceRuntime>,
+    manager: &crate::transcode::TranscodeManager,
+    prepared: &crate::http::hls::PreparedSourcePlayback,
+) -> (
+    Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+    plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeRequest,
+) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    runtime
+        .refresh_admission_capacity(deadline)
+        .await
+        .expect("actual capacity observation");
+    let snapshot = Arc::new(
+        manager
+            .store
+            .playback_planning_snapshot(
+                prepared.file().id,
+                &crate::transcode::QUALITY_PLANNING_KEYS,
+            )
+            .await
+            .expect("actual atomic snapshot")
+            .expect("actual Source snapshot"),
+    );
+    let bytes =
+        crate::transcode::adaptive_attempts::planning_snapshot_requested_heap_bytes(&snapshot)
+            .expect("snapshot capacities")
+            .checked_add(crate::transcode::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)
+            .expect("application allowance");
+    let request = crate::transcode::adaptive_attempts::fixed_planning_request(
+        manager,
+        &snapshot,
+        prepared.fingerprint(),
+        bytes,
+    )
+    .expect("actual original P request");
+    (snapshot, request)
+}
+
+/// Expiry and an actually aged original membership observation refuse before
+/// reservation. Waiting here changes no observation or physical owner.
+pub(in crate::transcode) async fn source_before_reservation_refusal_fixture(
+    runtime: Arc<NodeResourceRuntime>,
+    manager: &crate::transcode::TranscodeManager,
+    prepared: &crate::http::hls::PreparedSourcePlayback,
+    assignment: &SourceDispatchAssignment,
+) {
+    use plurx_core::adaptive_resources::runtime::direct_source::{
+        DirectSourceBinding, DirectSourceRequest,
+    };
+    use plurx_core::adaptive_resources::WorkloadDemand;
+    use plurx_core::process::observation::Metric;
+    let (snapshot, request) = original_source_request(&runtime, manager, prepared).await;
+    let before = runtime.accounting().expect("baseline").used;
+    let failure = start_source_fixed_probe(
+        &runtime,
+        request,
+        snapshot,
+        assignment.clone(),
+        Instant::now(),
+    )
+    .err()
+    .expect("actual expired constructor");
+    assert!(
+        failure.into_parts().1.is_none(),
+        "exact pre-P tag returns no held operation"
+    );
+    assert_eq!(runtime.accounting().expect("no expired P/M").used, before);
+    // The current production observation maximum age is five seconds. Wait
+    // for THIS retained observation to become genuinely stale, then verify
+    // the original validator before asking the direct constructor to reject it.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let now_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("clock range");
+    assert!(
+        assignment.validate_observation_freshness(now_ms).is_err(),
+        "original observation must actually be stale"
+    );
+    let file = prepared.file();
+    let media_file_id = assignment.binding().file_id().as_str().to_owned();
+    let memory = DirectSourceRequest::minimum_memory_bytes(
+        file.path.as_os_str().len(),
+        media_file_id.len(),
+        1,
+        4096,
+        1,
+        0,
+    )
+    .expect("actual direct requested layout");
+    let request = DirectSourceRequest {
+        binding: DirectSourceBinding::Sharing(assignment.clone()),
+        path: file.path.clone(),
+        media_file_id,
+        scanner_size: file.size,
+        scanner_mtime: file.mtime,
+        demand: WorkloadDemand {
+            resources: Metric::Known(ResourceVector {
+                peak_memory_bytes: memory,
+                handles: 1,
+                ..ResourceVector::default()
+            }),
+            limit_epoch: runtime.accounting().expect("same actual epoch").limit_epoch,
+            trial: false,
+        },
+        max_bodies: 1,
+        chunk_bytes: 4096,
+        outstanding_chunks: 1,
+        application_owner_bytes: 0,
+    };
+    let error = runtime
+        .prepare_direct_source(request, Instant::now() + Duration::from_secs(30))
+        .err()
+        .expect("actual stale observation refusal");
+    assert!(error.definitely_before_reservation());
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("no direct R/read-domain reservation")
+            .used,
+        before
+    );
+    let counts = runtime
+        .planning_ownership_diagnostics()
+        .expect("original inventory");
+    assert_eq!(counts.native_roles_held, 0);
+    assert_eq!(counts.metadata_owners, 0);
+}
+
+/// A real one-shot application lease refusal retains its original P selector;
+/// dropping a borrowed settlement waiter cannot replace or refund that owner.
+pub(in crate::transcode) async fn source_application_lease_refusal_cleanup_fixture(
+    runtime: Arc<NodeResourceRuntime>,
+    manager: &crate::transcode::TranscodeManager,
+    prepared: &crate::http::hls::PreparedSourcePlayback,
+    assignment: &SourceDispatchAssignment,
+) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (snapshot, mut request) = original_source_request(&runtime, manager, prepared).await;
+    let recipe_binding = request.recipe_source_binding.clone();
+    request.application_metadata_bytes = request
+        .application_metadata_bytes
+        .checked_add(
+            assignment
+                .requested_heap_bytes()
+                .expect("original assignment capacities"),
+        )
+        .and_then(|value| value.checked_add(recipe_binding.capacity()))
+        .expect("original application layout");
+    let requested = request.application_metadata_bytes;
+    let owner = runtime
+        .prepare_fixed_planning_probe(request, deadline)
+        .expect("ONE original P/M");
+    let charged = runtime.accounting().expect("original P/M charge").used;
+    let application = owner
+        .take_application_lease(requested)
+        .expect("consume actual original one-shot application partition");
+    // Reuse the production application boundary; its second lease attempt is
+    // rejected by the actual original state, not a boolean or injected error.
+    let failure = retain_source_fixed_application(
+        &runtime,
+        owner,
+        snapshot,
+        assignment.clone(),
+        recipe_binding,
+        requested,
+    )
+    .err()
+    .expect("actual application already-taken refusal");
+    let (_, operation) = failure.into_parts();
+    let operation = operation.expect("same original P must remain selected");
+    let SourceProbeState::PlanningUncertain(state) = &operation.state else {
+        panic!("held original state")
+    };
+    let work_slot = state
+        .work
+        .as_ref()
+        .expect("Some original owner has resumable cleanup");
+    let mut original = work_slot.lock().await;
+    assert!(original.owner.is_some());
+    let counts = runtime
+        .planning_ownership_diagnostics()
+        .expect("ONE original P/M");
+    assert_eq!(counts.native_roles_held, 1);
+    assert_eq!(counts.metadata_owners, 1);
+    // Invoke the exact synchronous production transfer, while keeping its
+    // actual mutex as a deterministic delay before native retirement awaits.
+    // This creates no native receipt, task, preparation or replacement owner.
+    original
+        .select_cleanup()
+        .expect("select SAME original cleanup");
+    assert!(original.owner.is_none());
+    assert!(original.cleanup.is_some());
+    let original_slot = std::ptr::from_ref(&original.cleanup) as usize;
+    let mut waiting = Box::pin(operation.settle());
+    std::future::poll_fn(|cx| {
+        assert!(
+            waiting.as_mut().poll(cx).is_pending(),
+            "actual original lock delays settlement"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(waiting);
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("no refund after cancellation")
+            .used,
+        charged
+    );
+    assert_eq!(
+        std::ptr::from_ref(&original.cleanup) as usize,
+        original_slot
+    );
+    assert!(original.cleanup.is_some());
+    drop(original);
+    assert!(tokio::time::timeout_at(deadline.into(), operation.settle())
+        .await
+        .expect("FAILURE watchdog: original no-task cleanup hung")
+        .matches(assignment));
+    {
+        let work = work_slot.lock().await;
+        assert!(work.owner.is_none(), "same owner moved into cleanup");
+        assert!(work.cleanup.is_some());
+        assert!(work.native_closed);
+    }
+    let counts = runtime
+        .planning_ownership_diagnostics()
+        .expect("original native cleanup inventory");
+    assert_eq!(counts.native_roles_held, 0);
+    assert_eq!(
+        counts.metadata_owners, 1,
+        "actual application alias still holds M"
+    );
+    let metadata = runtime.accounting().expect("P closed/M held").used;
+    assert_ne!(metadata, charged);
+    assert_ne!(metadata, ResourceVector::default());
+    assert!(tokio::time::timeout_at(deadline.into(), operation.settle())
+        .await
+        .expect("FAILURE watchdog: same cleanup replay hung")
+        .matches(assignment));
+    assert_eq!(
+        runtime.accounting().expect("no duplicate refund").used,
+        metadata
+    );
+    drop(operation);
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("M held by actual application")
+            .used,
+        metadata
+    );
+    drop(application);
+    tokio::time::timeout_at(deadline.into(), async {
+        loop {
+            runtime.maintain_planning_cleanup(deadline).await;
+            if runtime
+                .planning_ownership_diagnostics()
+                .is_some_and(|counts| counts.metadata_owners == 0)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("FAILURE watchdog: final original M cleanup hung");
+    assert_eq!(
+        runtime.accounting().expect("actual final accounting").used,
+        ResourceVector::default()
+    );
+}

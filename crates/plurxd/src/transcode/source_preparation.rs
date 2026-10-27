@@ -488,6 +488,22 @@ struct FixedSourceWork {
     native_closed: bool,
 }
 #[cfg(target_os = "linux")]
+impl FixedSourceWork {
+    fn select_cleanup(&mut self) -> Result<(), &'static str> {
+        // Failed startup discards only its private report alias. Keep the
+        // original application alias through Source SQL close when one exists.
+        drop(self.report.take());
+        if self.cleanup.is_none() {
+            let original = self
+                .owner
+                .take()
+                .ok_or("Source original cleanup selector is absent")?;
+            self.cleanup = Some(original.into_cleanup());
+        }
+        Ok(())
+    }
+}
+#[cfg(target_os = "linux")]
 struct FixedSourceState {
     runtime: Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
     work: tokio::sync::Mutex<FixedSourceWork>,
@@ -502,10 +518,11 @@ struct FixedSourceState {
 #[cfg(target_os = "linux")]
 struct UncertainSourcePlanning {
     reason: String,
-    // If an owner was returned before application retention failed, preserve
-    // that SAME selector. Drop requests cleanup only after rich fields above.
-    _original:
-        Option<plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner>,
+    runtime: Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
+    // Some means the constructor returned this SAME original P selector.
+    // Keep its cleanup transition installed across cancelled settlement waits.
+    // None provides no selector and cannot authorize Source SQL release.
+    work: Option<tokio::sync::Mutex<FixedSourceWork>>,
 }
 #[cfg(target_os = "linux")]
 pub(crate) struct SourceFixedStartFailure {
@@ -535,6 +552,7 @@ impl SourceFixedStartFailure {
     }
     fn held(
         reason: String,
+        runtime: &Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
         assignment: SourceDispatchAssignment,
         original: Option<
             plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner,
@@ -545,7 +563,15 @@ impl SourceFixedStartFailure {
             cancel: tokio_util::sync::CancellationToken::new(),
             state: SourceProbeState::PlanningUncertain(UncertainSourcePlanning {
                 reason: reason.clone(),
-                _original: original,
+                runtime: Arc::clone(runtime),
+                work: original.map(|owner| {
+                    tokio::sync::Mutex::new(FixedSourceWork {
+                        owner: Some(owner),
+                        cleanup: None,
+                        report: None,
+                        native_closed: false,
+                    })
+                }),
             }),
         };
         Self {
@@ -579,14 +605,14 @@ impl SourceProbeOperation {
         let state = match &self.state {
             SourceProbeState::Legacy(state) => state,
             #[cfg(target_os = "linux")]
-            SourceProbeState::PlanningUncertain(held) => {
+            SourceProbeState::PlanningUncertain(held) if held.work.is_none() => {
                 tracing::warn!(target: "plurxd::transcode", reason = %held.reason, "Source planning constructor uncertainty retains the original Source assignment");
-                // No returned selector/Err/status can authorize Source SQL
+                // Missing returned selector/Err/status cannot authorize SQL
                 // release. No native or NeverAcquired fact is reconstructed.
                 return std::future::pending::<SourceProbeSettlement>().await;
             }
             #[cfg(target_os = "linux")]
-            SourceProbeState::Fixed(_) => {
+            SourceProbeState::Fixed(_) | SourceProbeState::PlanningUncertain(_) => {
                 // Cancellation is not a close receipt. Keep the exact P
                 // selector and M while its original closer remains pending.
                 let mut warned = false;
@@ -738,33 +764,35 @@ impl SourceProbeOperation {
     /// retained native handles after a collector waiter was cancelled.
     #[cfg(target_os = "linux")]
     async fn retire_fixed_native(&self, deadline: Instant) -> Result<(), String> {
-        let SourceProbeState::Fixed(state) = &self.state else {
-            return Err("Source original fixed planning owner is absent".into());
+        let (runtime, work_slot) = match &self.state {
+            SourceProbeState::Fixed(state) => (&state.runtime, &state.work),
+            SourceProbeState::PlanningUncertain(state) => (
+                &state.runtime,
+                state
+                    .work
+                    .as_ref()
+                    .ok_or("Source original cleanup selector is absent")?,
+            ),
+            SourceProbeState::Legacy(_) => {
+                return Err("Source original fixed planning owner is absent".into());
+            }
         };
         {
-            let mut work = tokio::time::timeout_at(deadline.into(), state.work.lock())
+            let mut work = tokio::time::timeout_at(deadline.into(), work_slot.lock())
                 .await
                 .map_err(|_| "Source original planning cleanup deadline")?;
             if work.native_closed {
                 return Ok(());
             }
-            // An R/Encoding handoff is possible only after native_closed was
-            // set. Here startup failed: discard its private report alias, but
-            // retain the original application lease through Source SQL close.
-            drop(work.report.take());
-            if work.cleanup.is_none() {
-                let original = work
-                    .owner
-                    .take()
-                    .ok_or("Source original cleanup selector is absent")?;
-                work.cleanup = Some(original.into_cleanup());
-            }
+            // Install the exact original cleanup before the first await.
+            // Cancellation of this waiter cannot lose or replace its selector.
+            work.select_cleanup()?;
         }
         // Existing maintenance joins ONLY already-entered original tasks.
         // cleanup_requested blocks native entry for never-entered inputs;
         // no new job, task, descriptor, P or native proof is reconstructed.
-        state.runtime.maintain_planning_cleanup(deadline).await;
-        let mut work = tokio::time::timeout_at(deadline.into(), state.work.lock())
+        runtime.maintain_planning_cleanup(deadline).await;
+        let mut work = tokio::time::timeout_at(deadline.into(), work_slot.lock())
             .await
             .map_err(|_| "Source original planning cleanup deadline")?;
         work.cleanup
@@ -837,16 +865,42 @@ pub(crate) fn start_source_fixed_probe(
             return Err(if definite {
                 SourceFixedStartFailure { reason, held: None }
             } else {
-                SourceFixedStartFailure::held(reason, assignment, None)
+                SourceFixedStartFailure::held(reason, runtime, assignment, None)
             });
         }
     };
+    retain_source_fixed_application(
+        runtime,
+        owner,
+        snapshot,
+        assignment,
+        recipe_binding,
+        requested_bytes,
+    )
+}
+
+// This seam never acquires P: it consumes the one returned original owner.
+// Application refusal retains that owner in the resumable cleanup slot.
+#[cfg(target_os = "linux")]
+#[expect(
+    clippy::result_large_err,
+    reason = "Application refusal returns the same move-only P and Source assignment inline; a Box would allocate after application admission failed. SourceFixedStartFailure is measured in the pre-P coordinator projection."
+)]
+fn retain_source_fixed_application(
+    runtime: &Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
+    owner: plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner,
+    snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+    assignment: SourceDispatchAssignment,
+    recipe_binding: String,
+    requested_bytes: usize,
+) -> Result<SourceProbeOperation, SourceFixedStartFailure> {
     let application = match owner.take_application_lease(requested_bytes) {
         Ok(application) => application,
         Err(error) => {
             drop(snapshot);
             return Err(SourceFixedStartFailure::held(
                 format!("retaining Source original planning application: {error}"),
+                runtime,
                 assignment,
                 Some(owner),
             ));
@@ -1417,5 +1471,6 @@ mod dv_source_origin_tests {
 mod fixed_tests;
 #[cfg(all(test, target_os = "linux"))]
 pub(in crate::transcode) use fixed_tests::{
+    source_application_lease_refusal_cleanup_fixture, source_before_reservation_refusal_fixture,
     source_fixed_planning_fixture, source_native_cancelled_collector_cleanup_fixture,
 };

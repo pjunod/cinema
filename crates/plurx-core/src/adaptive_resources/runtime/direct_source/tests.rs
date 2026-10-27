@@ -376,3 +376,46 @@ fn restart_closes_only_positive_old_direct_domains_and_validates_close_history()
         );
     }
 }
+
+// These are negative constructor checks on the actual runtime and original
+// request. No absence receipt is manufactured from a missing returned owner.
+#[tokio::test]
+async fn expired_invalid_and_overflow_direct_requests_are_before_reservation() {
+    let root = tempfile::tempdir().expect("isolated runtime");
+    let runtime = actual_runtime(root.path());
+    let path = root.path().join("unopened.bin");
+    std::fs::write(&path, b"actual unopened source").expect("actual source");
+    let baseline = runtime.accounting().expect("before requests").used;
+    let expired = runtime.prepare_direct_source(local_request(path.clone(), 1, 1), Instant::now());
+    assert!(expired
+        .err()
+        .expect("expired request")
+        .definitely_before_reservation());
+    let mut invalid = local_request(path.clone(), 1, 1);
+    invalid.path = PathBuf::from("relative.bin");
+    assert!(runtime
+        .prepare_direct_source(invalid, deadline())
+        .err()
+        .expect("invalid path")
+        .definitely_before_reservation());
+    let mut overflow = local_request(path, 1, 1);
+    overflow.application_owner_bytes = usize::MAX;
+    assert!(runtime
+        .prepare_direct_source(overflow, deadline())
+        .err()
+        .expect("layout overflow")
+        .definitely_before_reservation());
+    assert_eq!(
+        runtime.accounting().expect("no R/domain charge").used,
+        baseline
+    );
+    assert!(runtime
+        .direct_read_domain
+        .lock()
+        .expect("original domain slot")
+        .is_none());
+    assert!(
+        !DirectSourceError(OperationError::State).definitely_before_reservation(),
+        "generic post-reservation state remains uncertain"
+    );
+}
