@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: plurx contributors <noreply@plurx.invalid>
 Date: Mon, 26 Oct 2026 12:00:00 +0000
-Subject: [PATCH 4/4] vulkan/context: start Wayland swapchains pass-through
+Subject: [PATCH 4/5] vulkan/context: start Wayland swapchains pass-through
 
 A Wayland surface can have only one wp_color_management_surface_v1. When
 mpv describes the surface itself (set_color() on waylandvk), it switches

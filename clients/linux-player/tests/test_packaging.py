@@ -100,6 +100,25 @@ class PrivateBuild(unittest.TestCase):
         self.assertEqual(len(rows), 1, rows)
         self.assertRegex(rows[0][1], r"^[0-9]{8}T[0-9]{6}Z$")
 
+    def test_every_container_shares_the_snapshot_apt_cache(self):
+        # A 503 from snapshot.ubuntu.com used to fail every build: each of
+        # the three containers fetched the same immutable indexes and
+        # packages again.
+        build = read("packaging/build-deb.sh")
+        self.assertIn('-v "$apt_cache:/apt-cache"', build)
+        self.assertIn("chown -R", build)
+        snapshot = read("packaging/apt-snapshot.sh")
+        self.assertIn('Dir::State::lists "/apt-cache/lists";', snapshot)
+        self.assertIn('Dir::Cache::archives "/apt-cache/archives";', snapshot)
+        # Reused only once fetched and verified in full for this timestamp.
+        self.assertIn("marker=/apt-cache/lists/.plurx-snapshot-$ts", snapshot)
+        self.assertLess(snapshot.index("apt-get -q -o APT::Update::Error-Mode=any update\n["), snapshot.index('touch "$marker"'))
+        self.assertIn('Acquire::Retries "10";', snapshot)
+        # A partial index must fail the run, never be marked complete.
+        self.assertEqual(snapshot.count("-o APT::Update::Error-Mode=any"), 2)
+        self.assertLess(snapshot.index('if [ -f "$marker" ]'), snapshot.index("apt-get -q -o APT::Update::Error-Mode=any"))
+        self.assertIn('flock -n 9', build)
+
     def test_package_version_names_the_pinned_versions(self):
         rows = pins()
         version = re.match(r"plurx-player \(([^)]+)\)", read("debian/changelog")).group(1)
@@ -286,6 +305,38 @@ class WaylandColourSurface(unittest.TestCase):
         self.assertIn("+    if (owns_wayland_color(sw))", hunk)
         self.assertIn("+        pl_swapchain_colorspace_hint(vk->swapchain, &(struct pl_color_space){0});", hunk)
         self.assertIn("@@ bool ra_vk_ctx_init(", text)
+
+
+class EnhancementLayerOverHls(unittest.TestCase):
+    """Profile 7's enhancement layer is split from streams demux_lavf reads."""
+
+    def test_the_split_reads_the_hvcc_that_demux_lavf_keeps(self):
+        # Every plurx stream comes through demux_lavf (HLS), which leaves the
+        # hvcC in lav_codecpar. Read from extradata alone, the length-prefixed
+        # samples were scanned as Annex B, no layer was found, and mpv
+        # buffered ~150 MB before showing the base layer alone.
+        text = read("packaging/patches/mpv/0002-demux-dovi_split-split-the-enhancement-layer-without.patch")
+        hunk = text.split("+static int hvcc_nal_length(const struct mp_codec_params *c)", 1)[1].split("+}", 1)[0]
+        self.assertIn("+    if ((!x || size <= 0) && c->lav_codecpar) {", hunk)
+        self.assertIn("c->lav_codecpar->extradata_size", hunk)
+        self.assertIn("x[0] != 1", hunk)
+
+
+class FilmTimelineOsc(unittest.TestCase):
+    """mpv's OSC draws the whole film for a live session (patch 0005)."""
+
+    def test_the_osc_reads_the_film_timeline_and_hands_back_outside_seeks(self):
+        series = read("packaging/patches/mpv/series")
+        patch = "0005-osc-draw-a-film-timeline-the-application-provides.patch"
+        self.assertIn(patch, series)
+        text = read(f"packaging/patches/mpv/{patch}")
+        self.assertIn("+++ b/player/lua/osc.lua", text)
+        self.assertIn('+mp.observe_property("user-data/osc/film", "native", function (_, value)', text)
+        self.assertIn('+        mp.commandv("script-message", "osc-film-seek", tostring(target))', text)
+        # The launcher sets exactly what the OSC reads and answers what it sends.
+        playback = read("plurx_player/playback.py")
+        self.assertIn('"user-data/osc/film"', playback)
+        self.assertIn('"osc-film-seek"', playback)
 
 
 class PatchSeries(unittest.TestCase):
