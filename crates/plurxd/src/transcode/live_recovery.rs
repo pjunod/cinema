@@ -147,6 +147,7 @@ pub(crate) const VOD_REFUSAL_CODES: &[(&str, VodRefusalClass)] = {
         ("vod_passive_capacity", Refuse),
         ("vod_passive_route_expired", Refuse),
         ("vod_output_budget_refused", Refuse),
+        ("vod_processed_contract_invalid", Refuse),
         ("vod_continuous_recipe_invalid", Refuse),
         ("vod_continuous_audio_invalid", Refuse),
         ("vod_family_invalid", Refuse),

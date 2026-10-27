@@ -545,6 +545,7 @@ async fn build(
     let (owned, layout) = materialised?;
     #[cfg(test)]
     tests::hooks::paused(runtime_cache).await;
+    require_font_links(&layout, &frozen.fonts)?;
 
     let command = |program: &Path| {
         let mut command = tokio::process::Command::new(program);
@@ -871,6 +872,22 @@ fn library_loads_match(root: &Path, live: &[PathBuf], trace: &str) -> Result<(),
     ))
 }
 
+/// Face listings may reuse original-path font metadata. The materialization
+/// contract independently requires every font entry to remain a link; regular
+/// configuration copies are a different role and remain valid.
+fn require_font_links(layout: &Layout, fonts: &[(PathBuf, String)]) -> Result<(), String> {
+    let expected: HashSet<&Path> = fonts.iter().map(|(path, _)| path.as_path()).collect();
+    for (entry, original) in &layout.entries {
+        if expected.contains(original.as_path()) && !entry.is_symlink() {
+            return Err(format!(
+                "the frozen font link for {} was replaced",
+                original.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 type Attested = (PathBuf, Vec<(PathBuf, String)>);
 
 fn attest(
@@ -881,6 +898,7 @@ fn attest(
     fonts: &[(PathBuf, String)],
     layout: Layout,
 ) -> Result<Attested, String> {
+    require_font_links(&layout, fonts)?;
     let version = crate::ffmpeg::engine_path_version;
     let mut objects = Vec::with_capacity(layout.entries.len() * 2);
     let mut parents = BTreeSet::new();

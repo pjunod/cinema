@@ -5,6 +5,18 @@ use std::sync::LazyLock;
 pub(crate) const SCHEMA: &str = include_str!("subtitle_managed_schema.sql");
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
 
+// The first statement of bootstrap's atomic legacy-probe/managed installation.
+// An exact old view and no extension objects must still be committed when the
+// transaction runs. A concurrent winner makes this SELECT fail before any DROP;
+// the caller accepts only a subsequently verified complete managed winner.
+#[cfg(feature = "hiqlite-store")]
+pub(super) const BOOTSTRAP_GUARD: &str = "SELECT CASE WHEN \
+    (SELECT count(*) FROM sqlite_master WHERE name IN \
+    ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed',\
+    'subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources'))=1 \
+    AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='background_job_required_resources' AND sql=$1) \
+    THEN 1 ELSE json('managed subtitle bootstrap layout changed') END";
+
 #[cfg(feature = "hiqlite-store")]
 pub(crate) fn statements() -> Vec<String> {
     SCHEMA
@@ -44,9 +56,20 @@ fn normalize(sql: &str) -> String {
 // SQLite normalizes IF NOT EXISTS and terminal semicolons when storing DDL.
 // Measure that normalization instead of inventing a second SQL parser.
 type SchemaShape = Vec<(String, String)>;
-static SHAPES: LazyLock<(SchemaShape, SchemaShape)> = LazyLock::new(|| {
+static SHAPES: LazyLock<(SchemaShape, SchemaShape, SchemaShape)> = LazyLock::new(|| {
     let conn = rusqlite::Connection::open_in_memory().expect("closed schema fixture");
     conn.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);").expect("closed stubs");
+    let resources = super::background_jobs_resources::SCHEMA
+        .split("-- next statement")
+        .find(|sql| {
+            sql.trim_start()
+                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
+        })
+        .expect("bootstrap resource view");
+    conn.execute_batch(resources).expect("bootstrap resources");
+    let bootstrap = rows(&conn).expect("bootstrap resource rows");
+    conn.execute_batch("DROP VIEW background_job_required_resources")
+        .expect("replace bootstrap resources");
     let old = super::background_jobs_probe::SCHEMA
         .split("CREATE VIEW IF NOT EXISTS background_job_required_resources")
         .nth(1)
@@ -57,8 +80,25 @@ static SHAPES: LazyLock<(SchemaShape, SchemaShape)> = LazyLock::new(|| {
     .expect("historical resources");
     let before = rows(&conn).expect("historical rows");
     conn.execute_batch(SCHEMA).expect("managed schema");
-    (before, rows(&conn).expect("managed rows"))
+    (before, rows(&conn).expect("managed rows"), bootstrap)
 });
+// Bootstrap also recognizes the exact pre-probe view it just installed. This
+// does not broaden the public extension version predicate: open/migrate must
+// still see either the canonical post-probe predecessor or the complete winner.
+#[cfg(feature = "hiqlite-store")]
+pub(super) fn bootstrap_version(shape: &[(String, String)]) -> Result<Option<i64>, StoreError> {
+    let canonical = |rows: &[(String, String)]| {
+        rows.iter()
+            .map(|(name, sql)| (name.clone(), normalize(sql)))
+            .collect::<Vec<_>>()
+    };
+    if canonical(shape) == canonical(&SHAPES.2) {
+        Ok(None)
+    } else {
+        version(shape)
+    }
+}
+
 pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreError> {
     let canonical = |rows: &[(String, String)]| {
         rows.iter()
@@ -80,6 +120,79 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
 mod tests {
     use super::*;
     use crate::store::SqliteStore;
+    #[test]
+    fn bootstrap_recognizes_only_exact_resources_probe_and_complete_managed_layouts() {
+        assert_eq!(
+            bootstrap_version(&SHAPES.0).expect("probe predecessor"),
+            None
+        );
+        assert_eq!(
+            bootstrap_version(&SHAPES.2).expect("resources predecessor"),
+            None
+        );
+        assert!(version(&SHAPES.2).is_err(), "ordinary open remains strict");
+        assert_eq!(
+            bootstrap_version(&SHAPES.1).expect("managed winner"),
+            Some(1)
+        );
+        let mut arbitrary = SHAPES.0.clone();
+        arbitrary[0].1 = "CREATE VIEW background_job_required_resources AS SELECT 1".into();
+        assert!(bootstrap_version(&arbitrary).is_err());
+        let mut partial = SHAPES.1.clone();
+        partial.retain(|(name, _)| name != "subtitle_model_receipts");
+        assert!(bootstrap_version(&partial).is_err());
+    }
+
+    #[test]
+    fn bootstrap_transaction_refuses_stale_legacy_observer_before_dropping_managed_view() {
+        fn install(conn: &mut rusqlite::Connection, observed: &str) -> rusqlite::Result<()> {
+            let txn = conn.transaction()?;
+            txn.query_row(BOOTSTRAP_GUARD, [observed], |row| row.get::<_, i64>(0))?;
+            txn.execute_batch(super::super::background_jobs_probe::SCHEMA)?;
+            txn.execute_batch(SCHEMA)?;
+            txn.commit()
+        }
+        let mut conn = rusqlite::Connection::open_in_memory().expect("bootstrap fixture");
+        SqliteStore::apply_migrations_for_test(&conn, 110).expect("legacy queue fixture");
+        let observed = rows(&conn).expect("observed predecessor")[0].1.clone();
+        let before = rows(&conn).expect("predecessor shape");
+        {
+            let txn = conn.transaction().expect("interrupted install");
+            txn.query_row(BOOTSTRAP_GUARD, [&observed], |row| row.get::<_, i64>(0))
+                .expect("unchanged legacy guard");
+            txn.execute_batch(super::super::background_jobs_probe::SCHEMA)
+                .expect("legacy replacement");
+            txn.execute_batch(SCHEMA).expect("staged managed install");
+            txn.rollback().expect("interrupted install rolls back");
+        }
+        assert_eq!(rows(&conn).expect("rolled back shape"), before);
+        install(&mut conn, &observed).expect("competing winner commits");
+        conn.execute(
+            "INSERT INTO subtitle_model_receipts VALUES('node','base',?1)",
+            [r#"{"proof":"retained"}"#],
+        )
+        .expect("populated receipt");
+        conn.execute(r#"INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms) VALUES('install','subtitle_model_operation',1,'{"node_id":"node","model_id":"base"}','install',0,'queued',0,1,1)"#, [])
+            .expect("populated queued installation");
+        let winner = rows(&conn).expect("complete winner shape");
+        assert!(
+            install(&mut conn, &observed).is_err(),
+            "stale snapshot cannot pass the first statement"
+        );
+        assert_eq!(rows(&conn).expect("winner shape retained"), winner);
+        assert_eq!(version(&winner).expect("strict winner"), Some(1));
+        let receipt: String = conn.query_row("SELECT receipt_json FROM subtitle_model_receipts WHERE node_id='node' AND model_id='base'", [], |row| row.get(0)).expect("receipt retained");
+        assert_eq!(receipt, r#"{"proof":"retained"}"#);
+        let queued: (String, i64) = conn
+            .query_row(
+                "SELECT state,revision FROM background_jobs WHERE id='install'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("queue retained");
+        assert_eq!(queued, ("queued".into(), 0));
+    }
+
     #[test]
     fn managed_extension_preserves_old_lineage_and_resource_rows_and_refuses_partial_shape() {
         let conn = rusqlite::Connection::open_in_memory().expect("schema contract fixture");

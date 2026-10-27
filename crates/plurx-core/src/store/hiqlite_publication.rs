@@ -693,6 +693,9 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 statement_params,
             ));
         }
+        // This set-copy can affect zero, one or many user/list pairs. The
+        // remaining mutations, guards and final acknowledgement are single-row.
+        let annotation_copy_index = statements.len();
         {
             // A person's watchlist and favorites follow a retired duplicate show
             // onto its survivor (the later add time wins), before the retired
@@ -851,11 +854,18 @@ impl FencedPublicationStore for HiqliteAuthStore {
             ack_params,
         ));
 
+        let mutation_count = statements.len();
         let result = self
             .atomic_publication(lease, replacement, statements)
             .await;
         match result {
-            Ok(counts) if counts.iter().all(|count| *count == 1) => {
+            Ok(counts)
+                if counts.len() == mutation_count
+                    && counts
+                        .iter()
+                        .enumerate()
+                        .all(|(index, count)| index == annotation_copy_index || *count == 1) =>
+            {
                 Ok(IdentityRepairOutcome::Applied)
             }
             Ok(_) if self.identity_repair_mapping_applied(plan).await? => {

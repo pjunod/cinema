@@ -158,14 +158,13 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
-    // Compare the configured root set, delete only admitted files and prune
-    // emptied items within the same authority boundary.
+    // Replace the provider scores and their fetch marker in one boundary.
     SqliteTransactionSite {
-        module: "media.rs",
-        method: "remove_files_outside_library_roots",
+        module: "annotations.rs",
+        method: "put_item_ratings",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
+        shape: TransactionShape::BatchWrite,
     },
     // Receiver and all grants revoke in the same boundary.
     SqliteTransactionSite {
@@ -467,6 +466,15 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
         module: "media.rs",
         method: "reconcile_library",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    // Configuration check, file removal and item pruning share one snapshot
+    // and commit, so changed roots cannot race a removal based on old roots.
+    SqliteTransactionSite {
+        module: "media.rs",
+        method: "remove_files_outside_library_roots",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -1160,6 +1168,7 @@ mod tests {
     use super::*;
 
     const SQLITE_MODULES: &[(&str, &str)] = &[
+        ("annotations.rs", include_str!("sqlite/annotations.rs")),
         ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
         ("cache.rs", include_str!("sqlite/cache.rs")),
         (
@@ -1419,8 +1428,10 @@ mod tests {
         // guarded transaction, each measured in sqlite/sharing.rs.
         // Cinema adds one paired receiver/grant revoke and four guarded
         // invitation admission/cleanup boundaries, registered above.
+        // Root removal adds one guarded delete/prune boundary, named once.
+        // v113 adds the atomic annotation rating replacement/fetch marker.
         // Playback handoff redemption adds one fixed claim/mint batch.
-        assert_eq!(methods.len(), 115);
+        assert_eq!(methods.len(), 116);
     }
 
     mod source_inventory {

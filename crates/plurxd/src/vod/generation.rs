@@ -1977,10 +1977,8 @@ impl RenditionSink {
         // Reserve before publication/dependency locks: making room can retire
         // a different rendition through the same locking protocol.
         let already_present = self
-            .rendition
-            .manifest
-            .lock()
-            .await
+            .publication_lock(self.rendition.manifest.lock())
+            .await?
             .state(entry)
             .is_some_and(|state| state.is_materialized());
         self.shared

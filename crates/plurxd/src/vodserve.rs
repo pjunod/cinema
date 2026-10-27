@@ -1287,6 +1287,14 @@ pub(crate) trait VodSharedHooks: std::any::Any + Send + Sync {
     fn before_finite_metadata_reservation(&self, _key: &str) -> crate::seam_hooks::HookFuture<'_> {
         Box::pin(crate::seam_hooks::HookReady)
     }
+    /// Production starts its ordinary driver. Custody controls can retain a
+    /// scoped worker claim without qualifying normal producer scheduling.
+    fn controlled_driver(
+        &self,
+        _encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
     fn private_cleanup_failure(&self, _phase: &str) -> bool {
         false
     }
@@ -1403,6 +1411,13 @@ pub(crate) struct VodSharedTestHooks {
 
 #[cfg(test)]
 impl VodSharedHooks for VodSharedTestHooks {
+    fn controlled_driver(
+        &self,
+        encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        driver::controlled_driver::spawn(encoding)
+    }
+
     fn private_cleanup_failure_for(&self, phase: &str, key: &str) -> bool {
         let failures = self.private_failures.lock().expect("private failures");
         failures.contains(phase) || failures.contains(&format!("{phase}:{key}"))

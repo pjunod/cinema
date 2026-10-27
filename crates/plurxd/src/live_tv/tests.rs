@@ -4957,6 +4957,8 @@ fn live_tv_software_hls_argument_baseline_is_stable() {
         "CUDA_VISIBLE_DEVICES",
         "NVIDIA_VISIBLE_DEVICES",
         "NVIDIA_DRIVER_CAPABILITIES",
+        "CUDA_CACHE_DISABLE",
+        "MESA_SHADER_CACHE_DISABLE",
     ];
     assert!(command
         .as_std()
@@ -4964,6 +4966,17 @@ fn live_tv_software_hls_argument_baseline_is_stable() {
         .all(|(name, _)| allowed_environment
             .iter()
             .any(|allowed| name == std::ffi::OsStr::new(allowed))));
+    for (key, value) in [
+        ("CUDA_CACHE_DISABLE", "1"),
+        ("MESA_SHADER_CACHE_DISABLE", "true"),
+    ] {
+        assert!(
+            command.as_std().get_envs().any(|(name, supplied)| {
+                name == std::ffi::OsStr::new(key) && supplied == Some(std::ffi::OsStr::new(value))
+            }),
+            "{key} must preserve the runtime cache contract"
+        );
+    }
     let actual = command
         .as_std()
         .get_args()

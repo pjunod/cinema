@@ -1506,7 +1506,7 @@ fn the_derivative_child_caches_in_the_runtime_cache_not_the_artwork_root() {
         .and_then(|(_, value)| value)
         .map(std::path::PathBuf::from)
         .expect("the child is given a cache home");
-    assert_eq!(cache_home, runtime_cache);
+    assert_eq!(cache_home, runtime_cache.join("gpu-cache"));
     assert_ne!(cache_home, artwork);
 }
 

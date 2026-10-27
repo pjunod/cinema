@@ -26,8 +26,9 @@ use tokio::task::JoinHandle;
 
 use super::topology::{resolve_build_sha, resolve_embedded_build_sha, unix_ms};
 use super::{
-    allocate_nodes, harness_executable, wait_for_protocol_pending, with_port_retry,
-    ClusterProcesses, NodeLaunch, NodeProcess, NodeSpec, Request, Response, API_SECRET,
+    allocate_nodes, harness_executable, harness_node_identity, wait_for_protocol_pending,
+    with_port_retry, ClusterProcesses, NodeLaunch, NodeProcess, NodeSpec, Request, Response,
+    API_SECRET,
 };
 use crate::transport_recovery_diagnostics::{
     classify_failure, CleanupSummary, DiagnosticContracts, DiagnosticOutcome, FailureClass,
@@ -1577,7 +1578,7 @@ async fn admit_learner(
                         request: RedeemJoinRequest {
                             token_digest: join_token_digest(&issued.token),
                             raft_id: TARGET_NODE,
-                            node_id: super::harness_node_identity(TARGET_NODE),
+                            node_id: harness_node_identity(TARGET_NODE),
                             hostname: format!("cluster-node-{TARGET_NODE}"),
                             raft_address: target.raft.clone(),
                             api_address: target.api.clone(),
@@ -1661,7 +1662,7 @@ async fn admit_learner(
                         request: FinalizeJoinRequest {
                             token_digest: join_token_digest(&issued.token),
                             raft_id: TARGET_NODE,
-                            node_id: super::harness_node_identity(TARGET_NODE),
+                            node_id: harness_node_identity(TARGET_NODE),
                         },
                     },
                 )
@@ -2174,6 +2175,36 @@ struct SnapshotPurgeEvidence {
     purged_index: u64,
 }
 
+/// The finite trigger writes can finish before the asynchronous image copy.
+/// Observe completion without adding writes or renewing the recovery budget.
+async fn await_snapshot_publication<T>(
+    previous: Option<u64>,
+    deadline: Instant,
+    mut observe: impl std::ops::AsyncFnMut() -> Result<(Option<u64>, T)>,
+) -> Result<T> {
+    let deadline = tokio::time::Instant::from_std(deadline);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("snapshot publication exceeded recovery deadline");
+        }
+        let (index, status) = tokio::time::timeout_at(deadline, observe())
+            .await
+            .map_err(|_| anyhow::anyhow!("snapshot publication exceeded recovery deadline"))??;
+        // timeout_at may poll a ready observation before checking its timer.
+        // Never accept that value after the original absolute deadline.
+        if tokio::time::Instant::now() >= deadline {
+            bail!("snapshot publication exceeded recovery deadline");
+        }
+        if is_new_snapshot(index, previous) {
+            return Ok(status);
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(50)).min(deadline),
+        )
+        .await;
+    }
+}
+
 async fn trigger_and_wait_for_snapshot(
     cluster: &mut ClusterProcesses,
     leader: u64,
@@ -2251,14 +2282,11 @@ async fn await_triggered_snapshot(
     // Exhausting the bounded writes is not a publication deadline: an
     // image may still be copying when the last write is acknowledged.
     // Spend only the cycle's original remaining time, without more writes.
-    loop {
-        let remaining = remaining_before(deadline, "snapshot publication")?;
-        tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
+    await_snapshot_publication(previous, deadline, async || {
         let status = advance(None).await?;
-        if is_new_snapshot(status.snapshot_index, previous) {
-            return Ok(status);
-        }
-    }
+        Ok((status.snapshot_index, status))
+    })
+    .await
 }
 
 fn snapshot_purge_evidence(

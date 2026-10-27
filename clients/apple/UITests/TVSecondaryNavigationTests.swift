@@ -24,11 +24,17 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
             if index > 0 { remote.press(.down) }
             let paragraph = app.descendants(matching: .any).matching(identifier: "info:paragraph:\(index)").firstMatch
             assertFocus(paragraph, in: app, context: "Synopsis region \(index + 1)")
+            var lastGeometrySample = "No geometry sample recorded"
             let outlineFits = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                readingViewport.frame.contains(paragraph.frame.insetBy(dx: -4, dy: -4))
+                let viewportFrame = readingViewport.frame
+                let paragraphFrame = paragraph.frame
+                let outlineFrame = paragraphFrame.insetBy(dx: -4, dy: -4)
+                let fits = viewportFrame.contains(outlineFrame)
+                lastGeometrySample = "region=\(index + 1), viewport=\(viewportFrame), paragraph=\(paragraphFrame), expandedOutline=\(outlineFrame)"
+                return fits
             }, object: nil)
             XCTAssertEqual(XCTWaiter.wait(for: [outlineFits], timeout: 2), .completed,
-                           "Synopsis focus outline fits inside the reading viewport")
+                           "Synopsis focus outline fits inside the reading viewport; \(lastGeometrySample)")
             if index == 3 { XCTAssertTrue(paragraph.label.contains("FINAL SYNOPSIS LINE")) }
         }
         remote.press(.menu)
