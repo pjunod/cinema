@@ -154,7 +154,7 @@ as the task diff base. Historical `8b6331e` retains the original bounded design
 request and manifest. The current source manifest includes original dependencies
 and changed Source/private-constructor/product files; review the task diff too.
 The compiler receipts cover the code pin above. Publication adds only identified
-review/status/manifest text afterward; no test body has run.
+review/status/manifest text afterward; no behavioral or mutation test body has run.
 
 Check the S0–S4 boundaries, original latch/handle identity, kill/join/wait
 ordering, same-operation journal replay, complete preflight before witness
