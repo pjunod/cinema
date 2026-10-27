@@ -601,5 +601,44 @@ class VideoWindow(LauncherCase):
         self.assertEqual(self.errors, [])
 
 
+
+class FilmTimeline(LauncherCase):
+    """A live session shows the whole film on mpv's OSC (mpv patch 0005)."""
+
+    def film_settings(self):
+        return [c for c in self.mpv.commands()
+                if c[:2] == ["set_property", "user-data/osc/film"] or c == ["del", "user-data/osc/film"]]
+
+    def test_a_live_session_tells_the_osc_the_film_timeline(self):
+        self.close_at(4)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.film_settings(),
+                         [["set_property", "user-data/osc/film", {"origin": 60.0, "duration": 7200.0}]])
+        self.assertIn("--force-seekable=yes", self.mpv.argv())
+
+    def test_a_vod_session_has_no_film_timeline(self):
+        self.server.vod = True
+        self.close_at(4)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.film_settings(), [["del", "user-data/osc/film"]])
+
+    def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):
+        self.server.origins = [60_000, 3_000_000]
+        self.clock.at(6, lambda: self.mpv.emit({"event": "client-message", "args": ["osc-film-seek", "3000.5"]}))
+        self.close_at(30)
+        self.assertEqual(self.run_launcher(), 0)
+        creates = self.server.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions")
+        self.assertEqual(len(creates), 2)
+        self.assertEqual(creates[1]["body"]["start"], 3000.5)
+        self.assertEqual(self.film_settings()[-1],
+                         ["set_property", "user-data/osc/film", {"origin": 3000.0, "duration": 7200.0}])
+
+    def test_a_malformed_film_seek_is_ignored(self):
+        self.clock.at(6, lambda: self.mpv.emit({"event": "client-message", "args": ["osc-film-seek", "nan"]}))
+        self.close_at(12)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(len(self.server.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,12 @@ plurx-player (0.3.2+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency
     so the split read the samples as Annex B, found no layer, and mpv
     buffered about 150 MB waiting for one before showing the base layer
     alone. Local Matroska files were unaffected.
+  * A title the server is still preparing (it streams a live presentation
+    from where playback started) shows the whole film on the seek bar, and
+    a seek anywhere in it works: mpv's OSC draws the film timeline the
+    launcher gives it (new mpv patch 0005), seeks inside what the stream
+    holds stay in mpv (--force-seekable), and one outside it starts the
+    stream again at that point.
   * The package build keeps the pinned snapshot's apt indexes and packages
     in a cache shared by its containers, and retries the snapshot service's
     503s, so a rebuild does not depend on snapshot.ubuntu.com being up.

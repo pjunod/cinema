@@ -322,6 +322,23 @@ class EnhancementLayerOverHls(unittest.TestCase):
         self.assertIn("x[0] != 1", hunk)
 
 
+class FilmTimelineOsc(unittest.TestCase):
+    """mpv's OSC draws the whole film for a live session (patch 0005)."""
+
+    def test_the_osc_reads_the_film_timeline_and_hands_back_outside_seeks(self):
+        series = read("packaging/patches/mpv/series")
+        patch = "0005-osc-draw-a-film-timeline-the-application-provides.patch"
+        self.assertIn(patch, series)
+        text = read(f"packaging/patches/mpv/{patch}")
+        self.assertIn("+++ b/player/lua/osc.lua", text)
+        self.assertIn('+mp.observe_property("user-data/osc/film", "native", function (_, value)', text)
+        self.assertIn('+        mp.commandv("script-message", "osc-film-seek", tostring(target))', text)
+        # The launcher sets exactly what the OSC reads and answers what it sends.
+        playback = read("plurx_player/playback.py")
+        self.assertIn('"user-data/osc/film"', playback)
+        self.assertIn('"osc-film-seek"', playback)
+
+
 class PatchSeries(unittest.TestCase):
     """packaging/apply-series.sh applies the series exactly, in series order."""
 
