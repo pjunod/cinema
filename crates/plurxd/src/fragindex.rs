@@ -771,7 +771,7 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
                 provenance: CompletionProvenance::StreamSeconds,
                 source_object_version: "test-helper".to_owned(),
             });
-    index_stream_with_progress(src, identity, expectation.as_ref(), dolby_vision, None).await
+    index_stream_with_progress(src, identity, expectation.as_ref(), dolby_vision, None, None).await
 }
 
 /// What this index pass does about the muxer's Dolby Vision record.
@@ -799,6 +799,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     expectation: Option<&VideoCompletionExpectation>,
     dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
+    samples: Option<&std::sync::atomic::AtomicU64>,
 ) -> IndexOutcome {
     let convert = matches!(dolby_vision, DolbyVisionPass::Rewrite(_));
     // A converting identity's index has to describe the CONVERTED bytes. An
@@ -930,6 +931,12 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                             "a fragment carried no video track".into(),
                         );
                     };
+                    if let Some(samples) = samples {
+                        samples.fetch_add(
+                            track.sample_count() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                     let dts = track.base_decode_time;
                     let duration = fragment.video_duration(init);
                     covered_ticks = covered_ticks.saturating_add(duration);
@@ -1381,6 +1388,185 @@ struct IndexPass {
     /// Its argv is already at the end of `args`; the plan rides with the pass
     /// so the verdict and the stage's removal belong to the same owner.
     ride_along: Option<RideAlongPlan>,
+    /// The Dolby Vision title scan this pass also feeds. Its argv follows the
+    /// PGS ride-along at the end of `args`.
+    dv_title: Option<DvTitleRide>,
+}
+
+/// The content-analysis pass also reads every Dolby Vision RPU of the title it
+/// indexes: the selected video stream is copied, with **no** bitstream filter,
+/// to the complete-title scanner. The index outputs strip, rewrite or keep RPUs
+/// per identity; this copy carries exactly what the file does, so the scanner
+/// sees the same access units its standalone `dv_title_scan` job reads from the
+/// file itself. One read of the file serves both.
+///
+/// Like the PGS ride-along it can only ever keep nothing: its tee slave is
+/// `onfail=ignore` behind a `null` sentinel, and its result is taken only
+/// after the child is reaped, only when the lead output built, and only when
+/// the scanner read exactly as many packets as the index has samples.
+#[derive(Clone)]
+pub(crate) struct DvTitleRide {
+    tools: Arc<crate::vodencode::dv_runtime::ToolSet>,
+    stream_index: u32,
+}
+
+/// A complete-title aggregate the pass's ride-along produced, not yet
+/// published. The caller publishes it after its own freshness checks.
+#[derive(Debug)]
+pub(crate) struct PendingDvTitle {
+    pub(crate) scanner_digest: String,
+    pub(crate) stats: plurx_core::scan::dv_title::DvTitleStats,
+}
+
+/// Where the child writes the Dolby Vision ride-along: after the held source
+/// (3) and every sibling output (4 up to `3 + MAX_PASS_OUTPUTS - 1`).
+#[cfg(unix)]
+const DV_TITLE_FD: SourceFd = 3 + MAX_PASS_OUTPUTS as SourceFd;
+
+impl DvTitleRide {
+    /// A title the scanner covers, on a node with the processing bundle.
+    #[cfg(target_os = "linux")]
+    async fn for_file(file: &MediaFile, stream_index: u32) -> Option<Self> {
+        let facts = &file.dolby_vision;
+        if !matches!(file.video_codec.as_deref(), Some("hevc"))
+            || !matches!(facts.profile, Some(5 | 7 | 8))
+            || facts.rpu_present != Some(true)
+        {
+            return None;
+        }
+        match crate::vodencode::dv_runtime::ToolSet::capture().await {
+            Ok(Some(tools)) => Some(Self { tools, stream_index }),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::debug!(file_id = file.id, %error, "title scanner unavailable to the index pass");
+                None
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn args(&self) -> Vec<String> {
+        vec![
+            "-map_chapters".to_owned(),
+            "-1".to_owned(),
+            "-map".to_owned(),
+            format!("0:{}", self.stream_index),
+            "-c:v".to_owned(),
+            "copy".to_owned(),
+            "-f".to_owned(),
+            "tee".to_owned(),
+            // Mandatory sentinel, as for the PGS ride-along: a tee whose only
+            // slave failed would take the process, and the index, down.
+            format!("[f=matroska:onfail=ignore]pipe:{DV_TITLE_FD}|[f=null]-"),
+        ]
+    }
+}
+
+/// Start the scanner on the ride-along pipe. It reads until the child closes
+/// its end; the returned task owns the scanner and its descriptor.
+#[cfg(target_os = "linux")]
+fn spawn_dv_title_scan(
+    ride: &DvTitleRide,
+    reader: std::os::fd::OwnedFd,
+    wall_time: Duration,
+) -> tokio::task::JoinHandle<Result<plurx_core::process::bounded::Output, String>> {
+    let scanner = ride.tools.scanner.clone();
+    tokio::spawn(async move {
+        use std::os::fd::AsRawFd;
+        let mut command = tokio::process::Command::new(&scanner);
+        command.args(["--ride-along", "/proc/self/fd/3"]);
+        crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
+            &mut command,
+            &[(reader.as_raw_fd(), 3)],
+            None,
+        );
+        let output = plurx_core::process::bounded::output_command_clean_env(
+            &mut command,
+            wall_time,
+            64 * 1024,
+            plurx_core::process::ChildWork::background(
+                "complete-title Dolby Vision scan (content-analysis pass)",
+            ),
+        )
+        .await
+        .map_err(|error| error.to_string());
+        drop(reader);
+        output
+    })
+}
+
+/// The ride-along's aggregate, when the lead output built and the scanner
+/// read exactly the samples that output indexed. Anything else keeps nothing,
+/// and the title's standalone job reads the file itself.
+#[cfg(target_os = "linux")]
+async fn finish_dv_title_scan(
+    file_id: i64,
+    ride: &DvTitleRide,
+    mut task: tokio::task::JoinHandle<Result<plurx_core::process::bounded::Output, String>>,
+    lead_built: bool,
+    lead_samples: u64,
+) -> Option<PendingDvTitle> {
+    let refused = |reason: String| {
+        tracing::info!(file_id, %reason, "the index pass kept no Dolby Vision title aggregate");
+        None
+    };
+    if !lead_built {
+        task.abort();
+        let _ = task.await;
+        return None;
+    }
+    // The child has exited, so the scanner already has its EOF.
+    let output = match tokio::time::timeout(Duration::from_secs(30), &mut task).await {
+        Ok(Ok(Ok(output))) => output,
+        Ok(Ok(Err(error))) => return refused(format!("scanner did not run: {error}")),
+        Ok(Err(error)) => return refused(format!("scanner task failed: {error}")),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            return refused("scanner did not finish after the pass".to_owned());
+        }
+    };
+    dv_title_aggregate(&output, lead_samples, ride.tools.is_current().await)
+        .map(|stats| PendingDvTitle {
+            scanner_digest: ride.tools.title_scanner_digest(),
+            stats,
+        })
+        .map_err(refused)
+        .ok()
+}
+
+/// Judge a ride-along scanner's output against the lead output's samples.
+fn dv_title_aggregate(
+    output: &plurx_core::process::bounded::Output,
+    lead_samples: u64,
+    scanner_current: bool,
+) -> Result<plurx_core::scan::dv_title::DvTitleStats, String> {
+    use plurx_core::scan::dv_title::{DvTitleStats, TitleEligibility};
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("scanner refused: {}", stderr.trim()));
+    }
+    if !scanner_current {
+        return Err("the installed scanner changed during the pass".to_owned());
+    }
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| format!("scanner output: {error}"))?;
+    let packets = document
+        .as_object_mut()
+        .and_then(|object| object.remove("ride_along_packets"))
+        .and_then(|value| value.as_u64())
+        .ok_or("scanner output has no ride-along packet count")?;
+    let stats: DvTitleStats =
+        serde_json::from_value(document).map_err(|error| format!("scanner aggregate: {error}"))?;
+    if packets != lead_samples {
+        return Err(format!(
+            "the scanner read {packets} packets; the index has {lead_samples} samples"
+        ));
+    }
+    if !stats.complete || stats.eligibility() == TitleEligibility::InvalidAggregate {
+        return Err("incomplete or inconsistent aggregate".to_owned());
+    }
+    Ok(stats)
 }
 
 /// One identity's half of an index pass: what to do about the Dolby Vision
@@ -1421,6 +1607,7 @@ fn index_pass(
         input,
         expectation,
         ride_along,
+        None,
     ))
 }
 
@@ -1430,13 +1617,21 @@ fn shared_index_pass(
     input: Option<&str>,
     expectation: VideoCompletionExpectation,
     ride_along: Option<RideAlongPlan>,
+    dv_title: Option<DvTitleRide>,
 ) -> IndexPass {
     let videos = outputs
         .iter()
         .map(|output| output.video)
         .collect::<Vec<_>>();
+    #[allow(unused_mut)]
+    let mut args = shared_index_argv(file, &videos, input, ride_along.as_ref());
+    #[cfg(unix)]
+    if let Some(ride) = &dv_title {
+        args.extend(ride.args());
+    }
     IndexPass {
-        args: shared_index_argv(file, &videos, input, ride_along.as_ref()),
+        args,
+        dv_title,
         outputs,
         expectation,
         ride_along,
@@ -1488,6 +1683,9 @@ fn shared_index_argv(
 pub(crate) struct IndexBuild {
     pub(crate) outcome: IndexOutcome,
     pub(crate) ride_along: Option<PendingRideAlong>,
+    /// The Dolby Vision title aggregate the pass's ride-along read, when the
+    /// lead output built and the scanner read exactly its samples.
+    pub(crate) dv_title: Option<PendingDvTitle>,
     /// Whether the held source was still the object the pass read when the
     /// pass ended, as far as this function could tell: [`build_riding`]
     /// reads its fence; the attested paths leave it to their caller, who
@@ -1500,6 +1698,7 @@ impl IndexBuild {
         Self {
             outcome,
             ride_along: None,
+            dv_title: None,
             source_unchanged: true,
         }
     }
@@ -2321,7 +2520,18 @@ async fn build_attested_pass(
         let input = "/dev/fd/3".to_owned();
         #[cfg(windows)]
         let input = path.to_string_lossy().into_owned();
-        let pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
+        #[cfg(target_os = "linux")]
+        let dv_title = DvTitleRide::for_file(file, probed.expectation.stream_index).await;
+        #[cfg(not(target_os = "linux"))]
+        let dv_title = None;
+        let pass = shared_index_pass(
+            file,
+            outputs,
+            Some(&input),
+            probed.expectation,
+            plan,
+            dv_title,
+        );
         #[cfg(unix)]
         let (source_fd, source_handoff) = {
             use std::os::fd::AsRawFd;
@@ -2433,6 +2643,7 @@ async fn build_with_args_owned(
         outputs,
         expectation,
         ride_along,
+        dv_title,
     } = pass;
     let identities = outputs
         .iter()
@@ -2501,6 +2712,21 @@ async fn build_with_args_owned(
             "this platform builds one identity per index pass".into(),
         ));
     }
+    // The Dolby Vision ride-along's pipe. Without it the tee slave finds no
+    // descriptor and fails alone; the index is unaffected.
+    #[cfg(target_os = "linux")]
+    let dv_title_pipe = match &dv_title {
+        Some(_) => match sibling_pipe() {
+            Ok(pipe) => Some(pipe),
+            Err(error) => {
+                tracing::info!(file_id = file.id, %error, "no pipe for the Dolby Vision ride-along");
+                None
+            }
+        },
+        None => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = &dv_title;
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     if ride_along.is_some() {
         if let Err(error) = crate::subtitle_ride_along::configure_stage_limits(&mut command) {
@@ -2519,6 +2745,10 @@ async fn build_with_args_owned(
         }
         for (at, (_, writer)) in sibling_pipes.iter().enumerate() {
             inherited.push(writer.as_raw_fd(), 4 + at as SourceFd);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some((_, writer)) = &dv_title_pipe {
+            inherited.push(writer.as_raw_fd(), DV_TITLE_FD);
         }
         if inherited.len > 0 {
             // SAFETY: `inherit` makes only async-signal-safe calls (`fcntl`,
@@ -2612,6 +2842,16 @@ async fn build_with_args_owned(
                 .transient(transient),
             )));
         }
+    };
+    // The scanner reads the ride-along until the child closes it, so our
+    // writer goes now; the task owns the reader and the scanner.
+    #[cfg(target_os = "linux")]
+    let dv_title_scan = match (&dv_title, dv_title_pipe) {
+        (Some(ride), Some((reader, writer))) => {
+            drop(writer);
+            Some(spawn_dv_title_scan(ride, reader, budget.saturating_sub(started.elapsed())))
+        }
+        _ => None,
     };
     // The child holds its own copies now. Ours must close, or a sibling's
     // reader would wait forever for the EOF our copy keeps from it.
@@ -2722,6 +2962,8 @@ async fn build_with_args_owned(
     // behaviour: its reader closes with the refusal and the child ends early.
     let shared = identities.len() > 1;
     let mut dolby_vision = outputs.into_iter().map(|output| output.dolby_vision);
+    // The lead output's samples: what a ride-along scanner must have read.
+    let lead_samples = std::sync::atomic::AtomicU64::new(0);
     let mut streams: Vec<OutputRead<'_>> = Vec::with_capacity(identities.len());
     streams.push(Box::pin(index_output(
         stdout,
@@ -2730,6 +2972,7 @@ async fn build_with_args_owned(
         dolby_vision.next().unwrap_or_default(),
         Some(&record_progress),
         shared,
+        Some(&lead_samples),
     )));
     for (reader, identity) in sibling_readers.into_iter().zip(identities.iter().skip(1)) {
         streams.push(Box::pin(index_output(
@@ -2739,6 +2982,7 @@ async fn build_with_args_owned(
             dolby_vision.next().unwrap_or_default(),
             None,
             shared,
+            None,
         )));
     }
     let stream = tokio::time::timeout(
@@ -2944,6 +3188,22 @@ async fn build_with_args_owned(
     let carrier = outcomes
         .iter()
         .position(|outcome| matches!(outcome, IndexOutcome::Built(_)));
+    #[cfg(target_os = "linux")]
+    let mut dv_title = match (dv_title.as_ref(), dv_title_scan) {
+        (Some(ride), Some(task)) => {
+            finish_dv_title_scan(
+                file.id,
+                ride,
+                task,
+                matches!(outcomes.first(), Some(IndexOutcome::Built(_))),
+                lead_samples.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .await
+        }
+        _ => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut dv_title: Option<PendingDvTitle> = None;
     let mut ride_along = match (ride_along, carrier) {
         (Some(plan), Some(_)) => Some(PendingRideAlong::new(plan, scan)),
         (Some(plan), None) => {
@@ -2962,6 +3222,8 @@ async fn build_with_args_owned(
             } else {
                 None
             },
+            // Only a built lead output carries it, and the lead is first.
+            dv_title: if at == 0 { dv_title.take() } else { None },
             source_unchanged: true,
         })
         .collect()
@@ -2982,6 +3244,7 @@ async fn index_output<R: AsyncRead + Unpin>(
     dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
     drain: bool,
+    samples: Option<&std::sync::atomic::AtomicU64>,
 ) -> (IndexOutcome, bool) {
     let outcome = index_stream_with_progress(
         &mut reader,
@@ -2989,6 +3252,7 @@ async fn index_output<R: AsyncRead + Unpin>(
         Some(expectation),
         dolby_vision,
         progress,
+        samples,
     )
     .await;
     // Whether the stream answered before its output ended: a refusal of

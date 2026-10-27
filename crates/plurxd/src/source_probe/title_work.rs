@@ -71,6 +71,11 @@ impl TitleTask {
             {
                 continue;
             }
+            // The local index pass reads this title next, and reads its RPUs
+            // in that same read: do not read the file twice.
+            if state.jobs.title_scan_awaits_index_pass(file.id) {
+                continue;
+            }
             let Some(revision) = state
                 .store
                 .bind_dv_title_demand(demand.probe_revision, &scanner)
@@ -78,6 +83,7 @@ impl TitleTask {
             else {
                 continue;
             };
+            let reused = reusable_aggregate(&demand, revision);
             demand.probe_revision = revision;
             use sha2::{Digest, Sha256};
             let identity = hex::encode(Sha256::digest(
@@ -164,6 +170,7 @@ impl TitleTask {
                 state.clone(),
                 file,
                 demand,
+                reused,
                 tools,
                 admission,
                 job,
@@ -246,6 +253,22 @@ impl TitleTask {
     }
 }
 
+/// The aggregate this title's job may settle with instead of reading the
+/// file: one stored under the generation the worker's bind left unchanged.
+/// Only a publisher bound to that generation's scanner stores one (an index
+/// pass's ride-along, or an earlier job), and a bind to another scanner
+/// rotates the generation and drops it in the same transaction — so a
+/// generation that moved, or a document read before it moved, reuses nothing.
+pub(super) fn reusable_aggregate(
+    demand: &TitleDemand,
+    bound_revision: i64,
+) -> Option<plurx_core::scan::dv_title::DvTitleStats> {
+    if bound_revision != demand.probe_revision {
+        return None;
+    }
+    plurx_core::scan::dv_title::DvTitleStats::from_probe_json(&demand.probe_json)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one owned title attempt retains source, tools, physical and durable admission"
@@ -254,6 +277,7 @@ async fn execute(
     state: AppState,
     file: plurx_core::domain::MediaFile,
     demand: TitleDemand,
+    reused: Option<plurx_core::scan::dv_title::DvTitleStats>,
     tools: Arc<ToolSet>,
     admission: crate::transcode::FragmentAdmission,
     job: plurx_core::store::background_jobs::BackgroundJob,
@@ -262,15 +286,20 @@ async fn execute(
 ) -> bool {
     let fence = active.fence();
     let cancel = fence.loss_token().child_token();
-    let result = super::run_admitted_probe(
-        &state.transcode,
-        &admission,
-        &cancel,
-        &shutdown,
-        None,
-        super::dv_title::scan(&file, &demand.probe_json, &tools),
-    )
-    .await;
+    let result = match reused {
+        Some(stats) => Ok(stats),
+        None => {
+            super::run_admitted_probe(
+                &state.transcode,
+                &admission,
+                &cancel,
+                &shutdown,
+                None,
+                super::dv_title::scan(&file, &demand.probe_json, &tools),
+            )
+            .await
+        }
+    };
     let mut published = false;
     let settlement = if shutdown.is_cancelled() || cancel.is_cancelled() {
         // A manual cancel/source supersession has already invalidated our token,

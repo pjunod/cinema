@@ -609,6 +609,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
         state.clone(),
         file,
         demand,
+        None,
         tools,
         admission,
         job,
@@ -639,4 +640,83 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
         started.elapsed().as_secs(),
         serde_json::to_string(&verdict).expect("JSON")
     );
+}
+
+fn stored_title() -> TitleDemand {
+    let stats = serde_json::json!({
+        "schema": 1, "complete": true, "decoded_frames": 3, "valid_l1_frames": 3,
+        "missing_l1_frames": 0, "invalid_l1_frames": 0, "max_l1_pq": 3000,
+        "mastering_luminance": {"state": "unknown"}, "mastering_primaries": {"state": "unknown"}
+    });
+    TitleDemand {
+        file_id: 9,
+        probe_revision: 7,
+        source_size: 1,
+        source_mtime: 1,
+        probe_json: serde_json::json!({
+            "streams": [],
+            plurx_core::scan::dv_title::PROBE_FIELD: stats,
+        })
+        .to_string(),
+    }
+}
+
+/// A job settles with a stored aggregate only when its bind left the
+/// generation where the document was read; a moved generation reads the file.
+#[test]
+fn a_moved_generation_reuses_no_stored_aggregate() {
+    let demand = stored_title();
+    let reused = reusable_aggregate(&demand, 7).expect("same generation");
+    assert_eq!(reused.decoded_frames, 3);
+    assert_eq!(reused.max_l1_pq, Some(3000));
+    assert_eq!(reusable_aggregate(&demand, 8), None);
+    let unscanned = TitleDemand {
+        probe_json: r#"{"streams":[]}"#.into(),
+        ..stored_title()
+    };
+    assert_eq!(reusable_aggregate(&unscanned, 7), None);
+}
+
+/// Discovery waits for the local index pass on a fresh title, decides reuse
+/// from the generation its own bind returned, and only then rebinds the
+/// demand it carries to the job.
+#[test]
+fn title_discovery_waits_for_the_pass_then_reuses_by_generation() {
+    let source = include_str!("title_work.rs");
+    let wait = source
+        .find("state.jobs.title_scan_awaits_index_pass(file.id)")
+        .expect("discovery waits for the index pass");
+    let bind = source.find(".bind_dv_title_demand(demand.probe_revision, &scanner)").expect("bind");
+    let reuse = source.find("let reused = reusable_aggregate(&demand, revision);").expect("reuse");
+    let moved = source.find("demand.probe_revision = revision;").expect("rebind");
+    assert!(wait < bind && bind < reuse && reuse < moved);
+    assert!(source.contains("let result = match reused {\n        Some(stats) => Ok(stats),"));
+}
+
+#[test]
+fn a_fresh_title_waits_only_for_a_local_index_pass() {
+    let dir = crate::test_tempdir().expect("scratch");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let state = AppState::new(
+        "test".into(),
+        Arc::clone(&store),
+        crate::state::Dirs {
+            artwork: dir.path().join("artwork"),
+            transcode: dir.path().join("transcode"),
+            cache: dir.path().join("cache"),
+            subs: dir.path().join("subs"),
+            runtime_cache: dir.path().join("runtime"),
+            renditions: dir.path().join("renditions"),
+        },
+        "title-node".into(),
+        Default::default(),
+        Default::default(),
+        Arc::new(crate::logbuf::LogBuffer::new(16)),
+    );
+    state.jobs.note_fresh_index_files(vec![5]);
+    // The cluster queue never drains the fresh list: nothing waits on it.
+    assert!(!state.jobs.title_scan_awaits_index_pass(5));
+    state.jobs.set_local_index_pass(true);
+    assert!(state.jobs.title_scan_awaits_index_pass(5));
+    assert!(!state.jobs.title_scan_awaits_index_pass(6));
 }

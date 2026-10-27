@@ -26,6 +26,29 @@ pub struct TitleOutput {
     pub scanner_digest: String,
     pub stats: DvTitleStats,
 }
+/// A complete-title aggregate the content-analysis pass read while it indexed
+/// the file, offered for the title's current demand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisTitleOutput {
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub scanner_digest: String,
+    pub stats: DvTitleStats,
+}
+/// What became of an analysis pass's aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisTitleOutcome {
+    /// Stored for the demand's current revision and scanner. The title's job
+    /// reuses it instead of reading the file, and qualifies a FEL title.
+    Published,
+    /// That revision already holds this scanner's completed answer.
+    Current,
+    /// The catalogue row no longer describes the source the pass read, or the
+    /// title is not one the scanner covers.
+    NoDemand,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishTitleJob {
     pub token: JobToken,
@@ -113,6 +136,79 @@ pub(super) async fn publish<T: QueueSql>(
             .ok_or_else(|| StoreError::Task("no title publication verdict".into()))?,
     )
 }
+
+/// Offer an analysis pass's aggregate to the title's demand. The demand is
+/// first bound to the pass's scanner exactly as the title worker binds it, so
+/// a different scanner's generation is rotated away and its aggregate dropped;
+/// the aggregate is then stored through the same `publish_dv_title` command a
+/// job uses, with no job attached. The demand stays open: the title worker
+/// finds this revision's aggregate already stored and settles the job without
+/// a second read of the file (and qualifies a FEL title while it holds it).
+pub(super) async fn publish_from_analysis<T: QueueSql>(
+    store: &T,
+    output: AnalysisTitleOutput,
+) -> Result<AnalysisTitleOutcome, StoreError> {
+    if output.file_id <= 0
+        || output.source_size < 0
+        || output.source_mtime < 0
+        || !digest(&output.scanner_digest)
+        || !output.stats.complete
+        || output.stats.eligibility() == TitleEligibility::InvalidAggregate
+        || encode(&output)?.len() > 64 * 1024
+    {
+        return Err(StoreError::Task(
+            "invalid complete-title analysis publication".into(),
+        ));
+    }
+    #[derive(Deserialize)]
+    struct Verdict {
+        outcome: String,
+        revision: Option<i64>,
+    }
+    for _ in 0..2 {
+        let body = serde_json::json!({"id": uuid::Uuid::new_v4().to_string(), "output": output});
+        let rows = store
+            .queue_sql(ANALYSIS_PUBLISH_SQL.into(), encode(&body)?, true, true)
+            .await?;
+        let verdict = decode::<Verdict>(rows.first().ok_or_else(|| {
+            StoreError::Task("no analysis title publication verdict".into())
+        })?)?;
+        match (verdict.outcome.as_str(), verdict.revision) {
+            ("published", _) => return Ok(AnalysisTitleOutcome::Published),
+            ("current", _) => return Ok(AnalysisTitleOutcome::Current),
+            ("unbound", Some(revision)) => {
+                if bind(store, revision, &output.scanner_digest).await?.is_none() {
+                    return Ok(AnalysisTitleOutcome::NoDemand);
+                }
+            }
+            _ => return Ok(AnalysisTitleOutcome::NoDemand),
+        }
+    }
+    Ok(AnalysisTitleOutcome::NoDemand)
+}
+
+/// `job_id` is null: the command's job and waiter settlements match nothing,
+/// and only the probe document receives the aggregate.
+const ANALYSIS_PUBLISH_SQL: &str = r#"
+WITH input AS (SELECT json($1) AS body), verdict AS (
+ SELECT body,d.revision AS revision,CASE
+  WHEN d.revision IS NULL OR f.id IS NULL
+   OR f.size IS NOT json_extract(body,'$.output.source_size')
+   OR f.mtime IS NOT json_extract(body,'$.output.source_mtime')
+   OR NOT (f.video_codec='hevc' AND f.dv_profile IN (5,7,8) AND f.dv_rpu_present=1
+    AND json_valid(f.probe_json)) THEN 'no_demand'
+  WHEN d.scanner_digest IS NOT json_extract(body,'$.output.scanner_digest') THEN 'unbound'
+  WHEN d.terminal=1 THEN 'current'
+  ELSE 'published' END AS outcome
+ FROM input LEFT JOIN dv_title_jobs_demand d ON d.file_id=json_extract(body,'$.output.file_id')
+ LEFT JOIN files f ON f.id=d.file_id
+)
+INSERT INTO background_job_commands(id,operation,request_json,result_json)
+SELECT json_extract(body,'$.id'),'publish_dv_title',body,
+ json_object('outcome',outcome,'job_id',NULL,'revision',revision,
+  'file_id',json_extract(body,'$.output.file_id'))
+FROM verdict RETURNING result_json
+"#;
 
 /// Conservative scheduler handoff, never a claim or publication authority.
 /// The worker also checks its exact reporter and readable physical source.

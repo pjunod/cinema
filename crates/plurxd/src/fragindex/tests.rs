@@ -1008,6 +1008,7 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
             source_object_version: "budget".to_owned(),
         },
         None,
+        None,
     );
     // Paced to real time, a twelve-second film cannot be read in one.
     let input = pass.args.iter().position(|arg| arg == "-i").expect("-i");
@@ -1983,5 +1984,114 @@ async fn a_landing_in_a_real_index_resolves_uniquely() {
             Ok(start),
             "a real fixture's fragment byte counts must place a landing"
         );
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod dv_title_ride {
+    use super::*;
+    use plurx_core::transcode::dv_processing::{DvBackendIdentity, DvDigest};
+
+    fn ride(stream_index: u32) -> DvTitleRide {
+        let digest = |bytes: &[u8]| {
+            DvDigest::new(hex::encode(sha2::Sha256::digest(bytes))).expect("digest")
+        };
+        let backend = DvBackendIdentity::new(
+            digest(b"renderer"),
+            digest(b"libraries"),
+            digest(b"parser"),
+            digest(b"sources"),
+            1,
+            digest(b"manifest"),
+        )
+        .expect("backend");
+        DvTitleRide {
+            tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(backend)),
+            stream_index,
+        }
+    }
+
+    fn dv_file() -> MediaFile {
+        let mut file = hevc_file(Some("dolby_vision"), Some("Dolby Vision · Profile 7"));
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.rpu_present = Some(true);
+        file.dolby_vision.el_present = Some(true);
+        file
+    }
+
+    /// The scanner must see what the file carries: the selected stream,
+    /// copied with no bitstream filter, behind every index output, on its
+    /// own descriptor, through a tee that can only drop itself.
+    #[test]
+    fn the_ride_along_copies_the_selected_stream_unfiltered_after_every_output() {
+        let file = dv_file();
+        let videos = video_identities(&file, None, true, true);
+        assert!(videos.len() > 1, "a FEL title indexes several identities");
+        let pass = shared_index_pass(
+            &file,
+            videos
+                .iter()
+                .map(|video| IndexOutput::new(&file, *video).expect("describable"))
+                .collect(),
+            Some("/dev/fd/3"),
+            VideoCompletionExpectation {
+                stream_index: 2,
+                duration_num: 12,
+                duration_den: 1,
+                provenance: CompletionProvenance::StreamSeconds,
+                source_object_version: "ride".to_owned(),
+            },
+            None,
+            Some(ride(2)),
+        );
+        let ride_args = ride(2).args();
+        let tail = &pass.args[pass.args.len() - ride_args.len()..];
+        assert_eq!(tail, ride_args.as_slice(), "the ride-along is the last output");
+        let without = shared_index_argv(&file, &videos, Some("/dev/fd/3"), None);
+        assert_eq!(&pass.args[..without.len()], without.as_slice(), "index argv unchanged");
+        assert!(without.iter().any(|arg| arg == "-bsf:v"), "the index outputs filter");
+        assert!(!ride_args.iter().any(|arg| arg.starts_with("-bsf")), "{ride_args:?}");
+        let map = ride_args.iter().position(|arg| arg == "-map").expect("hard map");
+        assert_eq!(ride_args[map + 1], "0:2", "the probed selected stream");
+        assert_eq!(
+            ride_args.last().map(String::as_str),
+            Some("[f=matroska:onfail=ignore]pipe:7|[f=null]-")
+        );
+        assert_eq!(DV_TITLE_FD, 3 + MAX_PASS_OUTPUTS as SourceFd);
+    }
+
+    fn output(code: i32, stdout: &str, stderr: &str) -> plurx_core::process::bounded::Output {
+        use std::os::unix::process::ExitStatusExt;
+        plurx_core::process::bounded::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    const AGGREGATE: &str = r#"{"schema":1,"complete":true,"decoded_frames":3,"valid_l1_frames":3,"missing_l1_frames":0,"invalid_l1_frames":0,"max_l1_pq":3000,"mastering_luminance":{"state":"unknown"},"mastering_primaries":{"state":"unknown"},"ride_along_packets":3}"#;
+
+    /// A ride-along is a complete-title claim only when the scanner read every
+    /// packet the lead output indexed: a slave that failed part-way leaves a
+    /// well-formed prefix, and only the count tells.
+    #[test]
+    fn the_ride_along_aggregate_needs_every_indexed_sample() {
+        let stats = dv_title_aggregate(&output(0, AGGREGATE, ""), 3, true).expect("complete");
+        assert_eq!(stats.decoded_frames, 3);
+        assert_eq!(stats.max_l1_pq, Some(3000));
+        let short = dv_title_aggregate(&output(0, AGGREGATE, ""), 4, true).expect_err("short");
+        assert!(short.contains("3 packets") && short.contains("4 samples"), "{short}");
+        assert!(dv_title_aggregate(&output(0, AGGREGATE, ""), 3, false).is_err());
+        let refused = dv_title_aggregate(
+            &output(1, "", "DV title scan refused: corrupt demux packet\n"),
+            3,
+            true,
+        )
+        .expect_err("refused");
+        assert!(refused.contains("corrupt demux packet"), "{refused}");
+        let uncounted = AGGREGATE.replace(r#","ride_along_packets":3"#, "");
+        assert!(dv_title_aggregate(&output(0, &uncounted, ""), 3, true).is_err());
+        let incomplete = AGGREGATE.replace(r#""complete":true"#, r#""complete":false"#);
+        assert!(dv_title_aggregate(&output(0, &incomplete, ""), 3, true).is_err());
     }
 }

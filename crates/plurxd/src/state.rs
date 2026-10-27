@@ -1771,6 +1771,10 @@ pub struct JobManager {
     /// backlog. Without it a changed title waited for the cursor to wrap the
     /// whole library — about 56 hours behind 900 files (lab N4, 2026-10-11).
     fresh_index_files: std::sync::Mutex<std::collections::VecDeque<i64>>,
+    /// The node-local index pass, not the cluster queue, ran last. Only then
+    /// does `fresh_index_files` drain, so only then may a Dolby Vision title
+    /// scan wait for the pass that would read its title anyway.
+    local_index_pass: std::sync::atomic::AtomicBool,
     /// Process-local discovery count shown in the Developer backfill item.
     subtitle_backfill_enqueued_process: AtomicU64,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
@@ -3656,6 +3660,7 @@ impl JobManager {
             subtitle_source_sweep_cursor: Mutex::new(None),
             subtitle_sidecar_sweep_cursor: Mutex::new(None),
             fresh_index_files: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            local_index_pass: std::sync::atomic::AtomicBool::new(false),
             subtitle_backfill_enqueued_process: AtomicU64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
@@ -8183,6 +8188,53 @@ impl JobManager {
         }
     }
 
+    /// Whether a Dolby Vision title scan for `file_id` should wait: the
+    /// node-local index pass has the file at the front of its queue and its
+    /// ride-along reads the title's RPUs in the same read. Once the pass has
+    /// examined the file, built or not, the scan no longer waits.
+    #[cfg(test)]
+    pub(crate) fn set_local_index_pass(&self, local: bool) {
+        self.local_index_pass.store(local, Ordering::Relaxed);
+    }
+
+    pub(crate) fn title_scan_awaits_index_pass(&self, file_id: i64) -> bool {
+        self.local_index_pass.load(Ordering::Relaxed)
+            && self
+                .fresh_index_files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&file_id)
+    }
+
+    /// Offer an index pass's Dolby Vision title aggregate to the title's
+    /// demand — both paths, cluster and not, after the caller's freshness
+    /// checks. A refusal or failure leaves the demand to the title job.
+    pub(crate) async fn settle_dv_title(
+        &self,
+        file: &MediaFile,
+        pending: crate::fragindex::PendingDvTitle,
+    ) {
+        let output = plurx_core::store::dv_title_jobs::AnalysisTitleOutput {
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            scanner_digest: pending.scanner_digest,
+            stats: pending.stats,
+        };
+        match self.store.publish_dv_title_from_analysis(output).await {
+            Ok(outcome) => tracing::info!(
+                file_id = file.id,
+                ?outcome,
+                "the index pass offered its Dolby Vision title aggregate"
+            ),
+            Err(error) => tracing::warn!(
+                file_id = file.id,
+                %error,
+                "publishing the index pass's Dolby Vision title aggregate"
+            ),
+        }
+    }
+
     /// A pass has examined `file_id`: it no longer goes ahead of the backlog.
     fn settle_index_priority(&self, transcode: &TranscodeManager, file_id: i64) {
         transcode.settle_local_index_demand(file_id);
@@ -8198,7 +8250,7 @@ impl JobManager {
     /// which is where they would have been without this. On a node whose
     /// pass runs the cluster queue instead, nothing consumes this and the
     /// bound is all that keeps it.
-    fn note_fresh_index_files(&self, changed: Vec<i64>) {
+    pub(crate) fn note_fresh_index_files(&self, changed: Vec<i64>) {
         const FRESH_INDEX_CAP: usize = 4_096;
         if changed.is_empty() {
             return;
@@ -8239,6 +8291,8 @@ impl JobManager {
                     false
                 }
             };
+        self.local_index_pass
+            .store(!cluster_cache_enabled, Ordering::Relaxed);
         if cluster_cache_enabled {
             if self.may_run_cluster_jobs().await {
                 self.discover_subtitle_sources(Arc::clone(&transcode)).await;
@@ -8569,6 +8623,7 @@ impl JobManager {
                 let crate::fragindex::IndexBuild {
                     outcome,
                     ride_along: harvest,
+                    dv_title,
                     source_unchanged,
                 } = build;
                 let refusal = match outcome {
@@ -8590,6 +8645,9 @@ impl JobManager {
                         if let Some(pending) = harvest {
                             self.settle_ride_along(&file, pending, source_unchanged)
                                 .await;
+                        }
+                        if let Some(pending) = dv_title {
+                            self.settle_dv_title(&file, pending).await;
                         }
                         continue;
                     }
@@ -11092,6 +11150,9 @@ impl JobManager {
             // `true`: the `source_still_matches` refusal above has returned
             // already for a source that moved.
             self.settle_ride_along(&file, pending, true).await;
+        }
+        if let Some(pending) = builds.iter_mut().find_map(|build| build.dv_title.take()) {
+            self.settle_dv_title(&file, pending).await;
         }
         let mut builds = builds.into_iter();
         let Some(lead) = builds.next() else {

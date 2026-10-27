@@ -134,6 +134,50 @@ stored next to the DV facts) records:
 - the frames whose L1 is missing or invalid;
 - the L6/L9 mastering minimum and primaries.
 
+**How the title scan runs (2026-10-27).** The scan reads metadata, never
+pixels. `tools/dv_processing/scan_title.c` parses each access unit's RPU
+straight from the demuxed bitstream. Until 2026-10-27 it decoded every picture
+in software on one thread: hours of one core per title, with 835 titles queued
+on lab5. Each access unit is judged by the rules the renderer's pipeline
+applies (`dovi_split` `bl_rpu`, then the HEVC decoder), so the counts describe
+the pictures the renderer will see:
+- enhancement-layer NALs (UNSPEC63) are removed first;
+- an access unit with no base-layer VCL NAL yields no picture;
+- RASL pictures after an IRAP with NoRaslOutputFlag are not output;
+- a picture's RPU is the last UNSPEC62 NAL after the first one, with layer 0,
+  temporal id 0 and more than its two header bytes.
+
+The one accepted difference: the decoder drops an RPU its own parser rejects,
+and the scanner can only ask libdovi. The renderer still refuses any picture
+that arrives without a fresh RPU. Parity: on eight titles the old scanner had
+already published (P5, P7 FEL, P8 remux and WEB-DL), the new scanner's
+aggregate is identical, at 3–28 s of CPU per title, limited by the NAS.
+
+It runs two ways, with one aggregate:
+- **Standalone:** the `dv_title_scan` job reads the held source (`scan_title
+  HELD_SOURCE VIDEO_INDEX`). It also qualifies a Profile 7 FEL title while it
+  holds it.
+- **Inside content analysis:** the fragment-index pass adds one more ffmpeg
+  output, after every index output and the PGS ride-along. It is the selected
+  stream, copied with no bitstream filter (the index outputs strip or rewrite
+  RPUs; this copy keeps what the file carries), sent as Matroska through an
+  `onfail=ignore` tee slave behind a `null` sentinel to `scan_title --ride-along`
+  on fd 7. The result is kept only when the child exited, the lead output
+  built, and the scanner read exactly as many packets as that output has
+  samples: a remux re-times packets, so the count, not timestamps, proves the
+  copy complete. It is stored through the same `publish_dv_title` command a job
+  uses, under the title's current demand generation, with no job attached. The
+  demand stays open; the title job finds that generation's aggregate already
+  stored and settles without reading the file (and qualifies a FEL title). A
+  fresh title waits for the node-local pass that will read it anyway; once the
+  pass has examined it, built or not, the job runs.
+
+Title demand is keyed by the scanner executable alone
+(`ToolSet::title_scanner_digest`). It used to be the whole DV backend
+(renderer, libraries, parser, every helper source), so any renderer, shader
+or libplacebo change re-queued every title. FEL verdicts keep the backend key
+(`backend_digest`), because they measure the renderer.
+
 **Bucket elision.** If the scanned title maximum is at or below the bucket,
 the target would change nothing above black. In that case the server uses
 the master recipe and reports "this title already fits a 1600-nit display".

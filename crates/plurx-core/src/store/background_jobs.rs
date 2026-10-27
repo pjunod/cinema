@@ -2072,6 +2072,12 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: super::dv_title_jobs::PublishTitleJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    /// Offer a content-analysis pass's complete-title aggregate to the
+    /// title's current demand.
+    async fn publish_dv_title_from_analysis(
+        &self,
+        output: super::dv_title_jobs::AnalysisTitleOutput,
+    ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -2636,6 +2642,12 @@ LIMIT 1
         request: super::dv_title_jobs::PublishTitleJob,
     ) -> Result<JobPublishOutcome, StoreError> {
         super::dv_title_jobs::publish(self, request).await
+    }
+    async fn publish_dv_title_from_analysis(
+        &self,
+        output: super::dv_title_jobs::AnalysisTitleOutput,
+    ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError> {
+        super::dv_title_jobs::publish_from_analysis(self, output).await
     }
     async fn probe_can_preempt_title(
         &self,

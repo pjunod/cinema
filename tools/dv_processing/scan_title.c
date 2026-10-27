@@ -14,6 +14,13 @@
 // Display-order coverage is proven from the presentation timestamps, which are
 // the timestamps the decoder gives its frames.
 //
+// `scan_title --ride-along HELD_PIPE` reads the same selected stream from a
+// pipe instead: the content-analysis pass's ffmpeg copies it there, unfiltered,
+// as Matroska, while it reads the file for its index. A remux re-times packets
+// into milliseconds, so that mode proves nothing from timestamps; it reports
+// how many packets it read, and the daemon accepts the aggregate only when that
+// equals the samples of the complete index built from the same demux.
+//
 // One difference is accepted: the decoder drops an RPU its own parser rejects,
 // and this scanner can only ask libdovi. Both parse the same syntax; the
 // renderer still refuses any picture that arrives without a fresh RPU.
@@ -55,6 +62,8 @@ static struct title_stats stats;
 static struct picture_time *times;
 static size_t time_capacity;
 static struct nal nals[MAX_UNIT_NALS];
+static uint64_t packets;
+static bool ride_along;
 
 static void need(bool ok, const char *why) {
   if (!ok) {
@@ -210,10 +219,11 @@ static void observe_unit(const AVPacket *packet, int length_size) {
     need(seen_irap, "title begins at a random access point");
     if ((picture == NAL_RASL_N || picture == NAL_RASL_R) && skip_rasl) return;
   }
+  need(stats.frames < MAX_TITLE_FRAMES, "bounded title display-frame count");
+  if (ride_along) goto timed;
   need(packet->pts >= 0 && packet->duration > 0 &&
        packet->pts < INT64_MAX - packet->duration,
        "observed complete display-frame timing");
-  need(stats.frames < MAX_TITLE_FRAMES, "bounded title display-frame count");
   if (stats.frames == time_capacity) {
     size_t grown = time_capacity ? time_capacity * 2 : 65536;
     struct picture_time *resized = realloc(times, grown * sizeof(*times));
@@ -223,6 +233,7 @@ static void observe_unit(const AVPacket *packet, int length_size) {
   }
   times[stats.frames].pts = packet->pts;
   times[stats.frames].duration = packet->duration;
+timed:
   stats.frames++;
   const struct nal *rpu = NULL;
   for (size_t i = kept; i-- > 1;) {
@@ -251,12 +262,16 @@ static int nal_length_size(const AVCodecParameters *par) {
 }
 
 int main(int argc, char **argv) {
-  need(argc == 3, "usage: scan_title HELD_SOURCE VIDEO_INDEX");
-  char *end;
-  errno = 0;
-  long index = strtol(argv[2], &end, 10);
-  need(!errno && end != argv[2] && !*end && index >= 0 && index < 256,
-       "selected video index");
+  need(argc == 3, "usage: scan_title HELD_SOURCE VIDEO_INDEX | scan_title --ride-along HELD_PIPE");
+  ride_along = !strcmp(argv[1], "--ride-along");
+  long index = 0;
+  if (!ride_along) {
+    char *end;
+    errno = 0;
+    index = strtol(argv[2], &end, 10);
+    need(!errno && end != argv[2] && !*end && index >= 0 && index < 256,
+         "selected video index");
+  }
   av_log_set_level(AV_LOG_ERROR);
   av_max_alloc(64ULL * 1024 * 1024);
   AVFormatContext *input = avformat_alloc_context();
@@ -264,7 +279,11 @@ int main(int argc, char **argv) {
   input->max_streams = 256;
   input->probesize = 1024 * 1024;
   input->max_analyze_duration = AV_TIME_BASE;
-  need(avformat_open_input(&input, argv[1], NULL, NULL) >= 0, "source open");
+  const AVInputFormat *carrier = ride_along ? av_find_input_format("matroska") : NULL;
+  need(!ride_along || carrier, "ride-along demuxer");
+  need(avformat_open_input(&input, argv[ride_along ? 2 : 1], carrier, NULL) >= 0,
+       "source open");
+  need(!ride_along || input->nb_streams == 1, "one ride-along video stream");
   // Supported catalogue containers expose codec parameters on opening. Avoid
   // a second analysis pass and never seek past the start of the title.
   need((unsigned long)index < input->nb_streams, "selected stream exists");
@@ -280,12 +299,17 @@ int main(int argc, char **argv) {
   while ((ret = av_read_frame(input, packet)) >= 0) {
     if (packet->stream_index == index) {
       need(!(packet->flags & AV_PKT_FLAG_CORRUPT), "corrupt demux packet");
+      packets++;
       observe_unit(packet, length_size);
     }
     av_packet_unref(packet);
   }
   need(ret == AVERROR_EOF && (!input->pb || !input->pb->error ||
        input->pb->error == AVERROR_EOF), "complete demux EOF");
+  if (ride_along) {
+    need(stats.frames > 0, "complete declared frame coverage");
+    goto report;
+  }
   need(stats.frames > 0 && (stream->nb_frames <= 0 ||
        (uint64_t)stream->nb_frames == stats.frames), "complete declared frame coverage");
   // Pictures leave the decoder in presentation order; prove that order is
@@ -326,6 +350,7 @@ int main(int argc, char **argv) {
     endpoint_known = true;
   }
   need(endpoint_known, "independent complete selected-video endpoint unavailable");
+report:
   // `decoded_frames` keeps its schema-1 name: it counts the pictures the
   // decoder would output, established here without decoding them.
   printf("{\"schema\":1,\"complete\":true,\"decoded_frames\":%"PRIu64
@@ -348,7 +373,9 @@ int main(int argc, char **argv) {
     } else printf("null");
     printf("}");
   } else printf("\"state\":\"%s\"", stats.mastering.l9_state == 3 ? "inconsistent" : "unknown");
-  printf("}}\n");
+  printf("}");
+  if (ride_along) printf(",\"ride_along_packets\":%"PRIu64, packets);
+  printf("}\n");
   need(!ferror(stdout) && fflush(stdout) == 0, "aggregate output");
   free(times);
   av_packet_free(&packet);
