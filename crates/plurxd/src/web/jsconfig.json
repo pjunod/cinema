@@ -66,6 +66,8 @@
     "player/menus.js",
     "player/audio-sync.js",
     "player/subtitle-translation.js",
+    "player/subtitle-text-translation.js",
+    "player/shared-subtitle-captions.js",
     "player/stats.js",
     "player/watch-presentation.js",
     "detail/watch-browser.js",
