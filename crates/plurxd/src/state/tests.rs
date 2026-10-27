@@ -4733,7 +4733,7 @@ async fn a_file_that_cannot_be_indexed_is_asked_once_per_identity() {
         .expect("the pass records why it could not index this file");
     assert_eq!(first.attempts, 1);
     assert!(
-        first.is_terminal(),
+        first.is_terminal(clock_ms()),
         "an unsupported source is terminal, not a wait: {first:?}"
     );
     assert!(!first.reason.is_empty(), "the builder's own words are kept");

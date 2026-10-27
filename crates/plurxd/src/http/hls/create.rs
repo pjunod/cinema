@@ -5963,6 +5963,11 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
         let (status, code) = match code {
             "vod_disabled" => (StatusCode::SERVICE_UNAVAILABLE, "vod_disabled"),
             "vod_index_pending" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
+            // Every shipped client answers `vod_index_pending` by falling
+            // back (a progressive remux on the web), and none knows the
+            // terminal code, so a VOD-only start keeps the public code and
+            // carries the indexer's reason in the message.
+            "vod_index_unavailable" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
             "hevc_configuration_unverified" => {
                 (StatusCode::CONFLICT, "hevc_configuration_unverified")
             }

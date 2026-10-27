@@ -6,6 +6,60 @@ use super::*;
 const LOCAL_INDEX_DEMAND_CAP: usize = 64;
 
 impl Shared {
+    /// Why a start has no local fragment index for `identity`, as the code
+    /// and words of its VOD refusal.
+    ///
+    /// The recorded outcome decides, so the refusal says what the indexer
+    /// found rather than "pending" for a title it will never index:
+    /// terminal is `vod_index_unavailable` with the stored reason; a wait
+    /// says when the next attempt is due; due, or never tried, asks the
+    /// local pass to examine the file next (`demand_local_index`).
+    pub(super) async fn local_index_refusal(
+        &self,
+        file_id: i64,
+        identity: &plurx_core::segplan::SourceIdentity,
+        untried: String,
+    ) -> (&'static str, String) {
+        use plurx_core::segplan::IndexOutcomeState;
+        let now = crate::state::clock_ms();
+        let outcome = match self.store.fragment_index_outcome(file_id, identity).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::debug!(file_id, %error, "reading the local index outcome");
+                None
+            }
+        };
+        let Some(outcome) = outcome else {
+            self.demand_local_index(file_id);
+            return ("vod_index_pending", untried);
+        };
+        let found = crate::http::index_refusal_summary(std::slice::from_ref(&outcome), now)
+            .map_or_else(|| outcome.reason.clone(), |(_, detail)| detail);
+        match outcome.state(now) {
+            IndexOutcomeState::Terminal => (
+                "vod_index_unavailable",
+                format!("this node cannot index this title: {found}"),
+            ),
+            IndexOutcomeState::WaitUntil(at) => {
+                self.demand_local_index(file_id);
+                (
+                    "vod_index_pending",
+                    format!(
+                        "the last index attempt failed ({found}); the next is due in {} s",
+                        (at.saturating_sub(now).max(0) + 999) / 1_000
+                    ),
+                )
+            }
+            IndexOutcomeState::Due => {
+                self.demand_local_index(file_id);
+                (
+                    "vod_index_pending",
+                    format!("{untried}; the last index attempt failed ({found}) and is due again"),
+                )
+            }
+        }
+    }
+
     /// A start for `file_id` was refused for want of a local fragment index:
     /// ask the node-local pass to examine it before its backlog.
     pub(super) fn demand_local_index(&self, file_id: i64) {

@@ -747,15 +747,20 @@ pub(crate) fn record_typed_outcome(
     max_attempts: u32,
 ) -> Result<FragmentIndexOutcome, StoreError> {
     let transaction = conn.unchecked_transaction()?;
+    // A row recorded under an older failure policy starts a fresh retry
+    // window: that policy's window is what left it stranded.
     let existing_deadline = transaction
         .query_row(
-            "SELECT retry_deadline_ms FROM fragment_index_outcomes
+            "SELECT retry_deadline_ms, policy_revision FROM fragment_index_outcomes
               WHERE file_id = ?1 AND argv_fingerprint = ?2",
             params![file_id, source.argv_fingerprint],
-            |row| row.get::<_, i64>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?
-        .unwrap_or(0);
+        .filter(|(_, revision)| {
+            *revision >= i64::from(crate::content_analysis::INDEX_FAILURE_POLICY_REVISION)
+        })
+        .map_or(0, |(deadline, _)| deadline);
     let refusal = if code == crate::content_analysis::IndexFailureCode::Unsupported {
         IndexRefusal::Unsupported
     } else {

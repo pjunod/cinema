@@ -190,30 +190,67 @@ pub struct FragmentIndexOutcome {
     pub diagnostic: Option<crate::content_analysis::IndexDiagnostic>,
 }
 
+/// What a recorded refusal means for the indexer, now.
+///
+/// Exactly one of three. Before, a retryable row past its retry deadline was
+/// neither due nor terminal: the indexer skipped it forever while VOD said
+/// "pending" for it forever (lab5: 83 titles, Avatar and Twilight among them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexOutcomeState {
+    /// The indexer may spend a pass on this identity now.
+    Due,
+    /// Not before this Unix ms.
+    WaitUntil(i64),
+    /// Waiting will not change the answer; only a changed source or a newer
+    /// failure policy will.
+    Terminal,
+}
+
 impl FragmentIndexOutcome {
+    /// The state this refusal is in at `now_ms`.
+    ///
+    /// The typed disposition is what the indexer decided, and the legacy
+    /// `refusal` answers only for rows recorded before there was one: the
+    /// legacy field carries `Truncated` for every terminal code that is not
+    /// literally `Unsupported`.
+    ///
+    /// A budget failure recorded under an older failure policy is due once:
+    /// [`crate::content_analysis::INDEX_FAILURE_POLICY_REVISION`] 2 budgets a
+    /// retry from what the failed attempt measured, which is the change those
+    /// rows were waiting for.
+    pub fn state(&self, now_ms: i64) -> IndexOutcomeState {
+        if self.typed_code == Some(crate::content_analysis::IndexFailureCode::IndexBudgetExceeded)
+            && self.policy_revision < crate::content_analysis::INDEX_FAILURE_POLICY_REVISION
+        {
+            return IndexOutcomeState::Due;
+        }
+        let retryable = self
+            .typed_retryable
+            .unwrap_or_else(|| self.refusal.is_retryable());
+        if !retryable || self.next_attempt_at_ms == i64::MAX {
+            return IndexOutcomeState::Terminal;
+        }
+        if self.typed_retryable.is_some()
+            && self.retry_deadline_ms != 0
+            && now_ms >= self.retry_deadline_ms
+        {
+            return IndexOutcomeState::Terminal;
+        }
+        if now_ms >= self.next_attempt_at_ms {
+            IndexOutcomeState::Due
+        } else {
+            IndexOutcomeState::WaitUntil(self.next_attempt_at_ms)
+        }
+    }
+
     /// Whether the indexer may spend another pass on this identity.
     pub fn is_due(&self, now_ms: i64) -> bool {
-        if let Some(retryable) = self.typed_retryable {
-            return retryable
-                && now_ms >= self.next_attempt_at_ms
-                && (self.retry_deadline_ms == 0 || now_ms < self.retry_deadline_ms);
-        }
-        self.refusal.is_retryable() && now_ms >= self.next_attempt_at_ms
+        self.state(now_ms) == IndexOutcomeState::Due
     }
 
     /// Whether waiting will change the answer.
-    ///
-    /// Same precedence as [`Self::is_due`], and for the same reason: the typed
-    /// disposition is what the indexer decided, and the legacy `refusal`
-    /// answers only for rows recorded before there was one. Reading `refusal`
-    /// directly says "waiting will help" for every terminal code that is not
-    /// literally `Unsupported`, because the legacy field carries `Truncated`
-    /// for all of them.
-    pub fn is_terminal(&self) -> bool {
-        match self.typed_retryable {
-            Some(retryable) => !retryable,
-            None => !self.refusal.is_retryable(),
-        }
+    pub fn is_terminal(&self, now_ms: i64) -> bool {
+        self.state(now_ms) == IndexOutcomeState::Terminal
     }
 }
 
@@ -1244,6 +1281,76 @@ pub fn discards_to(index: &FragmentIndex, landed_row: usize, entry: &PlanEntry) 
 
 #[cfg(test)]
 mod tests {
+    use super::{FragmentIndexOutcome, IndexOutcomeState, IndexRefusal, SourceIdentity};
+    use crate::content_analysis::{IndexFailureCode, INDEX_FAILURE_POLICY_REVISION};
+
+    fn outcome(
+        typed_retryable: Option<bool>,
+        next_attempt_at_ms: i64,
+        retry_deadline_ms: i64,
+    ) -> FragmentIndexOutcome {
+        FragmentIndexOutcome {
+            source: SourceIdentity::new(1, 1, "argv"),
+            refusal: IndexRefusal::Truncated { rows: 10 },
+            reason: "budget".to_owned(),
+            attempts: 1,
+            next_attempt_at_ms,
+            updated_at_ms: 0,
+            typed_code: typed_retryable.map(|_| IndexFailureCode::IndexSourceIo),
+            typed_retryable,
+            retry_deadline_ms,
+            policy_revision: INDEX_FAILURE_POLICY_REVISION,
+            terminal_reason: None,
+            diagnostic: None,
+        }
+    }
+
+    /// Every recorded refusal is due, waiting for a known time, or terminal,
+    /// at every instant. The state that was none of these — retryable, its
+    /// retry window past — kept 83 lab5 titles out of VOD for good.
+    #[test]
+    fn no_outcome_is_neither_due_nor_waiting_nor_terminal() {
+        let cases = [
+            outcome(Some(true), 100, 1_000),
+            outcome(Some(true), 100, 0),
+            outcome(Some(false), i64::MAX, 1_000),
+            outcome(None, 100, 0),
+            {
+                let mut unsupported = outcome(None, i64::MAX, 0);
+                unsupported.refusal = IndexRefusal::Unsupported;
+                unsupported
+            },
+        ];
+        for case in &cases {
+            for now in [0, 99, 100, 500, 999, 1_000, 5_000, i64::MAX - 1] {
+                let state = case.state(now);
+                let due = case.is_due(now);
+                let terminal = case.is_terminal(now);
+                let waiting = matches!(state, IndexOutcomeState::WaitUntil(at) if at > now);
+                assert_eq!(
+                    u8::from(due) + u8::from(terminal) + u8::from(waiting),
+                    1,
+                    "{case:?} at {now}: {state:?}"
+                );
+            }
+        }
+        // The limbo row itself: retryable, attempt time reached, window over.
+        assert_eq!(cases[0].state(1_000), IndexOutcomeState::Terminal);
+        assert_eq!(cases[0].state(500), IndexOutcomeState::Due);
+        assert_eq!(cases[0].state(50), IndexOutcomeState::WaitUntil(100));
+    }
+
+    /// A budget failure recorded before measured budgets existed gets one more
+    /// attempt, whatever its window says.
+    #[test]
+    fn a_budget_failure_under_the_old_policy_is_due_once() {
+        let mut old = outcome(Some(true), 100, 1_000);
+        old.typed_code = Some(IndexFailureCode::IndexBudgetExceeded);
+        old.policy_revision = INDEX_FAILURE_POLICY_REVISION - 1;
+        assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Due);
+        old.policy_revision = INDEX_FAILURE_POLICY_REVISION;
+        assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Terminal);
+    }
     use super::*;
 
     fn row(dts: u64, duration: u64, bytes: u32, class: CutClass) -> IndexRow {

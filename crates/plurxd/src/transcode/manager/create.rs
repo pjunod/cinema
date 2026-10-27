@@ -880,6 +880,7 @@ impl TranscodeManager {
                     // back and which reason it is counted under, so a new
                     // code cannot produce sessions the engine serves and
                     // nothing attributes — nor fail playback unclassified.
+                    let refusal_detail = vod_refusal(&error).map(|(_, detail)| detail.to_owned());
                     let live_recovery_reason = vod_refusal(&error)
                         .and_then(|(code, _)| LiveRecoveryReason::from_refusal(code));
                     if let Some(reason) = live_recovery_reason {
@@ -888,6 +889,7 @@ impl TranscodeManager {
                                 target: "plurxd::transcode",
                                 file_id = req.file_id,
                                 refusal = reason.label(),
+                                detail = refusal_detail.as_deref().unwrap_or_default(),
                                 "VOD prerequisite unavailable; using temporary live-HLS recovery"
                             );
                             self.hooks.get().before_vod_fallback_start().await;
