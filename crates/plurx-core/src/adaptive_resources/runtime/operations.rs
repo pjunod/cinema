@@ -1428,6 +1428,11 @@ impl NodeResourceRuntime {
         if let Some(graph) = role.graph.take() {
             role.sealed = Some(graph.seal());
         }
+        #[cfg(target_os = "linux")]
+        if let Some(copy) = role.copy_vod.as_mut() {
+            copy.closing = true;
+            copy.progress.notify_waiters();
+        }
         if role.transition.is_none() {
             start_transition(&self.journal, role, Mutation::Seal, Effect::Seal, deadline)?;
         } else if role

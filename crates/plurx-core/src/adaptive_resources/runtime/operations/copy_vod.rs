@@ -37,6 +37,8 @@ pub(super) struct CopyLaunch {
     pub(super) settlement_operation_id: Uuid,
     #[cfg(test)]
     pub(super) preflight_omit_owner_once: bool,
+    #[cfg(test)]
+    pub(super) post_mint_source_collision: bool,
     pub(super) task_observed_committed: bool,
     // Successful delivery of the ORIGINAL parser latch, not parser/native
     // entry or cleanup evidence. Used only for same-task release replay.
@@ -49,6 +51,9 @@ pub(super) struct CopyLaunch {
     pub(super) permanent_hold: Option<CopyCleanupHoldReason>,
     pub(super) retryable_hold: Option<CopyCleanupHoldReason>,
     pub(super) source_drifted: bool,
+    // Original close intent, distinct from sealing native entry for a natural
+    // parser join. Its structural bytes are charged before R.
+    pub(super) closing: bool,
     pub(super) cleanup_requested: Arc<std::sync::atomic::AtomicBool>,
     pub(super) progress: Arc<tokio::sync::Notify>,
 }
@@ -272,6 +277,8 @@ impl NodeResourceRuntime {
             settlement_operation_id: Uuid::new_v4(),
             #[cfg(test)]
             preflight_omit_owner_once: false,
+            #[cfg(test)]
+            post_mint_source_collision: false,
             task_observed_committed: false,
             start_released: false,
             fixed_image: None,
@@ -282,6 +289,7 @@ impl NodeResourceRuntime {
             permanent_hold: None,
             retryable_hold: None,
             source_drifted: false,
+            closing: false,
             cleanup_requested,
             progress,
         });
@@ -301,20 +309,55 @@ impl NodeResourceRuntime {
         self.validate_preparation(owner)?;
         let bundle = owner.state.lock().await;
         let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+        let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
         if role.refunded
-            || role.copy_vod.is_none()
+            || copy.closing
+            || copy
+                .cleanup_requested
+                .load(std::sync::atomic::Ordering::Acquire)
             || role.pending_finite_close.is_some()
-            || !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+            || role.phase != Phase::AcquisitionPossible
+            || role
+                .transition
+                .as_ref()
+                .is_some_and(|t| t.effect == Effect::Seal)
         {
             return Err(OperationError::State);
         }
         if role.transition.is_some() {
             return Ok(false);
         }
-        role.bootstrap
+        let ready = role
+            .bootstrap
             .get(&member)
             .ok_or(OperationError::State)?
-            .rolling_segment_slot_ready(bytes)
+            .rolling_segment_slot_ready(bytes)?;
+        #[cfg(all(test, feature = "fixtures"))]
+        let full_file_window = role.typed_members.as_ref().is_some_and(|plans| {
+            plans.iter().any(|plan| match plan {
+                v2::MemberPlan::ScratchAssetsV3 { slot, plan }
+                    if slot.member_id.uuid() == member =>
+                {
+                    role.bootstrap
+                        .get(&member)
+                        .and_then(|b| b.fold())
+                        .is_some_and(|fold| {
+                            fold.state().asset.totals.resident_file_objects
+                                >= plan.limits.resident_file_objects
+                        })
+                }
+                _ => false,
+            })
+        });
+        drop(bundle);
+        #[cfg(all(test, feature = "fixtures"))]
+        if !ready && full_file_window {
+            // The original sink registered progress.notified BEFORE this
+            // actual fold preflight. No fabricated window counter or task.
+            self.fixture_copy_stage(CopyStartFixtureStage::OutputWindowFull)
+                .await;
+        }
+        Ok(ready)
     }
 
     pub(in crate::adaptive_resources::runtime) fn mark_copy_admission_failed(
@@ -845,6 +888,11 @@ impl NodeResourceRuntime {
                 .copied()
                 .ok_or(OperationError::State)?;
             let start_released = copy.start_released;
+            if abort {
+                let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
+                copy.closing = true;
+                copy.progress.notify_waiters();
+            }
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());
             }
@@ -986,8 +1034,23 @@ impl NodeResourceRuntime {
             copy.permanent_hold = Some(CopyCleanupHoldReason::TerminalIdentityMismatch);
             return Err(OperationError::State);
         }
-        for source in role.sources.values() {
-            let _ = source.copy_closed_fact(closure)?;
+        #[cfg(test)]
+        if std::mem::take(&mut copy.post_mint_source_collision) {
+            role.sources
+                .values_mut()
+                .next()
+                .ok_or(OperationError::State)?
+                .fixture_parent_close_operation_collision(closure.close_operation_id());
+        }
+        if let Some(error) = role
+            .sources
+            .values()
+            .find_map(|source| source.copy_closed_fact(closure).err())
+        {
+            // The genuine one-shot proof is already retained and graph roots
+            // have closed. Retrying kill/wait cannot repair contradictory facts.
+            set_copy_hold(copy, CopyCleanupHoldReason::TerminalIdentityMismatch);
+            return Err(error);
         }
         copy.terminal = Some(terminal);
         if copy.retryable_hold == Some(CopyCleanupHoldReason::FailedParserKill) {

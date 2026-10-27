@@ -18,6 +18,7 @@ pub(in crate::adaptive_resources::runtime) enum CopyStartFixtureStage {
     TaskRegistered,
     TaskObservationQueued,
     TaskObserved,
+    OutputWindowFull,
 }
 struct Delay {
     reached: tokio::sync::Notify,

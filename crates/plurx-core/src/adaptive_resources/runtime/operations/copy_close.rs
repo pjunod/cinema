@@ -388,6 +388,8 @@ impl NodeResourceRuntime {
             if !role.finite_app.as_ref().is_some_and(|state| state.seal()) {
                 return Err(OperationError::State);
             }
+            copy.closing = true;
+            copy.progress.notify_waiters();
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());
             }
@@ -467,6 +469,9 @@ impl NodeResourceRuntime {
             let mut bundle = owner.state.lock().await;
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
             let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+            // invoked records the attempted root launch even on a physical
+            // pre-entry refusal. Allow only this original root here; the SAME
+            // graph's positive no-acquisition constructor below remains owed.
             if role.refunded
                 || copy.entered
                 || copy.task.is_some()
@@ -481,7 +486,7 @@ impl NodeResourceRuntime {
                 || role
                     .invoked
                     .iter()
-                    .any(|m| !copy.source_members.contains(m))
+                    .any(|m| !copy.source_members.contains(m) && *m != copy.root_member)
                 || role.transition.is_some()
             {
                 return Err(OperationError::State);
@@ -559,12 +564,20 @@ impl NodeResourceRuntime {
         index: usize,
     ) -> Result<(), OperationError> {
         let (graph, root) = {
-            let bundle = owner.state.lock().await;
-            let role = bundle.roles.get(index).ok_or(OperationError::State)?;
-            let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+            let mut bundle = owner.state.lock().await;
+            let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+            let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
+            if copy.task.is_none() && role.invoked.contains(&copy.task_member) {
+                // Registration was recorded, but its original selector is
+                // missing. Never adapt the live writer into a root-only proof.
+                super::copy_vod::set_copy_hold(
+                    copy,
+                    CopyCleanupHoldReason::TerminalIdentityMismatch,
+                );
+                return Err(OperationError::State);
+            }
             if !copy.entered
                 || copy.task.is_some()
-                || role.invoked.contains(&copy.task_member)
                 || copy.task_observed_committed
                 || copy.terminal.is_some()
                 || role.roots.len() != 1
@@ -660,8 +673,21 @@ impl NodeResourceRuntime {
             copy.permanent_hold = Some(CopyCleanupHoldReason::TerminalIdentityMismatch);
             return Err(OperationError::State);
         }
-        for source in role.sources.values() {
-            let _ = source.copy_root_only_closed_fact(proof)?;
+        #[cfg(test)]
+        if std::mem::take(&mut copy.post_mint_source_collision) {
+            role.sources
+                .values_mut()
+                .next()
+                .ok_or(OperationError::State)?
+                .fixture_parent_close_operation_collision(proof.close_operation_id());
+        }
+        if let Some(error) = role
+            .sources
+            .values()
+            .find_map(|source| source.copy_root_only_closed_fact(proof).err())
+        {
+            super::copy_vod::set_copy_hold(copy, CopyCleanupHoldReason::TerminalIdentityMismatch);
+            return Err(error);
         }
         Ok(())
     }

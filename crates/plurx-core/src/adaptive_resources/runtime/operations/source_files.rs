@@ -1859,6 +1859,18 @@ impl SourceCell {
             .ok_or(OperationError::State)
     }
 
+    /// Negative fixture corruption AFTER real native closure/proof minting.
+    /// This touches no File/FD or closure capability; the existing fact
+    /// validator must reject parent/root close-operation identity collision.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::adaptive_resources::runtime::operations) fn fixture_parent_close_operation_collision(
+        &mut self,
+        root_close_operation: Uuid,
+    ) {
+        assert!(self.parent_closed());
+        self.parent_close_operation_id = root_close_operation;
+    }
+
     /// The SAME copy root's native closure, with no registered parser, closes
     /// only the inventoried inherited copy after this cell's checked parent
     /// close. Unobserved root-copy enrichment still must match its exact slot.

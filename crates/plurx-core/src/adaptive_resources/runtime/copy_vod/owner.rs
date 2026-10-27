@@ -166,6 +166,7 @@ pub struct CopyVodOwner {
     target_seconds: u32,
     app_state: Arc<super::super::finite_lifetime::FiniteAppState>,
     cleanup_requested: Arc<std::sync::atomic::AtomicBool>,
+    progress: Arc<tokio::sync::Notify>,
     // Last: this guard observes destruction of the rich owner fields above.
     _app_guard: Arc<super::super::finite_lifetime::FiniteAppGuard>,
 }
@@ -806,6 +807,7 @@ impl Drop for CopyVodOwner {
         // runtime book for its ordinary same-operation repair pass.
         self.cleanup_requested
             .store(true, std::sync::atomic::Ordering::Release);
+        self.progress.notify_waiters();
     }
 }
 
@@ -1253,7 +1255,7 @@ impl NodeResourceRuntime {
                 usize::try_from(bounds.one_io_payload_bytes).map_err(|_| invalid())?,
                 request.parser_limits,
                 request.operation_timeout,
-                progress,
+                Arc::clone(&progress),
             )?;
             let response_budget = ResponseBudget::with_metadata(
                 usize::try_from(bounds.response_memory_bytes).map_err(|_| invalid())?,
@@ -1314,6 +1316,7 @@ impl NodeResourceRuntime {
                 target_seconds: request.parser_limits.target_seconds.max(1),
                 app_state: Arc::clone(&app_state),
                 cleanup_requested,
+                progress,
                 _app_guard: app_guard,
             })
         })();

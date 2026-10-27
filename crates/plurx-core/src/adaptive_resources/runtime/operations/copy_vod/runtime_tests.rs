@@ -1149,3 +1149,481 @@ async fn copy_full_preflight_rejection_retains_original_witnesses_and_same_settl
     drop(ticket);
     retire_with_retained_aliases(runtime, owner, preparation, true, output, application).await;
 }
+
+// C1: unlike the deadline case, these actual refusals occur inside the
+// selected native launcher AFTER committed Arm and the invoked bookkeeping.
+async fn copy_post_arm_native_admission_refusal(epoch_change: bool) {
+    let root = tempfile::tempdir().expect("actual post-Arm refusal fixture");
+    let (runtime, request) =
+        NodeResourceRuntime::fixture_actual_copy_request(root.path(), false).await;
+    let capacity = request.demand.resources;
+    let epoch = request.demand.limit_epoch;
+    let mut owner = runtime
+        .prepare_copy_vod(request, deadline())
+        .await
+        .expect("original R");
+    let preparation = NodeResourceRuntime::fixture_copy_original_preparation(&owner);
+    original_prefix(&runtime, &mut owner, &preparation).await;
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::RootArmed);
+    let mut start = Box::pin(runtime.start_copy_vod(&preparation, 0, deadline()));
+    tokio::select! {
+        result=&mut start=>panic!("original launch skipped committed Arm boundary: {result:?}"),
+        ()=gate.reached()=>{},
+        ()=tokio::time::sleep(Duration::from_secs(15))=>panic!("FAILURE watchdog: committed original Arm missing"),
+    }
+    if epoch_change {
+        runtime
+            .update_capacity(epoch.checked_add(1).expect("next real epoch"), capacity)
+            .expect("actual same-ledger capacity epoch change");
+    } else {
+        runtime
+            .begin_drain()
+            .expect("actual admission drain after committed Arm");
+    }
+    drop(gate);
+    assert!(
+        matches!(start.await, Err(OperationError::Physical(_))),
+        "must reach real native acquisition refusal, not the earlier deadline branch"
+    );
+    {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role.copy_vod.as_ref().expect("same never-entered original");
+        assert!(!copy.entered && role.roots.is_empty() && copy.task.is_none());
+        assert!(role.armed.contains(&copy.root_member));
+        assert!(
+            role.invoked.contains(&copy.root_member),
+            "exercise the former closer rejection"
+        );
+        assert!(
+            role.transition
+                .as_ref()
+                .expect("original refusal Hold")
+                .effect
+                == Effect::Hold
+        );
+        let snapshot = role
+            .sealed
+            .as_ref()
+            .expect("same sealed graph")
+            .snapshot()
+            .await;
+        assert!(!snapshot.acquired && snapshot.roots == 0 && snapshot.writers == 0);
+    }
+    retire_with_actual_alias_barriers(runtime, owner, preparation, false).await;
+}
+
+#[tokio::test]
+async fn copy_post_arm_actual_drain_refusal_closes_same_never_root_and_refunds() {
+    copy_post_arm_native_admission_refusal(false).await;
+}
+
+#[tokio::test]
+async fn copy_post_arm_actual_epoch_refusal_closes_same_never_root_and_refunds() {
+    copy_post_arm_native_admission_refusal(true).await;
+}
+
+// R15 is required: actual entered parser, actual immutable five-file window,
+// no reader acknowledgment, and natural original task join after cancellation.
+#[tokio::test]
+async fn copy_entered_parser_full_window_retirement_wakes_and_joins_before_deadline() {
+    use crate::adaptive_resources::runtime::copy_vod::CopyPipeCommand;
+    use crate::adaptive_resources::runtime::finite_vod::SoftwareAvcExecutable;
+    let root = tempfile::tempdir().expect("actual full-window fixture");
+    let (runtime, mut request) =
+        NodeResourceRuntime::fixture_actual_copy_request(root.path(), false).await;
+    // Eight genuine source iterations exceed the valid minimum five-file
+    // rolling window even if one complete source GOP makes each segment.
+    // This is fixture input creation, not a manufactured fold or native proof.
+    let source = root.path().join("full-window-source.mp4");
+    crate::testfixtures::run(
+        std::process::Command::new(crate::testfixtures::ffmpeg())
+            .args(["-y", "-v", "error", "-stream_loop", "7", "-i"])
+            .arg(&request.source.path)
+            .args(["-map", "0", "-c", "copy"])
+            .arg(&source),
+    );
+    let source = std::fs::canonicalize(source).expect("canonical genuine extended source");
+    let metadata = std::fs::metadata(&source).expect("actual extended source metadata");
+    let identity = crate::source_identity::SourceIdentity::from_metadata(&metadata);
+    let probe = crate::testfixtures::run(
+        std::process::Command::new(crate::testfixtures::ffprobe())
+            .args([
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_format",
+                "-of",
+                "json",
+            ])
+            .arg(&source),
+    );
+    let probe: serde_json::Value = serde_json::from_slice(&probe).expect("actual extended probe");
+    let probe = crate::scan::probe::parse_probe_json(&probe);
+    let mut media = request.command.source().clone();
+    media.path = source.clone();
+    media.size = i64::try_from(metadata.len()).expect("actual source size");
+    media.mtime = identity.mtime;
+    media.duration_ms = probe.duration_ms;
+    request.command = CopyPipeCommand::compile(
+        media,
+        request.command.video(),
+        SoftwareAvcExecutable::new(
+            request.command.executable().path().to_owned(),
+            request.command.executable().source_identity(),
+            &hex::encode(request.command.executable().sha256()),
+        )
+        .expect("same cached executable plan; original SourceCell must verify it"),
+        root.path().to_owned(),
+        None,
+        false,
+        crate::transcode::Pacing::unpaced(),
+        None,
+    )
+    .expect("same fixed copy launcher for actual source");
+    request.source.path = source;
+    request.source.object_version = identity.render_s1();
+    request.source.scanner_size = i64::try_from(metadata.len()).expect("actual scanner size");
+    request.source.scanner_mtime = identity.mtime;
+    // These are valid immutable pre-R payload limits, as in the existing real
+    // positive-publication fixture. Do not widen the five-file window itself.
+    request.parser_limits.max_bytes = 4 * 1024 * 1024;
+    request.reader_bounds.unit_bytes = 4 * 1024 * 1024;
+    request.reader_bounds.buffer_bytes = 4 * 1024 * 1024;
+    request.output.one_io_payload_bytes = 4 * 1024 * 1024;
+    request.output.one_file_logical_bytes = 4 * 1024 * 1024;
+    request.output.resident_logical_bytes = 48 * 1024 * 1024;
+    request.output.resident_memory_bytes = 8 * 1024 * 1024;
+    assert_eq!(request.output.resident_file_objects, 5);
+    let window = request.output.resident_file_objects;
+    let mut owner = runtime
+        .prepare_copy_vod(request, deadline())
+        .await
+        .expect("actual tight-window R");
+    let preparation = NodeResourceRuntime::fixture_copy_original_preparation(&owner);
+    let charge = runtime.accounting().expect("full original R").used;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("real application alias");
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::OutputWindowFull);
+    owner
+        .start(deadline())
+        .await
+        .expect("actual original native parser entry");
+    tokio::time::timeout(Duration::from_secs(30), gate.reached())
+        .await
+        .expect("FAILURE watchdog: original sink never reached its real full window");
+    let (observation, root_member) = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role.copy_vod.as_ref().expect("same actual entered parser");
+        assert!(copy.entered && copy.start_released && copy.task_observed_committed);
+        let member = output_member_from_role(role);
+        let state = role
+            .bootstrap
+            .get(&member)
+            .expect("same actual fold")
+            .fold()
+            .expect("same acknowledged output state")
+            .state();
+        assert_eq!(state.asset.totals.resident_file_objects, window);
+        assert!(
+            copy.task.is_some(),
+            "same original task retained at full window"
+        );
+        (copy.task_observation, copy.root_member)
+    };
+    drop(gate); // only the fixture delay leaves; no real window credit is freed.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            owner.wait_producer_result(deadline())
+        )
+        .await
+        .is_err(),
+        "full original window must keep the actual parser pending without acknowledgment"
+    );
+    let mut ticket = tokio::time::timeout(
+        Duration::from_secs(15),
+        owner.prepare_retirement(true, deadline()),
+    )
+    .await
+    .expect("R15 FAILURE: original full-window parser did not naturally join")
+    .expect("same original native/scratch closure");
+    {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        assert!(role.copy_vod.is_none() && role.pending_finite_close.is_some());
+        let Mutation::SettleTyped(closed) = &role
+            .pending_finite_close
+            .as_ref()
+            .expect("same pending close")
+            .mutation
+        else {
+            panic!("original typed close")
+        };
+        assert!(closed.settlement.members.iter().any(|m| matches!(m,
+            v2::MemberDisposition::Closed { fact: v2::ClosedFact::VodOutputTaskV1 { task: actual, .. }, .. }
+                if actual.root_member_id.uuid() == root_member)), "original registered task inventory survives closure");
+    }
+    assert!(!observation.is_nil());
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("native closure is not refund")
+            .used,
+        charge
+    );
+    drop(owner);
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "actual output/application/preparation aliases still retain R"
+    );
+    drop(output);
+    drop(application);
+    drop(preparation);
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("same original joined ticket and alias release");
+    assert_eq!(
+        runtime.accounting().expect("known original refund").used,
+        ResourceVector::default()
+    );
+    drop(ticket);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("actual journal drain");
+}
+
+fn output_member_from_role(role: &OwnedRole) -> Uuid {
+    role.typed_members
+        .as_ref()
+        .expect("same original typed plan")
+        .iter()
+        .find_map(|plan| match plan {
+            v2::MemberPlan::ScratchAssetsV3 { slot, .. } => Some(slot.member_id.uuid()),
+            _ => None,
+        })
+        .expect("same original output member")
+}
+
+async fn copy_post_mint_source_fact_collision(root_only: bool) {
+    let root = tempfile::tempdir().expect("actual post-mint collision fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(
+        &runtime,
+        &mut owner,
+        if root_only {
+            CopyStartFixtureStage::RootRegistered
+        } else {
+            CopyStartFixtureStage::TaskObserved
+        },
+    )
+    .await;
+    let charge = runtime.accounting().expect("original held R").used;
+    preparation.state.lock().await.roles[0]
+        .copy_vod
+        .as_mut()
+        .expect("same original copy")
+        .post_mint_source_collision = true;
+    assert!(owner.prepare_retirement(true, deadline()).await.is_err());
+    let (graph, close) = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role
+            .copy_vod
+            .as_ref()
+            .expect("retained same original witness");
+        assert_eq!(
+            copy.permanent_hold,
+            Some(CopyCleanupHoldReason::TerminalIdentityMismatch)
+        );
+        assert!(!copy.post_mint_source_collision && role.pending_finite_close.is_none());
+        let close = if root_only {
+            copy.root_only_closure
+                .as_ref()
+                .expect("genuine root-only proof retained")
+                .close_operation_id()
+        } else {
+            copy.process_closure
+                .as_ref()
+                .expect("genuine joined proof retained")
+                .close_operation_id()
+        };
+        assert!(role.sources.values().all(|s| s.parent_closed()));
+        (
+            role.sealed.as_ref().expect("same graph").select_same(),
+            close,
+        )
+    };
+    assert_eq!(
+        graph.snapshot().await.roots,
+        0,
+        "actual constructor already consumed its native inventory"
+    );
+    assert!(owner.prepare_retirement(true, deadline()).await.is_err());
+    {
+        let bundle = preparation.state.lock().await;
+        let copy = bundle.roles[0]
+            .copy_vod
+            .as_ref()
+            .expect("same permanently held original");
+        let retry_close = if root_only {
+            copy.root_only_closure
+                .as_ref()
+                .expect("same proof")
+                .close_operation_id()
+        } else {
+            copy.process_closure
+                .as_ref()
+                .expect("same proof")
+                .close_operation_id()
+        };
+        assert_eq!(retry_close, close);
+    }
+    assert!(
+        !runtime.has_failed_copy_admission(),
+        "permanent contradiction must not spin maintenance"
+    );
+    assert_eq!(
+        runtime
+            .maintain_failed_copy_admissions(deadline())
+            .await
+            .expect("same maintenance"),
+        0
+    );
+    assert_eq!(
+        runtime.accounting().expect("no contradictory refund").used,
+        charge
+    );
+    drop(graph);
+    drop(preparation);
+    drop(owner);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole held runtime")
+        .drain()
+        .expect("durable held journal, no refund");
+}
+
+#[tokio::test]
+async fn copy_post_mint_root_only_fact_identity_error_is_permanent_and_retains_proof() {
+    copy_post_mint_source_fact_collision(true).await;
+}
+
+#[tokio::test]
+async fn copy_post_mint_joined_fact_identity_error_is_permanent_and_retains_proof() {
+    copy_post_mint_source_fact_collision(false).await;
+}
+
+// C4/R22: drive the actual runtime closer with its task selector lost while
+// the SAME physical graph still owns the actual registered writer/JoinHandle.
+#[tokio::test]
+async fn copy_runtime_missing_task_with_actual_registered_writer_is_sticky_held() {
+    let root = tempfile::tempdir().expect("actual registered writer selector-loss fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::TaskRegistered).await;
+    let charge = runtime.accounting().expect("same original R").used;
+    let (graph, task, child) = {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        let copy = role
+            .copy_vod
+            .as_mut()
+            .expect("actual original registered writer");
+        let task = copy
+            .task
+            .take()
+            .expect("lose only retained runtime selector");
+        assert!(role.invoked.contains(&copy.task_member));
+        let child = *role
+            .roots
+            .get(&copy.root_member)
+            .expect("same original root");
+        let graph = role.graph.take().expect("same original graph").seal();
+        role.sealed = Some(graph);
+        (
+            role.sealed
+                .as_ref()
+                .expect("same original sealed graph")
+                .select_same(),
+            task,
+            child,
+        )
+    };
+    assert_eq!(graph.snapshot().await.writers, 1);
+    assert!(owner.prepare_retirement(true, deadline()).await.is_err());
+    {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role.copy_vod.as_ref().expect("same held original");
+        assert_eq!(
+            copy.permanent_hold,
+            Some(CopyCleanupHoldReason::TerminalIdentityMismatch)
+        );
+        assert!(
+            copy.task.is_none()
+                && copy.root_only_closure.is_none()
+                && copy.process_closure.is_none()
+                && copy.never_root_closure.is_none()
+        );
+        assert!(role.pending_finite_close.is_none());
+    }
+    assert!(!runtime.has_failed_copy_admission());
+    assert_eq!(
+        runtime
+            .maintain_failed_copy_admissions(deadline())
+            .await
+            .expect("same maintenance"),
+        0
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("selector loss does not refund")
+            .used,
+        charge
+    );
+    // Fixture hygiene uses ONLY captured genuine original selectors. Do not
+    // restore the runtime field, create a replacement task or mint a witness.
+    let _ = graph.start_kill_root(child).await;
+    graph
+        .wait_root(child)
+        .await
+        .expect("same original native child wait");
+    graph
+        .join_copy_vod(task)
+        .await
+        .expect("same original parked task naturally joins");
+    {
+        let mut bundle = preparation.state.lock().await;
+        for source in bundle.roles[0].sources.values_mut() {
+            source
+                .close_parent()
+                .await
+                .expect("same actual original parent close");
+        }
+    }
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("native teardown alone is not refund")
+            .used,
+        charge
+    );
+    drop(graph);
+    drop(preparation);
+    drop(owner);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole held runtime")
+        .drain()
+        .expect("durable held journal, no refund");
+}
