@@ -12224,27 +12224,6 @@ impl MembershipManager {
             replays.remove(node_id);
         }
         inner.internal_read_authority.lock().await.remove(node_id);
-        // Nothing but the removed node claims the analysis requests targeted
-        // at it. Retire them with it rather than leaving them active, counted
-        // against the queue's ceiling, for good. The voters' settle pass
-        // retires any this misses.
-        match inner
-            .store
-            .retire_analysis_requests_for_node(node_id, unix_ms().unwrap_or(i64::MAX))
-            .await
-        {
-            Ok(0) => {}
-            Ok(retired) => {
-                tracing::info!(
-                    node_id,
-                    retired,
-                    "retired a removed node's analysis requests"
-                )
-            }
-            Err(error) => {
-                tracing::warn!(node_id, %error, "retiring a removed node's analysis requests")
-            }
-        }
         if let Err(error) = inner
             .client
             .txn(vec![
@@ -12269,6 +12248,28 @@ impl MembershipManager {
         {
             // The pending-removal row remains the authoritative durable fence.
             tracing::error!(%error, %node_id, "could not materialize final node tombstone");
+            return;
+        }
+        // Nothing but the removed node claims the analysis requests targeted
+        // at it. Retire them once its tombstone is durable rather than leave
+        // them active, counted against the queue's ceiling, for good. The
+        // voters' settle pass retires any this misses.
+        match inner
+            .store
+            .retire_analysis_requests_for_node(node_id, unix_ms().unwrap_or(i64::MAX))
+            .await
+        {
+            Ok(0) => {}
+            Ok(retired) => {
+                tracing::info!(
+                    node_id,
+                    retired,
+                    "retired a removed node's analysis requests"
+                )
+            }
+            Err(error) => {
+                tracing::warn!(node_id, %error, "retiring a removed node's analysis requests")
+            }
         }
     }
 

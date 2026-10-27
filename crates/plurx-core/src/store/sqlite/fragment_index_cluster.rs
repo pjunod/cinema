@@ -466,8 +466,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 return Ok(Some(request));
             }
             tx.execute(
-                "INSERT INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT ?1,?2,?3,?4,'subtitle_source',?5,'',?1,'',?6,?7,0,'','queued',NULL,0,NULL,0,?8,NULL,NULL,0,?8,?8 WHERE EXISTS (SELECT 1 FROM files WHERE id = ?2 AND size = ?3 AND mtime = ?4) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < ?9",
-                params![generation, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, priority, if priority == "foreground" { "playback" } else { "background" }, now_ms, MAX_ANALYSIS_REQUESTS],
+                "INSERT INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT ?1,?2,?3,?4,'subtitle_source',?5,'',?1,'',?6,?7,0,'','queued',NULL,0,NULL,0,?8,NULL,NULL,0,?8,?8 WHERE EXISTS (SELECT 1 FROM files WHERE id = ?2 AND size = ?3 AND mtime = ?4) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < ?9 + CASE WHEN ?6 = 'foreground' THEN ?10 ELSE 0 END",
+                params![generation, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, priority, if priority == "foreground" { "playback" } else { "background" }, now_ms, MAX_ANALYSIS_REQUESTS, super::super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM],
             )?;
             let result = tx.query_row(&format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"), params![generation], request_from_row).optional()?;
             tx.commit()?;
@@ -850,45 +850,49 @@ impl ClusterFragmentIndexStore for SqliteStore {
             let backoff_base_ms = configured_backoff_base_ms(conn)?;
             let backoff_max_ms = configured_backoff_max_ms(conn)?.max(backoff_base_ms);
             let transaction = conn.unchecked_transaction()?;
-            transaction.execute(
-                "UPDATE analysis_attempts
-                    SET phase = 'retry_wait', phase_updated_at_ms = ?1,
-                        terminal_code = 'lease_expired'
-                  WHERE (request_id, claim_epoch) IN (
-                    SELECT request_id, fence FROM analysis_requests
-                     WHERE component <> 'subtitle_source' AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1)",
-                params![now_ms],
-            )?;
-            transaction.execute(
-                "UPDATE analysis_requests
-                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                        not_before_ms = ?1 + MIN(MAX(1000,
-                          (?2 * (1 << MIN(MAX(attempts - 1, 0), 30)) *
-                           (75 + (ABS(length(request_id) * 17
-                             + unicode(substr(request_id, 1, 1)) * 31
-                             + unicode(substr(request_id, -1, 1)) * 13
-                             + attempts * 7) % 51))) / 100), ?3),
-                        last_error_code = 'lease_expired',
-                        updated_at_ms = ?1
-                  WHERE component <> 'subtitle_source' AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1",
-                params![now_ms, backoff_base_ms, backoff_max_ms],
-            )?;
-            transaction.execute(
-                "UPDATE analysis_attempts
-                    SET phase = 'failed', phase_updated_at_ms = ?1,
-                        terminal_code = 'attempt_limit'
-                  WHERE (request_id, claim_epoch) IN (
-                    SELECT request_id, fence FROM analysis_requests
-                     WHERE component <> 'subtitle_source' AND attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1)",
-                params![now_ms, max_attempts],
-            )?;
-            transaction.execute(
-                "UPDATE analysis_requests
-                    SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
-                        last_error_code = 'attempt_limit', updated_at_ms = ?1
-                  WHERE component <> 'subtitle_source' AND attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1",
-                params![now_ms, max_attempts],
-            )?;
+            // Cluster-wide sweeps; a learner's targeted-only claim leaves
+            // them to the voters' claims.
+            if !targeted_only {
+                transaction.execute(
+                    "UPDATE analysis_attempts
+                        SET phase = 'retry_wait', phase_updated_at_ms = ?1,
+                            terminal_code = 'lease_expired'
+                      WHERE (request_id, claim_epoch) IN (
+                        SELECT request_id, fence FROM analysis_requests
+                         WHERE component <> 'subtitle_source' AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1)",
+                    params![now_ms],
+                )?;
+                transaction.execute(
+                    "UPDATE analysis_requests
+                        SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                            not_before_ms = ?1 + MIN(MAX(1000,
+                              (?2 * (1 << MIN(MAX(attempts - 1, 0), 30)) *
+                               (75 + (ABS(length(request_id) * 17
+                                 + unicode(substr(request_id, 1, 1)) * 31
+                                 + unicode(substr(request_id, -1, 1)) * 13
+                                 + attempts * 7) % 51))) / 100), ?3),
+                            last_error_code = 'lease_expired',
+                            updated_at_ms = ?1
+                      WHERE component <> 'subtitle_source' AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= ?1",
+                    params![now_ms, backoff_base_ms, backoff_max_ms],
+                )?;
+                transaction.execute(
+                    "UPDATE analysis_attempts
+                        SET phase = 'failed', phase_updated_at_ms = ?1,
+                            terminal_code = 'attempt_limit'
+                      WHERE (request_id, claim_epoch) IN (
+                        SELECT request_id, fence FROM analysis_requests
+                         WHERE component <> 'subtitle_source' AND attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1)",
+                    params![now_ms, max_attempts],
+                )?;
+                transaction.execute(
+                    "UPDATE analysis_requests
+                        SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
+                            last_error_code = 'attempt_limit', updated_at_ms = ?1
+                      WHERE component <> 'subtitle_source' AND attempts >= ?2 AND state = 'queued' AND not_before_ms <= ?1",
+                    params![now_ms, max_attempts],
+                )?;
+            }
             let candidate = transaction
                 .query_row(
                     &format!(

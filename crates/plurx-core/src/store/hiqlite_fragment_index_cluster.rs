@@ -1820,8 +1820,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                  params!(now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version)),
                 ("UPDATE analysis_requests SET priority = 'foreground', trigger = 'playback', updated_at_ms = $1 WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state = 'queued' AND priority = 'normal' AND $6 = 'foreground'".to_owned(),
                  params!(now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority)),
-                ("INSERT OR IGNORE INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT $1,$2,$3,$4,'subtitle_source',$5,'',$1,'',$6,$7,0,'','queued',NULL,0,NULL,0,$8,NULL,NULL,0,$8,$8 WHERE $9 < $10 AND COALESCE((SELECT next_epoch FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $11 AND COALESCE((SELECT COALESCE(last_1_ms >= $12, 0) + COALESCE(last_2_ms >= $12, 0) + COALESCE(last_3_ms >= $12, 0) FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $9 AND EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4) AND NOT EXISTS (SELECT 1 FROM analysis_requests WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state IN ('queued','running','submitted')) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < $13".to_owned(),
-                 params!(&generation, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority, trigger, now_ms, repairs.recent, SUBTITLE_SOURCE_REPAIR_LIMIT, repairs.lifetime, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS), MAX_ANALYSIS_REQUESTS)),
+                ("INSERT OR IGNORE INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT $1,$2,$3,$4,'subtitle_source',$5,'',$1,'',$6,$7,0,'','queued',NULL,0,NULL,0,$8,NULL,NULL,0,$8,$8 WHERE $9 < $10 AND COALESCE((SELECT next_epoch FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $11 AND COALESCE((SELECT COALESCE(last_1_ms >= $12, 0) + COALESCE(last_2_ms >= $12, 0) + COALESCE(last_3_ms >= $12, 0) FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $9 AND EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4) AND NOT EXISTS (SELECT 1 FROM analysis_requests WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state IN ('queued','running','submitted')) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < $13 + CASE WHEN $6 = 'foreground' THEN $14 ELSE 0 END".to_owned(),
+                 params!(&generation, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority, trigger, now_ms, repairs.recent, SUBTITLE_SOURCE_REPAIR_LIMIT, repairs.lifetime, now_ms.saturating_sub(SUBTITLE_SOURCE_REPAIR_WINDOW_MS), MAX_ANALYSIS_REQUESTS, super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM)),
             ]).await?.into_iter().collect::<Result<Vec<_>, _>>().map_err(database_error)?;
             let _ = results;
             let active = self.client().query_consistent_map::<RequestRow, _>(
@@ -2235,57 +2235,62 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         let max_attempts = configured_max_attempts(self).await?;
         let backoff_base_ms = configured_backoff_base_ms(self).await?;
         let backoff_max_ms = configured_backoff_max_ms(self).await?.max(backoff_base_ms);
-        self.client()
-            .txn(vec![
-                (
-                    "UPDATE analysis_attempts
-                        SET phase = 'retry_wait', phase_updated_at_ms = $1,
-                            terminal_code = 'lease_expired'
-                      WHERE (request_id, claim_epoch) IN (
-                        SELECT request_id, fence FROM analysis_requests
-                         WHERE component <> 'subtitle_source' AND state = 'running'
-                           AND COALESCE(lease_expires_ms, 0) <= $1)"
-                        .to_owned(),
-                    params!(now_ms),
-                ),
-                (
-                    "UPDATE analysis_requests
-                        SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                            not_before_ms = $1 + MIN(MAX(1000,
-                              ($2 * (1 << MIN(MAX(attempts - 1, 0), 30)) *
-                               (75 + (ABS(length(request_id) * 17
-                                 + unicode(substr(request_id, 1, 1)) * 31
-                                 + unicode(substr(request_id, -1, 1)) * 13
-                                 + attempts * 7) % 51))) / 100), $3),
-                            last_error_code = 'lease_expired',
-                            updated_at_ms = $1
-                      WHERE component <> 'subtitle_source' AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= $1"
-                        .to_owned(),
-                    params!(now_ms, backoff_base_ms, backoff_max_ms),
-                ),
-                (
-                    "UPDATE analysis_attempts
-                        SET phase = 'failed', phase_updated_at_ms = $1,
-                            terminal_code = 'attempt_limit'
-                      WHERE (request_id, claim_epoch) IN (
-                        SELECT request_id, fence FROM analysis_requests
-                         WHERE component <> 'subtitle_source' AND attempts >= $2 AND state = 'queued' AND not_before_ms <= $1)"
-                        .to_owned(),
-                    params!(now_ms, max_attempts),
-                ),
-                (
-                    "UPDATE analysis_requests
-                        SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
-                            last_error_code = 'attempt_limit', updated_at_ms = $1
-                      WHERE component <> 'subtitle_source' AND attempts >= $2 AND state = 'queued' AND not_before_ms <= $1"
-                        .to_owned(),
-                    params!(now_ms, max_attempts),
-                ),
-            ])
-            .await?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
+        // Requeueing expired leases and failing attempt-limited rows are
+        // cluster-wide sweeps. A learner's targeted-only claim leaves them to
+        // the voters' claims instead of running them on every wake.
+        if !targeted_only {
+            self.client()
+                .txn(vec![
+                    (
+                        "UPDATE analysis_attempts
+                            SET phase = 'retry_wait', phase_updated_at_ms = $1,
+                                terminal_code = 'lease_expired'
+                          WHERE (request_id, claim_epoch) IN (
+                            SELECT request_id, fence FROM analysis_requests
+                             WHERE component <> 'subtitle_source' AND state = 'running'
+                               AND COALESCE(lease_expires_ms, 0) <= $1)"
+                            .to_owned(),
+                        params!(now_ms),
+                    ),
+                    (
+                        "UPDATE analysis_requests
+                            SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                                not_before_ms = $1 + MIN(MAX(1000,
+                                  ($2 * (1 << MIN(MAX(attempts - 1, 0), 30)) *
+                                   (75 + (ABS(length(request_id) * 17
+                                     + unicode(substr(request_id, 1, 1)) * 31
+                                     + unicode(substr(request_id, -1, 1)) * 13
+                                     + attempts * 7) % 51))) / 100), $3),
+                                last_error_code = 'lease_expired',
+                                updated_at_ms = $1
+                          WHERE component <> 'subtitle_source' AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= $1"
+                            .to_owned(),
+                        params!(now_ms, backoff_base_ms, backoff_max_ms),
+                    ),
+                    (
+                        "UPDATE analysis_attempts
+                            SET phase = 'failed', phase_updated_at_ms = $1,
+                                terminal_code = 'attempt_limit'
+                          WHERE (request_id, claim_epoch) IN (
+                            SELECT request_id, fence FROM analysis_requests
+                             WHERE component <> 'subtitle_source' AND attempts >= $2 AND state = 'queued' AND not_before_ms <= $1)"
+                            .to_owned(),
+                        params!(now_ms, max_attempts),
+                    ),
+                    (
+                        "UPDATE analysis_requests
+                            SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
+                                last_error_code = 'attempt_limit', updated_at_ms = $1
+                          WHERE component <> 'subtitle_source' AND attempts >= $2 AND state = 'queued' AND not_before_ms <= $1"
+                            .to_owned(),
+                        params!(now_ms, max_attempts),
+                    ),
+                ])
+                .await?
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(database_error)?;
+        }
         for _ in 0..8 {
             let capacity = super::fragment_index_cluster::analysis_source_capacity_clause("$3");
             let viewer = if viewer_only {
@@ -2640,7 +2645,15 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         // Rows targeted at a node membership has removed can never be
         // claimed. Removal retires them as it finishes; this catches the rows
         // a removal predating that, or one that could not, left behind.
-        let retired = self.retire_requests_of_removed_nodes(now_ms).await?;
+        let retired = match self.retire_requests_of_removed_nodes(now_ms).await {
+            Ok(retired) => retired,
+            Err(error) => {
+                // Housekeeping beside the settle, not part of it: a failure
+                // here must not stop the settle that follows.
+                tracing::warn!(%error, "retiring a removed node's analysis requests");
+                0
+            }
+        };
         let results = self
             .client()
             .txn(vec![

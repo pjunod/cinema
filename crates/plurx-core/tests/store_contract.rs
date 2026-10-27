@@ -24753,6 +24753,86 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
     .await;
 }
 
+/// Review of #1299: the voters' settle pass retires the active requests of a
+/// node membership has already removed -- the rows a removal predating the
+/// retirement left behind (104 on lab3).
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn hiqlite_settle_retires_requests_of_a_node_membership_removed() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let raw = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect raw replicated client");
+    raw.execute(
+        "CREATE TABLE IF NOT EXISTS cluster_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER)",
+        hiqlite::params!(),
+    )
+    .await
+    .expect("the membership table");
+    raw.execute(
+        "INSERT INTO cluster_nodes (node_id, removed_at) VALUES ($1, $2)",
+        hiqlite::params!("removed-node", 5_i64),
+    )
+    .await
+    .expect("a removed node");
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (_, file_id) = seed_file(&store, "settle-removed").await;
+    for (id, target, generation) in [
+        ("settle-removed", "removed-node", "settle-removed-a"),
+        ("settle-kept", "kept-node", "settle-removed-b"),
+    ] {
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: id.into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "settle-engine".into(),
+                video_identity: String::new(),
+                requested_generation: generation.into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: target.into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("enqueue");
+    }
+    store.settle_analysis_requests(20).await.expect("settle");
+    let removed = store
+        .analysis_request("settle-removed")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(removed.state, "cancelled");
+    assert_eq!(removed.last_error_code, "node_removed");
+    assert_eq!(
+        store
+            .analysis_request("settle-kept")
+            .await
+            .expect("read")
+            .expect("row")
+            .state,
+        "queued"
+    );
+}
+
 #[tokio::test]
 async fn analysis_worker_skips_incompatible_engine_before_spending_a_claim() {
     for_each_backend(|store, backend| async move {

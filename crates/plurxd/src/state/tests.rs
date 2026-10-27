@@ -4802,7 +4802,7 @@ async fn a_learner_resolves_the_analysis_request_targeted_at_it() {
 /// foreground work with its own headroom above that ceiling.
 #[tokio::test]
 async fn a_viewer_preparation_is_queued_when_background_work_fills_the_ceiling() {
-    use plurx_core::store::UserStore as _;
+    use plurx_core::store::{ClusterFragmentIndexStore as _, UserStore as _};
     let dir = crate::test_tempdir().expect("db dir");
     let path = dir.path().join("ceiling.db");
     let store = SqliteStore::open(&path).expect("store");
@@ -4884,6 +4884,29 @@ async fn a_viewer_preparation_is_queued_when_background_work_fills_the_ceiling()
     assert_eq!(request.state, "queued");
     assert_eq!(request.priority, "foreground");
     assert_eq!(request.trigger, "playback");
+
+    // A viewer's subtitle source shares the headroom; discovery does not.
+    let stamp = SubtitleSourceStamp {
+        file_id: file.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        pipeline_version: "ceiling-subtitles".to_owned(),
+    };
+    assert!(
+        !matches!(
+            store
+                .enqueue_or_promote_subtitle_source(&stamp, "normal", 10)
+                .await,
+            Ok(Some(_))
+        ),
+        "background subtitle discovery still stops at the ceiling"
+    );
+    let subtitle = store
+        .enqueue_or_promote_subtitle_source(&stamp, "foreground", 11)
+        .await
+        .expect("a viewer's subtitle source is admitted above the ceiling")
+        .expect("request");
+    assert_eq!(subtitle.priority, "foreground");
 }
 
 /// #463 review finding 3: the switch turned off while a riding pass runs

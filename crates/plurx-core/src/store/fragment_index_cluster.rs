@@ -1773,8 +1773,8 @@ pub struct AnalysisHistoryPage {
 pub const MAX_ACTIVE_ANALYSIS_REQUESTS: i64 = 4_096;
 
 /// Room above [`MAX_ACTIVE_ANALYSIS_REQUESTS`] that only a viewer's own
-/// preparation request (`priority = foreground`, `trigger = playback`) may
-/// use. Background discovery that filled the queue to the ceiling refused
+/// request may use: copy preparation (`priority = foreground`,
+/// `trigger = playback`) and a viewer's subtitle source (`foreground`). Background discovery that filled the queue to the ceiling refused
 /// the one request a waiting viewer needed; the ceiling still bounds the
 /// background producers, and this bounds the viewers.
 pub const PLAYBACK_ANALYSIS_HEADROOM: i64 = 256;
