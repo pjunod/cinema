@@ -20,6 +20,10 @@ DEFAULT_BINARY = "/usr/lib/plurx-player/bin/mpv"
 # presents PQ, with libplacebo mapping.
 VIDEO_ARGS = ["--vo=gpu-next", "--gpu-api=vulkan", "--hwdec=auto-safe",
               "--target-colorspace-hint=yes"]
+# A live session's playlist is still growing, which mpv reads as unseekable;
+# it is seekable within what it holds, and a seek past that is the
+# launcher's to answer with a new session (Playback.on_seek).
+SEEK_ARGS = ["--force-seekable=yes"]
 # The player only opens plurx URLs from a server the user allowed; mpv's
 # ytdl hook would otherwise run yt-dlp on any other URL it is handed.
 SAFETY_ARGS = ["--ytdl=no"]
@@ -70,7 +74,7 @@ class Mpv:
         config = [f"--config-dir={self.config_dir}"] if self.config_dir else []
         return [self.binary, *config, "--idle=once", "--force-window=yes", "--no-terminal",
                 f"--input-ipc-server={self.socket_path}", f"--title={self.title}",
-                *VIDEO_ARGS, *SAFETY_ARGS]
+                *VIDEO_ARGS, *SEEK_ARGS, *SAFETY_ARGS]
 
     def start(self, connect_timeout=15.0):
         env = {key: value for key, value in os.environ.items() if key not in LOADER_OVERRIDES}

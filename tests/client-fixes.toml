@@ -7913,11 +7913,47 @@ source_anchor = 'and not t.get("albumart")'
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_mpvs_vo_error_line_is_a_failure_too(self):"
 
-# From main (PR #1134): the launcher seek test runs its seek through the real event handlers on virtual time.
+# Package builds share a snapshot apt cache and retry 503s from snapshot.ubuntu.com.
 [[fixes]]
-id = "pjunod.linux-player-seek-test-on-virtual-time"
-commits = ["7bec1b236eb7c2acd590d7ad20890ac73d3f2501"]
+id = "claude.linux-player-snapshot-apt-cache"
+commits = ["9dc49c361ed42688a01766c2777e643e1ff61183"]
+source = "clients/linux-player/packaging/apt-snapshot.sh"
+source_anchor = 'marker=/apt-cache/lists/.plurx-snapshot-$ts'
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_every_container_shares_the_snapshot_apt_cache(self):"
+
+# mpv patch 0002 reads the hvcC demux_lavf keeps in lav_codecpar, so Profile 7's enhancement layer is split from HLS streams.
+[[fixes]]
+id = "claude.linux-player-fel-over-hls"
+commits = ["cf6801a2494f8a11c3af2128c286d99a4984a3a7"]
+source = "clients/linux-player/packaging/patches/mpv/0002-demux-dovi_split-split-the-enhancement-layer-without.patch"
+source_anchor = "+    if ((!x || size <= 0) && c->lav_codecpar) {"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_the_split_reads_the_hvcc_that_demux_lavf_keeps(self):"
+
+# Review of #1298: a partial apt index fails the build rather than being marked complete; one build per cache.
+[[fixes]]
+id = "claude.linux-player-apt-cache-review"
+commits = ["fb447e521465e33ae5017b3d11afe10c01784b53"]
+source = "clients/linux-player/packaging/apt-snapshot.sh"
+source_anchor = "apt-get -q -o APT::Update::Error-Mode=any update"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_every_container_shares_the_snapshot_apt_cache(self):"
+
+# A live session shows the whole film on mpv's OSC (patch 0005) and seeks outside the stream restart it there.
+[[fixes]]
+id = "claude.linux-player-film-timeline"
+commits = ["d1acb127c26c09b0674eba96bf7b051790bd698a"]
 source = "clients/linux-player/plurx_player/playback.py"
-source_anchor = "def on_seek(self):"
+source_anchor = "def show_film_timeline(self):"
 test = "clients/linux-player/tests/test_launcher.py"
-test_anchor = "def test_seek_inside_the_range_stays_in_the_session(self):"
+test_anchor = "def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):"
+
+[[fixes]]
+id = "claude.mpv-osc-film-timeline"
+commits = []
+supplements = "claude.linux-player-film-timeline"
+source = "clients/linux-player/packaging/patches/mpv/0005-osc-draw-a-film-timeline-the-application-provides.patch"
+source_anchor = "+-- A film timeline the embedding application sets in user-data/osc/film as"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_the_osc_reads_the_film_timeline_and_hands_back_outside_seeks(self):"
