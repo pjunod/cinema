@@ -1935,7 +1935,10 @@ pattern = "terminal_reason"
 # or chooses a cause: retirement and the playback actor retain ownership.
 # Shared libraries: the Source actor and its tests read the terminal cause
 # of a settled Source route. The terminal causes are unchanged.
-expected_occurrences = 50
+# 50 -> 52 with the VOD index recovery (PR1299), both test-only: the budget
+# test's outcome fixture initializes the field to None, and the vod test reads
+# the `attempt_limit` cause the recovery wrote. No route cause changes.
+expected_occurrences = 52
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -3217,7 +3220,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Main: +13 net retained task sites: HTTPS listener supervision (4), admin tests
 # (2), transport tests (5), startup/drain tests (2); vodserve gains one and
 # vod/driver loses one in the driver/serve relocation. Existing joins remain.
-expected_occurrences = 1017
+# PR1299 VOD index recovery: +4 test-only tasks in state/tests.rs: three runs
+# of the queued local index pass and one queued speech admission behind it.
+# Each is awaited under a timeout; none outlives its test.
+expected_occurrences = 1021
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4912,7 +4918,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Main: +13 retained HTTPS/font fixture bounds: font refusal (2), admin (3),
 # transport (7), startup (1). Each bounds owned work; expiry is refusal, never
 # shutdown or settlement acknowledgement.
-expected_occurrences = 1885
+# PR1299 VOD index recovery: +9 test-only timers in state/tests.rs: four
+# sleeps that let the pass and the speech pass take their places in the
+# heavy lane's queue, four timeouts bounding those awaited tasks, and one
+# sleep in the ride-along worker test's polling loop.
+expected_occurrences = 1894
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
