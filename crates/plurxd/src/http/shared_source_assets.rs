@@ -15,7 +15,7 @@ use super::{
 };
 use crate::state::AppState;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::Response,
     routing::get,
@@ -52,6 +52,18 @@ pub(crate) fn peer_router(state: AppState) -> Router<AppState> {
         .route(manifest, get(overlay_manifest))
         .route(object, get(overlay_object))
         .route(chapter, get(chapter_thumb))
+        .route(
+            "/sharing/v1/items/{item}/files/{file}/captions",
+            get(captions),
+        )
+        .route(
+            "/sharing/v1/items/{item}/files/{file}/captions/{asset}/manifest",
+            get(caption_manifest),
+        )
+        .route(
+            "/sharing/v1/items/{item}/files/{file}/captions/{asset}/segments/{segment}",
+            get(caption_segment),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             shared_library::source_content_guard,
@@ -89,6 +101,43 @@ fn reference(headers: &HeaderMap) -> Result<SourcePlaybackTarget, ApiError> {
         return Err(invalid());
     }
     serde_json::from_slice(value.as_bytes()).map_err(|_| invalid())
+}
+
+async fn captions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((item, file)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, ApiError> {
+    let suffix = format!(
+        "captions{}",
+        query.map(|q| format!("?{q}")).unwrap_or_default()
+    );
+    serve_with_revision(&state, &headers, &item, &file, &suffix, None).await
+}
+async fn caption_manifest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((item, file, asset)): Path<(String, String, String)>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, ApiError> {
+    let suffix = format!(
+        "captions/{asset}/manifest{}",
+        query.map(|q| format!("?{q}")).unwrap_or_default()
+    );
+    serve_with_revision(&state, &headers, &item, &file, &suffix, None).await
+}
+async fn caption_segment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((item, file, asset, segment)): Path<(String, String, String, String)>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, ApiError> {
+    let suffix = format!(
+        "captions/{asset}/segments/{segment}{}",
+        query.map(|q| format!("?{q}")).unwrap_or_default()
+    );
+    serve_with_revision(&state, &headers, &item, &file, &suffix, None).await
 }
 
 async fn subtitle(
@@ -202,6 +251,11 @@ async fn serve_with_revision(
         .await?
         .ok_or_else(unavailable)?;
     let mut response = match resource.kind() {
+        SharingFileResourceKind::Captions
+        | SharingFileResourceKind::CaptionManifest
+        | SharingFileResourceKind::CaptionSegment => {
+            super::shared_captions::source(state, &target, authority.grant, &resource).await?
+        }
         SharingFileResourceKind::Subtitle { index } => {
             stream::subtitle_vtt_for_file_revision(state, &media, index.into(), revision).await?
         }
@@ -797,5 +851,69 @@ pub(crate) mod tests {
             app.oneshot(head).await.expect("response").status(),
             StatusCode::NOT_FOUND
         );
+    }
+    #[tokio::test]
+    async fn shared_caption_catalog_is_grant_read_only_and_rechecks_before_delivery() {
+        let fixture = source_fixture().await;
+        let counts = || {
+            fixture.writer().query_row("SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM background_jobs),(SELECT count(*) FROM subtitle_translation_demands)",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).expect("read-only authority counts")
+        };
+        let before = counts();
+        assert!(matches!(
+            serve(
+                &fixture.state,
+                &fixture.headers(),
+                fixture.target.item_id.as_str(),
+                "1",
+                "captions"
+            )
+            .await,
+            Err(ApiError::Typed {
+                status: StatusCode::BAD_REQUEST,
+                ..
+            })
+        ));
+        let response = guarded(
+            &fixture,
+            call(&fixture, &fixture.headers(), "captions").await,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&body(response).await).expect("catalog");
+        assert_eq!(
+            catalog,
+            serde_json::json!({"version":1,"assets":[],"next_asset":null})
+        );
+        assert_eq!(
+            counts(),
+            before,
+            "media grant cannot create a Source user, job or demand"
+        );
+        let mut missing = fixture.headers();
+        missing.remove(axum::http::header::AUTHORIZATION);
+        assert_eq!(
+            call(&fixture, &missing, "captions").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let response = call(&fixture, &fixture.headers(), "captions").await;
+        fixture
+            .writer()
+            .execute(
+                "UPDATE items SET library_id=?1 WHERE id=?2",
+                rusqlite::params![fixture.private, fixture.item],
+            )
+            .expect("revoke item scope after read");
+        assert_eq!(
+            guarded(&fixture, response).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_ne!(
+            call(&fixture, &fixture.headers(), "captions")
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(counts(), before);
     }
 }

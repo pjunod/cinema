@@ -1195,6 +1195,117 @@ impl TranscodeManager {
             }))
     }
 
+    /// Source read attestation has no producer/job authority. It consumes one
+    /// ordinary speculative CPU slot and never uses the oversized exception.
+    pub(crate) async fn read_attestation_limits(&self) -> (usize, usize) {
+        (self.max_hw_sessions().await, self.software_budget().await)
+    }
+    pub(crate) fn admit_read_attestation(
+        &self,
+        limits: (usize, usize),
+    ) -> Option<crate::admission::TranscodePermit> {
+        if self.admissions.live_is_waiting()
+            || self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+            || self.admissions.software_in_use().checked_add(1)? > limits.1
+        {
+            return None;
+        }
+        self.admissions.try_admit_bundle(
+            limits.0,
+            limits.1,
+            &TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: 1,
+                decoder_threads: None,
+            },
+            Priority::Speculative,
+        )
+    }
+
+    /// Caption inference supports the current playback using two bounded CPU
+    /// threads. It shares the heavy lane and the normal resource pool, but an
+    /// already-running hardware/video session does not make spare CPU unusable.
+    pub(crate) async fn admit_speech(&self) -> Option<FragmentAdmission> {
+        if self.admissions.live_is_waiting()
+            || self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
+        self.admit_speech_with_heavy(heavy).await
+    }
+
+    pub(crate) async fn admit_speech_queued(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<FragmentAdmission> {
+        let heavy = tokio::select! { biased; () = cancel.cancelled() => return None, permit = Arc::clone(&self.background_heavy).acquire_owned() => permit.ok()?, };
+        if cancel.is_cancelled() {
+            return None;
+        }
+        self.admit_speech_with_heavy(heavy).await
+    }
+
+    async fn admit_speech_with_heavy(
+        &self,
+        heavy: tokio::sync::OwnedSemaphorePermit,
+    ) -> Option<FragmentAdmission> {
+        let threads = 2;
+        let budget = self.software_budget().await;
+        // This work may never use the pool's lone-job oversized exception.
+        if self.admissions.software_in_use().checked_add(threads)? > budget
+            || self.admissions.live_is_waiting()
+            || self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        self.admissions
+            .try_admit_bundle(
+                self.max_hw_sessions().await,
+                budget,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: threads,
+                    decoder_threads: None,
+                },
+                Priority::Speculative,
+            )
+            .map(|permit| FragmentAdmission {
+                _heavy: heavy,
+                threads,
+                _permit: permit,
+                extension: std::sync::Mutex::new(None),
+            })
+    }
+
+    pub(crate) async fn speech_capacity_observation(&self) -> (usize, usize, bool) {
+        let budget = self.software_budget().await;
+        let used = self.admissions.software_in_use();
+        let available = used.checked_add(2).is_some_and(|total| total <= budget)
+            && !self.admissions.live_is_waiting()
+            && !self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+            && self.background_heavy.available_permits() > 0;
+        (budget, used, available)
+    }
+
+    pub(crate) fn speech_capacity_available(&self, admission: &FragmentAdmission) -> bool {
+        admission.threads == 2
+            && !self.admissions.live_is_waiting()
+            && !self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {
         self.admit_source_work(self.software_budget().await.max(1))
             .await
@@ -1204,26 +1315,6 @@ impl TranscodeManager {
     #[cfg(target_os = "linux")]
     pub(crate) async fn admit_dv_title(&self) -> Option<FragmentAdmission> {
         self.admit_source_work(1).await
-    }
-
-    /// A claimed, cancellable operation keeps its FIFO place behind the
-    /// current heavy worker instead of losing every try-acquire race. CPU
-    /// capacity is reserved only after this same shared gate is acquired;
-    /// foreground work still wins the normal admission checks.
-    pub(crate) async fn admit_fragment_queued(
-        &self,
-        cancel: &tokio_util::sync::CancellationToken,
-    ) -> Option<FragmentAdmission> {
-        let heavy = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return None,
-            permit = Arc::clone(&self.background_heavy).acquire_owned() => permit.ok()?,
-        };
-        if cancel.is_cancelled() {
-            return None;
-        }
-        self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
-            .await
     }
 
     async fn admit_source_work(&self, threads: usize) -> Option<FragmentAdmission> {

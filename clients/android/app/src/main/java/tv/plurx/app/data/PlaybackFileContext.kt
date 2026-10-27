@@ -52,9 +52,10 @@ class PlaybackFileContext private constructor(
     }
     fun path(resource: String, query: Map<String, String> = emptyMap()): String {
         requireCurrent()
-        require(Regex("(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb)").matches(resource))
+        require(Regex("(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb|captions(/[0-9a-f]{64}/(manifest|segments/[0-9a-f]{64}))?)").matches(resource))
         // A Shared track or chapter index is the Source wire grammar: canonical
         // decimal 0..4095, the bound B and every Source enforce. Local keeps its own.
+        if (resource == "captions" || resource.startsWith("captions/")) require(reference != null)
         if (reference != null) require(sharedFileSuffix(resource))
         if (reference != null && resource in setOf("direct", "stream.mp4")) require(sessionId != null)
         if (reference != null) validateQuery(resource, query)
@@ -133,11 +134,16 @@ class PlaybackFileContext private constructor(
             val allowed = when {
                 resource == "decision" -> capabilities + setOf("force", "audio", "subtitle", "audio_offset_ms", "achannels", "capver", "hdrtypes", "dvdecoders", "dvraw", "dvstatus")
                 resource == "stream.mp4" -> capabilities + setOf("force", "audio", "audio_offset_ms", "start", "stream")
+                resource == "captions" -> setOf("after")
+                resource.matches(Regex("captions/[0-9a-f]{64}/manifest")) -> setOf("position_ms")
+                resource.matches(Regex("captions/[0-9a-f]{64}/segments/[0-9a-f]{64}")) -> setOf("lease")
                 resource.startsWith("chapters/") -> setOf("v")
                 else -> emptySet()
             }
             fun integer(text: String, low: Long, high: Long): Boolean = text.toLongOrNull()?.let { it.toString() == text && it in low..high } == true
             fun match(text: String, pattern: String): Boolean = Regex(pattern).matches(text)
+            if (resource.endsWith("/manifest") && resource.startsWith("captions/")) require(query.keys == setOf("position_ms"))
+            if (resource.contains("/segments/") && resource.startsWith("captions/")) require(query.keys == setOf("lease"))
             for ((key, text) in query) {
                 require(key in allowed)
                 val valid = when (key) {
@@ -153,6 +159,9 @@ class PlaybackFileContext private constructor(
                     "force" -> text in setOf("auto", "original", "transcode")
                     "stream" -> match(text, "[A-Za-z0-9_-]{1,200}")
                     "start" -> match(text, "(0|[1-9][0-9]{0,12})(\\.[0-9]{1,3})?")
+                    "after" -> match(text, "[0-9a-f]{64}")
+                    "position_ms" -> integer(text, 0, 14_400_000)
+                    "lease" -> canonicalUuid(text) && text != "00000000-0000-0000-0000-000000000000"
                     "v" -> match(text, "-?(0|[1-9][0-9]{0,19})")
                     "subtitle" -> integer(text, -1, 999999)
                     "audio_offset_ms" -> integer(text, -15000, 15000)
@@ -165,6 +174,7 @@ class PlaybackFileContext private constructor(
         private val sharedSuffix = Regex("decision|hls/sessions|direct|stream\\.mp4|subs/(0|[1-9][0-9]{0,3})(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/(0|[1-9][0-9]{0,3})/thumb")
         /** The closed Shared file-suffix grammar, as B and every Source parse it. */
         internal fun sharedFileSuffix(resource: String): Boolean {
+            if (resource == "captions" || resource.matches(Regex("captions/[0-9a-f]{64}/(manifest|segments/[0-9a-f]{64})"))) return true
             val match = sharedSuffix.matchEntire(resource) ?: return false
             return listOf(1, 3).all { group -> match.groupValues[group].let { it.isEmpty() || it.toInt() <= 4095 } }
         }

@@ -15,8 +15,19 @@ struct AudioTrackDto {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SubtitleTrackSource {
+    Embedded,
+    Downloaded,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SubTrackDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<SubtitleTrackSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    downloaded_subtitle_id: Option<String>,
     pub index: i64,
     pub codec: String,
     pub language: Option<String>,

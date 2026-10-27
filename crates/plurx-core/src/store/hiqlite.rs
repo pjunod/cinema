@@ -2046,6 +2046,8 @@ impl HiqliteAuthStore {
         store.install_invitation_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
+        store.install_subtitle_text_translation_schema(None).await?;
+        store.install_shared_caption_schema(None).await?;
         store.install_library_annotations_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
         store.install_playback_handoffs_schema(None).await?;
@@ -2234,6 +2236,9 @@ impl HiqliteAuthStore {
                     self.install_invitation_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
+                    self.install_subtitle_text_translation_schema(admission)
+                        .await?;
+                    self.install_shared_caption_schema(admission).await?;
                     self.install_library_annotations_schema(admission).await?;
                     self.install_dv_title_jobs_schema(admission).await?;
                     return self.install_playback_handoffs_schema(admission).await;
@@ -4009,7 +4014,7 @@ impl HiqliteAuthStore {
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
         let version = super::subtitle_translation_schema::version(&shape)?;
-        if version == Some(1) {
+        if version.is_some() {
             // authority: admission must observe the committed singleton marker paired with the extension shape.
             let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
@@ -4025,21 +4030,125 @@ impl HiqliteAuthStore {
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
-        if self.subtitle_translation_schema_version().await? == Some(1) {
+        let current = self.subtitle_translation_schema_version().await?;
+        if current == Some(2) {
             return Ok(());
         }
-        let statements = super::subtitle_translation_schema::statements()
-            .into_iter()
-            .map(|sql| (sql, params!()))
-            .collect::<Vec<_>>();
+        let statements = match current {
+            Some(0) => super::subtitle_translation_schema::retarget_statements()
+                .into_iter()
+                .chain(super::subtitle_translation_schema::continuity_statements())
+                .collect(),
+            Some(1) => super::subtitle_translation_schema::continuity_statements(),
+            _ => super::subtitle_translation_schema::statements(),
+        }
+        .into_iter()
+        .map(|sql| (sql, params!()))
+        .collect::<Vec<_>>();
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
-        if self.subtitle_translation_schema_version().await? == Some(1) {
+        if self.subtitle_translation_schema_version().await? == Some(2) {
             return Ok(());
         }
         result?;
         Err(StoreError::Migration(
             "progressive translation subtitle schema install did not settle".into(),
+        ))
+    }
+
+    async fn subtitle_text_translation_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed translation shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::subtitle_text_translation_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::subtitle_text_translation_schema::version(&shape)?;
+        if version == Some(1) {
+            // authority: admission must observe the committed singleton marker paired with the extension shape.
+            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_text_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
+            if !matches!(rows.as_slice(),[row] if row.count==1) {
+                return Err(StoreError::Migration(
+                    "text translation subtitle schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+    async fn install_subtitle_text_translation_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.subtitle_text_translation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::subtitle_text_translation_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.subtitle_text_translation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "text translation subtitle schema install did not settle".into(),
+        ))
+    }
+
+    async fn shared_caption_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed translation shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::shared_caption_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::shared_caption_schema::version(&shape)?;
+        if version == Some(1) {
+            // authority: admission must observe the committed singleton marker paired with the extension shape.
+            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM shared_caption_schema WHERE singleton=1 AND version=1",params!()).await?;
+            if !matches!(rows.as_slice(),[row] if row.count==1) {
+                return Err(StoreError::Migration(
+                    "Shared caption read schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+    async fn install_shared_caption_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.shared_caption_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::shared_caption_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.shared_caption_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "Shared caption read schema install did not settle".into(),
         ))
     }
 

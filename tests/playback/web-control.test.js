@@ -207,6 +207,7 @@ function fullOpenHarness() {
     shippedSource("retirePlaybackPredecessor"),
     shippedSource("handlePlaybackTransportEvent"),
     shippedSource("beginPlaybackMediaAttachment"), shippedSource("applyPlaybackAttachmentPosition"),
+    shippedSource("playbackCaptionAttachmentPositionReady"),
     shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
     shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
     shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
@@ -1211,7 +1212,8 @@ async function main() {
       "function sessionHeight(){return null;} function langName(){return 'English';}",
       "function useNativeHls(){return false;} function showSessionOpenFailure(){return false;}",
       "function showStallRecoveryFailure(){}",
-      "function selectedAudioIndex(){return 0;} function hlsJsSupported(){return true;} function mseCanTake(){return true;} function clearStreamFailure(){}",
+      shippedSource("selectedAudioIndex"),
+      "function hlsJsSupported(){return true;} function mseCanTake(){return true;} function clearStreamFailure(){}",
       "function transcodeOpts(position){return {position};}",
       "async function openSession(id,opts){calls.push({kind:'session',position:(opts.position??opts.start)*1000});if(failure)throw failure;if(held)return new Promise(resolve=>pending.push(resolve));return {session_id:'replacement'};}",
       "function releaseSession(id){released.push(id);}",
@@ -1233,6 +1235,9 @@ async function main() {
       shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),
       shippedSource("retirePlaybackPredecessor"),
+      // Progressive replacements retain the shipped attachment/caption owner.
+      shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
+      shippedSource("playbackCaptionAttachmentPositionReady"),
       shippedSource("rememberPlaybackSelection"),
       shippedSource("offsetLabel"),
       shippedSource("startCopyHls"),
@@ -1273,7 +1278,10 @@ async function main() {
     assert.equal(h.calls.length,1,`${operation} makes one replacement`);
     assert.equal(h.calls[0].position,90_000,`${operation} retains the unpresented seek destination`);
     assert.equal(p.controlSeek.targetMs,90_000);
-    if(operation==='audio-track') assert.equal(p.controlSeek.executed,true);
+    if(operation==='audio-track'){
+      assert.equal(p.controlSeek.executed,true);
+      assert.equal(p.mediaAttachment.audioOrdinal,1,'the replacement attachment owns the chosen audio');
+    }
   }
   {
     const h=replacementHarness();
@@ -1426,7 +1434,9 @@ async function main() {
       // against is the one ending.
       shippedSource("settleDirectedChange"),qualityCancellationSources(), shippedSource("supersedeDirectedChange"),
       shippedSource("teardownHls"),
+      shippedSource("clearEffectiveProcessing"),
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
+      shippedSource("playbackCaptionAttachmentPositionReady"),
       shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("attachHls"),shippedSource("beginHlsAttachment"),
       qualityResourceTimingSources(),shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
@@ -4290,6 +4300,7 @@ async function main() {
         shippedSource("destroyHlsInstance"),
         shippedSource("resetPlaybackTransportEvents"), shippedSource("playbackTransportEvents"),
         shippedSource("beginPlaybackMediaAttachment"),
+        shippedSource("playbackCaptionAttachmentPositionReady"),
         shippedSource("hasPendingPlaybackOpen"), shippedSource("playbackOwnsAttachedMedia"),
         shippedSource("rememberPlaybackTransportIntent"),
         transportTelemetrySources(),shippedSource("pausePlaybackInternally"),
@@ -7167,7 +7178,9 @@ function terminalHlsStopTests(){
     shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),
     shippedSource("abortHlsStartupLoaders"),shippedSource("retireHlsTerminalAttempt"),
     seekTelemetrySources(), shippedSource("stopPlayerForExhaustion"),shippedSource("scheduleHlsNetworkRetry"),
+    shippedSource("clearEffectiveProcessing"),
     shippedSource("beginPlaybackMediaAttachment"),
+    shippedSource("playbackCaptionAttachmentPositionReady"),
     "const owned=()=>attachment.current()&&player.hls===hls&&!playbackAttemptTerminallyStopped(player,token);",
     "return {calls,player,episode,stop:stopPlayerForExhaustion,current:()=>hlsStartupCurrent(player,episode),retry:()=>scheduleHlsNetworkRetry(video,player,'late fatal'),late(){if(owned())surface='recovering';return surface;},reopen(){player.attemptId='a2';const next=beginPlaybackMediaAttachment(player);return {current:next.current(),terminal:player.terminalStop};}};",
   ].join("\n"))(policy);

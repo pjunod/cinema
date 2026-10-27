@@ -988,6 +988,60 @@ impl JobFence {
                 plurx_core::store::background_jobs_transcription::ObserveSubtitleJob {
                     token,
                     phase,
+                    completed_cues: None,
+                    total_cues: None,
+                    now_ms: unix_ms()?,
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn publish_text_slice(
+        &self,
+        source: plurx_core::store::background_jobs::JobPayload,
+        cues: Vec<plurx_core::store::subtitle_text_translation::TextTranslationCue>,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .publish_text_translation_slice(
+                plurx_core::store::subtitle_text_translation::PublishTextSlice {
+                    token,
+                    source,
+                    cues,
+                    now_ms: unix_ms()?,
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn observe_text_progress(
+        &self,
+        phase: plurx_core::store::background_jobs_transcription::SubtitlePhase,
+        completed: u32,
+        total: u32,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .observe_subtitle_job(
+                plurx_core::store::background_jobs_transcription::ObserveSubtitleJob {
+                    token,
+                    phase,
+                    completed_cues: Some(completed),
+                    total_cues: Some(total),
                     now_ms: unix_ms()?,
                 },
             )

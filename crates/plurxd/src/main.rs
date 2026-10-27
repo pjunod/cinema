@@ -95,6 +95,7 @@ mod subtitle_models;
 mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;
+mod subtitle_text_translation;
 mod subtitle_transcription;
 mod subtitle_translation;
 mod subtitles;

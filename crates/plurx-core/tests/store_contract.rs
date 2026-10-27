@@ -67,6 +67,9 @@ mod sharing_source_sessions;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/source_contract.rs"]
 mod source_contract;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/subtitle_translation_upgrade.rs"]
+mod subtitle_translation_upgrade;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
@@ -33065,6 +33068,7 @@ async fn downloaded_subtitles_survive_rescan_and_reject_stale_or_duplicate_write
             .expect("subtitle contract fixture")
             .expect("subtitle contract fixture");
         let track = plurx_core::domain::DownloadedSubtitle {
+            text_translation: None,
             source_size: original.size,
             source_mtime: original.mtime,
             provider_file_id: 123,

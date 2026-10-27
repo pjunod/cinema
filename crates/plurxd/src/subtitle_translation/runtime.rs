@@ -14,7 +14,7 @@ use crate::{
 };
 #[cfg(unix)]
 use plurx_core::store::subtitle_translation::{
-    cue_id, ExecutionProvenance, TranslationCue, MAX_TRANSLATION_CUES,
+    cue_id, ExecutionProvenance, SpeechTask, TranslationCue, MAX_TRANSLATION_CUES,
 };
 use plurx_core::{
     domain::MediaFile,
@@ -150,7 +150,17 @@ fn log_integer(line: &str, key: &str) -> Option<i64> {
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn observe_clock(log: &[u8], begin: i64, end: i64) -> Result<ClockObservation, StoreError> {
+    observe_source_clock(log, begin, end, 0)
+}
+#[cfg(unix)]
+fn observe_source_clock(
+    log: &[u8],
+    begin: i64,
+    end: i64,
+    audio_start: i64,
+) -> Result<ClockObservation, StoreError> {
     let log = std::str::from_utf8(log).map_err(|_| failure("decode_failed"))?;
     let mut raw_first = None;
     let mut raw_previous: Option<(i64, i64, i64)> = None;
@@ -169,7 +179,7 @@ fn observe_clock(log: &[u8], begin: i64, end: i64) -> Result<ClockObservation, S
             let rate = log_integer(line, " rate:")
                 .filter(|n| (8_000..=384_000).contains(n))
                 .ok_or_else(|| failure("source_clock_unsupported"))?;
-            if !(0..=14_400_000 * 16).contains(&pts) {
+            if !(-14_400_000 * 16..=14_400_000 * 16).contains(&pts) {
                 return Err(failure("source_clock_unsupported"));
             }
             if let Some((previous, previous_count, previous_rate)) = raw_previous {
@@ -211,10 +221,12 @@ fn observe_clock(log: &[u8], begin: i64, end: i64) -> Result<ClockObservation, S
     let raw_first = raw_first.ok_or_else(|| failure("source_clock_unsupported"))?;
     let anchor = anchor.ok_or_else(|| failure("decode_failed"))?;
     // Never manufacture missing speech by padding an input seek that started
-    // after the requested window. Leading audio delay is unavailable in this
-    // initial aligned-clock profile; the separate marker proof is not a blanket
-    // permission to guess the origin of an arbitrary source.
-    if raw_first > begin || anchor != begin || next.is_none_or(|n| n > end) {
+    // after the requested window. Only the selected stream's verified leading
+    // delay can justify padding; its rational source anchor stays authoritative.
+    // Padding is legitimate only before the selected stream's measured start.
+    // A later input seek overshoot is still refused, as are gaps/overlaps above.
+    let delayed_start = begin < audio_start && (raw_first - audio_start).abs() <= 1;
+    if (raw_first > begin && !delayed_start) || anchor != begin || next.is_none_or(|n| n > end) {
         return Err(failure("source_clock_unsupported"));
     }
     Ok(ClockObservation {
@@ -500,41 +512,72 @@ async fn check_revision(
     }
 }
 
+/// Resumable full-content hashing. The producer and read-only attestation use
+/// exactly the same byte count, held identity and cancellation checks.
+pub(crate) struct SourceHash {
+    held: std::fs::File,
+    expected: FileIdentity,
+    hash: Sha256,
+    bytes: u64,
+}
+impl SourceHash {
+    pub(crate) fn new(mut held: std::fs::File, expected: FileIdentity) -> Result<Self, StoreError> {
+        if std_file_identity(&held).ok() != Some(expected) {
+            return Err(failure("source_changed"));
+        }
+        held.seek(SeekFrom::Start(0))
+            .map_err(|_| failure("worker_source_unavailable"))?;
+        Ok(Self {
+            held,
+            expected,
+            hash: Sha256::new(),
+            bytes: 0,
+        })
+    }
+    /// One bounded I/O operation; the caller can relinquish CPU between chunks
+    /// without discarding the held file position or already verified prefix.
+    pub(crate) fn step(
+        &mut self,
+        cancel: &CancellationToken,
+    ) -> Result<Option<String>, StoreError> {
+        interrupted(cancel)?;
+        let mut buffer = [0_u8; 128 * 1024];
+        let length = self
+            .held
+            .read(&mut buffer)
+            .map_err(|_| failure("worker_source_unavailable"))?;
+        interrupted(cancel)?;
+        if length == 0 {
+            if self.bytes != self.expected.size
+                || std_file_identity(&self.held).ok() != Some(self.expected)
+            {
+                return Err(failure("source_changed"));
+            }
+            return Ok(Some(hex::encode(self.hash.clone().finalize())));
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(length as u64)
+            .ok_or_else(|| failure("source_changed"))?;
+        if self.bytes > self.expected.size {
+            return Err(failure("source_changed"));
+        }
+        self.hash.update(&buffer[..length]);
+        Ok(None)
+    }
+}
 fn hash_source(
-    mut held: std::fs::File,
+    held: std::fs::File,
     expected: FileIdentity,
     cancel: &CancellationToken,
 ) -> Result<String, StoreError> {
     interrupted(cancel)?;
-    if std_file_identity(&held).ok() != Some(expected) {
-        return Err(failure("source_changed"));
-    }
-    held.seek(SeekFrom::Start(0))
-        .map_err(|_| failure("worker_source_unavailable"))?;
-    let mut hash = Sha256::new();
-    let mut bytes = 0_u64;
-    let mut buffer = [0_u8; 128 * 1024];
+    let mut hash = SourceHash::new(held, expected)?;
     loop {
-        interrupted(cancel)?;
-        let length = held
-            .read(&mut buffer)
-            .map_err(|_| failure("worker_source_unavailable"))?;
-        if length == 0 {
-            break;
+        if let Some(digest) = hash.step(cancel)? {
+            return Ok(digest);
         }
-        bytes = bytes
-            .checked_add(length as u64)
-            .ok_or_else(|| failure("source_changed"))?;
-        if bytes > expected.size {
-            return Err(failure("source_changed"));
-        }
-        hash.update(&buffer[..length]);
     }
-    interrupted(cancel)?;
-    if bytes != expected.size || std_file_identity(&held).ok() != Some(expected) {
-        return Err(failure("source_changed"));
-    }
-    Ok(hex::encode(hash.finalize()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -587,7 +630,7 @@ pub(crate) async fn verify_source(
     tokio::pin!(operation);
     tokio::select! {
         result = &mut operation => result,
-        () = crate::subtitle_transcription::watch_capacity(&state.transcode, admission) => {
+        () = crate::subtitle_transcription::watch_speech_capacity(&state.transcode, admission) => {
             cancel.cancel();
             operation.await
         }
@@ -757,11 +800,14 @@ fn rewind(file: &std::fs::File) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Initial route is an aligned, single-video/single-audio common source clock.
-/// Other clock shapes remain explicit refusals; the controlled delayed marker
-/// does not qualify arbitrary edit lists, discontinuities or nonzero origins.
+/// Re-probe the held source, then use the same normalized container/audio
+/// mapping advertised by options. Multiple audio tracks are selected by ordinal.
 #[cfg(unix)]
-async fn aligned_clock(source: &VerifiedSource) -> Result<(), StoreError> {
+async fn selected_clock(
+    source: &VerifiedSource,
+    ordinal: i64,
+    container_ms: i64,
+) -> Result<super::SourceClock, StoreError> {
     let probe = crate::ffmpeg::ffprobe_bin();
     if !Path::new(&probe).is_absolute() {
         return Err(failure("engine_unavailable"));
@@ -774,37 +820,19 @@ async fn aligned_clock(source: &VerifiedSource) -> Result<(), StoreError> {
         "-protocol_whitelist",
         "file,pipe",
         "-show_entries",
-        "stream=codec_type,start_time:format=start_time",
+        "stream=index,codec_type,start_time,start_pts,time_base,duration:stream_tags:format=start_time",
         "-of",
         "json",
         "/dev/fd/3",
     ]);
     crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.fence.handle, 3)]);
-    let output = child_output(&mut command, Duration::from_secs(15), 64 * 1024, false).await?;
+    let output = child_output(&mut command, Duration::from_secs(15), 1024 * 1024, false).await?;
     if output.stderr.iter().any(|byte| !byte.is_ascii_whitespace()) {
         return Err(failure("source_clock_unsupported"));
     }
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).map_err(|_| failure("source_clock_unsupported"))?;
-    let zero = |value: &serde_json::Value| {
-        value
-            .as_str()
-            .and_then(|v| v.parse::<f64>().ok())
-            .is_some_and(|v| v == 0.0)
-    };
-    if !zero(&value["format"]["start_time"]) {
-        return Err(failure("source_clock_unsupported"));
-    }
-    let streams = value["streams"]
-        .as_array()
-        .ok_or_else(|| failure("source_clock_unsupported"))?;
-    for kind in ["video", "audio"] {
-        let matched: Vec<_> = streams.iter().filter(|s| s["codec_type"] == kind).collect();
-        if matched.len() != 1 || !zero(&matched[0]["start_time"]) {
-            return Err(failure("source_clock_unsupported"));
-        }
-    }
-    Ok(())
+    super::source_clock(&value, ordinal, container_ms).map_err(failure)
 }
 
 #[cfg(unix)]
@@ -823,6 +851,50 @@ struct Window {
     begin_ms: i64,
     end_ms: i64,
     audio_index: i64,
+    audio_start_samples: i64,
+}
+
+/// The pinned whisper.cpp revision's include/whisper.h declares
+/// WHISPER_CHUNK_SIZE=30 (306c88f4d1286aec1bf96e544632897886af5501;
+/// scripts/subtitle-engine-manifest.json). A context window can need a second
+/// acoustic encoder block even though its owned core is only thirty seconds.
+/// Preserve the existing wall budget per block and cap the input at the
+/// registered profile's core plus contexts, never at a caller-supplied limit.
+#[cfg(unix)]
+fn inference_budget(window: Window) -> Result<Duration, StoreError> {
+    const ACOUSTIC_BLOCK_MS: i64 = 30_000;
+    const SECONDS_PER_BLOCK: u64 = 120;
+    let invalid = || failure("output_invalid");
+    let span = window
+        .end_ms
+        .checked_sub(window.begin_ms)
+        .filter(|span| *span > 0)
+        .ok_or_else(invalid)?;
+    let selected = super::profile::selected_profile();
+    let maximum = i64::from(selected.core_ms)
+        .checked_add(i64::from(selected.left_context_ms))
+        .and_then(|span| span.checked_add(i64::from(selected.right_context_ms)))
+        .ok_or_else(invalid)?;
+    if window.begin_ms < 0
+        || span > maximum
+        || window.core_begin_ms < window.begin_ms
+        || window.core_end_ms > window.end_ms
+        || window
+            .core_end_ms
+            .checked_sub(window.core_begin_ms)
+            .is_none_or(|core| core <= 0 || core > i64::from(selected.core_ms))
+    {
+        return Err(invalid());
+    }
+    let blocks = span
+        .checked_add(ACOUSTIC_BLOCK_MS - 1)
+        .ok_or_else(invalid)?
+        / ACOUSTIC_BLOCK_MS;
+    let seconds = u64::try_from(blocks)
+        .map_err(|_| invalid())?
+        .checked_mul(SECONDS_PER_BLOCK)
+        .ok_or_else(invalid)?;
+    Ok(Duration::from_secs(seconds))
 }
 
 #[cfg(unix)]
@@ -868,7 +940,7 @@ async fn decode_window(
             "-protocol_whitelist",
             "file,pipe",
             "-threads",
-            "2",
+            "1",
             "-filter_threads",
             "1",
             "-ss",
@@ -883,7 +955,7 @@ async fn decode_window(
             "-af",
             &filter,
             "-threads",
-            "2",
+            "1",
             "-ac",
             "1",
             "-ar",
@@ -907,7 +979,12 @@ async fn decode_window(
         Purpose::TranslationSelfTest => Duration::from_secs(30),
     };
     let decoded = child_output(&mut decode, wall, MAX_CHILD_LOG, false).await?;
-    let clock = observe_clock(&decoded.stderr, begin_sample, end_sample)?;
+    let clock = observe_source_clock(
+        &decoded.stderr,
+        begin_sample,
+        end_sample,
+        window.audio_start_samples,
+    )?;
     let pcm = plurx_core::fs_secure::open_read_nofollow(&wav)
         .await
         .map_err(|_| failure("decode_failed"))?
@@ -949,6 +1026,7 @@ async fn infer_window(
     asset_id: &str,
     core_index: i64,
     language: &str,
+    task: SpeechTask,
     engine: &Engine,
     model: &ManagedModel,
     scratch: &Path,
@@ -976,7 +1054,6 @@ async fn infer_window(
                 "--no-gpu",
                 "--language",
                 language,
-                "--translate",
                 "--output-vtt",
                 "--no-prints",
                 "--model",
@@ -986,12 +1063,15 @@ async fn infer_window(
                 "--output-file",
             ])
             .arg(&output_base);
+        if task.is_translation() {
+            whisper.arg("--translate");
+        }
         constrain_child_file(&mut whisper, 256 * 1024);
         crate::ffmpeg::inherit_file_descriptors(
             &mut whisper,
             &[(&decoded.file, 3), (&model.handle, 5), (&engine.handle, 7)],
         );
-        child_output(&mut whisper, Duration::from_secs(120), 256 * 1024, true).await?;
+        child_output(&mut whisper, inference_budget(window)?, 256 * 1024, true).await?;
         if !invocation.unchanged() {
             return Err(failure("packaged_engine_changed"));
         }
@@ -1037,9 +1117,10 @@ pub(crate) async fn translate_range(
         interrupted(&cancel)?;
         if recipe.source != source.revision
             || recipe.source_sha256 != source.sha256
-            || file.audio_streams.len() != 1
-            || recipe.audio_index != 0
-            || file.audio_streams[0].index != recipe.audio_index
+            || !file
+                .audio_streams
+                .iter()
+                .any(|audio| audio.index == recipe.audio_index)
         {
             return Err(failure("source_changed"));
         }
@@ -1052,7 +1133,22 @@ pub(crate) async fn translate_range(
         crate::subtitle_transcription::managed_artifacts_unchanged(engine, model)?;
         source.recheck(state, file, &cancel).await?;
         phase(fence, SubtitlePhase::Decoding, &cancel).await?;
-        aligned_clock(source).await?;
+        let clock = selected_clock(
+            source,
+            recipe.audio_index,
+            file.duration_ms
+                .ok_or_else(|| failure("source_clock_unsupported"))?,
+        )
+        .await?;
+        let catalog = super::selected_file_capability(state, file, recipe.audio_index)
+            .await
+            .map_err(failure)?;
+        if clock.origin_samples != catalog.origin_samples
+            || clock.audio_start_samples != catalog.audio_start_samples
+            || clock.duration_ms != recipe.duration_ms
+        {
+            return Err(failure("source_changed"));
+        }
         let (core_begin, core_end) = recipe.core_bounds()?;
         let begin = (core_begin - i64::from(recipe.profile.left_context_ms)).max(0);
         let end = (core_end + i64::from(recipe.profile.right_context_ms)).min(recipe.duration_ms);
@@ -1073,6 +1169,7 @@ pub(crate) async fn translate_range(
             begin_ms: begin,
             end_ms: end,
             audio_index: recipe.audio_index,
+            audio_start_samples: clock.audio_start_samples,
         };
         let decoded = decode_window(
             &source.fence.handle,
@@ -1089,6 +1186,7 @@ pub(crate) async fn translate_range(
             &recipe.asset_id,
             recipe.core_index,
             &recipe.spoken_language,
+            recipe.profile.task,
             engine,
             model,
             scratch.path(),
@@ -1140,7 +1238,7 @@ pub(crate) async fn translate_range(
     tokio::pin!(operation);
     tokio::select! {
         result = &mut operation => result,
-        () = crate::subtitle_transcription::watch_capacity(&state.transcode, admission) => {
+        () = crate::subtitle_transcription::watch_speech_capacity(&state.transcode, admission) => {
             cancel.cancel();
             operation.await
         }
@@ -1181,7 +1279,7 @@ pub(crate) async fn self_test_translation(
     let operation = plurx_core::process::bounded::cancellable(cancel.clone(), async {
         use super::profile as selected;
         use plurx_core::store::background_jobs_transcription::SubtitlePhase;
-        if *profile != selected::selected_profile() {
+        if !selected::registered(profile) {
             return Err(failure("translation_unverified"));
         }
         if model.sha256 != profile.model_sha256 {
@@ -1249,6 +1347,7 @@ pub(crate) async fn self_test_translation(
             begin_ms: 0,
             end_ms: duration_ms,
             audio_index: 0,
+            audio_start_samples: 0,
         };
         let decoded = decode_window(
             &source,
@@ -1264,6 +1363,7 @@ pub(crate) async fn self_test_translation(
             selected::SELF_TEST_SHA256,
             0,
             selected::SELF_TEST_LANGUAGE,
+            profile.task,
             engine,
             model,
             scratch.path(),
@@ -1277,7 +1377,10 @@ pub(crate) async fn self_test_translation(
         }
         crate::subtitle_transcription::managed_artifacts_unchanged(engine, model)?;
         interrupted(&cancel)?;
-        if !selected::english_self_test(&cues) {
+        if !(match profile.task {
+            SpeechTask::TranslateToEnglish => selected::english_self_test(&cues),
+            SpeechTask::Transcribe => selected::transcription_self_test(&cues),
+        }) {
             return Err(failure("model_self_test_failed"));
         }
         Ok(())
@@ -1285,7 +1388,7 @@ pub(crate) async fn self_test_translation(
     tokio::pin!(operation);
     tokio::select! {
         result = &mut operation => result,
-        () = crate::subtitle_transcription::watch_capacity(&state.transcode, admission) => {
+        () = crate::subtitle_transcription::watch_speech_capacity(&state.transcode, admission) => {
             cancel.cancel();
             operation.await
         }
@@ -1311,10 +1414,62 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn inference_budget_counts_pinned_acoustic_blocks_within_registered_window_bounds() {
+        let window = |span: i64| Window {
+            purpose: Purpose::Range,
+            core_begin_ms: 0,
+            core_end_ms: span.min(30_000),
+            begin_ms: 0,
+            end_ms: span,
+            audio_index: 2,
+            audio_start_samples: 0,
+        };
+        for (span, seconds) in [
+            (12_960, 120),
+            (30_000, 120),
+            (30_001, 240),
+            (35_000, 240),
+            (40_000, 240),
+        ] {
+            assert_eq!(
+                inference_budget(window(span)).expect("qualified span"),
+                Duration::from_secs(seconds)
+            );
+        }
+        let mut self_test = window(12_960);
+        self_test.purpose = Purpose::TranslationSelfTest;
+        assert_eq!(
+            inference_budget(self_test).expect("self-test budget"),
+            Duration::from_secs(120)
+        );
+        for span in [0, -1, 40_001, i64::MAX] {
+            assert!(inference_budget(window(span)).is_err());
+        }
+        let mut overflowing = window(1);
+        overflowing.begin_ms = i64::MIN;
+        overflowing.end_ms = i64::MAX;
+        assert!(inference_budget(overflowing).is_err());
+        let mut invalid_core = window(30_000);
+        invalid_core.core_end_ms = 30_001;
+        assert!(inference_budget(invalid_core).is_err());
+    }
+
     fn frame(filter: u8, pts: i64, samples: i64) -> String {
         format!(
             "[Parsed_ashowinfo_{filter} @0] n:0 pts:{pts} pts_time:0 fmt:s16 channels:1 rate:16000 nb_samples:{samples}\n"
         )
+    }
+
+    #[test]
+    fn observed_clock_allows_only_verified_leading_audio_delay_and_negative_preroll() {
+        let delayed = frame(1, 8_000, 8_000) + &frame(4, 0, 16_000);
+        assert!(observe_source_clock(delayed.as_bytes(), 0, 16_000, 8_000).is_ok());
+        assert!(observe_source_clock(delayed.as_bytes(), 0, 16_000, 7_000).is_err());
+        let negative = frame(1, -1_000, 17_000) + &frame(4, 0, 16_000);
+        assert!(observe_source_clock(negative.as_bytes(), 0, 16_000, -1_000).is_ok());
+        let seek_overshoot = frame(1, 18_000, 1_000) + &frame(4, 16_000, 3_000);
+        assert!(observe_source_clock(seek_overshoot.as_bytes(), 16_000, 19_000, 8_000).is_err());
     }
 
     #[test]
@@ -1471,6 +1626,31 @@ mod tests {
         assert!(hash_source(source, identity, &CancellationToken::new()).is_err());
     }
 
+    #[test]
+    fn resumed_source_hash_rejects_changed_content_and_cancellation_between_chunks() {
+        let mut source = tempfile::tempfile().expect("source");
+        source
+            .write_all(&vec![1_u8; 128 * 1024 + 1])
+            .expect("bytes");
+        let identity = std_file_identity(&source).expect("identity");
+        let mut hash = SourceHash::new(source.try_clone().expect("held"), identity).expect("hash");
+        let cancel = CancellationToken::new();
+        assert!(hash.step(&cancel).expect("prefix").is_none());
+        cancel.cancel();
+        assert!(
+            hash.step(&cancel).is_err(),
+            "a paused cancelled read must not publish"
+        );
+        source.seek(SeekFrom::Start(0)).expect("rewind");
+        source
+            .write_all(&[2])
+            .expect("replace byte without changing length");
+        assert!(
+            SourceHash::new(source, identity).is_err(),
+            "same-sized mutation changes held identity"
+        );
+    }
+
     fn test_decoder() -> String {
         let configured = crate::ffmpeg::ffmpeg_bin();
         if Path::new(&configured).is_absolute() {
@@ -1524,6 +1704,7 @@ mod tests {
                 core_begin_ms,
                 core_end_ms,
                 audio_index: 0,
+                audio_start_samples: 0,
             };
             // The held-capability opener rejects symlinked ancestors such as
             // macOS /var. Match the canonical runtime root used in production.

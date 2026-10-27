@@ -461,6 +461,8 @@ data class SubTrack(
      * legacy burn/refusal policy.
      */
     val overlay: String? = null,
+    /** Additive origin: downloaded captions are absent from the source container. */
+    val source: String = "embedded",
 ) {
     /**
      * Route on this, not on [text]. The two questions differ for exactly one

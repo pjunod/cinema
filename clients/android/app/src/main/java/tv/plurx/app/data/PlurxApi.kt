@@ -19,6 +19,72 @@ import retrofit2.http.Url
  * relative. The bearer token is added by an OkHttp interceptor (see [Net]).
  */
 interface PlurxApi {
+    // Progressive caption responses are streamed and byte-bounded before decoding.
+    @Streaming @GET("files/{id}/subtitle-translation/options")
+    suspend fun captionOptions(@Path("id") id: Long): Response<ResponseBody>
+    @Streaming @GET("files/{id}/subtitle-translation/assets")
+    suspend fun captionAssets(@Path("id") id: Long, @Query("cursor") cursor: String): Response<ResponseBody>
+    @Streaming @POST("files/{id}/subtitle-translation")
+    suspend fun createCaptions(@Path("id") id: Long, @Body body: CaptionCreate): Response<ResponseBody>
+    @Streaming @GET("subtitle-translation/operations/{id}")
+    suspend fun captionOperation(@Path("id") id: String): Response<ResponseBody>
+    @Streaming @PUT("subtitle-translation/operations/{id}/demands/{demand}")
+    suspend fun captionDemand(@Path("id") id: String, @Path("demand") demand: String, @Body body: CaptionDemand): Response<ResponseBody>
+    @Streaming @retrofit2.http.HTTP(method = "DELETE", path = "subtitle-translation/operations/{id}/demands/{demand}", hasBody = true)
+    suspend fun releaseCaptions(@Path("id") id: String, @Path("demand") demand: String, @Body body: CaptionRelease): Response<ResponseBody>
+    @Streaming @POST("subtitle-translation/operations/{id}/stop")
+    suspend fun stopCaptions(@Path("id") id: String, @Body body: CaptionStop): Response<ResponseBody>
+    @Streaming @POST("subtitle-translation/operations/{id}/retry")
+    suspend fun retryCaptions(@Path("id") id: String, @Body body: CaptionRetry): Response<ResponseBody>
+    @Streaming @POST("subtitle-translation/operations/{id}/retry")
+    suspend fun retryCaptionRange(@Path("id") id: String, @Body body: CaptionRangeRetry): Response<ResponseBody>
+    @Streaming @GET("subtitle-translation/operations/{id}/failed-ranges")
+    suspend fun captionFailedRanges(@Path("id") id: String, @Query("cursor") cursor: String,
+        @Header("x-translation-read-lease") lease: String): Response<ResponseBody>
+    @Streaming @GET("subtitle-translation/assets/{id}/manifest")
+    suspend fun captionManifest(@Path("id") id: String, @Query("position_ms") position: Long,
+        @Header("x-translation-read-lease") lease: String? = null): Response<ResponseBody>
+    @Streaming @GET("subtitle-translation/assets/{id}/segments")
+    suspend fun captionSegments(@Path("id") id: String, @Query("cursor") cursor: String,
+        @Header("x-translation-read-lease") lease: String): Response<ResponseBody>
+    @Streaming @GET("subtitle-translation/assets/{id}/segments/{segment}")
+    suspend fun captionSegment(@Path("id") id: String, @Path("segment") segment: String,
+        @Header("x-translation-read-lease") lease: String): Response<ResponseBody>
+    @Streaming @GET("subtitle-translation")
+    suspend fun captionSettings(): Response<ResponseBody>
+    @Streaming @PUT("subtitle-translation")
+    suspend fun saveCaptionSettings(@Body body: CaptionSettingsWrite): Response<ResponseBody>
+    @Streaming @GET("subtitle-translation/models")
+    suspend fun captionModels(): Response<ResponseBody>
+    @Streaming @POST("subtitle-transcription/models/{id}/{action}")
+    suspend fun captionModelAction(@Path("id") id: String, @Path("action") action: String,
+        @Body body: CaptionModelRequest): Response<ResponseBody>
+    @Streaming @GET("subtitle-transcription/jobs/{id}")
+    suspend fun captionModelJob(@Path("id") id: String): Response<ResponseBody>
+
+    @Streaming @GET("files/{id}/subtitle-text-translation/options")
+    suspend fun subtitleTextOptions(@Path("id") id: Long): Response<ResponseBody>
+    @Streaming @GET("subtitle-text-translation/config")
+    suspend fun subtitleTextConfig(): Response<ResponseBody>
+    @Streaming @PUT("subtitle-text-translation/config")
+    suspend fun saveSubtitleTextConfig(@Body body: SubtitleTextConfigWrite): Response<ResponseBody>
+    @Streaming @GET("subtitle-text-translation/models")
+    suspend fun subtitleTextModels(): Response<ResponseBody>
+    @Streaming @POST("subtitle-text-translation/models/{action}")
+    suspend fun subtitleTextModelAction(@Path("action") action: String, @Body body: SubtitleTextModelRequest): Response<ResponseBody>
+    @Streaming @POST("files/{id}/subtitles/{index}/translation")
+    suspend fun translateSubtitleText(@Path("id") id: Long, @Path("index") index: Long, @Body body: SubtitleTextRequest): Response<ResponseBody>
+    @Streaming @GET("subtitle-text-translation/jobs/{id}")
+    suspend fun subtitleTextJob(@Path("id") id: String): Response<ResponseBody>
+    @Streaming @POST("subtitle-text-translation/jobs/{id}/retry")
+    suspend fun retrySubtitleTextJob(@Path("id") id: String, @Body body: SubtitleTextRetry): Response<ResponseBody>
+    @Streaming @POST("cluster/jobs/{id}/cancel")
+    suspend fun cancelSubtitleTextJob(@Path("id") id: String): Response<ResponseBody>
+
+    /** Opaque Shared caption reads have no Local ID or mutation method. */
+    @Streaming @GET
+    suspend fun sharedCaptionReadPath(@Url path: String): Response<ResponseBody>
+
     @GET("server")
     suspend fun server(): Server
 

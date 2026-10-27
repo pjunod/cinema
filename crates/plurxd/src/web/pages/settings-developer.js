@@ -803,10 +803,11 @@ async function downloadHttpsCertificate(btn){
 }
 
 function subtitleTranslationCard(){
-  return setCard(`${cardHead("English subtitle translation","Translate foreign speech while the movie keeps playing.",'<span class="pill">Experimental accuracy</span>')}
-    <p>Install a compatible multilingual model, then choose Translate to English in the player. Partial captions may lag or be wrong; original captions and Off remain available.</p>
-    <p class="hint">Supported on local web direct playback with one audio stream. Other delivery routes, multiple audio streams and native clients remain unsupported.</p>
-    <button type="button" class="sm" onclick="openTranslationSettings()">Configure English translation</button><div id="subtitle-translation-form"></div>`,{id:"enable-subtitle-translation"});
+  return setCard(`${cardHead("AI captions and subtitle translation","Generate captions from speech, translate speech to English, or translate an existing text subtitle.",'<span class="pill">Accuracy needs checking</span>')}
+    <p>Download and test the speech model on a worker, then choose Generate or translate speech in the player. A separate text model translates existing text subtitles. Each setup shows download progress, worker readiness and an explicit retry.</p>
+    <p class="hint">Web, iPhone and Apple TV use the selected audio track and the current playback timeline. Shared viewers can read committed AI captions; a Source administrator requests missing coverage. Partial captions may lag or be wrong. Original captions and Off remain available.</p>
+    <button type="button" class="sm" onclick="openTranslationSettings()">Set up speech captions</button><div id="subtitle-translation-form"></div>
+    <button type="button" class="sm" onclick="openTextTranslationSettings()">Set up subtitle text translation</button><div id="text-subtitle-translation-settings"></div>`,{id:"enable-subtitle-translation"});
 }
 
 function displayTargetHdr10Card(settings,readiness){
