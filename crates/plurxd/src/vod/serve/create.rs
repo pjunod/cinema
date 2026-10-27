@@ -2463,6 +2463,7 @@ impl ReservedSourceVodRendition {
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
+                processing_note: None,
                 session_id: session_id.into(),
                 playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                 duration_ms: Some(plan_duration_ms(&self.rendition.plan)),

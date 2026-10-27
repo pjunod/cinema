@@ -652,6 +652,31 @@ pub struct VodActivityObservation {
     pub producer_hold: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_target: Option<DisplayTargetActivity>,
+    /// The Dolby Vision processing this session's GPU is doing, and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing: Option<ProcessingActivity>,
+}
+
+/// What a processed rendition spends the node's hardware on, in an
+/// operator's words: the delivered picture, the work, and the reason it was
+/// chosen. Stopping the session (Activity → Stop playback) ends the graph.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessingActivity {
+    pub delivered: String,
+    pub work: String,
+    pub reason: String,
+    /// The served base layer is the FEL-composed picture.
+    pub fel_composed: bool,
+    pub live_rendering: bool,
+}
+
+impl ProcessingActivity {
+    pub(crate) const MAX_TEXT: usize = 256;
+    pub(crate) fn bounded(&self) -> bool {
+        [&self.delivered, &self.work, &self.reason]
+            .iter()
+            .all(|text| text.len() <= Self::MAX_TEXT)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -665,21 +690,25 @@ pub struct DisplayTargetActivity {
 
 impl VodActivityObservation {
     pub(crate) fn bounded(&self) -> bool {
-        self.display_target.as_ref().is_none_or(|target| {
-            target.note.len() <= 512
-                && target.bucket_nits.is_none_or(|nits| {
-                    nits == 100
-                        || plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS
-                            .contains(&nits)
-                })
-        }) && [
-            &self.control_demand,
-            &self.render_state,
-            &self.producer_state,
-            &self.producer_hold,
-        ]
-        .iter()
-        .all(|value| value.as_ref().is_none_or(|text| text.len() <= 32))
+        self.processing
+            .as_ref()
+            .is_none_or(ProcessingActivity::bounded)
+            && self.display_target.as_ref().is_none_or(|target| {
+                target.note.len() <= 512
+                    && target.bucket_nits.is_none_or(|nits| {
+                        nits == 100
+                            || plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS
+                                .contains(&nits)
+                    })
+            })
+            && [
+                &self.control_demand,
+                &self.render_state,
+                &self.producer_state,
+                &self.producer_hold,
+            ]
+            .iter()
+            .all(|value| value.as_ref().is_none_or(|text| text.len() <= 32))
     }
     pub(crate) fn demand(&self) -> Option<&'static str> {
         match self.control_demand.as_deref() {

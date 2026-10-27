@@ -215,6 +215,12 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/ffmpeg_support.rs::ffmpeg_support::tests::"
             "complete_macos_package_runs_metal_and_vulkan"
         ] = "requires PLURX_TEST_FFMPEG pointing at a complete native Mac package"
+        # Profile 7 FEL qualification (#1290) runs the deployed helper on a
+        # radeonsi VA-API device against a real P7 FEL title.
+        additional_fixture_reasons[
+            "crates/plurxd/src/source_probe/title_work_tests.rs::source_probe::title_work::tests::"
+            "physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict"
+        ] = "physical: the deployed processing helper, a radeonsi VA-API device and a P7 FEL title"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -222,9 +228,9 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 13)
+        self.assertEqual(len(additional_fixtures), 14)
         # HDR/DV and the explicit Mac graph check are operator-run fixtures.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 37)
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 38)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

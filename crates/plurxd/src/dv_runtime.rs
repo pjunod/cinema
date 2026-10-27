@@ -160,7 +160,7 @@ fn renderer_source_identity() -> String {
 /// picture costs more than decoding it in software. The VA-API runtime and
 /// drivers are the media runtime's (the same ones the encoder uses), so its
 /// library directory follows the bundle's own on the search path.
-fn gpu_decode_environment(
+pub(crate) fn gpu_decode_environment(
     environment: &mut Vec<(String, std::ffi::OsString)>,
     device: &str,
     ffmpeg: &str,
@@ -629,6 +629,18 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) display_target_note: Option<String>,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    /// Where the renderer was admitted to decode; it sized the graph's CPU debit.
+    pub(crate) decode: crate::dv_segment::RendererDecode,
+    /// The node's live FEL reconstruction slot, held for this graph's life
+    /// when it composes the enhancement layer.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "held for the graph's lifetime; dropping it frees the slot"
+        )
+    )]
+    pub(crate) reconstruction_slot: Option<tokio::sync::OwnedSemaphorePermit>,
     pub(crate) encoder: plurx_core::transcode::Encoder,
     pub(crate) vaapi_hdr_policy: Option<plurx_core::transcode::VaapiHdrPolicy>,
     pub(crate) runtime_cache: PathBuf,
@@ -722,7 +734,7 @@ impl RuntimeRecipe {
         if owners.mark_report_logged(physical_owner, &generation) {
             tracing::info!(target: "plurxd::vodserve",
                 effective_processing = %serde_json::to_string(&report).expect("bounded processing report"),
-                "accepted HDR10 processing report");
+                "accepted DV processing report");
         }
         Some(report)
     }
@@ -961,6 +973,9 @@ impl RuntimeRecipe {
             if self.destination == DvDestination::Sdr {
                 output = output.with_sdr_output();
             }
+            if self.destination == DvDestination::Profile81 {
+                output = output.with_reconstructed_profile81();
+            }
             let raster = plan
                 .output_contract()
                 .effective_width()
@@ -1006,6 +1021,7 @@ impl RuntimeRecipe {
             );
             let request = crate::dv_segment::StreamingSegmentRequest {
                 mode: self.mode,
+                decode: self.decode,
                 export_raster: Some(export_raster),
                 display_target: export_policy.display_target(),
                 request: crate::dv_segment::SegmentRequest {
@@ -1058,6 +1074,18 @@ impl RuntimeRecipe {
             {
                 return Err(
                     "renderer source clock or native geometry differs from held probe".into(),
+                );
+            }
+            // The graph's CPU debit assumed the GPU decodes. A renderer that
+            // opened its decoders in software spent threads nobody reserved;
+            // its window is not served.
+            if self.decode == crate::dv_segment::RendererDecode::Gpu
+                && observed.software_frame_workers
+            {
+                return Err(
+                    "the renderer decoded in software, but this graph was admitted \
+                     for GPU decode and holds no CPU for software decoders"
+                        .into(),
                 );
             }
             let backend = self
@@ -1552,14 +1580,19 @@ pub(crate) struct ObservedWindow {
     pub(crate) runtime_device: DvDigest,
     /// The helper's own account of how it decoded the source pictures.
     pub(crate) decoder: plurx_core::transcode::DecodeBackend,
+    /// The helper opened its decoders without a VA-API device, so each layer
+    /// ran four software frame workers (`segment_decode_render.c`
+    /// `open_layer`). A per-frame GPU fallback keeps one thread per layer and
+    /// is not this.
+    pub(crate) software_frame_workers: bool,
 }
 /// Read the helper's decoder report. A GPU decode that fell back (no device,
 /// no HEVC Main10 decode, surfaces the Vulkan device could not import) is
 /// still a valid window; the reason is logged so the fallback is visible.
 #[cfg(target_os = "linux")]
-fn helper_decoder(
+pub(crate) fn helper_decoder(
     value: &serde_json::Value,
-) -> Result<plurx_core::transcode::DecodeBackend, String> {
+) -> Result<(plurx_core::transcode::DecodeBackend, bool), String> {
     use plurx_core::transcode::DecodeBackend;
     let mode = value
         .get("mode")
@@ -1577,7 +1610,7 @@ fn helper_decoder(
     if mode != "vaapi" && reason != "no-decode-device" {
         tracing::debug!(target: "plurxd::dv", mode, reason, "processed window decoder fallback");
     }
-    Ok(backend)
+    Ok((backend, mode == "software"))
 }
 #[cfg(target_os = "linux")]
 fn rational(value: &str) -> Result<(i64, u32), String> {
@@ -1730,7 +1763,7 @@ impl PrivateWindow {
         }
         let complete = complete.ok_or("no source window completion")?;
         let segment = segment.ok_or("no renderer completion")?;
-        let decoder = decoder.ok_or("no decoder report")?;
+        let (decoder, software_frame_workers) = decoder.ok_or("no decoder report")?;
         if mode == DvProcessingMode::BaseRpu {
             let base = base_complete
                 .as_ref()
@@ -1983,6 +2016,7 @@ impl PrivateWindow {
             source_tick: tick,
             runtime_device,
             decoder,
+            software_frame_workers,
         })
     }
 }
@@ -2230,14 +2264,16 @@ mod helper_decoder_tests {
 
     #[test]
     fn the_helper_decoder_report_names_the_backend() {
-        for (mode, backend) in [
-            ("vaapi", DecodeBackend::Vaapi),
-            ("vaapi-host-copy", DecodeBackend::Vaapi),
-            ("vaapi-software-fallback", DecodeBackend::Software),
-            ("software", DecodeBackend::Software),
+        // Only a helper that opened without a device runs software frame
+        // workers; that is what a GPU-decode admission did not debit.
+        for (mode, backend, workers) in [
+            ("vaapi", DecodeBackend::Vaapi, false),
+            ("vaapi-host-copy", DecodeBackend::Vaapi, false),
+            ("vaapi-software-fallback", DecodeBackend::Software, false),
+            ("software", DecodeBackend::Software, true),
         ] {
             let row = serde_json::json!({"kind": "decoder", "mode": mode, "reason": ""});
-            assert_eq!(helper_decoder(&row), Ok(backend), "{mode}");
+            assert_eq!(helper_decoder(&row), Ok((backend, workers)), "{mode}");
         }
         assert!(helper_decoder(&serde_json::json!({"kind": "decoder"})).is_err());
         assert!(helper_decoder(&serde_json::json!({"kind": "decoder", "mode": "cuda"})).is_err());

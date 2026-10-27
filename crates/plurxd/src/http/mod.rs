@@ -25,6 +25,7 @@ pub(crate) mod dvr;
 pub(crate) mod error;
 pub(crate) mod extract;
 pub(crate) mod file_grants;
+pub(crate) mod playback_handoffs;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
 pub(crate) mod images;
@@ -438,6 +439,10 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/grants"
         | "/api/v1/grants/{id}"
         | "/api/v1/grants/{token}/content"
+        | "/api/v1/playback-handoffs"
+        | "/api/v1/playback-handoffs/redeem"
+        | "/api/v1/playback-handoffs/self"
+        | "/api/v1/playback-handoffs/{id}"
         | "/api/v1/files/{id}/stream.mp4"
         | "/api/v1/files/{id}/subs/{subtitle}"
         | "/api/v1/files/{id}/subs/{index}/overlay.json"
@@ -1600,8 +1605,8 @@ pub fn router(state: AppState) -> Router {
         .route("/cluster/media", get(internal_media::directory))
         // Any signed-in user can post a client-side playback error here so it
         // lands in the admin log (browsers that reject a stream produce no
-        // server log on their own).
-        .route("/client-log", post(system::client_log))
+        // server log on their own). A playback handoff token may too.
+        .route("/client-log", post(playback_handoffs::scoped_client_log))
         // Users (admin)
         .route("/users", get(users::list).post(users::create))
         .route("/users/{id}", put(users::update).delete(users::delete))
@@ -1670,7 +1675,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/lists/{list}", get(annotations::list_items))
         // Watch
-        .route("/items/{id}/progress", post(watch::progress))
+        // A playback handoff token may report progress for its file's item.
+        .route(
+            "/items/{id}/progress",
+            post(playback_handoffs::scoped_progress),
+        )
         .route("/items/{id}/scrobble", post(watch::scrobble))
         .route("/items/{id}/unscrobble", post(watch::unscrobble))
         .route(
@@ -1680,11 +1689,12 @@ pub fn router(state: AppState) -> Router {
                 .delete(reading::delete_state)
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
-        // Playback
+        // Playback. The decision also accepts a playback handoff token for
+        // its own file (`playback_handoffs.rs`).
         .route(
             "/files/{id}/decision",
-            get(stream::decision)
-                .post(stream::decision_post)
+            get(playback_handoffs::scoped_decision)
+                .post(playback_handoffs::scoped_decision_post)
                 // A capabilities document is a short list of codecs and a
                 // handful of learned limits; axum's 2 MiB default is four
                 // orders of magnitude of headroom for an authenticated caller
@@ -1697,6 +1707,15 @@ pub fn router(state: AppState) -> Router {
         .route("/files/{id}/offline-options", get(offline::options))
         .route("/files/{id}/grants", post(file_grants::mint))
         .route("/grants/{id}", delete(file_grants::revoke))
+        // Playback handoff: mint with a bearer, redeem with the code alone,
+        // poll the redemption, and let the redeemed token revoke itself.
+        .route("/playback-handoffs", post(playback_handoffs::mint))
+        .route("/playback-handoffs/redeem", post(playback_handoffs::redeem))
+        .route(
+            "/playback-handoffs/self",
+            delete(playback_handoffs::revoke_self),
+        )
+        .route("/playback-handoffs/{id}", get(playback_handoffs::status))
         .route(
             "/offline/packages/{id}",
             get(offline::package_status).delete(offline::delete_package),
@@ -2011,7 +2030,8 @@ pub fn router(state: AppState) -> Router {
             get(offline::subtitle),
         )
         .route("/offline/media/{token}/{segment}", get(offline::segment))
-        .route("/files/{id}/direct", get(stream::direct))
+        // A playback handoff token may read its own file (direct play).
+        .route("/files/{id}/direct", get(playback_handoffs::scoped_direct))
         .route("/files/{id}/download", get(stream::download))
         .route("/files/{id}/content", get(stream::book_content))
         .route("/grants/{token}/content", get(file_grants::content))
@@ -2035,12 +2055,17 @@ pub fn router(state: AppState) -> Router {
         .route("/stream/{id}/status", get(stream::stream_status))
         // The final segment accepts both `0` (legacy) and `0.vtt` (the
         // documented sidecar URL); the handler validates the suffix/index.
-        .route("/files/{id}/subs/{subtitle}", get(stream::subtitles_vtt))
+        // A playback handoff token may read its own file's text tracks.
+        .route(
+            "/files/{id}/subs/{subtitle}",
+            get(playback_handoffs::scoped_subtitles_vtt),
+        )
         // Creating a stream spawns a process and supersedes its predecessor,
         // so it is a POST. The GET is a deprecated bridge over the same path.
         .route(
             "/files/{id}/hls/sessions",
-            post(hls::create)
+            // A playback handoff token may create sessions for its own file.
+            post(playback_handoffs::scoped_hls_create)
                 // The web client now sends its capabilities document here as
                 // well, so this route walks exactly what
                 // `/files/{id}/decision` walks and inherits the same bound for

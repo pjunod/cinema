@@ -3335,6 +3335,7 @@ mod activity_vod_tests {
     fn vod_activity_projects_real_control_without_rolling_measurements() {
         let info = crate::vodserve::VodDeliveryInfo {
             observation: Some(crate::vodserve::VodActivityObservation {
+                processing: None,
                 display_target: None,
                 control_demand: Some("hold".into()),
                 render_state: Some("rendering".into()),

@@ -667,6 +667,11 @@ paths = [
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/file_grants.rs",
+  "crates/plurx-core/src/store/playback_handoffs.rs",
+  "crates/plurx-core/src/store/playback_handoffs.sql",
+  "crates/plurx-core/src/store/hiqlite_playback_handoffs.rs",
+  "crates/plurx-core/src/store/sqlite/playback_handoffs.rs",
+  "crates/plurx-core/tests/store_contract/playback_handoffs.rs",
   "crates/plurx-core/src/store/hiqlite_catalog.rs",
   "crates/plurx-core/src/store/hiqlite_classification.rs",
   "crates/plurx-core/src/store/hiqlite_coordination.rs",
@@ -751,6 +756,8 @@ paths = [
   "crates/plurxd/src/http/{cluster,background_jobs,internal_media_sessions,peer_transport}.rs",
   "crates/plurxd/src/http/{auth,extract,internal_auth_revocation,users}.rs",
   "crates/plurxd/src/http/file_grants.rs",
+  "crates/plurxd/src/http/playback_handoffs.rs",
+  "crates/plurxd/src/http/tests/playback_handoffs.rs",
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
   "scripts/cluster-named-runner",
@@ -1077,6 +1084,7 @@ paths = [
   "tests/support/rust_source_inventory.rs",
   "crates/plurx-core/src/fmp4/tests.rs",
   "crates/plurxd/src/ffmpeg/tests.rs",
+  "crates/plurxd/src/ffmpeg/hevc-main10-probe.mkv",
   "crates/plurxd/src/fragindex/equality_tests.rs",
   "crates/plurxd/src/fragindex/ride_along_tests.rs",
   "crates/plurxd/src/fragindex/tests.rs",
@@ -1775,6 +1783,15 @@ missing = "fail"
 timeout_seconds = 30
 
 [[checks]]
+id = "linux-player-launcher"
+title = "plurx Player launcher against a fake server and a fake mpv"
+command = "python3 -m unittest discover -s clients/linux-player/tests -p 'test_*.py'"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["python3"]
+missing = "fail"
+timeout_seconds = 120
+
+[[checks]]
 id = "desktop-cec-extension"
 title = "Desktop CEC document binding, local credit deadlines and semantic delivery"
 command = "node --test clients/desktop-remote/tests/extension.test.mjs"
@@ -1843,6 +1860,14 @@ paths = [
 ]
 checks = ["rust-gate", "rust-gate-ci", "finite-software-vod-lifecycle", "finite-software-vod-restart"]
 depends_on = ["playback.pipeline"]
+
+[[points]]
+id = "desktop.linux-player"
+title = "plurx Player (Linux) launcher"
+contract = "A plurx-player:// URL is played only when it is exactly play?server=<http(s) origin with no path>&code=<handoff code> and the origin is on the user's list or the user allows it once in a dialog naming it; anything else contacts nothing. The one-time code is redeemed without a bearer, and the scoped token it returns stays in memory: it reaches no file, no log line and no mpv argv, travels only in the Authorization header or the private 0700 IPC socket, and is never carried across a redirect. The player executes the decision's delivery with the caps v2 claims of LINUX-PLAYER-PLAN section 3.2, sends a passive control exchange every 5 s and progress every 10 s and on pause, seek and exit, always as mpv time plus the session's media_origin_ms, re-creates the session for a seek outside what it has produced, stops with the server's reason on a control 404 or 410 or any 401, logs one mapper line per playback with unknown rather than a guess, and on exit, mpv failure, a launcher exception or SIGTERM/SIGINT/SIGHUP releases the session and then revokes the token."
+paths = ["clients/linux-player/**"]
+checks = ["linux-player-launcher"]
+depends_on = ["server.api", "playback.pipeline"]
 
 [[points]]
 id = "knowledge.engineering"

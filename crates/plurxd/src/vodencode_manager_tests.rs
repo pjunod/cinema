@@ -87,6 +87,11 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         base.path().join("runtime"),
         EncoderCaps {
             vaapi: true,
+            // The radeonsi worker's detected policy: the one encoder the
+            // reconstructed 8.1's recipe and verdicts are qualified on.
+            vaapi_hdr_policy: profile81
+                .then_some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
+            vaapi_driver: profile81.then(|| "lab radeonsi VA driver".to_owned()),
             ..Default::default()
         },
         Pipeline::Cpu,
@@ -110,6 +115,12 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     manager.dovi_reshape = crate::ffmpeg::has_dovi_reshape().await;
     manager.decoders =
         plurx_core::transcode::detect_video_decoders(&crate::ffmpeg::ffmpeg_bin()).await;
+    // As at daemon start: the renderer's CPU debit follows the device's
+    // proved HEVC Main10 decode.
+    println!(
+        "{}",
+        serde_json::json!({"hevc_main10_vaapi_decode": crate::ffmpeg::has_hevc_main10_vaapi_decode().await})
+    );
     manager.dovi_passthrough = crate::ffmpeg::has_dovi_passthrough().await;
     manager.hdr10_passthrough = crate::ffmpeg::has_hdr10_passthrough().await;
     manager.hdr10_passthrough_vaapi =
@@ -175,11 +186,63 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         block_budget_secs: Some(10.0),
         ..reopen_request(id, "actual-hdr-probe", "unused", "unused")
     };
+    if profile81 {
+        // No verdict yet: the play keeps the plain conversion while the title
+        // is measured. Then an admitting verdict for this source, renderer and
+        // recipe (what the title job stores) lets the same start reconstruct.
+        let unmeasured = SessionRequest {
+            request_id: Some("actual-processed-hdr-window-unmeasured".into()),
+            ..request.clone()
+        };
+        assert!(
+            manager
+                .prepare_vod_encoding(&unmeasured, &file)
+                .await
+                .expect("plain conversion start")
+                .is_none(),
+            "an unmeasured FEL title is not reconstructed"
+        );
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture()
+            .await
+            .expect("helper")
+            .expect("helper");
+        let verdict = plurx_core::transcode::dv_fel_qualification::FelVerdict {
+            schema: plurx_core::transcode::dv_fel_qualification::SCHEMA,
+            identity: manager
+                .fel_identity(&tools.scanner_digest())
+                .await
+                .expect("this node's FEL verdict identity"),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            admitted: true,
+            served_mean: 1.0,
+            dropped_mean: 2.0,
+            served_p99: 1.0,
+            dropped_p99: 2.0,
+            p99_tolerance: 0.0,
+            measured_at_ms: 0,
+            windows: Vec::new(),
+        };
+        assert!(store
+            .put_dv_fel_verdict(
+                file.id,
+                file.size,
+                file.mtime,
+                &serde_json::to_value(&verdict).expect("verdict"),
+            )
+            .await
+            .expect("verdict stored"));
+    }
+    let file = store
+        .get_file(id)
+        .await
+        .expect("current file")
+        .expect("stored verdict");
     let started = Instant::now();
     let (encoding, prepared_root) = if sdr {
         // Fresh durable admission, canonical catalog restoration and normal
         // one-shot lease/source validation precede genuine SDR rendering.
-        let root = admit_native_sdr_window_control(&manager, &store, request, &file).await;
+        let root = admit_native_sdr_window_control(&manager, &store, request.clone(), &file).await;
         (Arc::clone(&root.encoding), Some(root))
     } else {
         (
@@ -273,6 +336,53 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     if sdr {
         assert_native_sdr_window(&verified.bytes, raster, encoding.grid).await;
     }
+    // PLURX_DV_WINDOW_DUMP=<dir> keeps the served first window (and its source
+    // interval) for the offline composition proof and ffprobe checks.
+    if let Ok(dir) = std::env::var("PLURX_DV_WINDOW_DUMP") {
+        let dir = PathBuf::from(dir);
+        std::fs::write(dir.join("window-000.mp4"), &verified.bytes).expect("dump served window");
+        let first = &encoding
+            .grid
+            .plan(file.duration_ms.expect("duration"), 0)
+            .entries[0];
+        std::fs::write(
+            dir.join("window-000.json"),
+            serde_json::json!({"start_ticks":first.start_ticks,"duration_ticks":first.duration_ticks,
+                "numerator":encoding.grid.numerator,"denominator":encoding.grid.denominator,
+                "decoder":format!("{:?}", verified.observed.decoder),
+                "renderer_decode":format!("{:?}", runtime.decode),
+                "graph_cpu_threads":encoding.resources.cpu_threads})
+            .to_string(),
+        )
+        .expect("dump window interval");
+    }
+    if profile81 {
+        // One live reconstruction per worker: this graph holds the slot, and
+        // a second play is not given another graph (it keeps its ordinary
+        // converted copy, or an unprocessed recipe), never a second slot.
+        assert!(runtime.reconstruction_slot.is_some());
+        assert_eq!(manager.processed_reconstruction_slots.available_permits(), 0);
+        let second = manager
+            .prepare_vod_encoding(
+                &SessionRequest {
+                    request_id: Some("second-live-reconstruction".into()),
+                    playback_id: "second-live-reconstruction".into(),
+                    ..request.clone()
+                },
+                &file,
+            )
+            .await
+            .expect("second play keeps an ordinary route");
+        assert!(
+            second.as_ref().is_none_or(|second| !matches!(
+                second.dv_processing,
+                DvSelection::Selected(_)
+            )),
+            "a second live reconstruction must not be admitted on this worker"
+        );
+        drop(second);
+        assert_eq!(manager.processed_reconstruction_slots.available_permits(), 0);
+    }
     let luma = processed_window_luma(&verified.bytes, raster, false);
     println!(
         "{}",
@@ -292,6 +402,13 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     } else {
         &[1, 2, 360]
     };
+    // A short excerpt has no twelve-minute window; it checks the ones it has.
+    let entries: Vec<usize> = entries
+        .iter()
+        .copied()
+        .filter(|at| *at < segment_plan.entries.len())
+        .collect();
+    let entries = entries.as_slice();
     let mut target_digest = None;
     for &at in entries {
         let entry = &segment_plan.entries[at];
