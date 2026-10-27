@@ -16,7 +16,10 @@
 #
 # Environment: PLURX_DEB_OUT (output directory), PLURX_DEB_JOBS (parallel
 # jobs, default 8), PLURX_DEB_IMAGE (default the pinned ubuntu:26.10 below),
-# DOCKER (default: docker, or "sudo -n docker" when only that works).
+# PLURX_DEB_APT_CACHE (apt's indexes and packages for the pinned snapshot,
+# shared by every container; default target/linux-player-apt-cache at the
+# repository root; see apt-snapshot.sh), DOCKER (default: docker, or
+# "sudo -n docker" when only that works).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -47,12 +50,18 @@ fi
 
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
+apt_cache=${PLURX_DEB_APT_CACHE:-$repo/target/linux-player-apt-cache}
+mkdir -p "$apt_cache"
+apt_cache=$(cd "$apt_cache" && pwd)
 rm -rf "$out"/plurx-player_* "$out/SHA256SUMS" "$out"/*.log "$out/rebuild"
 
 run() {
   local name=$1; shift
-  $DOCKER run --rm --init --name "$name-$$" --cpus="$jobs" -v "$repo:/repo:ro" "$@"
+  $DOCKER run --rm --init --name "$name-$$" --cpus="$jobs" -v "$repo:/repo:ro" \
+    -v "$apt_cache:/apt-cache" "$@"
 }
+# The containers run as root; hand the cache back so it can be removed.
+trap '$DOCKER run --rm -v "$apt_cache:/apt-cache" "$image" chown -R "$(id -u):$(id -g)" /apt-cache >/dev/null 2>&1 || true' EXIT
 build() {
   local dir=$1 log=$2
   run plurx-player-deb-build -v "$dir:/out" -e JOBS="$jobs" \

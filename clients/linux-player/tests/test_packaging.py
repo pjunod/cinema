@@ -100,6 +100,21 @@ class PrivateBuild(unittest.TestCase):
         self.assertEqual(len(rows), 1, rows)
         self.assertRegex(rows[0][1], r"^[0-9]{8}T[0-9]{6}Z$")
 
+    def test_every_container_shares_the_snapshot_apt_cache(self):
+        # A 503 from snapshot.ubuntu.com used to fail every build: each of
+        # the three containers fetched the same immutable indexes and
+        # packages again.
+        build = read("packaging/build-deb.sh")
+        self.assertIn('-v "$apt_cache:/apt-cache"', build)
+        self.assertIn("chown -R", build)
+        snapshot = read("packaging/apt-snapshot.sh")
+        self.assertIn('Dir::State::lists "/apt-cache/lists";', snapshot)
+        self.assertIn('Dir::Cache::archives "/apt-cache/archives";', snapshot)
+        # Reused only once fetched and verified in full for this timestamp.
+        self.assertIn("marker=/apt-cache/lists/.plurx-snapshot-$ts", snapshot)
+        self.assertLess(snapshot.index("apt-get -q update\n["), snapshot.index('touch "$marker"'))
+        self.assertIn('Acquire::Retries "10";', snapshot)
+
     def test_package_version_names_the_pinned_versions(self):
         rows = pins()
         version = re.match(r"plurx-player \(([^)]+)\)", read("debian/changelog")).group(1)
