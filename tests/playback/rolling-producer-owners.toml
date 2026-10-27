@@ -4900,7 +4900,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # on waiting for the fixture to take the slot, and its 10 ms poll.
 # Integration census (2026-10-27): the actual combined structural source has
 # 1860 occurrences; preserve the seven upstream deadline owners above and the
-# branch-owned frame metadata timeout rather than selecting a parent count.
+# branch-owned library_work/env.rs pressure interval rather than a parent count.
 expected_occurrences = 1860
 
 

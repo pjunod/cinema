@@ -101,7 +101,7 @@ LEGACY_JOB = '''  web_compile:
         run: make web-unit-check
 
 '''
-SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '97f338f93705406847d3987b80bf2f0fa8402755a4d1b80003f2434d5d44b814', '9569dd03dcbd4a84b408078f90601d075fe726a9': '4bddf7fb49972695846029e71e65c488052eefbd39a52e747b17b9c86dd28c6c', '80fa9bcfadf54ef89acf893eb485824ef5685549': '3a867b364c0ee5f39d94fee816e3b2bcd100ac2fe3150b0aafec412a9af6b628'}
+SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '97f338f93705406847d3987b80bf2f0fa8402755a4d1b80003f2434d5d44b814', '9569dd03dcbd4a84b408078f90601d075fe726a9': '4bddf7fb49972695846029e71e65c488052eefbd39a52e747b17b9c86dd28c6c', 'integrated-main-94da-census-v1': 'fb5fd36641c7a21899f01dc9f20473c8085f794739c5de0c907eac251a9969ea'}
 HELPERS = ('scripts/js-check', 'scripts/web-types', 'scripts/web-jsconfig', 'scripts/playback-lab', 'scripts/playback-frame-clock.js', 'scripts/continuous-quality-qualification', 'scripts/player-contract-table', 'scripts/ui-baseline', 'scripts/subtitle-readiness-browser-check', 'scripts/cq-native-shipping/check-evidence.js', 'tests/vendor/acorn.js', 'scripts/playback-startup-lab')
 WRAPPER = '''      - name: Retain or execute the reviewed whole web cohort
         env:
