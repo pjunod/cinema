@@ -2581,6 +2581,7 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
         config,
         Boot {
             source_activation_at_boot: None,
+            resource_runtime: None,
             store: handle.store,
             catalogue,
             replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
