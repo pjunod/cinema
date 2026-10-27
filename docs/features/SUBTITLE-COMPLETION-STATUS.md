@@ -16,7 +16,7 @@ deployment and is distinct from server/runtime or simulator evidence.
 
 | Area | Current implementation | Qualification and acceptance |
 |---|---|---|
-| On-the-fly captions | Shared progressive worker supports same-language transcription and speech-to-English translation, selected audio ordinal and actual media clock. | Review and focused regressions pass; real advancing-clock qualification produced useful captions at 14.3/15.9 seconds and complete 95-second coverage at 51.4/54.6 seconds on two CPUs. Final gate is tracked on PR #1292. |
+| On-the-fly captions | Shared progressive worker supports same-language transcription and speech-to-English translation, selected audio ordinal and actual media clock. | Review and focused regressions pass; real advancing-clock qualification produced useful captions at 13.3/14.6 seconds and complete 95-second coverage at 47.7/63.0 seconds on two CPUs. Final gate is tracked on PR #1292. |
 | Existing subtitle translation | Pinned local multilingual-to-English Marian model, durable eight-cue slices, bounded partial storage, explicit stable-ID adoption. | Production multilingual self-test and durable-slice regressions passed; broader human accuracy remains acceptance evidence. |
 | Apple/iOS/tvOS | Setup, three caption operations, synchronized rendering, Stop/seek/audio/auth ownership and Shared read-only delivery implemented. App and test targets compile. | 25 affected simulator methods pass; physical Apple TV acceptance follows user deployment. |
 | Android | Equivalent caption operations and Shared reader; direct downloaded caption attachment repaired. Main and JVM test sources compile. | 47 affected JVM tests pass; device acceptance follows user deployment. |
@@ -57,13 +57,14 @@ boundary and introduces no plugin loader. Both executables build, strict Rust
 construction checks pass, and all 17 packaging/verifier tests pass.
 
 The real moving-playback qualification passed for both Small tasks on the
-95-second source with selected audio ordinal 2. English translation first
-became useful at 14.281 seconds and completed all four immutable cores at
-51.386 seconds; same-language German first became useful at 15.857 seconds
-and completed at 54.617 seconds. Ordinary 1x playback advanced through
-71.387/74.619 seconds. Canonical leased readback observed useful current-core
+95-second source with selected audio ordinal 2, after integration of main
+`167af4616` and the reviewed engine-identity ownership correction. English translation first
+became useful at 13.325 seconds and completed all four immutable cores at
+47.709 seconds; same-language German first became useful at 14.628 seconds
+and completed at 63.039 seconds. Ordinary 1x playback advanced through
+72.711/73.040 seconds. Canonical leased readback observed useful current-core
 captions repeatedly in both the 30–60 and 60–90 second bands (9/3 English
-observations and 11/3 German observations). All eight range jobs and both real
+observations and 8/5 German observations). All eight range jobs and both real
 Install/Verify jobs succeeded. No competing owned compiler work ran during
 this qualification. The selected static engine SHA256 is
 `3beb7ff9ca5660306022a1acd0a9c30df431f1fff860722632997076415adbc4`.
@@ -72,6 +73,28 @@ The full private receipt is retained outside compiler caches with the local
 runtime log and source review. This proves the controlled source, worker and
 readback path; physical Apple TV acceptance follows the user's deployment.
 PR #1292 records the current-head main fast lane and landing receipt.
+
+
+## Final ownership and main integration — 2026-10-26
+
+The ownership inventory prompted an additional explicit source review. It found
+that cancellation of a text engine-identity request released serialization
+while its blocking hash continued. The fix moves the permit and cache
+publication into the hashing worker, accepts only nonempty regular executable
+files up to 2 GiB, and reads at most the accepted length plus one byte. Four
+focused regressions pass, including cancellation with retained serialization
+and cache publication, bounded growth, changed identity, and invalid input.
+The single inventory method passes with all seven reviewed counts; its other
+15 structural categories remain unchanged.
+
+Main `167af4616` added the published v115 playback-handoff schema. Integration
+preserves that ordinal and appends the subtitle schemas at v116–v119, with
+matching replay guards. A real v115-to-v119 fixture preserves handoff codes and
+tokens; exact legacy and replicated caption upgrades also pass. The shared
+admission constructor includes main's extension field. Independent source
+review and all three formal correspondence checks are clear. Native and web
+caption source is unchanged; existing passing cases are retained. The PR
+records qualification of the integrated candidate and its final gate.
 
 ## Final adversarial review — 2026-10-26
 
