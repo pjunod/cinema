@@ -74,6 +74,10 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
         include_str!("hiqlite_jellyfin_login.rs"),
     ),
     (
+        "hiqlite_playback_handoffs.rs",
+        include_str!("hiqlite_playback_handoffs.rs"),
+    ),
+    (
         "hiqlite_jellyfin_identity.rs",
         include_str!("hiqlite_jellyfin_identity.rs"),
     ),
@@ -161,6 +165,10 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
     ("mod.rs", include_str!("sqlite/mod.rs")),
     ("offline.rs", include_str!("sqlite/offline.rs")),
     ("outbox.rs", include_str!("sqlite/outbox.rs")),
+    (
+        "playback_handoffs.rs",
+        include_str!("sqlite/playback_handoffs.rs"),
+    ),
     ("pretranscode.rs", include_str!("sqlite/pretranscode.rs")),
     ("publication.rs", include_str!("sqlite/publication.rs")),
     ("reading.rs", include_str!("sqlite/reading.rs")),

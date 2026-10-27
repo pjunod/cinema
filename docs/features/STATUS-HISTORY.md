@@ -15,7 +15,7 @@ Rotated from `STATUS.md` on 2026-10-25. The following record first appeared on
 2026-10-05 in commit `81e28d115cfa285a4b4cdc41d2582deea3cc4248`; its original
 report is dated 2026-10-04.
 
-## Live TV station logos on Apple TV, iOS and Android
+## 2026-10-04 · Live TV station logos on Apple TV, iOS and Android
 
 **Branch `fix/live-tv-station-logos-native`, issue
 [#815](http://forge.lan:3000/noirr/plurx/issues/815).** Paul reported

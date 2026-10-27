@@ -234,6 +234,10 @@ function fullOpenHarness() {
     shippedSource("fallBackDirectedChange"),
     shippedSource("settleDirectedChange"),
     shippedSource("resetMediaSource"),
+    // This harness is the browser path. Settings → Playback → Open titles in
+    // at its default never hands off; tests/web/linux-player-handoff.test.js
+    // owns the plurx Player branch at the top of play().
+    "function playerHandoffWanted(){return false;}",
     ...["beginPlayAttempt","capturePlayInputs","decideForPlay","preparePlayOutgoing",
       "buildPlayer","presentPlayerChrome","choosePlayRoute","attachPlayRoute",
       "finishPlayAttach","play"].map(shippedSource),

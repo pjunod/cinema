@@ -2048,6 +2048,7 @@ impl HiqliteAuthStore {
         store.install_subtitle_translation_schema(None).await?;
         store.install_library_annotations_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
+        store.install_playback_handoffs_schema(None).await?;
         Ok(store)
     }
 
@@ -2234,7 +2235,8 @@ impl HiqliteAuthStore {
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
                     self.install_library_annotations_schema(admission).await?;
-                    return self.install_dv_title_jobs_schema(admission).await;
+                    self.install_dv_title_jobs_schema(admission).await?;
+                    return self.install_playback_handoffs_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4091,6 +4093,61 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "title jobs schema install did not settle".into(),
+        ))
+    }
+
+    async fn playback_handoffs_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed handoff shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::playback_handoffs::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::playback_handoffs::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    super::playback_handoffs::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "playback handoff schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_playback_handoffs_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.playback_handoffs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::playback_handoffs::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.playback_handoffs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "playback handoff schema install did not settle".into(),
         ))
     }
 
@@ -6366,6 +6423,15 @@ impl UserStore for HiqliteAuthStore {
         token_hash: &str,
         audience: super::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
+        // A handoff token is never a row in `tokens`; its own table answers.
+        if audience == super::TokenAudience::PlaybackHandoff {
+            return Ok(
+                match self.authenticate_playback_handoff(token_hash).await? {
+                    Some(user) => TokenAuthentication::Authenticated(user),
+                    None => TokenAuthentication::Unknown,
+                },
+            );
+        }
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
         // against the committed policy rather than a node-local cache.
@@ -6455,8 +6521,16 @@ impl UserStore for HiqliteAuthStore {
         // the user predicate, so it is `$1`.
         let sql = "SELECT substr(token_hash, 1, 8) AS token_hash_prefix, \
                           substr(device, 1, $1) AS device, created_at, last_seen_at \
-                   FROM tokens WHERE user_id = $2 \
-                   ORDER BY created_at, token_hash LIMIT $3";
+                   FROM (SELECT token_hash, device, created_at, last_seen_at \
+                         FROM tokens WHERE user_id = $2 \
+                         UNION ALL \
+                         SELECT h.token_hash, h.device, h.created_at, h.created_at \
+                         FROM playback_handoffs_tokens h \
+                         WHERE h.user_id = $2 AND h.expires_at > $3 \
+                           AND EXISTS (SELECT 1 FROM tokens s \
+                                       WHERE s.token_hash = h.source_token_hash \
+                                         AND s.user_id = h.user_id)) \
+                   ORDER BY created_at, token_hash LIMIT $4";
         validate_sql(sql)?;
         Ok(self
             .client()
@@ -6465,6 +6539,7 @@ impl UserStore for HiqliteAuthStore {
                 params!(
                     MAX_DEVICE_LABEL_BYTES as i64,
                     user_id,
+                    self.now()?,
                     TOKEN_SUMMARY_MAX as i64
                 ),
             )

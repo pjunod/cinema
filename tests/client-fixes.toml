@@ -7609,3 +7609,62 @@ source = "crates/plurxd/src/web/player/decode-tiers.js"
 source_anchor = "function watchDisplayDynamicRange(){"
 test = "tests/web/hdr-display-change.test.js"
 test_anchor = "test(\"a display that turns HDR after boot is claimed for the next session\""
+
+[[fixes]]
+id = "claude.linux-player-signal-during-redeem-revokes"
+commits = ["cb621c7dfd5053461c95ab93e04c333940a9cb74"]
+source = "clients/linux-player/plurx_player/launcher.py"
+source_anchor = "class SignalGate:"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_sigterm_while_redeeming_still_revokes_the_issued_token(self):"
+
+[[fixes]]
+id = "claude.linux-player-default-picker-policy-tracks"
+commits = ["752ac01107eee2c9cabcc09b8702e7f9377e6f50"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def apply_policy_defaults(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_default_audio_is_selected_for_direct_play(self):"
+
+[[fixes]]
+id = "claude.linux-player-package-removes-launcher-bytecode"
+commits = ["9bacd0bcfdb9159252b02de48f07434b7c9f0188"]
+source = "clients/linux-player/debian/rules"
+source_anchor = "override_dh_python3:"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_private_launcher_bytecode_is_owned_by_dh_python3(self):"
+
+[[fixes]]
+id = "claude.linux-player-mpv-without-loader-overrides"
+commits = ["beed7b4d7d222b52670129f1b72b472a50232383"]
+source = "clients/linux-player/plurx_player/mpv.py"
+source_anchor = "LOADER_OVERRIDES = (\"LD_LIBRARY_PATH\", \"LD_PRELOAD\", \"LD_AUDIT\")"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_mpv_gets_no_dynamic_loader_overrides(self):"
+
+[[fixes]]
+id = "claude.linux-player-packaging-review"
+commits = ["986310e245f534d4ddf84e4c42e5b3678b579a69"]
+source = "clients/linux-player/packaging/apply-series.sh"
+source_anchor = "echo \"apply-series: $dir/series and the directory disagree\" >&2"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_verification_never_lets_a_failed_check_fall_through_to_pass(self):"
+
+# PR #1291: the private libplacebo shares no symbol names with the system one libavfilter loads.
+[[fixes]]
+id = "claude.linux-player-libplacebo-renamed-and-hidden"
+commits = ["35326ed6892e214e3bba31444d16057356490d96"]
+source = "clients/linux-player/packaging/build-private.sh"
+source_anchor = 'objcopy --redefine-syms="$out/libplacebo.rename" "$archive"'
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_libplacebo_is_linked_in_renamed_and_hidden(self):"
+
+# PR #1291: CM v2.9 evaluates its output lattice once per frame (real time on an Intel Arc iGPU).
+[[fixes]]
+id = "claude.dv-dm-cm29-lattice-once-per-frame"
+commits = []
+supplements = "claude.linux-player-libplacebo-renamed-and-hidden"
+source = "tools/dv_processing/dv_dm.h"
+source_anchor = "static const char dv_dm_body_lattice[]"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_cm29_evaluates_its_lattice_once_per_frame(self):"
