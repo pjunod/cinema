@@ -7740,3 +7740,12 @@ source = "crates/plurxd/src/transcode/session_request.rs"
 source_anchor = 'format!("{base}+dl")'
 test = "crates/plurxd/src/transcode/tests/chunk_02.rs"
 test_anchor = "fn a_converting_copy_fingerprints_apart_from_the_copy_it_replaces()"
+
+# The no-window check asks whether the title has video, since mpv deselects the video track it cannot show.
+[[fixes]]
+id = "claude.linux-player-no-window-review"
+commits = ["7aae21cc17c95ccf9c24dd00aebbd9a1fe8763fd"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = 'and not t.get("albumart")'
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_mpvs_vo_error_line_is_a_failure_too(self):"
