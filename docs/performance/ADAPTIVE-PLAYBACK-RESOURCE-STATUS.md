@@ -1,23 +1,24 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation active · updated 2026-10-26. PR #1248 on
-`effort/adaptive-playback-resources` is the sole effort. Work continues on normal
-committed source; current main `087e836d3` is merged. Draft source publication
-and [copy-start review](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) use the ordinary
-branch/PR workflow. No Hermes or external API review is being dispatched.
-Complete-candidate independent Fable review/fixes precede behavioral tests,
-which remain NOT RUN. All V1–V5 and R1/M0–M7 remain OPEN.
+`effort/adaptive-playback-resources` is the sole effort. Draft task PR #1293
+uses normal committed Git source; current main `087e836d3` is merged.
+The user supplied the bounded Opus copy-start design review; its accepted
+[decisions and source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) are
+recorded separately from implementation and execution. No Hermes or external
+API review is dispatched. Completed-candidate independent review and fixes
+precede behavioral tests, which remain NOT RUN. V1–V5 and R1/M0–M7 stay OPEN.
 
-Selected software/static VOD retains original native/application cleanup,
-operator cache quota and typed pressure retirement. Copy request limits now
-match core's existing48MiB cap; its finalized quota is reserved before R and
-follows the same Session/native close ticket until actual actor/app/native
-retirement. Copy has no R→S transfer. Generic errors retain charge; only exact
-before-R provenance refunds an unentered quota grant. All session initializers
-now compile with that field. A task branch corrects named copy launch and
-same-latch release replay without claiming parser entry. Its in-repository
-review pins that code and the four partial-start closure boundaries, which
-remain open pending the explicit native-witness and schema decisions.
+Copy startup now has one driver for original NeverRoot, RootOnly and Joined
+witnesses. It drops an unsent latch before natural join, retains positive
+internal NeverEntered, signals a failing parser's same child before waiting
+stderr, and replays original source/task observations. Complete envelope and
+settlement validation precede one-shot takes; its requested snapshot/frame/
+serialization storage is added before R. S1/no Child and unbound identity add
+no recovery authority and retain full charge. Copy has no R→S transfer.
+Permanent native holds skip maintenance; termination/preflight refusals are
+retryable and retain the same witnesses and settlement ID. System exposes
+the actual held vector and typed reason without implying restart refunds it.
 
 Preparation now retains its real controller handle through positive join and
 same-operation Store proof. Unknown outcomes and response aliases keep the
@@ -27,40 +28,45 @@ admission race before adoption; input allocation precedes snapshot creation.
 Private task/channel/serializer/allocator and native aggregate peaks remain
 Unknown, so these projections are not complete finite-memory qualification.
 
-Planning retains its deadline, native/source witnesses and seven-member P
-settlement with structural M. UnknownHeld P still pins M until restart.
-Root-scoped worker intent, bounded durable-fence retry and foreign-fence cleanup
-are connected. Origin never issues Close or refunds native ownership.
+Planning retains its deadline, original native/source witnesses and seven-
+member P settlement with structural M. Private construction installs original
+payloads/fences before publishing the charged owner. Selected plain Linux
+software SDR Source planning uses that P and retained M through recipe/media
+retirement; native Unknown still pins metadata. Source factories retain the
+same planned-outage admission through P/producer cleanup. Direct hands it to
+the original retirement ticket, and retires the finished actor's redundant
+application Arc while real body/read aliases remain charged. Before-factory
+availability probes and non-Linux preliminary file opening remain outside
+that guard; the exact direct constructor capacity-refusal fixture is pending.
+
+Root-scoped worker intent, bounded durable-fence retry and foreign-fence
+cleanup are connected. Origin never issues Close or refunds native ownership.
 Shared storage domains and the unclosed-provisional inventory consumer remain
-missing. Original probe/inference/library/subtitle workers retain their
-admissions through their original inputs and results. The source open/fstat
-jobs now retain the same admission through unclaimed File+metadata results;
-waiter loss records persistent Unknown. Continuous admission resolves saved
-Automatic intent coherently. Selected finite ordinary/static encodes reserve
-the same software pool before possible R using the actual finalized thread
-count, retain the original exclusive worker claim, and bind family attachments
-to that same credit. Unknown cleanup retains it; positive original native
-close/R→S releases it. This does not qualify P/legacy CPU coexistence or all
-fragment/native adapters. Plain Source P/M work and selective recovery remain
-open.
+missing. Original probe/inference/library/subtitle/open-fstat workers retain
+admissions through actual input/results. Selected finite ordinary/static
+encodes bind their software pool and exclusive worker credit to the same
+family attachments; only positive original native close/R→S releases it.
+P/legacy CPU coexistence, private allocator/executor/native peaks, complete
+memory bounds, broader adapters and selective recovery remain open.
 
-**Compiler evidence:** joined software-pool, copy and original source-opener
-source `48aea35a7bc5` passed native x86_64 core+daemon all-target+cluster strict
-Clippy with Rust1.97.1:350.823s, source stable; log SHA-256
-`39922deb253e11e65c1acecb5f37a13af2ab409ee3e4ea29b45f99378947abb1`.
-Task PR #1293 targets effort PR #1248. Separate host/Linux-cfg checks passed
-for the software bridge and legacy opener; Linux-cfg stubs link no executable.
-Earlier native4de includes the copy watchdog and same-fence diagnostic;
-published effort647 adds only catalog metadata after ec6 native compilation.
-Local compilers run sequentially at j1. Static paperwork passed15/15; declared
-regression bodies resolve, including original490 fields preserved in PR1248.
-All three offline formal mapping checks pass after source review, with failed
-join/ambiguous retirement/last-alias gaps explicit and no theorem transfer.
-These are compilation/source checks: behavioral tests and final Fable review
-remain NOT RUN. The current compile-only effort gate must pass before task
-integration. No completed global M2/M3/M6 or native-peak qualification.
+**Compiler evidence:** exact native source `f0ea19df4001ebedafe922ef3b632bb2d850fe8c` passed
+Rust1.97.1 core+daemon all-target+cluster strict Clippy, source stable, in
+384.099s; log SHA-256 `fb6fdaf186d6dc8d632f6b21ade6883d2d8b4be993083eb0824f5384c6fa61f1`.
+Host/local Linux-target source `33e1c42ffee0ec385f95179f5c9643ff338da38d` matches all1,446
+Rust/Cargo blobs. Its strict checks passed269.643s/314.447s respectively,
+with all four library/test targets and zero diagnostics. Linux-target uses
+stub C dependencies and links no executable. Whole-tree formatting, web
+static checks, offline formal mappings and paperwork15/15 passed;73 declared
+regression bodies resolve. These are compile/source checks, not behavior.
 
-No deployment. Bounded direct recovery retains its held-lock and positive
+Earlier Source012 and native74a passes, the12GiB SIGKILL and precise fixture
+failures remain source-bound in retained receipts; no old result becomes a
+new-source pass. R8/R9/R10/R15/R19/R20 coverage remains partial; R11 authors
+real drain refusal and R21 actual COMMIT/delayed reply, not storage Unknown.
+Current-head compile-only effort gate is required before task integration.
+No complete M2/M3/M6 or native/allocator/executor-peak claim.
+
+Bounded direct recovery retains its held-lock and positive
 same-boot/PID-namespace old-daemon-exit requirements. Separate obsolete
 recovered-cache eviction retains its existing approval boundary.
 
