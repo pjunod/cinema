@@ -116,8 +116,11 @@ struct RestartDrain {
     state: tokio::sync::Mutex<RestartDrainState>,
     admissions: AtomicU64,
     next_generation: AtomicU64,
-    // Persistent diagnostic fence only. No timeout, leader wait, counter or
-    // response may turn unproven native cleanup into a drained verdict.
+    // Persistent restart-drain diagnostic, not an intake fence. Existing P/R
+    // charges and native selectors stay with their original owners; this bit creates
+    // or refunds no reservation. Other work may enter while the phase is open
+    // and its own resource checks admit it. No timeout, successful unrelated
+    // work or response may turn this uncertainty into a drained verdict.
     native_cleanup_uncertainty: AtomicU64,
     unresolved_releases: std::sync::Mutex<HashSet<PlannedOutageFenceToken>>,
     operation_gate: Arc<tokio::sync::Mutex<()>>,
@@ -206,8 +209,7 @@ impl ServingAuthority {
     pub(crate) async fn try_restart_admission(&self) -> Option<RestartAdmission> {
         let mut state = self.restart_drain.state.lock().await;
         expire_restart_drain(&mut state);
-        if self.restart_drain.native_cleanup_unknown().is_some()
-            || state.committed
+        if state.committed
             || state.token.is_some()
             || !self
                 .restart_drain
@@ -227,8 +229,7 @@ impl ServingAuthority {
     pub(crate) fn try_restart_admission_now(&self) -> Option<RestartAdmission> {
         let mut state = self.restart_drain.state.try_lock().ok()?;
         expire_restart_drain(&mut state);
-        if self.restart_drain.native_cleanup_unknown().is_some()
-            || state.committed
+        if state.committed
             || state.token.is_some()
             || !self
                 .restart_drain
@@ -266,12 +267,12 @@ impl ServingAuthority {
     }
 
     /// Same read-only placement observation as ServingFence: preserve its two
-    /// original ready/pending loads, original outage, and cleanup uncertainty.
+    /// original ready/pending loads and original outage. Native uncertainty
+    /// holds the original work and restart drain, not unrelated placement.
     /// This does not acquire admission or substitute the generation loop.
     pub(crate) async fn accepting_new_media(&self) -> bool {
         self.ready.load(Ordering::Acquire)
             && self.loss_transitions_pending.load(Ordering::Acquire) == 0
-            && self.restart_drain.native_cleanup_unknown().is_none()
             && self.current_planned_outage().await.is_none()
     }
 
@@ -619,8 +620,7 @@ impl ServingFence {
     pub(crate) async fn try_restart_admission(&self) -> Option<RestartAdmission> {
         let mut state = self.restart_drain.state.lock().await;
         expire_restart_drain(&mut state);
-        if self.restart_drain.native_cleanup_unknown().is_some()
-            || state.committed
+        if state.committed
             || state.expires_at.is_some()
             || !self
                 .restart_drain
@@ -1275,8 +1275,7 @@ fn restart_drain_status(
 ) -> RestartDrainStatus {
     let admissions_in_flight = drain.admissions.load(Ordering::Acquire);
     RestartDrainStatus {
-        new_admissions_blocked: drain.native_cleanup_unknown().is_some()
-            || state.committed
+        new_admissions_blocked: state.committed
             || state.expires_at.is_some()
             || !drain
                 .unresolved_releases
@@ -1324,6 +1323,7 @@ mod tests {
     async fn original_cleanup_unknown_survives_guard_drop_and_outage_cancel() {
         use plurx_core::process::bounded::OriginalWorkUncertainty;
         let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        fence.validation_set_ready(true).await;
         let admission = fence
             .try_restart_admission()
             .await
@@ -1341,6 +1341,10 @@ mod tests {
             .begin_restart_preparation_until(unix_ms() + 60_000)
             .await
             .expect("outage identity");
+        assert!(fence.try_restart_admission().await.is_none());
+        assert!(fence.authority().try_restart_admission().await.is_none());
+        assert!(fence.authority().try_restart_admission_now().is_none());
+        assert!(!fence.accepting_new_media().await);
         fence.cancel_planned_outage_preparation(token, 0).await;
         let (_, inventory, status) = fence
             .restart_drain_status_with_owned_work(0, || async {
@@ -1363,11 +1367,84 @@ mod tests {
             "report actual count, not a sentinel"
         );
         assert!(!status.drained);
-        assert!(status.new_admissions_blocked);
-        assert!(fence.try_restart_admission().await.is_none());
-        assert!(fence.authority().try_restart_admission_now().is_none());
+        assert!(!status.new_admissions_blocked);
+        assert!(fence.accepting_new_media().await);
+        let authority = fence.authority();
+        assert!(authority.accepting_new_media().await);
+        let unrelated = fence
+            .try_restart_admission()
+            .await
+            .expect("an open phase admits unrelated work");
+        let shared = authority
+            .try_restart_admission()
+            .await
+            .expect("shared authority uses the same open phase");
+        let immediate = authority
+            .try_restart_admission_now()
+            .expect("synchronous admission uses the same open phase");
+        assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 3);
+        drop((unrelated, shared, immediate));
+        let (_, retained, after) = fence
+            .restart_drain_status_with_owned_work(0, || async {
+                panic!("later successful work cannot clear original native uncertainty")
+            })
+            .await;
+        assert_eq!(retained, inventory);
+        assert_eq!(after.admissions_in_flight, 0);
+        assert!(!after.drained);
+        assert!(!after.new_admissions_blocked);
+        fence.validation_set_ready(false).await;
         assert!(!fence.accepting_new_media().await);
-        assert!(!fence.authority().accepting_new_media().await);
+        assert!(!authority.accepting_new_media().await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_uncertainty_preserves_unresolved_outage_admission_fence() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        fence.validation_set_ready(true).await;
+        let admission = fence
+            .try_restart_admission()
+            .await
+            .expect("original admission");
+        admission.retain_native_cleanup_uncertainty(
+            plurx_core::process::bounded::OriginalWorkUncertainty::CollectorDropped,
+        );
+        drop(admission);
+        let token = fence
+            .begin_maintenance_preparation_until(unix_ms() + 60_000)
+            .await
+            .expect("original maintenance fence");
+        fence.retain_planned_outage_preparation_until_cancelled(token);
+        tokio::time::advance(Duration::from_secs(61)).await;
+        let authority = fence.authority();
+        assert!(fence.restart_drain_status(0).await.new_admissions_blocked);
+        assert!(fence.try_restart_admission().await.is_none());
+        assert!(authority.try_restart_admission().await.is_none());
+        assert!(authority.try_restart_admission_now().is_none());
+        assert!(!authority.accepting_new_media().await);
+        fence.resolve_planned_outage_release(token);
+        let unrelated = authority
+            .try_restart_admission_now()
+            .expect("confirmed outage release reopens unrelated admission");
+        drop(unrelated);
+        let (_, inventory, status) = fence
+            .restart_drain_status_with_owned_work(0, || async {
+                panic!("outage release is not native-close evidence")
+            })
+            .await;
+        assert!(matches!(
+            inventory,
+            OwnedWorkInventory::Unknown {
+                reason: OwnedWorkUnknown::NativeCleanupUncertain {
+                    collector_dropped: true,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(status.admissions_in_flight, 0);
+        assert!(!status.new_admissions_blocked);
+        assert!(!status.drained);
+        assert!(fence.accepting_new_media().await);
     }
 
     #[tokio::test]
@@ -2029,6 +2106,53 @@ mod desktop_shutdown_tests {
             .begin_restart_preparation_until(unix_ms() + 1000)
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn native_uncertainty_blocks_desktop_commit_but_not_open_intake() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        fence.validation_set_ready(true).await;
+        let admission = fence
+            .try_restart_admission()
+            .await
+            .expect("original admission");
+        admission.retain_native_cleanup_uncertainty(
+            plurx_core::process::bounded::OriginalWorkUncertainty::LeaderReapFailed,
+        );
+        drop(admission);
+        let unrelated = fence
+            .try_desktop_http_admission()
+            .await
+            .expect("open desktop HTTP intake is unrelated to original uncertainty");
+        drop(unrelated);
+        let token = fence
+            .begin_desktop_preparation_until(unix_ms() + 60_000)
+            .await
+            .expect("original desktop preparation");
+        assert!(fence.try_desktop_http_admission().await.is_none());
+        assert!(fence.try_restart_admission().await.is_none());
+        assert!(fence.authority().try_restart_admission().await.is_none());
+        assert!(fence.authority().try_restart_admission_now().is_none());
+        assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+        assert!(!fence.commit_desktop_shutdown(token, 0).await);
+        fence.cancel_planned_outage_preparation(token, 0).await;
+        let (_, inventory, status) = fence
+            .restart_drain_status_with_owned_work(0, || async {
+                panic!("cancelled shutdown cannot certify native cleanup")
+            })
+            .await;
+        assert!(matches!(
+            inventory,
+            OwnedWorkInventory::Unknown {
+                reason: OwnedWorkUnknown::NativeCleanupUncertain {
+                    leader_reap_failed: true,
+                    ..
+                }
+            }
+        ));
+        assert!(!status.drained);
+        assert!(!status.new_admissions_blocked);
+        assert!(fence.accepting_new_media().await);
     }
 
     #[tokio::test]
