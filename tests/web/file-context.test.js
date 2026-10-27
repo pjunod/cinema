@@ -456,3 +456,14 @@ test("folded subtitle availability includes the selected generated track",()=>{
   assert.match(html,/trk on[^]*?Machine transcription/);
   assert.match(html,/<b>2<\/b> available · French/);
 });
+
+test("published captions stay inside opaque read grammar and cannot acquire work authority",()=>{
+  const h=harness(),shared=h.sharedPlaybackFileContextFromDetail(reference,detail()),hash="a".repeat(64),lease="11111111-1111-4111-8111-111111111111";
+  assert.equal(h.playbackFileApiPath(shared,"captions"),detail().file_base.slice(7)+"/captions");
+  assert.equal(h.playbackFileUrl(shared,`captions/${hash}/manifest`,{position_ms:"90000"}),detail().file_base+`/captions/${hash}/manifest?position_ms=90000`);
+  assert.ok(h.playbackFileUrl(shared,`captions/${hash}/segments/${hash}`,{lease}).endsWith(`?lease=${lease}`));
+  for(const position of ["-1","01","14400001"])assert.throws(()=>h.playbackFileUrl(shared,`captions/${hash}/manifest`,{position_ms:position}));
+  for(const suffix of [`captions/${hash}/stop`,`captions/${hash}/retry`,"subtitle-translation/options","captions%2fsecret"])assert.throws(()=>h.playbackFileUrl(shared,suffix));
+  assert.throws(()=>h.playbackFileUrl(h.localPlaybackFileContext(7),"captions"));
+  h.logout();assert.throws(()=>h.playbackFileUrl(shared,"captions"));
+});

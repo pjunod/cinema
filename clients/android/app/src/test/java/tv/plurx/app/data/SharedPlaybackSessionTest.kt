@@ -165,4 +165,19 @@ class SharedPlaybackSessionTest {
         assertEquals(mapOf("force" to "transcode", "audio" to "2", "subtitle" to "4"), SharedSelection(PlaybackQuality.Q480, 2, 4).decisionQuery())
         assertEquals(emptyMap<String, String>(), SharedSelection(PlaybackQuality.Auto).decisionQuery())
     }
+
+    @Test fun initialMultiAudioUsesTheDecisionOrdinalInCopyHlsWithoutLanguageGuessing(): Unit = runBlocking {
+        val f = SharedFixture("903"); f.login(); val context = f.context()
+        val wire = Json.parseToJsonElement(f.decision("direct_play")).jsonObject
+        val audio = buildJsonArray {
+            add(buildJsonObject { put("index", 0); put("codec", "aac"); put("language", "eng"); put("default", false) })
+            add(buildJsonObject { put("index", 1); put("codec", "aac"); put("language", "jpn"); put("default", true) })
+        }
+        val delivery = JsonObject(wire.getValue("delivery").jsonObject + ("audio" to JsonPrimitive(1)))
+        val updated = JsonObject(wire + mapOf("audio" to audio, "delivery" to delivery)).toString()
+        val plan = f.plan(context, "direct_play", allowDirect = true, wire = updated)
+        assertFalse(plan.direct); assertEquals(1, plan.request.audio); assertEquals(true, plan.request.copy)
+        assertNull(plan.request.height); assertEquals("vod", plan.request.presentation)
+    }
+
 }

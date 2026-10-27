@@ -391,3 +391,73 @@ The abandoned two-job ten-event run is incomplete cost evidence, kept outside
 the required registry. README gives its observed counts and the precise
 eleven-action path. A predeclared single-job ten-event fallback would cover
 commit only and must be labeled explicitly if used; it is not yet selected.
+
+## Subtitle completion construction correspondence
+
+The 2026-10-26 source mapping is reconciled against `origin/main` at
+`087e836d369eb2b8f94ec1d0454ea6c157612df9`. Text-caption admission is scoped to
+its new job kinds. The selected library claim/binding/token/publication
+predicates retain their base behavior; the new schema extensions do not alter
+the mapped Hiqlite timeout or SQLite fenced-publication transaction. Text
+translation, speech tasks and audio ordinals, caption leases, and content
+read attestation are outside this finite model. The mapping notes identify
+the changed source files without expanding the modeled guarantees.
+
+This is authored construction correspondence. Final adversarial review and
+current-source qualification remain pending; refreshing hashes does not
+relabel historical model receipts or execute any runtime regression.
+
+## Subtitle producer recovery correspondence
+
+The independent final review on 2026-10-26 inspected the frozen completion
+and retargeting delta atop `be9ee45ae`. Shared queue changes add producer-node
+and preparation-incarnation checks only for `subtitle_translation_prepare`
+and `subtitle_translation_range`; legacy payloads remain inspectable but
+cannot acquire new authority. The selected library enqueue/claim, binding,
+renewal, cancellation, publication and cleanup paths retain their behavior.
+
+The [exact-shape migration recognizer](../../crates/plurx-core/src/store/subtitle_translation_schema.rs)
+and [replacement trigger](../../crates/plurx-core/src/store/subtitle_translation_retarget.sql)
+were also inspected because migration installs effects on the shared job
+table. They recognize the complete legacy caption shape, replace its trigger
+transactionally, preserve domain data and refuse unknown shapes. Queue
+updates select caption kinds for one operation; they do not cancel the
+selected library jobs. New mapping dependencies pin these two boundaries.
+SQLite v117, Hiqlite extension installation and added store-contract module
+wiring leave the selected publication transaction and timeout unchanged.
+
+This source review supersedes the earlier construction-only correspondence
+status for these changes. It does not extend the finite model to caption
+completion, producer recovery, remote-worker liveness or admission fairness.
+Model/configuration bytes, fairness premises and historical receipts remain
+unchanged. Offline mapping validation checks the reviewed inputs and anchors;
+it is not Rust test execution, TLC qualification or a refinement proof.
+
+The later 2026-10-26 formatter pass only moved the unchanged feature-gated
+`subtitle_translation_upgrade` test-module declaration into lexical order.
+Its visibility, feature condition and source path are unchanged. The one
+inspected `store_contract.rs` mapping hash was rebound; this adds no model
+semantics or execution evidence.
+
+## Moving-playback continuity correspondence
+
+The independent bounded review on 2026-10-26 inspected the frozen delta atop
+`352137f764d8cf87d530352222d5948a77275d4f`. Hiqlite changes only the
+recognized caption extension chain; SQLite adds caption migration118. The
+selected library transaction, publication and timeout paths are unchanged.
+
+The exact original0/retarget1/continuity2 recognizer refuses unknown shapes.
+The new [continuity triggers](../../crates/plurx-core/src/store/subtitle_translation_continuity.sql)
+capture and retire grants only for `subtitle_translation_range`; demand
+revocation deletes only matching captured caption grant rows. Comparing
+the replacement mutation trigger with the previous retarget trigger confirms
+that its shared-job effects retain their caption-kind/operation scope. New
+dependency anchors pin these isolation boundaries. The expiry/UUID-reuse
+review finding was fixed by atomic demand-trigger grant withdrawal.
+
+The selected library enqueue, claim, renewal, binding, settlement and cleanup
+semantics remain unchanged. This source correspondence does not extend the
+finite model to caption continuity, playback deadlines or remote-worker
+liveness. Model/configuration bytes, fairness premises and historical
+receipts retain their identities. Offline mapping validation is distinct
+from runtime tests, TLC qualification and a refinement proof.

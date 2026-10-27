@@ -4,9 +4,9 @@
 
 <!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
 
-- **What this is:** Every endpoint plurxd serves and which credential authorizes it; the specification is this file (no OpenAPI document exists), written from the routers and handlers on 2026-09-07.
+- **What this is:** Every endpoint plurxd serves and which credential authorizes it; the specification is this file (no OpenAPI document exists), written from the routers and handlers on 2026-10-26.
 - **Where it stands:**
-  - Live reference; maintained with behavior changes. The intro states the route inventory as of 2026-10-15.
+  - Live reference; maintained with behavior changes. The intro states the route inventory as of 2026-10-26.
 - **Read further only for:**
   - the five surfaces and credentials: `## 1. Surfaces — five things on one port`; `## 2. Authentication — two bearer kinds and five capabilities`
   - error envelopes: `## 3. Errors — three envelopes, and the gates that answer first`
@@ -29,16 +29,16 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-25, plurx has 392 routes declared by the ordinary listener's
+As of 2026-10-26, plurx has 403 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
-additional HTTPS listener (`:32443`, off by default) serve the identical five surfaces
+HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
 Sharing uses a separate private TLS listener with its own peer credentials
 (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 392 routes across the registered routers.
+plurx has 403 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2380,17 +2380,20 @@ codeless 503 on `overlay.json` as a wait, for older servers.
 
 ### Progressive English translation
 
-The initial experimental route uses the attached web direct player with one
-unambiguous source audio stream. Spoken-language confirmation may correct the
-metadata tag. Small multilingual produces independent 30-second cores with
-five seconds of left/right context; clipped boundary repetition and grammar or
-meaning errors remain possible. Native, encoded and multi-audio playback are
-not qualified by this route.
+The speech API exposes same-language transcription and English translation
+for the selected attached audio ordinal on web and native clients. Source
+clock normalization is independent of direct, remux or encoded delivery.
+The two registered Small profiles produce independent30second cores with5seconds
+of left/right context. Transcription and English translation each require their
+own qualification; saved Small choices and immutable profile identities remain
+valid. The optional `default_profile_id` discovery hint reflects the saved
+profile/task choice and defaults to Small English translation when unset.
+Discovery does not grant producer authority or override the saved enable choice.
 
 | Method | Path | Credential | Meaning |
 |---|---|---|---|
 | GET, PUT | `/api/v1/subtitle-translation` | admin bearer | Saved enable/model/profile/language preferences with opaque revision CAS. Readiness never rejects Save. |
-| GET | `/api/v1/subtitle-translation/models` | admin bearer | Immutable profile, bounds and distinct English-translation worker qualification. |
+| GET | `/api/v1/subtitle-translation/models` | admin bearer | The two immutable Small task profiles, bounds, saved-choice hint and independent speech-task qualification. |
 | GET | `/api/v1/files/{id}/subtitle-translation/options` | bearer | Current source revision, supported profile and bounded cached asset list; no work. |
 | POST | `/api/v1/files/{id}/subtitle-translation` | admin bearer | Durable operation and expiring playback demand before source hashing; exact request replay. |
 | GET | `/api/v1/files/{id}/subtitle-translation/assets` | bearer | Explicit cursor page of cached assets. |
@@ -2404,6 +2407,19 @@ not qualified by this route.
 | GET | `/api/v1/subtitle-translation/assets/{id}/coverage` | bearer | Scoped cursor page of accepted overlapping core intervals. |
 | GET | `/api/v1/subtitle-translation/assets/{id}/segments/{segment}` | bearer | Exact bounded canonical UTF-8 JSON bytes; verify the manifest digest before decoding. |
 
+Create, demand renewal and both Retry variants accept an optional UUID
+`continuity_id`, echoed on their demand receipt. Clients retain it during
+ordinary clock advancement, pause/rate changes and continuous attachment
+handoffs; an actual seek/discontinuous traversal replaces it. Range claims
+capture at most16 currently authorizing demand identities. A running range
+may finish while one captured live traversal continues, even after its core
+leaves the scheduling window. A new seek, expired/released demand, Stop,
+source/producer replacement or lost claim/resource authority revokes that
+support. New queued claims still require useful current-window demand.
+Omitted continuity uses the legacy current-window-only lifetime. Exact replay
+includes the original UUID; a client resolves an uncertain renewal before
+sending the next generation with its new traversal identity.
+
 Existing model Install/Test routes also accept strict version 2 translation
 requests with request UUID, intent expiry, purpose, profile ID and named workers.
 Their version 2 responses identify `purpose: "translation"`, `model_id` and
@@ -2415,6 +2431,31 @@ ran. Work mutations require current administrator authority and an unexpired
 first-use intent; retained exact receipts replay without starting fresh work.
 Responses carry a fresh `X-Translation-Server-Now-Ms` even when receipt bodies
 retain their original clock.
+
+### Text subtitle translation and shared captions
+
+Text translation creates a durable job from an existing subtitle track and
+returns its result as a cached subtitle asset. Shared playback exposes only
+committed caption metadata and bounded manifest/segment reads through the
+existing import grant; it does not start work on the Source.
+
+| Method | Path | Credential | Meaning |
+|---|---|---|---|
+| GET, PUT | `/api/v1/subtitle-text-translation/config` | bearer; admin for PUT | Saved enable/model preferences and revision. |
+| GET | `/api/v1/subtitle-text-translation/models` | bearer | Model catalog and worker availability. |
+| POST | `/api/v1/subtitle-text-translation/models/install` | admin bearer | Enqueue model installation. |
+| POST | `/api/v1/subtitle-text-translation/models/verify` | admin bearer | Enqueue model verification. |
+| GET | `/api/v1/files/{id}/subtitle-text-translation/options` | bearer | Current subtitle tracks, supported models and available results. |
+| POST | `/api/v1/files/{id}/subtitles/{index}/translation` | admin bearer | Create a durable text translation job. |
+| GET | `/api/v1/subtitle-text-translation/jobs/{id}` | bearer | Observe a translation job. |
+| POST | `/api/v1/subtitle-text-translation/jobs/{id}/retry` | admin bearer | Retry a failed job. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions` | import grant | Cursor page of committed captions for shared playback. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/manifest` | import grant | Playback-window coverage and segment descriptors; requires `position_ms`. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/captions/{asset}/segments/{segment}` | import grant | Bounded caption segment; requires the manifest `lease` query value. |
+
+Shared caption reads are grant-bound and revalidate the Source asset authority.
+Expired snapshots require refreshing the caption page and manifest; the reads
+remain independent of playback session creation.
 
 Page and segment requests use `X-Translation-Read-Lease`. A matching ETag/304
 does not renew that lease. Expired leases or moved cursors require resynchronizing

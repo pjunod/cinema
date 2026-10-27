@@ -1494,6 +1494,7 @@ paths = [
   "scripts/release-package-candidate",
   "scripts/package-windows",
   "scripts/package-linux",
+  "scripts/stage-subtitle-translation-notice.py",
   "scripts/create-desktop-update-manifest",
   "scripts/{bench,codec-qualification-corpus.json,codec-hdr-score,dv-evidence,gop-census,rolling-grid-census,rolling-grid-acquire,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/bench-macos-video",
@@ -1734,13 +1735,36 @@ checks = ["diagnostics-contract", "rust-gate"]
 
 [[points]]
 id = "playback.translation"
-title = "Experimental progressive English subtitle translation"
-contract = "A confirmed single-audio web direct source is hashed under an owned cancellable preparation; administrator demand and Stop epochs fence independent Small translation cores, immutable retained segments, bounded read leases and cache retirement without reopening playback. Translation self-test qualification never implies an unrun generation self-test."
+title = "Progressive speech captions and existing-text English translation"
+contract = "The selected audible audio ordinal and normalized source clock bind progressive same-language speech captions or English speech translation across playback modes and clients. Administrator demand and Stop epochs fence immutable bounded cores; authenticated local readers and exact-grant Shared readers retain only committed coverage through bounded read leases without gaining producer authority. Existing text captions use a separate pinned multilingual-to-English model and explicit durable jobs, then publish ordinary acquired tracks selected only by stable artifact identity. Saved enable choices remain independent of advisory readiness, and task-specific qualification never implies an unrun speech or text self-test."
 paths = [
   "crates/plurx-core/src/store/subtitle_translation*.rs",
   "crates/plurx-core/src/store/subtitle_translation.sql",
+  "crates/plurx-core/src/store/subtitle_translation_retarget.sql",
+  "crates/plurx-core/src/store/subtitle_translation_continuity.sql",
+  "crates/plurx-core/src/store/shared_caption_read.rs",
+  "crates/plurx-core/src/store/shared_caption_schema.rs",
+  "crates/plurx-core/src/store/shared_caption_read.sql",
+  "crates/plurx-core/src/store/subtitle_text_translation.rs",
+  "crates/plurx-core/src/store/subtitle_text_translation_schema.rs",
+  "crates/plurx-core/src/store/subtitle_text_translation.sql",
   "crates/plurx-core/tests/subtitle_translation_contract.rs",
+  "crates/plurx-core/tests/subtitle_translation_retarget.rs",
+  "crates/plurx-core/tests/store_contract/subtitle_translation_upgrade.rs",
   "crates/plurxd/src/subtitle_translation/**",
+  "crates/plurxd/src/subtitle_text_translation/api.rs",
+  "crates/plurxd/src/subtitle_text_translation/artifacts.rs",
+  "crates/plurxd/src/subtitle_text_translation/catalog.json",
+  "crates/plurxd/src/subtitle_text_translation/config.rs",
+  "crates/plurxd/src/subtitle_text_translation/engine.rs",
+  "crates/plurxd/src/subtitle_text_translation/manager.rs",
+  "crates/plurxd/src/subtitle_text_translation/mod.rs",
+  "crates/plurxd/src/subtitle_text_translation/text.rs",
+  "crates/plurxd/src/subtitle_text_translation/tokenizer.rs",
+  "crates/plurxd/src/subtitle_text_translation/weights.rs",
+  "crates/plurxd/src/subtitle_text_translation/weights-layout.json",
+  "scripts/subtitle-text-weight-layout.py",
+  "crates/plurxd/src/http/shared_captions.rs",
   "crates/plurxd/src/subtitle_models/catalog-v1.json",
   "tests/fixtures/subtitle-translation/**",
 ]

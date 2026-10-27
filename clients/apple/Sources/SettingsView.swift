@@ -162,6 +162,7 @@ struct SettingsView: View {
                 Toggle("Bounded pause/resume", isOn: $boundedResumeEnabled)
                 Toggle("Prepared quality handoff", isOn: $preparedHandoffEnabled)
                 NavigationLink("Pause/resume and quality handoff readiness") { PlaybackHandoffDetailsView() }
+                NavigationLink("Captions and model setup") { ProgressiveCaptionSetupView() }
             } header: {
                 Text("Playback")
             } footer: {

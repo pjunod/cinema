@@ -12643,3 +12643,13 @@ final class ServerLabelTests: XCTestCase {
         XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: nil), "Living Room")
     }
 }
+
+extension AppleClientTests {
+    func testMultiAudioInitialAttachmentBindsActualOrdinalBeforeCaptionChoice() {
+        XCTAssertFalse(PlayerController.needsOrdinalBoundAudioSession(audioTrackCount: 1, explicitAudio: nil))
+        XCTAssertTrue(PlayerController.needsOrdinalBoundAudioSession(audioTrackCount: 2, explicitAudio: nil))
+        XCTAssertTrue(PlayerController.needsOrdinalBoundAudioSession(audioTrackCount: 1, explicitAudio: 0))
+        XCTAssertEqual(PlayerController.sessionAudioIndex(explicit: nil, plan: 2, selected: 0), 2)
+        XCTAssertEqual(PlayerController.sessionAudioIndex(explicit: 1, plan: 2, selected: 0), 1)
+    }
+}

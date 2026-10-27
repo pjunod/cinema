@@ -122,8 +122,12 @@ internal fun sharedPlaybackPlan(
 ): SharedPlaybackPlan {
     val decision = result.decision
     val presentation = decision.presentation
-    val direct = allowDirect && decision.method == "direct_play" && selection.audio == null && selection.subtitle == null &&
-        presentation.audio_offset_ms == 0L && !presentation.transcode_audio
+    val direct = allowDirect && decision.method == "direct_play" && presentation.audio.size <= 1 &&
+        selection.audio == null && selection.subtitle == null && presentation.audio_offset_ms == 0L && !presentation.transcode_audio
+    // The session carries this exact source ordinal. Native language preference is never track authority.
+    val audio = selection.audio ?: presentation.delivery?.audio?.takeIf { it in 0..1024 }?.toInt()
+        ?: presentation.audio.singleOrNull { it.default }?.index?.takeIf { it in 0..1024 }?.toInt()
+        ?: presentation.audio.singleOrNull()?.index?.takeIf { it in 0..1024 }?.toInt()
     val track = selection.subtitle?.let { index -> presentation.subtitles.firstOrNull { it.index == index.toLong() } }
     val burn = selection.burn || track?.isNativeHls == false
     val start = subject.resumeMs.toDouble() / 1000
@@ -132,7 +136,7 @@ internal fun sharedPlaybackPlan(
         quality_auto = selection.quality == PlaybackQuality.Auto, caps = result.caps, presentation = "direct",
     ) else CreateSessionReq(
         playback_id = playbackId, request_id = requestId, height = selection.quality.rungHeight,
-        quality_auto = selection.quality == PlaybackQuality.Auto, start = start, audio = selection.audio,
+        quality_auto = selection.quality == PlaybackQuality.Auto, start = start, audio = audio,
         native_subtitles = selection.subtitle?.takeUnless { burn }?.let { true }, subtitle = selection.subtitle?.takeUnless { burn },
         subtitle_burn = selection.subtitle?.takeIf { burn },
         copy = !burn && decision.method != "transcode", aac = presentation.transcode_audio,
