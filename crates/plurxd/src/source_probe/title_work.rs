@@ -53,7 +53,7 @@ impl TitleTask {
         let Some(probe_pipeline) = plurx_core::scan::probe::pipeline_digest().await else {
             return Ok(None);
         };
-        let scanner = tools.scanner_digest();
+        let scanner = tools.title_scanner_digest();
         let demands = state.store.dv_title_demands(&scanner, *after).await?;
         if demands.is_empty() {
             *after = 0;
@@ -328,7 +328,7 @@ async fn execute(
                     probe_revision: demand.probe_revision,
                     source_size: demand.source_size,
                     source_mtime: demand.source_mtime,
-                    scanner_digest: tools.scanner_digest(),
+                    scanner_digest: tools.title_scanner_digest(),
                     stats,
                 };
                 match fence.publish_dv_title(output).await {

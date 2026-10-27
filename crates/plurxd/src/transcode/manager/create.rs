@@ -1496,11 +1496,11 @@ impl TranscodeManager {
         let tools = crate::vodencode::dv_runtime::ToolSet::capture()
             .await?
             .ok_or("the processing helper is unavailable on this node")?;
-        let identity = self.fel_identity(&tools.scanner_digest()).await?;
+        let identity = self.fel_identity(&tools.backend_digest()).await?;
         self.fel_route_decision(
             &planning.file,
             planning.probe_json.as_deref(),
-            &tools.scanner_digest(),
+            &tools.title_scanner_digest(),
             &identity,
         )
         .await

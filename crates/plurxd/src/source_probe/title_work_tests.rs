@@ -454,7 +454,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
     );
     assert!(
         store
-            .dv_title_demands(&tools.scanner_digest(), 0)
+            .dv_title_demands(&tools.title_scanner_digest(), 0)
             .await
             .expect("demands")
             .iter()
@@ -499,7 +499,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
             .expect("probe");
         let identity = state
             .transcode
-            .fel_identity(&tools.scanner_digest())
+            .fel_identity(&tools.backend_digest())
             .await
             .expect("identity");
         let q::VerdictState::Current(verdict) =
@@ -519,7 +519,7 @@ async fn physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict() {
     // job's own body (`execute`): complete-title scan, the qualification under
     // the job's admission, publication.
     let started = std::time::Instant::now();
-    let scanner = tools.scanner_digest();
+    let scanner = tools.title_scanner_digest();
     let mut demand = store
         .dv_title_demands(&scanner, 0)
         .await
