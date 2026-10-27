@@ -395,6 +395,16 @@ pub(in crate::transcode) async fn source_before_reservation_refusal_fixture(
     };
     use plurx_core::adaptive_resources::WorkloadDemand;
     use plurx_core::process::observation::Metric;
+    let fresh_now_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("clock range");
+    assignment
+        .validate_observation_freshness(fresh_now_ms)
+        .expect("original assignment observation starts genuinely fresh");
     let (snapshot, request) = original_source_request(&runtime, manager, prepared).await;
     let before = runtime.accounting().expect("baseline").used;
     let failure = start_source_fixed_probe(
