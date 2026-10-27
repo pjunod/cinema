@@ -4863,12 +4863,92 @@ fn the_vod_index_cursor_wraps_past_failed_low_ids() {
 #[test]
 fn long_remuxes_receive_a_complete_pass_budget() {
     assert_eq!(
-        index_file_budget(None),
+        index_file_budget(None, 0, None),
         Duration::from_secs(INDEX_FILE_BUDGET_FLOOR_SECS)
     );
-    let steel = index_file_budget(Some(7_095_005));
+    let steel = index_file_budget(Some(7_095_005), 0, None);
     assert!(steel >= Duration::from_secs(15 * 60));
     assert!(steel <= Duration::from_secs(INDEX_FILE_BUDGET_CEILING_SECS));
+}
+
+fn budget_exceeded(
+    elapsed_ms: u64,
+    covered_ms: i64,
+    expected_ms: i64,
+) -> plurx_core::segplan::FragmentIndexOutcome {
+    plurx_core::segplan::FragmentIndexOutcome {
+        source: plurx_core::segplan::SourceIdentity::new(1, 1, "argv"),
+        refusal: plurx_core::segplan::IndexRefusal::Truncated { rows: 900 },
+        reason: "exceeded the 1511s index budget".to_owned(),
+        attempts: 1,
+        next_attempt_at_ms: 0,
+        updated_at_ms: 0,
+        typed_code: Some(plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded),
+        typed_retryable: Some(true),
+        retry_deadline_ms: 0,
+        policy_revision: 1,
+        terminal_reason: None,
+        diagnostic: Some(plurx_core::content_analysis::IndexDiagnostic {
+            version: 1,
+            code: "index_budget_exceeded".to_owned(),
+            retryable: true,
+            claim_fence: 0,
+            attempt: 1,
+            selected_stream: None,
+            expectation_provenance: None,
+            covered_ms: Some(covered_ms),
+            expected_ms: Some(expected_ms),
+            container_ms: None,
+            fragment_count: None,
+            output_bytes: None,
+            elapsed_ms: Some(elapsed_ms),
+            budget_ms: Some(1_511_000),
+            exit_category: Some("signal: 9 (SIGKILL)".to_owned()),
+            stderr_tail: Vec::new(),
+            recorded_at_ms: 0,
+        }),
+    }
+}
+
+/// lab5's Avatar remux (79 GB, 197 min): killed by a 1511 s budget at 64% of
+/// the film. Its retry is budgeted from that measured rate, past the old
+/// 30-minute ceiling, instead of repeating the same kill.
+#[test]
+fn a_budget_failure_budgets_the_retry_from_the_rate_it_measured() {
+    let film_ms = 11_820_000;
+    let first = index_file_budget(Some(film_ms), 0, None);
+    assert_eq!(first, Duration::from_secs(1_508));
+    let previous = budget_exceeded(1_511_000, film_ms * 64 / 100, film_ms);
+    let retry = index_file_budget(Some(film_ms), 0, Some(&previous));
+    // 1511 s for 64% is 2361 s for the film; a quarter more, plus headroom.
+    assert!(retry >= Duration::from_secs(2_966), "{retry:?}");
+    assert!(retry > Duration::from_secs(INDEX_FILE_BUDGET_CEILING_SECS));
+    // Only a budget failure says anything about the rate.
+    let mut other = previous.clone();
+    other.typed_code = Some(plurx_core::content_analysis::IndexFailureCode::IndexSourceIo);
+    assert_eq!(index_file_budget(Some(film_ms), 0, Some(&other)), first);
+    // A measurement that covered nothing gives no rate.
+    let nothing = budget_exceeded(1_511_000, 0, film_ms);
+    assert_eq!(index_file_budget(Some(film_ms), 0, Some(&nothing)), first);
+    // And it is bounded, however slow the read was.
+    let crawl = budget_exceeded(1_511_000, 1_000, film_ms);
+    assert_eq!(
+        index_file_budget(Some(film_ms), 0, Some(&crawl)),
+        Duration::from_secs(INDEX_MEASURED_BUDGET_CEILING_SECS)
+    );
+}
+
+/// A first attempt on a large, high-bitrate remux is budgeted from its size
+/// too: 79 GB at the slowest planned read rate, not 197 minutes at 8x.
+#[test]
+fn a_first_attempt_on_a_large_remux_is_budgeted_from_its_size() {
+    let avatar = index_file_budget(Some(11_820_000), 79_000_000_000, None);
+    assert!(avatar >= Duration::from_secs(2_300), "{avatar:?}");
+    // A small file keeps the duration budget.
+    assert_eq!(
+        index_file_budget(Some(11_820_000), 4_000_000_000, None),
+        Duration::from_secs(1_508)
+    );
 }
 
 #[tokio::test]
