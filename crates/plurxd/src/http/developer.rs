@@ -1784,6 +1784,7 @@ async fn dolby_vision_fel_reencode(
 }
 
 /// What this node knows about the per-title FEL qualification.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone)]
 struct FelQualityFacts {
     /// radeonsi VA-API with its Main10 graph: the only encoder the route's
@@ -1797,6 +1798,7 @@ struct FelQualityFacts {
 /// The quality row is the per-title verdicts, never a global claim: each
 /// Profile 7 FEL title is served the reconstruction only when its own
 /// measurement says the enhancement layer adds more than re-encoding loses.
+#[cfg(any(target_os = "linux", test))]
 fn fel_quality_requirement(facts: &FelQualityFacts) -> DeveloperRequirement {
     use plurx_core::transcode::dv_fel_qualification as q;
     let rule = format!(
