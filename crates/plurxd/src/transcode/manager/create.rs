@@ -1576,6 +1576,7 @@ impl TranscodeManager {
     /// verdict for this renderer and recipe. Only an admitting verdict serves
     /// the reconstruction; a missing one is measured and, until then, the play
     /// keeps the plain conversion.
+    #[cfg(target_os = "linux")]
     pub(crate) fn fel_gate(
         capable: bool,
         state: plurx_core::transcode::dv_fel_qualification::VerdictState,
@@ -1591,11 +1592,13 @@ impl TranscodeManager {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) const fn fel_recipe_unqualified() -> &'static str {
         "no reconstruction recipe is qualified for this server's encoder \
          (the route is measured on radeonsi VA-API only)"
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) const fn fel_being_measured() -> &'static str {
         "whether this title's enhancement layer adds more than re-encoding loses \
          is being measured on this server's GPU"
@@ -1706,7 +1709,7 @@ impl TranscodeManager {
     /// (`ffmpeg::has_hevc_main10_vaapi_decode`). The completed window remains
     /// the authority: one that opened its decoders in software under a GPU
     /// admission is refused.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn processed_renderer_decode(
         device_present: bool,
         main10_vaapi_decode: bool,
@@ -1790,6 +1793,7 @@ impl TranscodeManager {
     }
 
     /// Why a play could not take the slot from a FEL qualification.
+    #[cfg(target_os = "linux")]
     pub(crate) fn reconstruction_slot_held_by_qualification() -> String {
         format!(
             "this worker's reconstruction slot is held by a FEL qualification measurement \
@@ -1799,6 +1803,7 @@ impl TranscodeManager {
     }
 
     /// Why a second live FEL reconstruction on this worker was declined.
+    #[cfg(target_os = "linux")]
     pub(crate) fn reconstruction_slot_busy() -> String {
         format!(
             "this worker already runs its {} live FEL reconstruction{}; \
@@ -2289,8 +2294,12 @@ impl TranscodeManager {
             &mut Option<crate::vodencode::EncodePermit>,
             tokio::time::Instant,
         )>,
-        mut decline: Option<&mut Option<String>>,
+        decline: Option<&mut Option<String>>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        #[cfg(target_os = "linux")]
+        let mut decline = decline;
+        #[cfg(not(target_os = "linux"))]
+        let _ = decline;
         let processed_trial = prepared_admission.is_some();
         req.dv_processing_route()?;
         if req.dv_processing_destination.is_some() && !processed_trial {

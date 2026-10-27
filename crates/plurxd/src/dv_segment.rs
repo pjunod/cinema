@@ -945,6 +945,7 @@ pub(crate) enum RendererDecode {
     /// The renderer is given the VA-API render device and the node measured
     /// a VA-API HEVC decode. A window that nevertheless opened its decoders
     /// in software is refused (`dv_runtime`), never served over budget.
+    #[cfg(target_os = "linux")]
     Gpu,
     Software,
 }
@@ -964,6 +965,7 @@ pub(crate) fn streaming_helper_cpu_threads(
     // software-Vulkan worker.
     match decode {
         RendererDecode::Software => layers * STREAMING_DECODER_THREADS + 2,
+        #[cfg(target_os = "linux")]
         RendererDecode::Gpu => layers + 2,
     }
 }
