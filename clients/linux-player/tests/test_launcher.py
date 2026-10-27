@@ -150,12 +150,27 @@ class Seeking(LauncherCase):
         self.assertEqual(s.index("DELETE", rf"/hls/{second}$") > release_first, True)
 
     def test_seek_inside_the_range_stays_in_the_session(self):
-        self.clock.at(6, lambda: self.mpv.seek(20.0))
+        real_loop = playback_module.Playback.loop
+
+        def loop(playback):
+            def seek():
+                # Exercise seek semantics on virtual time; the fake mpv's
+                # separate wall-clock event producer is covered elsewhere.
+                self.mpv.props(time_pos=20.0)
+                self.assertEqual(playback.mpv.get("time-pos"), 20.0)
+                self.assertTrue(playback.on_event({"event": "seek"}))
+                self.assertTrue(playback.on_event({"event": "playback-restart"}))
+
+            self.clock.at(6, seek)
+            return real_loop(playback)
+
         self.close_at(14)
-        self.run_launcher()
+        with mock.patch.object(playback_module.Playback, "loop", loop):
+            self.run_launcher()
         self.assertEqual(len(self.server.sessions), 1)
         self.assertEqual(len(self.server.calls("DELETE", "/api/v1/hls/")), 1, "only the final release")
         seek_beat = [r for r in self.server.calls("POST", f"/api/v1/items/{ITEM_ID}/progress") if 6 <= r["at"] < 8]
+        self.assertEqual(len(seek_beat), 1, "one immediate progress report on seek")
         self.assertEqual(seek_beat[0]["body"]["position_ms"], 80_000, "progress on seek")
 
 

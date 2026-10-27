@@ -1,6 +1,6 @@
 # Runner disk — what fills a CI runner, and what is bounded
 
-**Status:** live · **Reconciled:** 2026-10-11
+**Status:** live · **Reconciled:** 2026-10-26
 
 Companion to [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md)
 (how the lanes are meant to get faster) — this is *where the bytes go, who
@@ -40,6 +40,52 @@ retired `lab3` guests receive no swap allocation. Both `lab4` root disks are
 The final repair check found a later compiler exhausting the initial 10 GiB
 combined limit; the additional swap raises that limit to 14 GiB without
 increasing host resident allocations.
+
+### Dedicated full-unit resident capacity
+
+The full Rust unit job uses the dedicated `unit-memory-16g` label and the
+same pinned CI image, `make ci-rust-gate`, test profile and 120-minute job
+limit. Its Docker options are
+`--cpus 3 --memory 16g --memory-swap 18g --pids-limit 4096`: 16 GiB resident
+and 18 GiB combined, one Cargo job and two Rust test threads.
+
+Full run 5991 (internal 6020) exhausted the former 12 GiB child cgroup during
+daemon test code generation: the kernel recorded a memory-cgroup OOM and
+killed `rustc`, without a Rust diagnostic or test assertion. A source-only
+build of that exact candidate with Rust 1.97.1 and unchanged workspace test
+features/profile passed under 16/18 GiB in 12m37s. Maximum child RSS was
+12.54 GiB; cgroup peak was 15.74 GiB, including file cache, with no cap-hit,
+OOM or swap event. This isolated compile establishes neither actual workflow
+limits nor a passing full unit run. Fresh qualification remains required.
+
+Earlier run 5274 measured about 6.5 GiB resident plus 3.5 GiB swapped under
+a 7 GiB resident cap. Two 6 GiB source-only experiments failed before producing
+a binary; their VM had only 1 GiB actual swap. No compiler-profile change from
+those experiments is retained.
+
+Keep this label on a single existing repository runner with capacity one,
+without `general`, `high-cpu`, `ci-store` or `ci-topology` labels. Retain the
+former `unit-memory-12g` capability for existing consumers. Its existing service has a 12 GiB
+high watermark and 16 GiB maximum; the explicit Docker bound is required
+because Docker children need not belong to that service's cgroup. The
+runner configuration also retains the same child-container options and
+compiler/test concurrency, so a missing workflow option cannot silently
+create an unbounded job. Keep this dedicated service available after
+qualification: the merged workflow must remain schedulable. Do not
+activate another registration, change unrelated services or use an offline
+registration as evidence of permission to restart it.
+
+Before activation, verify the existing registration identity and idle state,
+back up only its persistent Forgejo configuration with mode 0600, apply the
+dedicated labels and child bounds, then restart that same idle registration
+only if required. The older GitHub Ansible registration is not its provisioning
+authority. Check aggregate host headroom; nominal idle service caps do not
+reserve RAM. Verify the effective server
+labels and actual Docker limits before accepting a qualification result.
+Revert the dedicated configuration only together with a reviewed replacement
+for the workflow selector; stopping its sole service would strand the lane.
+The source contract is
+[`test_full_unit_suite_has_dedicated_bounded_resident_capacity`](../../tests/operations/test_contracts.py).
 
 The separate host image builder on `lab4` must also be bounded: its Docker
 container has a persistent 4 GiB resident and 10 GiB combined memory limit.
@@ -113,6 +159,21 @@ The live October 11 repair restored all three killed VMs and the Air daemon,
 canceled the running coverage measurement and its six queued successors, and
 disabled automatic coverage in Forgejo during the workflow transition. The
 manual-only definition is now merged and enabled in Forgejo.
+
+## Browser qualification wall-time budget
+
+The complete web-layout job has a 45-minute overall cap. Full run 6007
+(internal 6036) passed in 25m39s, including an 8m04s cold build and 4m45s after
+its 104 captures. Run 6030 (internal 6059) instead spent 13m56s compiling and
+about 4m40s preparing the fixture; its former 30-minute cap canceled the job
+after 103 successful captures. The observed stages project about 35 minutes
+for completion, with roughly ten minutes of margin at the new cap. This is
+budget calibration, not evidence of a passing qualification.
+
+The job still runs all registered layouts and the live-TV acceptance, reporter,
+Cinema, library-row and subtitle browser contracts. Per-step capture timeouts
+remain 45 seconds, with the existing restricted two-attempt retry policy; no assertion, golden,
+required step, downstream VOD dependency or promotion gate is relaxed.
 
 ## A full runner does not report a full disk
 

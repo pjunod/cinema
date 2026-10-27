@@ -18,7 +18,7 @@ type PauseMap = std::collections::HashMap<(String, &'static str), Arc<Preparatio
 static PAUSES: std::sync::OnceLock<std::sync::Mutex<PauseMap>> = std::sync::OnceLock::new();
 
 impl TranscodeManager {
-    pub(super) async fn processed_preparation_test_boundary(session: &str, boundary: &'static str) {
+    pub(crate) async fn processed_preparation_test_boundary(session: &str, boundary: &'static str) {
         let pause = PAUSES
             .get_or_init(Default::default)
             .lock()
@@ -1008,6 +1008,16 @@ async fn fixture_with_audio(
             "node".into(),
         ),
     );
+    manager.test_hooks();
+    let backend = DvBackendIdentity::new(
+        digest(b"lifecycle renderer"),
+        digest(b"lifecycle libraries"),
+        digest(b"lifecycle parser"),
+        digest(b"lifecycle graph"),
+        1,
+        digest(b"lifecycle environment"),
+    )
+    .expect("backend control");
     if destination == DvDestination::Sdr {
         store
             .put_setting(keys::DV_DISPLAY_TARGET, "1")
@@ -1018,10 +1028,135 @@ async fn fixture_with_audio(
             .await
             .expect("file")
             .expect("source");
-        let title_stats =
-            crate::source_probe::publish_title_for_control(&manager, &store, &source_file)
-                .await
-                .expect("real fenced title job publication");
+        // This lifecycle control never qualifies the installed scanner. Its
+        // scoped executable emits the aggregate for the three known control
+        // RPUs, while the real admitted title job proves source/claim/publish
+        // custody. Physical scanner coverage stays in the ignored bundle test.
+        use dolby_vision::rpu::extension_metadata::blocks::ExtMetadataBlock;
+        use plurx_core::scan::dv_title::{
+            DvTitleStats, MasteringLuminance, MasteringPrimaries, TitleConstant, SCHEMA,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let summarize = |raw: &[u8]| {
+            let rpu = dolby_vision::rpu::dovi_rpu::DoviRpu::parse_unspec62_nalu(raw)
+                .expect("known control RPU");
+            assert!(
+                !rpu.header.use_prev_vdr_rpu_flag,
+                "each source RPU is fresh"
+            );
+            let dm = rpu.vdr_dm_data.as_ref().expect("fresh control metadata");
+            let Some(ExtMetadataBlock::Level1(l1)) = dm.get_block(1) else {
+                panic!("control RPU needs L1");
+            };
+            assert!(l1.min_pq <= l1.avg_pq && l1.avg_pq <= l1.max_pq && l1.max_pq <= 4095);
+            DvTitleStats {
+                schema: SCHEMA,
+                complete: true,
+                decoded_frames: 1,
+                valid_l1_frames: 1,
+                missing_l1_frames: 0,
+                invalid_l1_frames: 0,
+                max_l1_pq: Some(l1.max_pq),
+                mastering_luminance: match dm.get_block(6) {
+                    Some(ExtMetadataBlock::Level6(l6)) => {
+                        TitleConstant::Consistent(MasteringLuminance {
+                            min_1e4_nits: u32::from(l6.min_display_mastering_luminance),
+                            max_nits: u32::from(l6.max_display_mastering_luminance),
+                        })
+                    }
+                    _ => TitleConstant::Unknown,
+                },
+                mastering_primaries: match dm.get_block(9) {
+                    Some(ExtMetadataBlock::Level9(l9)) => {
+                        TitleConstant::Consistent(MasteringPrimaries {
+                            index: l9.source_primary_index,
+                            custom_xy: (l9.source_primary_index == 255).then_some([
+                                l9.source_primary_red_x,
+                                l9.source_primary_red_y,
+                                l9.source_primary_green_x,
+                                l9.source_primary_green_y,
+                                l9.source_primary_blue_x,
+                                l9.source_primary_blue_y,
+                                l9.source_primary_white_x,
+                                l9.source_primary_white_y,
+                            ]),
+                        })
+                    }
+                    _ => TitleConstant::Unknown,
+                },
+            }
+        };
+        let raw_rpus = vec![
+            include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/frame-000.nal")
+                .to_vec(),
+            include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/frame-001.nal")
+                .to_vec(),
+            include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/frame-002.nal")
+                .to_vec(),
+        ];
+        // The existing packet validator ties every bundled source RPU to
+        // the actual authored pictures before remuxing their clock above.
+        dv_validate_encoded_window(
+            include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/authored.mp4"),
+            (64, 64),
+            24000,
+            48048,
+            1001,
+            &raw_rpus,
+            DvDestination::Profile81,
+        )
+        .expect("all three authored pictures carry these source RPUs");
+        assert_eq!(raw_rpus.len(), keys.len());
+        let frames: Vec<_> = raw_rpus.iter().map(|raw| summarize(raw)).collect();
+        let mut stats = frames[0];
+        stats.decoded_frames = frames.len() as u64;
+        stats.valid_l1_frames = frames.len() as u64;
+        stats.max_l1_pq = frames.iter().filter_map(|frame| frame.max_l1_pq).max();
+        for frame in &frames {
+            assert_eq!(
+                frame.mastering_luminance, stats.mastering_luminance,
+                "all authored L6 declarations must agree for this consistent aggregate"
+            );
+            assert_eq!(
+                frame.mastering_primaries, stats.mastering_primaries,
+                "all authored L9 declarations must agree for this consistent aggregate"
+            );
+        }
+        let scanner = root.path().join("controlled-title-scanner");
+        std::fs::write(
+            &scanner,
+            format!(
+                r#"#!/bin/sh
+set -eu
+test "$2" = 0
+test "$(wc -c < "$1")" -eq {}
+test "$(sha256sum "$1" | cut -d ' ' -f 1)" = '{}'
+printf '%s\n' '{}'
+"#,
+                source_file.size,
+                hex::encode(Sha256::digest(
+                    std::fs::read(&path).expect("held fixture bytes")
+                )),
+                serde_json::to_string(&stats).expect("controlled aggregate")
+            ),
+        )
+        .expect("scoped scanner");
+        std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o700))
+            .expect("executable control");
+        let tools = crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture_with_scanner(
+            backend.clone(),
+            scanner,
+        )
+        .expect("artifact-hashed controlled scanner");
+        let title_stats = crate::source_probe::publish_title_with_tools_for_control(
+            &manager,
+            &store,
+            &source_file,
+            Arc::new(tools),
+        )
+        .await
+        .expect("real fenced job with controlled scanner outcome");
+        assert_eq!(title_stats, stats);
         assert_eq!(
             title_stats.eligibility(),
             plurx_core::scan::dv_title::TitleEligibility::Eligible
@@ -1250,15 +1385,6 @@ async fn fixture_with_audio(
             .await
             .expect("held source"),
     );
-    let backend = DvBackendIdentity::new(
-        digest(b"lifecycle renderer"),
-        digest(b"lifecycle libraries"),
-        digest(b"lifecycle parser"),
-        digest(b"lifecycle graph"),
-        1,
-        digest(b"lifecycle environment"),
-    )
-    .expect("backend control");
     let source_facts = DvSourceFacts::new(
         file.dolby_vision,
         0,

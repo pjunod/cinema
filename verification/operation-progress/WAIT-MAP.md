@@ -4,6 +4,79 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## HTTPS and adaptive effort source binding — 2026-10-26
+
+This source audit covers the resolved union of effort `8eee8a897` and Main
+`656a85540`. Its source pins read the final formatted integration files before
+the merge commit; the historical sections below keep their original source
+and evidence identities. Current wait-map companion rows bind this resolved
+source rather than transferring an old source snapshot to it.
+
+The retained heartbeat/token guards, failed-join and ambiguous-retirement gaps
+remain those recorded by the accepted adaptive source audit. Main's new
+fragment checks precede enqueue receipt reuse only when fragment/analysis
+fields are present; ordinary selected library inputs omit both fields. The
+identity-repair classifier permits zero-to-many rows only for its guarded
+annotation set-copy and retains full-vector/all-other-exact-one checks. That
+repair, managed-schema bootstrap and public TLS ownership remain excluded;
+selected publication, worker admission, wait and settlement paths retain their
+existing scope. The unextended library admission still claims `(0, threads)`.
+
+Title requalification is separate: its active-job read and later `bind` remain
+two calls, so a newly queued title job can still race them. Main's fragment
+receipt fix supplies no title-race proof. Models, configurations, action/check
+and test inventories, validators and qualification claims are unchanged. This
+metadata resolution runs no model or behavioral tests and claims no native
+closure, last-alias release, global progress or new acceptance.
+
+## HTTPS and Linux-player integration — 2026-10-26
+
+The merge of HTTPS `67b09d29c` with main `167af4616` retains both scoped
+source reviews below. The new FEL trait/delegation methods, off-boot VA-API
+probe and independent handoff-pruning loop do not alter selected library
+claim, renewal, binding, wait/lock, settlement or fenced-publication paths.
+The Store parent retains strict historical fixtures and inventories; its
+`formal_publication` module is unchanged. Reviewed whole-file pins follow
+the composed source; models, configurations, anchors and scope do not change.
+FEL, handoff lifecycle, identity repair, historical migrations and public TLS
+remain outside these guarantees. This is source correspondence, not new
+execution, physical acceptance or qualification. Other historical explanatory
+anchors in `source-anchors.json` retain their recorded historical identity.
+Row 41 also follows the Linux-only guard on `extend_fragment_admission`;
+the selected `admit_fragment` body and try-only admission order are unchanged.
+
+## Completion identity-result correspondence — 2026-10-25
+
+Source `5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9` changes identity-repair result classification
+inside the shared publication file. Only its existing guarded annotation
+set-copy permits zero-to-many rows; full-vector and all other exact-one checks
+remain. Identity repair is outside the selected library-worker progress model
+and **is not proved here**. `atomic_publication` renewal, authority binding,
+wait/lock order, selected publication SQL/anchors and worker cancellation and
+settlement are unchanged. Two whole-file pins track this reviewed correspondence.
+No model, configuration, source-anchor, validator or scope changes are made;
+this adds no liveness, runtime, theorem, physical or qualification guarantee.
+Affected smoke receipts remain separate source-bound evidence.
+
+## HTTPS integration — scoped refresh on 2026-10-25
+
+Codex reviewed source `f18c39e66954b71fcedcf8f463914f112498a518` against
+`9bcfa9ca1f792d214122762981c84c85ba5b3e64`; the parent coordinator approved
+the scoped disposition. Four drifted whole-file inputs cover five table rows.
+
+| Binding | Source-backed disposition |
+|---|---|
+| Library authority (30) | Fragment enqueue guards now precede receipt reuse, but ordinary library inputs omit both fragment/analysis fields. The selected authority arm, claim/bind/publish/renew/cancel/settle paths and worker wait order are unchanged. General fragment receipt admission remains outside this operation. |
+| Daemon loops (42–43) | `AppState` gains only the HTTPS control field and initialization. Both mapped scheduler/worker bodies and their wait/lock/settlement order are unchanged. |
+| Main worker owner (44) | Public TLS preparation, serving and drain gain a separate owner and may request the existing daemon cancellation. The mapped background worker spawn and shutdown consumers are unchanged. Public listener startup, handshake/drain latency and whole-daemon shutdown remain outside the selected operation-progress guarantee. |
+| Tokio dependency | Only daemon dependency edges are added; Tokio remains 1.53.1 and Hiqlite remains 0.14.0. |
+
+Exact anchors, executable model/configurations, toolchain, historical
+source-anchor snapshot and worker correspondence are unchanged. Whole-file
+pins remain deliberate and fail closed on future drift. This source review
+adds no liveness guarantee or qualification result; fresh affected smoke
+receipts are separate evidence.
+
 ## Main and effort source binding — 2026-10-26
 
 Current source inspected: `2dc07bd0995f07f26281c72de80117f2c9afa9f0`,

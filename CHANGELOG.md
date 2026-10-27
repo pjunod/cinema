@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Optional HTTPS, off by default, serves the existing public router with a
+  persistent generated self-signed identity or supplied PEM certificate/key
+  files. Enable it in Settings → Developer; saved changes apply after restart.
+  Physical trust and playback acceptance remain open.
 - plurx Player (Linux) maps Dolby Vision profile 5 and 8 itself, with the
   server's closed-form CM v4.0 and CM v2.9 display management compiled into
   its private mpv, for the compositor's reported luminance and the largest
@@ -107,6 +111,10 @@ bump may break compatibility and a **patch** bump never does.
   settlement; retained output releases only producer resources. Custody startup
   streams historical authority and indexes per-asset reconstruction while
   preserving every historical migration row.
+- Shared playback retries closure acknowledgements after concurrent updates to
+  the same owner's custody ledger. Actual driver closure and authority fences
+  remain required.
+
 - A Dolby Vision client playing a Profile 7 FEL title now receives the
   reconstructed Profile 8.1 (FEL composed into the picture, re-encoded, an
   8.1 RPU per frame) on a 12-thread worker. The renderer was debited eight

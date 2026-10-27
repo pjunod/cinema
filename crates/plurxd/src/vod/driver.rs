@@ -17,8 +17,11 @@ pub(super) fn spawn_driver(
         // drive. Its counted output remains owned by the rendition directory.
         return tokio::spawn(async {});
     }
-    #[cfg(test)]
-    if let Some(driver) = controlled_driver::spawn(&rendition) {
+    if let Some(driver) = shared
+        .hooks
+        .get()
+        .controlled_driver(rendition.recipe.encoding.as_ref())
+    {
         return driver;
     }
     tokio::spawn(async move {
@@ -1225,7 +1228,7 @@ pub(super) fn continuous_dependency_windows(
 // or control flow exists in production. These controls do not qualify normal
 // driver scheduling, process execution or reap behavior.
 #[cfg(test)]
-mod controlled_driver {
+pub(super) mod controlled_driver {
     use super::*;
 
     #[derive(Default)]
@@ -1287,8 +1290,10 @@ mod controlled_driver {
         }
     }
 
-    pub(super) fn spawn(rendition: &Rendition) -> Option<tokio::task::JoinHandle<()>> {
-        let state = state(rendition.recipe.encoding.as_ref()?)?;
+    pub(crate) fn spawn(
+        encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let state = state(encoding?)?;
         state.registered.fetch_add(1, AcqRel);
         // Capture synchronously before spawn_driver returns or a first wake can
         // race guard teardown. Ticket drops even if aborted before first poll.
@@ -1306,6 +1311,7 @@ mod controlled_driver {
             &self,
             encoding: &Arc<crate::vodencode::Encoding>,
         ) -> Box<dyn Send + Sync> {
+            self.shared.test_hooks();
             let state = Arc::new(State::default());
             let inserted = {
                 let mut controls = CONTROLS
