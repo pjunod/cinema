@@ -391,7 +391,7 @@ impl DeviceProfile {
     /// asked for; everything else is routed by `dv_handling` to the conversion
     /// where this node can build one, and to the compatible base layer or a
     /// re-encode where it cannot — all of which decode.
-    fn decodes_dolby_vision_as_copied(&self, file: &MediaFile) -> bool {
+    pub fn decodes_dolby_vision_as_copied(&self, file: &MediaFile) -> bool {
         if dolby_vision_is_dual_layer(file) {
             return self.enumerates_dolby_vision_profile(file);
         }

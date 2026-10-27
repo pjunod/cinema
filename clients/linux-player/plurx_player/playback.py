@@ -13,6 +13,7 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass
 
+from .caps import control_capabilities
 from .api import ApiError, error_text
 from .mpv import CLOSED, MpvError
 
@@ -40,6 +41,10 @@ class ServerStop(Exception):
 
 class PlaybackError(Exception):
     """This playback cannot continue; the message is for the viewer."""
+
+
+class NoVideoWindow(PlaybackError):
+    """mpv has no window to show the message in, so the launcher's dialog says it."""
 
 
 def _track(value):
@@ -90,6 +95,8 @@ class Playback:
         self.last_position_ms = None
         self.mapper = None
         self.mapper_logged = False
+        # mpv's fatal "Error opening/initializing the ... (--vo) device" line.
+        self.vo_failed = False
         self.facts = None
         self.failure = None
         self.stopped_by_server = None
@@ -341,7 +348,7 @@ class Playback:
             "selection": {"quality": {"mode": "original"} if self.mode == "remux" else {"mode": "auto"},
                           "audio_track": self.audio, "subtitle": subtitle, "audio_offset_ms": 0,
                           "codec": "auto", "dynamic_range": "auto"},
-            "capabilities": None, "observation": None, "acknowledgement": None,
+            "capabilities": control_capabilities(), "observation": None, "acknowledgement": None,
         }
 
     def heartbeat(self):
@@ -383,6 +390,9 @@ class Playback:
     def on_log(self, event):
         text = event.get("text") or ""
         prefix = str(event.get("prefix") or "")
+        if prefix == "cplayer" and event.get("level") in ("fatal", "error") \
+                and text.startswith("Error opening/initializing the"):
+            self.vo_failed = True
         match = EXPLICIT_MAPPER.search(text)
         if match is None and ("placebo" in prefix or prefix.startswith("vo")):
             match = BARE_MAPPER.search(text)
@@ -402,6 +412,20 @@ class Playback:
                       "target_nits": round(nits) if nits else None,
                       "target_gamma": target.get("gamma") if isinstance(target, dict) else None,
                       "target_primaries": target.get("primaries") if isinstance(target, dict) else None}
+
+    def require_video_output(self):
+        """A title with video that mpv could not open a window for is a failure, not audio only.
+
+        mpv answers a video output it cannot open by deselecting the video
+        track ("Video: no video") and playing the audio, so the question is
+        whether the title *has* video (cover art aside), not whether a video
+        track is still selected.
+        """
+        tracks = self.mpv.get("track-list") or []
+        video = any(isinstance(t, dict) and t.get("type") == "video" and not t.get("albumart")
+                    for t in tracks)
+        if video and (self.vo_failed or self.mpv.get("vo-configured") is False):
+            raise NoVideoWindow("mpv could not open a video window: is a graphical session running?")
 
     def log_mapper(self):
         """One /client-log line per playback: the DV profile, the mapper and the target."""
@@ -439,6 +463,7 @@ class Playback:
             first = not self.started
             self.started, self.loading, self.seeking = True, False, False
             if first:
+                self.require_video_output()
                 self.capture_facts()
             else:
                 self.progress("seek")
@@ -494,6 +519,9 @@ class Playback:
             self.sleep(self.timing.stop_osd_s)
             self.mpv.quit()
             return 0
+        except NoVideoWindow as error:
+            self.failure = str(error)
+            raise
         except PlaybackError as error:
             self.failure = str(error)
             self.log(str(error))

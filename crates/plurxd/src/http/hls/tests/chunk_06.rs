@@ -1058,6 +1058,7 @@ fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
         PlanReview {
             preserve_dolby_vision: true,
             convert_dolby_vision: true,
+            dual_layer_as_copied: false,
             hdr10: true,
             notes: vec!["a note".to_owned()],
             mismatched: false,
@@ -1092,6 +1093,7 @@ fn the_reconciled_plan_reaches_the_request_and_the_body_cannot() {
         PlanReview {
             preserve_dolby_vision: true,
             convert_dolby_vision: true,
+            dual_layer_as_copied: false,
             hdr10: true,
             notes: Vec::new(),
             mismatched: false,
@@ -1172,6 +1174,71 @@ fn a_declined_dolby_vision_plan_declines_the_converted_kind_too() {
     );
     assert!(!overridden.preserve_dolby_vision);
     assert!(!overridden.convert_dolby_vision);
+}
+
+/// plurx Player names Profile 7 and composes the enhancement layer itself, so
+/// its plan hands a dual-layer source over as copied, and says so: a copy
+/// narrows every dual-layer source it is not told about to the base layer.
+#[test]
+fn a_client_that_names_profile_7_is_handed_the_dual_layer_as_copied() {
+    let mut file = dolby_vision_p8_file();
+    file.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+    file.dolby_vision.profile = Some(7);
+    file.dolby_vision.level = Some(6);
+    file.dolby_vision.bl_compat_id = Some(1);
+    let player = caps_v2(
+        r#"{"v":2,
+                "video":[{"codec":"hevc","present":["sdr","pq"],"dv_profiles":[5,7,8],
+                          "max_height":2160}],
+                "audio":["aac"],"containers":["mkv","mp4"],
+                "dv_transport":"hls",
+                "display":{"hdr":true,"dolby_vision":true}}"#,
+    );
+    let review = review_client_plan(&player, None, &file, &capable_node(), true, false, NOW_MS);
+    assert!(review.preserve_dolby_vision);
+    assert!(!review.convert_dolby_vision, "a client that decodes 7 is not converted");
+    assert!(review.dual_layer_as_copied);
+
+    // A client that takes 8 and not 7 is converted, never handed the layers.
+    let converted =
+        review_client_plan(&dolby_vision_client(), None, &file, &capable_node(), true, false, NOW_MS);
+    assert!(converted.convert_dolby_vision);
+    assert!(!converted.dual_layer_as_copied);
+
+    // Declining Dolby Vision declines it too.
+    let declined = review_client_plan(&player, None, &file, &capable_node(), false, false, NOW_MS);
+    assert!(!declined.dual_layer_as_copied);
+
+    // And a single-layer source has nothing to hand over.
+    let single = review_client_plan(
+        &player,
+        None,
+        &dolby_vision_p8_file(),
+        &capable_node(),
+        true,
+        false,
+        NOW_MS,
+    );
+    assert!(single.preserve_dolby_vision);
+    assert!(!single.dual_layer_as_copied);
+
+    // The review is what the copy reads, and no body can claim it.
+    let body = CreateSession {
+        playback_id: "p".into(),
+        copy: Some(true),
+        preserve_dolby_vision: Some(true),
+        ..bare_create()
+    };
+    let mut request = body.into_request(1, 0);
+    assert!(matches!(
+        request.kind,
+        crate::transcode::SessionKind::Copy { dual_layer_as_copied: false, .. }
+    ));
+    apply_plan_review(&mut request, review);
+    assert!(matches!(
+        request.kind,
+        crate::transcode::SessionKind::Copy { dual_layer_as_copied: true, .. }
+    ));
 }
 
 /// Apple's `forceCompatibleHDRBase` retry, and why it needs a name.
@@ -1765,6 +1832,7 @@ fn the_create_guard_reads_the_grade_this_session_would_deliver_without_a_burn() 
         aac: false,
         preserve_dolby_vision: true,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     let transcode = crate::transcode::SessionKind::Transcode { height: 2160 };
 
@@ -1816,6 +1884,7 @@ fn a_session_reports_the_dynamic_range_of_the_stream_it_just_built() {
     let file = hls_file(vec![]);
     let copy = |preserve: bool| crate::transcode::SessionKind::Copy {
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: preserve,
     };
@@ -3876,6 +3945,7 @@ async fn shipped_shape_primes_an_admitted_candidate() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     let delivered = crate::playback_control::EffectiveSelection::from_request(&recipe, 2160, None);
     let selection = crate::playback_control::ClientSelection {
@@ -4518,6 +4588,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     for route in [CandidateRoute::Original, CandidateRoute::Remux] {
         let copy_candidate = QualityCandidate {
@@ -5756,7 +5827,7 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
             apply_plan_review(&mut request, review());
             normalize_catalog_selection(&mut request, 2160, true).expect("ordinary Remux");
             reconcile_request_audio(Some(&file), &mut request);
-            let SessionKind::Copy { aac, preserve_dolby_vision, convert_dolby_vision } = request.kind else {
+            let SessionKind::Copy { aac, preserve_dolby_vision, convert_dolby_vision, .. } = request.kind else {
                 panic!("ordinary fallback must remain Copy");
             };
             assert_eq!(aac, expected_aac, "selected EAC3/offset determines execution, not raw AAC");

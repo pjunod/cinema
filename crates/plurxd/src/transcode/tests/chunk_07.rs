@@ -1811,6 +1811,7 @@ async fn d4_rolling_start_reads(
                 transcode_audio: false,
                 preserve_dolby_vision: false,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             "paul",
             "pb-copy",
@@ -3103,6 +3104,7 @@ async fn manager_reads_prefs_and_runs_session_lifecycle() {
             Some(1),
             CopySessionOptions {
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
                 transcode_audio: true,
                 preserve_dolby_vision: false,
             },
@@ -3201,6 +3203,7 @@ async fn a_new_session_supersedes_the_same_players_old_one() {
             None,
             CopySessionOptions {
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
                 transcode_audio: false,
                 preserve_dolby_vision: false,
             },

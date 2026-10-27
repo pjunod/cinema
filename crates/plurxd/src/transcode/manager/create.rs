@@ -1061,6 +1061,7 @@ impl TranscodeManager {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                dual_layer_as_copied,
             } => {
                 self.start_copy_with_audio_offset(
                     req.file_id,
@@ -1071,6 +1072,7 @@ impl TranscodeManager {
                         convert_dolby_vision,
                         transcode_audio: aac,
                         preserve_dolby_vision,
+                        dual_layer_as_copied,
                     },
                     user_name,
                     supersession_user,
@@ -3471,6 +3473,7 @@ impl TranscodeManager {
                     aac,
                     preserve_dolby_vision,
                     convert_dolby_vision,
+                    ..
                 } = req.kind
                 {
                     let source =

@@ -547,6 +547,7 @@
             transcode_audio: false,
             preserve_dolby_vision: true,
             convert_dolby_vision: true,
+            dual_layer_as_copied: false,
         };
         let served = served_copy_options(&profile7_file(), asked);
         assert!(
@@ -577,6 +578,35 @@
         );
     }
 
+    /// plurx Player enumerates Profile 7 and composes the enhancement layer on
+    /// the GPU. The reviewed plan says so (`dual_layer_as_copied`, derived from
+    /// its own capabilities), and only then does a copy hand a dual-layer
+    /// source over intact instead of narrowing it to the HDR10 base.
+    #[test]
+    fn a_copy_hands_dual_layer_over_intact_only_when_the_plan_says_the_client_named_it() {
+        let asked = CopySessionOptions {
+            transcode_audio: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: false,
+            dual_layer_as_copied: true,
+        };
+        let served = served_copy_options(&profile7_file(), asked);
+        assert!(served.preserve_dolby_vision, "the client decodes what it named");
+        assert!(served.dual_layer_as_copied);
+        assert!(!served.convert_dolby_vision);
+
+        // The bit never preserves on its own, and never rides along with a
+        // conversion this path cannot perform.
+        for asked in [
+            CopySessionOptions { preserve_dolby_vision: false, ..asked },
+            CopySessionOptions { convert_dolby_vision: true, ..asked },
+        ] {
+            let served = served_copy_options(&profile7_file(), asked);
+            assert!(!served.preserve_dolby_vision);
+            assert!(!served.dual_layer_as_copied, "it is only ever true beside preservation");
+        }
+    }
+
     /// The guard cannot be keyed on the conversion flag alone, because the
     /// state that produced the black screen is the one where that flag is
     /// already `false`.
@@ -596,6 +626,7 @@
             transcode_audio: false,
             preserve_dolby_vision: true,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         assert!(
             !served_copy_options(&profile7_file(), asked).preserve_dolby_vision,
@@ -660,6 +691,7 @@
         // because it keeps the definitions its pictures need.
         let started = mgr.start_copy(file_id, 0.0, None, CopySessionOptions {
             transcode_audio: false, preserve_dolby_vision: false, convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         }, "user", "playback").await.expect("a retaining rolling copy needs no proof");
         assert!(mgr.stop_session(&started.session_id, "test cleanup").await);
         // So a VOD refusal for a missing HEVC proof is "only VOD cannot build
@@ -727,6 +759,7 @@
                 transcode_audio: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: true,
+                dual_layer_as_copied: false,
             },
             Some(probe),
         );
@@ -755,6 +788,7 @@
                 transcode_audio: false,
                 preserve_dolby_vision: true,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             Some(probe),
         );
@@ -792,6 +826,7 @@
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: false,
                     preserve_dolby_vision: true,
                 },
@@ -810,6 +845,7 @@
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: true,
                     preserve_dolby_vision: false,
                 },
@@ -826,6 +862,7 @@
                 None,
                 CopySessionOptions {
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                     transcode_audio: true,
                     preserve_dolby_vision: false,
                 },

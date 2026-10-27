@@ -1,3 +1,27 @@
+plurx-player (0.3.1+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * The player window no longer opens black and closes on an NVIDIA GPU.
+    The NVIDIA driver (615) gives an sRGB swapchain a Wayland colour
+    surface of its own and keeps it after that swapchain is gone, so mpv's
+    request for the window's colour surface, made when the HDR video
+    arrives, ended the Wayland connection. Wayland swapchains now start
+    pass-through, so mpv is the only one that describes the window.
+  * Opened from Chrome, the launcher finds the desktop's display even when
+    xdg-desktop-portal started it without one: it takes WAYLAND_DISPLAY,
+    DISPLAY, XAUTHORITY, XDG_SESSION_TYPE and XDG_CURRENT_DESKTOP from the
+    user session, and nothing else.
+  * A title with video that mpv cannot open a window for fails with a
+    dialog instead of playing its audio with no picture.
+  * Every control exchange carries the player's capabilities, as the
+    playback control protocol requires, and the server knows a Linux
+    client (it answered 400 and then 409 before).
+  * Profile 7 titles arrive with both layers once the server is on this
+    release's plurx: a copy used to narrow every dual-layer source to its
+    HDR10 base, even for a client that names Profile 7.
+  * Closed-form equations unchanged: tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 23:00:00 +0000
+
 plurx-player (0.3.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
 
   * Profile 7 FEL titles play with their full enhancement layer, composed

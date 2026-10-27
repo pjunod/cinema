@@ -1,4 +1,4 @@
-.TH PLURX-PLAYER 1 2026-10-26 "plurx-player 0.3.0" "User Commands"
+.TH PLURX-PLAYER 1 2026-10-26 "plurx-player 0.3.1" "User Commands"
 .SH NAME
 plurx-player \- play a plurx title handed over by the plurx web app
 .SH SYNOPSIS
@@ -108,6 +108,16 @@ The same as
 .TP
 .B XDG_CONFIG_HOME
 The base of the configuration paths above.
+.TP
+.BR WAYLAND_DISPLAY ", " DISPLAY
+When neither is set, as when the browser opens the link through
+xdg\-desktop\-portal, the player takes these, with
+.BR XAUTHORITY ,
+.B XDG_SESSION_TYPE
+and
+.BR XDG_CURRENT_DESKTOP ,
+from
+.BR "systemctl \-\-user show\-environment" .
 .SH NOTES
 HDR output needs a Wayland compositor with wp_color_manager_v1 in HDR mode.
 An accurate target luminance needs one that reports the panel's real

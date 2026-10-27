@@ -626,6 +626,7 @@ impl VodServe {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
             _ if prepared.encoding.is_some() => (
                 true,
@@ -2530,6 +2531,7 @@ impl VodServe {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
             _ if prepared.encoding.is_some() => (
                 true,
@@ -2975,6 +2977,7 @@ mod principal_demand_tests {
                 aac: true,
                 preserve_dolby_vision: false,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             start_seconds: 0.0,
             audio_index: None,

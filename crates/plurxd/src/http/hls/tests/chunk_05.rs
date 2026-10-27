@@ -2639,6 +2639,7 @@ fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
         aac: false,
         preserve_dolby_vision: preserve,
         convert_dolby_vision: convert,
+        dual_layer_as_copied: false,
     };
     let badge = |kind: &SessionKind| {
         (
@@ -3458,6 +3459,7 @@ fn reconstructed_p81_claims_fel_only_from_processing_truth_and_its_fallback_says
     // The busy-slot decline reaches the converted fallback's FEL row.
     let converted = crate::transcode::SessionKind::Copy {
         convert_dolby_vision: true,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: true,
     };
@@ -3507,6 +3509,7 @@ fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
     let file = dolby_vision_p7_file();
     let converted = crate::transcode::SessionKind::Copy {
         convert_dolby_vision: true,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: true,
     };
@@ -3579,6 +3582,7 @@ fn the_enhancement_follows_the_selected_plan_before_any_report() {
     assert!(base.details.iter().all(|detail| !detail.text.contains("Settings")));
     let native = crate::transcode::SessionKind::Copy {
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: true,
     };

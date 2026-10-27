@@ -4,6 +4,7 @@ Driven through files in $FAKE_MPV_DIR, so a test can steer it from outside:
 
 * argv.json      - written at start: the command line it was given
 * env.json       - written at start: the dynamic-loader variables it was given
+* display.json   - written at start: the display variables it was given
 * commands.jsonl - appended: every IPC command received, in order
 * state.json     - read on every request: property overrides ("props"),
                    a viewer seek ({"seek": {"id": n, "to": seconds}}), plus
@@ -40,6 +41,10 @@ def main():
         json.dump(sys.argv[1:], handle)
     with open(path("env.json"), "w", encoding="utf-8") as handle:
         json.dump({key: value for key, value in os.environ.items() if key.startswith("LD_")}, handle)
+    with open(path("display.json"), "w", encoding="utf-8") as handle:
+        json.dump({key: os.environ[key] for key in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY",
+                                                    "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP")
+                   if key in os.environ}, handle)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(sock_path)
     server.listen(1)
