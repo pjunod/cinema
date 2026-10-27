@@ -53,6 +53,10 @@ out=$(cd "$out" && pwd)
 apt_cache=${PLURX_DEB_APT_CACHE:-$repo/target/linux-player-apt-cache}
 mkdir -p "$apt_cache"
 apt_cache=$(cd "$apt_cache" && pwd)
+# apt does not wait for its locks: a second build on the same cache would
+# fail half way. Refuse it up front instead.
+exec 9>"$apt_cache/.build.lock"
+flock -n 9 || { echo "build-deb.sh: another build is using $apt_cache" >&2; exit 1; }
 rm -rf "$out"/plurx-player_* "$out/SHA256SUMS" "$out"/*.log "$out/rebuild"
 
 run() {

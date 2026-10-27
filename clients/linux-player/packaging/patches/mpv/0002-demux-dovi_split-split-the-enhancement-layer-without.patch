@@ -16,7 +16,7 @@ BSF route does.
  1 file changed, 118 insertions(+), 21 deletions(-)
 
 diff --git a/demux/dovi_split.c b/demux/dovi_split.c
-index cfe27185d..7fc7288f1 100644
+index cfe27185d..d3ea45daf 100644
 --- a/demux/dovi_split.c
 +++ b/demux/dovi_split.c
 @@ -39,8 +39,48 @@ struct mp_dovi_split {
@@ -36,7 +36,7 @@ index cfe27185d..7fc7288f1 100644
 +{
 +    const uint8_t *x = (const uint8_t *)c->extradata;
 +    int size = c->extradata_size;
-+    if (!x && c->lav_codecpar) {
++    if ((!x || size <= 0) && c->lav_codecpar) {
 +        x = c->lav_codecpar->extradata;
 +        size = c->lav_codecpar->extradata_size;
 +    }

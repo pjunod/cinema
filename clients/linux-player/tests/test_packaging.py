@@ -112,8 +112,12 @@ class PrivateBuild(unittest.TestCase):
         self.assertIn('Dir::Cache::archives "/apt-cache/archives";', snapshot)
         # Reused only once fetched and verified in full for this timestamp.
         self.assertIn("marker=/apt-cache/lists/.plurx-snapshot-$ts", snapshot)
-        self.assertLess(snapshot.index("apt-get -q update\n["), snapshot.index('touch "$marker"'))
+        self.assertLess(snapshot.index("apt-get -q -o APT::Update::Error-Mode=any update\n["), snapshot.index('touch "$marker"'))
         self.assertIn('Acquire::Retries "10";', snapshot)
+        # A partial index must fail the run, never be marked complete.
+        self.assertEqual(snapshot.count("-o APT::Update::Error-Mode=any"), 2)
+        self.assertLess(snapshot.index('if [ -f "$marker" ]'), snapshot.index("apt-get -q -o APT::Update::Error-Mode=any"))
+        self.assertIn('flock -n 9', build)
 
     def test_package_version_names_the_pinned_versions(self):
         rows = pins()
@@ -313,8 +317,9 @@ class EnhancementLayerOverHls(unittest.TestCase):
         # buffered ~150 MB before showing the base layer alone.
         text = read("packaging/patches/mpv/0002-demux-dovi_split-split-the-enhancement-layer-without.patch")
         hunk = text.split("+static int hvcc_nal_length(const struct mp_codec_params *c)", 1)[1].split("+}", 1)[0]
-        self.assertIn("c->lav_codecpar->extradata", hunk)
+        self.assertIn("+    if ((!x || size <= 0) && c->lav_codecpar) {", hunk)
         self.assertIn("c->lav_codecpar->extradata_size", hunk)
+        self.assertIn("x[0] != 1", hunk)
 
 
 class PatchSeries(unittest.TestCase):

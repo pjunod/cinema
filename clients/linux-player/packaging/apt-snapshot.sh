@@ -8,7 +8,7 @@
 # packages it downloads there. A snapshot never changes, so once its indexes
 # have been fetched and verified against the archive signature, later
 # containers reuse them without contacting the mirror, and install every
-# package they have seen before from the cache: a rebuild needs no network.
+# package they have seen before from the cache: a rebuild needs no apt mirror.
 set -euo pipefail
 ts=$(awk '$1 == "apt-snapshot" {print $2}' "$1")
 [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || { echo "apt-snapshot: no apt-snapshot row in $1" >&2; exit 1; }
@@ -42,7 +42,8 @@ EOC
   if [ -f "$marker" ]; then
     # Indexes signed and verified when they were fetched; apt checks every
     # package against them, cached or not.
-    apt-get -q install -y --no-install-recommends ca-certificates
+    # The stock image has no CA bundle yet; the same trust argument as below.
+    apt-get -q -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates
     echo "apt-snapshot: snapshot.ubuntu.com $ts (indexes from /apt-cache)"
     exit 0
   fi
@@ -51,8 +52,10 @@ fi
 # unverified TLS. Integrity does not rest on TLS: apt checks every index
 # against the archive's InRelease signature (Signed-By above) and every
 # package against its index. Everything after this uses verified TLS.
-apt-get -q -o Acquire::https::Verify-Peer=false update
+# Error-Mode=any: an index that still fails after the retries fails the run,
+# instead of apt's default warning, so a partial index is never marked.
+apt-get -q -o APT::Update::Error-Mode=any -o Acquire::https::Verify-Peer=false update
 apt-get -q -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates
-apt-get -q update
+apt-get -q -o APT::Update::Error-Mode=any update
 [ -z "$marker" ] || touch "$marker"
 echo "apt-snapshot: snapshot.ubuntu.com $ts"
