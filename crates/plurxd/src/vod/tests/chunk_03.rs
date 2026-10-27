@@ -5496,6 +5496,44 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 crate::transcode::LiveRecoveryReason::IndexUnavailable
             ))
         ));
+
+        // A typed outcome the indexer will not retry -- here its attempts ran
+        // out -- refuses the same way.
+        let typed = store
+            .record_fragment_index_typed_outcome(
+                file.id,
+                &identity,
+                plurx_core::content_analysis::IndexFailureCode::IndexProbeTimeout,
+                false,
+                "probe timed out",
+                0,
+                &plurx_core::content_analysis::IndexDiagnostic::default(),
+                1,
+            )
+            .await
+            .expect("record the attempt-limited outcome");
+        assert_eq!(typed.terminal_reason.as_deref(), Some("attempt_limit"));
+        let error = serve
+            .try_create(
+                &request("attempt-limited", 0.0),
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "attempt-limited".into(),
+            )
+            .await
+            .expect_err("an attempt-limited title cannot start VOD");
+        assert_eq!(
+            crate::transcode::vod_refusal(&error)
+                .expect("a typed refusal")
+                .0,
+            "vod_index_unavailable"
+        );
+        assert!(serve.local_index_demand().is_empty());
     }
 
     /// Review of N2: a probe that could not answer once (its 5 s bound under

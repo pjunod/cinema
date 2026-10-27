@@ -828,6 +828,29 @@
         assert_eq!(accepted_bytes(), 0, "stale bytes must not be acknowledged");
     }
 
+    /// Review of #1299: the local indexer's reason -- which can carry source
+    /// paths and ffmpeg's stderr -- reached the client in the refusal message.
+    #[test]
+    fn an_unindexable_title_tells_the_client_the_code_not_the_indexer_log() {
+        let error = crate::transcode::vod_refusal_error(
+            "vod_index_unavailable",
+            "this node cannot index this title: ffmpeg: /srv/media/Film.mkv: Invalid data",
+        );
+        match super::create::session_start_error(7, error) {
+            ApiError::Typed {
+                status,
+                code,
+                message,
+            } => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(code, "vod_index_pending");
+                assert!(!message.contains("/srv"), "{message}");
+                assert!(!message.contains("ffmpeg"), "{message}");
+            }
+            other => panic!("not a typed refusal: {other:?}"),
+        }
+    }
+
     #[test]
     fn same_incarnation_publication_rejection_is_retryable_not_not_found() {
         let error = response_publication_rejection(

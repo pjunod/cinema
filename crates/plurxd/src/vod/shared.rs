@@ -35,6 +35,14 @@ impl Shared {
         };
         let found = crate::http::index_refusal_summary(std::slice::from_ref(&outcome), now)
             .map_or_else(|| outcome.reason.clone(), |(_, detail)| detail);
+        // The indexer's own words (`found`) can carry source paths and
+        // ffmpeg's stderr. A pending refusal's message reaches the client, so
+        // it names the failure code; the terminal one is replaced with a
+        // generic message at the HTTP edge and logged there in full.
+        let failure = outcome.typed_code.map_or_else(
+            || outcome.refusal.code().to_owned(),
+            |code| code.as_str().to_owned(),
+        );
         match outcome.state(now) {
             IndexOutcomeState::Terminal => (
                 "vod_index_unavailable",
@@ -45,7 +53,7 @@ impl Shared {
                 (
                     "vod_index_pending",
                     format!(
-                        "the last index attempt failed ({found}); the next is due in {} s",
+                        "the last index attempt failed ({failure}); the next is due in {} s",
                         (at.saturating_sub(now).max(0) + 999) / 1_000
                     ),
                 )
@@ -54,7 +62,9 @@ impl Shared {
                 self.demand_local_index(file_id);
                 (
                     "vod_index_pending",
-                    format!("{untried}; the last index attempt failed ({found}) and is due again"),
+                    format!(
+                        "{untried}; the last index attempt failed ({failure}) and is due again"
+                    ),
                 )
             }
         }
