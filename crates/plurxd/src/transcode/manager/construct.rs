@@ -1300,6 +1300,7 @@ impl TranscodeManager {
     /// as the job's own capacity, so the job does not read its own step as
     /// foreground pressure. Released by [`FragmentAdmission::release_extension`]
     /// or with the admission.
+    #[cfg(target_os = "linux")]
     pub(crate) async fn extend_fragment_admission(
         &self,
         admission: &FragmentAdmission,
