@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "source_commit": "f0ea19df4001ebedafe922ef3b632bb2d850fe8c",
+  "source_commit": "5267b8721312b86e205ac99217c20a159b0fec4a",
   "source_branch": "codex/adaptive-copy-start-and-admission",
   "original_design_review": {
     "implementation": "46dc2805b9b6688b5052494605250898a6b105c7",
@@ -9,7 +9,7 @@
     "reviewer_attribution": "User-supplied Claude Opus 5.5, 2026-10-26; bounded design only"
   },
   "source_sha256": {
-    "Cargo.lock": "d69f413b6b5552860c3e377227ec220fd2f2a247ce811f397c5798e4bd5e6ae6",
+    "Cargo.lock": "95a0858506d843b86e74d65dd0a92cfc4601f91bebecc0a21de41bc6e04d9999",
     "Cargo.toml": "72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f",
     "crates/plurx-core/Cargo.toml": "e5be28538ca8e132bd31d2433c1d8dd41470f124d9de1aca22328dd10143910a",
     "crates/plurx-core/src/adaptive_resources/physical_graph.rs": "d3bc2096752d5cc94b426cf9c1449ba1ff66b5782f217bb0523cc63a634a6c3c",
@@ -58,8 +58,13 @@
     "crates/plurx-core/src/resource_custody/transaction/typed/tests/copy_task_settlement.rs": "cf335717ad6ac19f2dabcb31959af0f49795d4274e909187c098b840fbe5a40e",
     "crates/plurx-core/src/resource_custody/worker.rs": "c0186e004ac583312840e199cfd780c323822bc300ee18d06719343f4b5e56f8",
     "crates/plurx-core/src/resource_custody/worker/fixtures.rs": "410c98ee2d85eacbf3dd8ddb35a8dc36232e729d3f5df190433d4b5d87439170",
+    "crates/plurxd/src/fragment_index_cluster.rs": "c96ac46d2e1407d80a14f05385cc596da1e2c975e0117a16871be8ccb7f74815",
+    "crates/plurxd/src/fragment_index_cluster/tests/legacy_opener.rs": "63a35f5407cf650288cd22a40fd3421bd1bd1ec5e6823bafc960f60d4fec7ac0",
+    "crates/plurxd/src/fragment_index_cluster/tests/timed_opener.rs": "6d3c39d29f8fe3f0dbcc0b6714419a01107c2490acc9986bd2cd03b1086b4e59",
     "crates/plurxd/src/http/shared_source_direct_tests.rs": "aed03c0a39734a624ebdcbc93b687a72fa9c91a6628b71a49b9939a1c8579272",
     "crates/plurxd/src/http/system.rs": "746538928b153ab738e7916b9a67c3a695753cc33a414e10aa0be1d0d51ef08c",
+    "crates/plurxd/src/renditiondir/finite_publication.rs": "70971a937bfbb8509fe71bf9ab26a639c759e5d0691f7b578e540b2cdb18647f",
+    "crates/plurxd/src/transcode/background_static.rs": "1d36817be27e043ccb55e6adb77634329ad6015b407edcf0c06a86b1d2861808",
     "crates/plurxd/src/transcode/source_actor.rs": "921c0c1238d0afb5ce0a993a922b06e8db2d70d3ec9dc2ffe96b2326bdab9ea1",
     "crates/plurxd/src/transcode/source_actor/restart_admission_tests.rs": "d55b30aa2339b95a6b61dd232d1531a83f89ae3ea7f4e032f4ec9dbb0e70088b",
     "crates/plurxd/src/transcode/source_control.rs": "e802a9d5b7092e37d0afd0c10e580ef618ea990ee58448e2ad10bbe6d6360f4a",
@@ -68,10 +73,18 @@
     "crates/plurxd/src/transcode/source_preparation/fixed_tests.rs": "88747e93b319b0a90133561dd0958d733f8e731a546574a6df2d66da83d796fd",
     "crates/plurxd/src/transcode/tests/source_actor.rs": "d1f7018c355979a6de1a825271a35e8caaa588d2fac9956813bd3056fe2c356e",
     "crates/plurxd/src/transcode/tests/source_fixed_native.rs": "e0baada81f4eb2334ba25fdb6e9762bc2153fc4fa03d8c4de2bea2ae32bf6799",
+    "crates/plurxd/src/vod/background_artifact.rs": "3bb78aca7973130b0131da965163b89e3ca095802ed896bdc0a60d7a77c48d70",
+    "crates/plurxd/src/vod/finite_profile.rs": "2c508a248a792e7eae7e7c0ba912cd8e472699b1d93c46666cfb6eefc0ae6e89",
     "crates/plurxd/src/vod/finite_software.rs": "148f96bdf2e00be7bdc996ba0dc105ebaff4c6e895537f6c206142511d400fb7",
-    "crates/plurxd/src/vod/serve/delivery.rs": "7c0b40e7f79e8cefde37abb42866e987cc59fbdb0c7f3020157ff137242514ec",
-    "crates/plurxd/src/web/pages/settings-system.js": "aece7d44009d84e6f44d8278e20ff388a2dcba7068ba6c026b1dfb6e8eac0131",
-    "tests/web/system-settings.test.js": "e603deaa30de622591a1cfc5dfd418121b968c1e485f54578c9a6d46aecb9c6c"
+    "crates/plurxd/src/vod/serve/create.rs": "9634d57cf76ccdde094cd0ed988c95b4120812b5cb3e179a2cfa9c3c5bbb1d60",
+    "crates/plurxd/src/vod/shared.rs": "5233c84f0b4c3deeea4b1cdfcaa078f9c4abbd58aeefdd43cc0d56f70b7e301f",
+    "crates/plurxd/src/vod/tests/automatic_static.rs": "cac918ca5cacdc2a42a1e3d9b66211dac10478e204591606e3c850c77454a0db",
+    "crates/plurxd/src/vod/tests/chunk_01.rs": "9765d6e6bf79ec997aac45b763535b806fc9972ee6659a311b88f05185cb1e7e",
+    "crates/plurxd/src/vod/tests/finite_software.rs": "2b5325dd65aca757166d7e448397ce013b6f647410a5631ab77ad847775eda3c",
+    "crates/plurxd/src/vod/tests/finite_software/actor_application.rs": "a68c724dc77fb08c43fed92837d1205c0c629b7976cbd49e208dcc0c27282262",
+    "crates/plurxd/src/vodencode.rs": "0f8289d5872b6b47d882784a98bf94019aaa10f0c5bd2de0296ba5e8865a18fc",
+    "crates/plurxd/src/web/pages/settings-system.js": "ce6993c6d10e350bcf8d886abc053ae746244b490a36aaf4880aeedb2f59d770",
+    "tests/web/system-settings.test.js": "6feacd6933c933d622618dca9776db552999552ad36f9e7979129da2862d30d0"
   },
   "symbols": {
     "CopyCancellationClosure": {

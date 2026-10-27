@@ -17,7 +17,7 @@ execution. That original request and manifest remain available at `8b6331e`.
 The supplied review's SHA-256 is
 `dc9df50930130a30adee9ec91a52e62bf06392509d25e8bff677dc7439505672`.
 The current [source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW-SOURCE.json)
-pins implementation `f0ea19df4001ebedafe922ef3b632bb2d850fe8c` for the next review; it is source identity, not
+pins implementation `5267b8721312b86e205ac99217c20a159b0fec4a` for the next review; it is source identity, not
 execution or approval evidence.
 
 **Original** means the same retained instance: Child/ChildJob, JoinHandle,
@@ -148,11 +148,13 @@ unknown storage transaction outcome. None of these bodies or controls ran.
 
 ## 5. Next independent implementation review
 
-Review committed source `f0ea19df4001ebedafe922ef3b632bb2d850fe8c` through normal
-Git and task PR #1293 into effort PR #1248. Compare against `8b6331e` for this
-continuation, and against effort `647e4bb68` for the complete task. The source
-manifest includes the original dependencies and changed Source/private-
-constructor/product files; it is not a replacement for reviewing the PR diff.
+Review committed source `5267b8721312b86e205ac99217c20a159b0fec4a` through ordinary
+Git and task PR #1293 into effort PR #1248. Use effort `48eccfd748741bab47d945e68c7713a4c213ea60`
+as the task diff base. Historical `8b6331e` retains the original bounded design
+request and manifest. The current source manifest includes original dependencies
+and changed Source/private-constructor/product files; review the task diff too.
+The compiler receipts cover the code pin above. Publication adds only identified
+review/status/manifest text afterward; no test body has run.
 
 Check the S0–S4 boundaries, original latch/handle identity, kill/join/wait
 ordering, same-operation journal replay, complete preflight before witness

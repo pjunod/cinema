@@ -2,7 +2,7 @@
 
 **Status:** open · implementation active · updated 2026-10-26. PR #1248 on
 `effort/adaptive-playback-resources` is the sole effort. Draft task PR #1293
-uses normal committed Git source; current main `087e836d3` is merged.
+uses normal committed Git source; current main `656a85540` is merged.
 The user supplied the bounded Opus copy-start design review; its accepted
 [decisions and source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) are
 recorded separately from implementation and execution. No Hermes or external
@@ -49,15 +49,18 @@ family attachments; only positive original native close/R→S releases it.
 P/legacy CPU coexistence, private allocator/executor/native peaks, complete
 memory bounds, broader adapters and selective recovery remain open.
 
-**Compiler evidence:** exact native source `f0ea19df4001ebedafe922ef3b632bb2d850fe8c` passed
+**Compiler evidence:** exact native source `5267b8721312b86e205ac99217c20a159b0fec4a` passed
 Rust1.97.1 core+daemon all-target+cluster strict Clippy, source stable, in
-384.099s; log SHA-256 `fb6fdaf186d6dc8d632f6b21ade6883d2d8b4be993083eb0824f5384c6fa61f1`.
-Host/local Linux-target source `33e1c42ffee0ec385f95179f5c9643ff338da38d` matches all1,446
-Rust/Cargo blobs. Its strict checks passed269.643s/314.447s respectively,
-with all four library/test targets and zero diagnostics. Linux-target uses
-stub C dependencies and links no executable. Whole-tree formatting, web
-static checks, offline formal mappings and paperwork15/15 passed;73 declared
-regression bodies resolve. These are compile/source checks, not behavior.
+612.846s; log SHA-256 `811cf9dbfee5dd6d355e44ecb9aa1b5880033f47391b50dff6d70b2279ee8489`.
+Matching host and Linux-target strict checks passed267.793s/320.812s;
+all1472 Rust/Cargo hashes match, with all four library/test artifacts
+and zero diagnostics. Linux-target uses stub C dependencies and links nothing.
+Pinned formatting, web static contracts, offline source mappings and paperwork
+passed;73 declared regression bodies resolve. These checks execute no behavior.
+Current main `656a85540fd3c6d091d0df4aa72f77ee3c1a219c` is merged into effort `48eccfd748741bab47d945e68c7713a4c213ea60`;
+task PR1293 remains unmerged. Gate6071 rejected stale main ancestry before
+compiler jobs; the normal refresh preserves that authenticated check. A fresh
+compile-only gate is required before integration.
 
 Earlier Source012 and native74a passes, the12GiB SIGKILL and precise fixture
 failures remain source-bound in retained receipts; no old result becomes a

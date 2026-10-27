@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`be610d6472b8717bc034e45404141ef0854c4bf2` · **Scope:** bound `library_scan` and
+`5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
