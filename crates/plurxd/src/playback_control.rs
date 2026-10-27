@@ -789,7 +789,8 @@ pub(crate) enum ClientPlatform {
 /// How many [`ClientPlatform`]s there are, and their metric labels in the
 /// enum's own order: every per-platform counter is indexed by it.
 pub(crate) const CLIENT_PLATFORMS: usize = 4;
-pub(crate) const CLIENT_PLATFORM_LABELS: [&str; CLIENT_PLATFORMS] = ["web", "apple", "android", "linux"];
+pub(crate) const CLIENT_PLATFORM_LABELS: [&str; CLIENT_PLATFORMS] =
+    ["web", "apple", "android", "linux"];
 
 impl DynamicCapabilities {
     fn validate(&self) -> Result<(), &'static str> {
