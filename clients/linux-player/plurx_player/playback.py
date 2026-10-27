@@ -95,6 +95,8 @@ class Playback:
         self.last_position_ms = None
         self.mapper = None
         self.mapper_logged = False
+        # mpv's fatal "Error opening/initializing the ... (--vo) device" line.
+        self.vo_failed = False
         self.facts = None
         self.failure = None
         self.stopped_by_server = None
@@ -388,6 +390,9 @@ class Playback:
     def on_log(self, event):
         text = event.get("text") or ""
         prefix = str(event.get("prefix") or "")
+        if prefix == "cplayer" and event.get("level") in ("fatal", "error") \
+                and text.startswith("Error opening/initializing the"):
+            self.vo_failed = True
         match = EXPLICIT_MAPPER.search(text)
         if match is None and ("placebo" in prefix or prefix.startswith("vo")):
             match = BARE_MAPPER.search(text)
@@ -409,10 +414,17 @@ class Playback:
                       "target_primaries": target.get("primaries") if isinstance(target, dict) else None}
 
     def require_video_output(self):
-        """A title with video that mpv could not open a window for is a failure, not audio only."""
+        """A title with video that mpv could not open a window for is a failure, not audio only.
+
+        mpv answers a video output it cannot open by deselecting the video
+        track ("Video: no video") and playing the audio, so the question is
+        whether the title *has* video (cover art aside), not whether a video
+        track is still selected.
+        """
         tracks = self.mpv.get("track-list") or []
-        video = any(isinstance(t, dict) and t.get("type") == "video" and t.get("selected") for t in tracks)
-        if video and self.mpv.get("vo-configured") is False:
+        video = any(isinstance(t, dict) and t.get("type") == "video" and not t.get("albumart")
+                    for t in tracks)
+        if video and (self.vo_failed or self.mpv.get("vo-configured") is False):
             raise NoVideoWindow("mpv could not open a video window: is a graphical session running?")
 
     def log_mapper(self):

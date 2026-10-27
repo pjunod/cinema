@@ -18,6 +18,7 @@ plurx-player (0.3.1+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency
   * Profile 7 titles arrive with both layers once the server is on this
     release's plurx: a copy used to narrow every dual-layer source to its
     HDR10 base, even for a client that names Profile 7.
+  * Closed-form equations unchanged: tools/dv_processing dm 193c40343ebf.
 
  -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 23:00:00 +0000
 

@@ -19,6 +19,13 @@ Hint pass-through as soon as the swapchain exists, so the first one is
 already pass-through and the only description is mpv's. Until mpv sets
 one, the surface has none, which the compositor treats as sRGB, as it
 treated the driver's sRGB swapchain.
+
+This covers every swapchain while target-colorspace-hint describes the
+surface. With the hint off (set_color(NULL)), vo_gpu_next still hands
+libplacebo a NULL hint, which brings back a driver-described sRGB
+swapchain; turning the hint on again at run time would then meet the
+same driver surface. plurx Player always passes
+--target-colorspace-hint=yes.
 ---
  video/out/vulkan/context.c | 24 +++++++++++++++++++++++-
  1 file changed, 23 insertions(+), 1 deletion(-)

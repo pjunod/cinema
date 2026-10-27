@@ -67,7 +67,11 @@ def adopt_session_display(environ, read_session_environment):
             session[key] = value
     if not (session.get("WAYLAND_DISPLAY") or session.get("DISPLAY")):
         return []
-    adopted = [key for key in SESSION_DISPLAY if key in session and not environ.get(key)]
+    # As a set: an XAUTHORITY left over beside no display is not this
+    # session's, and must not be paired with its DISPLAY.
+    for key in SESSION_DISPLAY:
+        environ.pop(key, None)
+    adopted = [key for key in SESSION_DISPLAY if key in session]
     for key in adopted:
         environ[key] = session[key]
     return adopted

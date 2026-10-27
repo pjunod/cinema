@@ -75,6 +75,34 @@ quality_catalog: None,
         assert!(!plain.intent_fingerprint("paul").contains("+dl"));
     }
 
+    /// `SessionKind` is `deny_unknown_fields` and crosses the cluster relay
+    /// and takeover: a copy without the dual-layer bit must serialise to
+    /// exactly the bytes an older binary wrote, and their bytes must parse.
+    #[test]
+    fn a_copy_without_the_dual_layer_bit_keeps_its_old_wire_form() {
+        let old = r#"{"kind":"copy","aac":false,"preserve_dolby_vision":true,"convert_dolby_vision":false}"#;
+        let parsed: SessionKind = serde_json::from_str(old).expect("an older binary's copy");
+        assert_eq!(
+            parsed,
+            SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: true,
+                convert_dolby_vision: false,
+                dual_layer_as_copied: false,
+            }
+        );
+        assert_eq!(serde_json::to_string(&parsed).expect("serialise"), old);
+        let dual = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: false,
+            dual_layer_as_copied: true,
+        };
+        let text = serde_json::to_string(&dual).expect("serialise");
+        assert!(text.contains(r#""dual_layer_as_copied":true"#));
+        assert_eq!(serde_json::from_str::<SessionKind>(&text).expect("round trip"), dual);
+    }
+
     #[test]
     fn ffmpeg_gets_the_app_owned_runtime_cache() {
         use plurx_core::store::SqliteStore;

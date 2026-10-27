@@ -500,10 +500,6 @@ class NoTokenOnDisk(LauncherCase):
         self.assertEqual(carried, [["set_property", "http-header-fields", [f"Authorization: Bearer {TOKEN}"]]])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 DISPLAY_VARS = ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP")
 SESSION = ("PATH=/home/someone/bin:/usr/bin\nWAYLAND_DISPLAY=wayland-0\nDISPLAY=:0\n"
            "XAUTHORITY=/run/user/1000/.mutter-Xwaylandauth.ABC\nXDG_SESSION_TYPE=wayland\n"
@@ -540,6 +536,13 @@ class SessionDisplay(LauncherCase):
             environ, lambda: "XDG_SESSION_TYPE=tty\nXAUTHORITY=/x\n"), [])
         self.assertEqual(environ, {})
 
+    def test_the_session_display_is_taken_as_a_set(self):
+        environ = {"XAUTHORITY": "/stale/Xauthority", "XDG_SESSION_TYPE": "tty", "HOME": "/home/someone"}
+        launcher_module.adopt_session_display(environ, lambda: SESSION)
+        self.assertEqual(environ["XAUTHORITY"], "/run/user/1000/.mutter-Xwaylandauth.ABC")
+        self.assertEqual(environ["XDG_SESSION_TYPE"], "wayland")
+        self.assertEqual(environ["HOME"], "/home/someone")
+
     def test_an_escaped_value_is_not_taken(self):
         environ = {}
         launcher_module.adopt_session_display(environ, lambda: "DISPLAY=$'\\033:0'\nWAYLAND_DISPLAY=wayland-0\n")
@@ -548,7 +551,10 @@ class SessionDisplay(LauncherCase):
 
 class VideoWindow(LauncherCase):
     def test_a_title_with_video_but_no_window_fails_instead_of_playing_audio_only(self):
-        self.mpv.props(track_list=[{"type": "video", "selected": True}], vo_configured=False)
+        # What mpv really does without a display: it deselects the video
+        # track and goes on with the audio.
+        self.mpv.props(track_list=[{"type": "video", "selected": False, "albumart": False},
+                                   {"type": "audio", "selected": True}], vo_configured=False)
         self.clock.at(30, self.mpv.close)
         self.assertEqual(self.run_launcher(), launcher_module.EXIT_PLAYBACK)
         self.assertEqual(self.errors, ["plurx Player: mpv could not open a video window: "
@@ -558,8 +564,27 @@ class VideoWindow(LauncherCase):
         self.assertEqual(len(failures), 1)
         self.assertTrue(self.server.revoked)
 
+    def test_mpvs_vo_error_line_is_a_failure_too(self):
+        self.mpv.props(track_list=[{"type": "video", "selected": False}])
+        self.mpv.emit({"event": "log-message", "prefix": "cplayer", "level": "fatal",
+                       "text": "Error opening/initializing the selected video_out (--vo) device.\n"})
+        self.clock.at(30, self.mpv.close)
+        self.assertEqual(self.run_launcher(), launcher_module.EXIT_PLAYBACK)
+        self.assertEqual(len(self.errors), 1)
+
+    def test_an_audio_file_with_cover_art_plays_without_a_window(self):
+        self.mpv.props(track_list=[{"type": "video", "selected": False, "albumart": True},
+                                   {"type": "audio", "selected": True}], vo_configured=False)
+        self.close_at(4)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.errors, [])
+
     def test_a_title_with_a_window_plays(self):
         self.mpv.props(track_list=[{"type": "video", "selected": True}], vo_configured=True)
         self.close_at(4)
         self.assertEqual(self.run_launcher(), 0)
         self.assertEqual(self.errors, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
