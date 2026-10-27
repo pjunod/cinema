@@ -7939,3 +7939,12 @@ source = "clients/linux-player/packaging/patches/mpv/0002-demux-dovi_split-split
 source_anchor = "+    if (!x && c->lav_codecpar) {"
 test = "clients/linux-player/tests/test_packaging.py"
 test_anchor = "def test_the_split_reads_the_hvcc_that_demux_lavf_keeps(self):"
+
+# Review of #1298: a partial apt index fails the build rather than being marked complete; one build per cache.
+[[fixes]]
+id = "claude.linux-player-apt-cache-review"
+commits = ["fb447e521465e33ae5017b3d11afe10c01784b53"]
+source = "clients/linux-player/packaging/apt-snapshot.sh"
+source_anchor = "apt-get -q -o APT::Update::Error-Mode=any update"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_every_container_shares_the_snapshot_apt_cache(self):"
