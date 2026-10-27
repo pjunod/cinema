@@ -7921,3 +7921,21 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = "def on_seek(self):"
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_seek_inside_the_range_stays_in_the_session(self):"
+
+# Package builds share a snapshot apt cache and retry 503s from snapshot.ubuntu.com.
+[[fixes]]
+id = "claude.linux-player-snapshot-apt-cache"
+commits = ["9dc49c361ed42688a01766c2777e643e1ff61183"]
+source = "clients/linux-player/packaging/apt-snapshot.sh"
+source_anchor = 'marker=/apt-cache/lists/.plurx-snapshot-$ts'
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_every_container_shares_the_snapshot_apt_cache(self):"
+
+# mpv patch 0002 reads the hvcC demux_lavf keeps in lav_codecpar, so Profile 7's enhancement layer is split from HLS streams.
+[[fixes]]
+id = "claude.linux-player-fel-over-hls"
+commits = ["cf6801a2494f8a11c3af2128c286d99a4984a3a7"]
+source = "clients/linux-player/packaging/patches/mpv/0002-demux-dovi_split-split-the-enhancement-layer-without.patch"
+source_anchor = "+    if (!x && c->lav_codecpar) {"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_the_split_reads_the_hvcc_that_demux_lavf_keeps(self):"
