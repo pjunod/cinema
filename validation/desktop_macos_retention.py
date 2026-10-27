@@ -38,7 +38,7 @@ JOB = 'Apple compile and native TV navigation'
 LABELS = ['self-hosted','macOS','ARM64','lab','apple','xcode-27.1']
 ROOTS = ('clients/server-tray/macos','Makefile','Cargo.toml','LICENSE','brand/export')
 # Whole recipes are pinned: a new helper/dependency cannot escape ROOTS.
-RECIPE_VERSION = 3
+RECIPE_VERSION = 4
 MAX_ROOT_ENTRIES, MAX_ROOT_BYTES = 512, 32*1024
 MAKEFILE_FAMILY = (
     {'path':'Makefile','mode':'100644','blob':'917e9879ebac1006dc7267caffc3e08c2755b5a0',
@@ -47,8 +47,54 @@ MAKEFILE_FAMILY = (
      'sha256':'5fd6f68451b172ce48f0093adf3bb32ee63644087264130a481206a43263ad64'},
 )
 CANONICAL_MAKEFILE = MAKEFILE_FAMILY[0]
-APPLICABILITY_PROJECTION = 'exact-reviewed-make-pair-v1'
-RECIPE_COMPATIBILITY = 'exact protected native workflow scope v1; exact reviewed Makefile pair v1'
+APPLICABILITY_PROJECTION = 'bounded-native-make-scope-v1'
+RECIPE_COMPATIBILITY = 'exact protected native workflow scope v1; bounded native Make scope v1'
+MAX_MAKE_LINES = 4096
+MAKE_PROTECTED_LINES = (
+    'CARGO ?= cargo',
+    'CARGO_RAW := $(CARGO)',
+    'ANDROID_IMAGE ?= plurx-android-build',
+    'ANDROID_PLATFORM ?= linux/amd64',
+    'ANDROID_DATA_DIR ?=',
+    '.DEFAULT_GOAL := help',
+    'unit-core: override CARGO := PLURX_EXPECT_TEST_COUNT_AT_LEAST=$${PLURX_EXPECT_TEST_COUNT_AT_LEAST:-1100} scripts/require-test-count $(CARGO_RAW)',
+    'cluster-wal-check: override CARGO := scripts/require-test-count $(CARGO_RAW)',
+    'ifndef RECOVERY_EXECUTION_ID',
+    "RECOVERY_EXECUTION_ID := local-$(shell date +%s)-$(shell sh -c 'echo $$$$')",
+    'endif',
+    'RECOVERY_OUTPUT_DIR ?= target/validation/transport-recovery/$(RECOVERY_EXECUTION_ID)',
+    'RECOVERY_SMOKE_CYCLES ?= 3',
+    'RECOVERY_MAX_RUN_SECONDS ?=',
+    'RECOVERY_CARGO_PROFILE ?= transport-recovery',
+    'RECOVERY_PROFILE_DIR ?= $(if $(filter dev,$(RECOVERY_CARGO_PROFILE)),debug,$(RECOVERY_CARGO_PROFILE))',
+    'RECOVERY_BUILD_SHA ?= $(shell git rev-parse HEAD)',
+    'RECOVERY_BINARY_ORIGIN := $(origin RECOVERY_BINARY)',
+    'RECOVERY_BINARY ?= $(shell $(CARGO) metadata --no-deps --format-version 1 | python3 -c \'import json,sys; print(json.load(sys.stdin)["target_directory"] + "/$(RECOVERY_PROFILE_DIR)/plurx-cluster-check")\')',
+    'ifeq ($(RECOVERY_BINARY_ORIGIN),command line)',
+    'RECOVERY_BUILD = test -x "$(RECOVERY_BINARY)"',
+    'else',
+    'RECOVERY_BUILD = PLURX_BUILD_SHA="$(RECOVERY_BUILD_SHA)" $(CARGO) build --locked --profile "$(RECOVERY_CARGO_PROFILE)" -p plurx-cluster-check',
+    'endif',
+    'BENCHMARK_CONFIG ?= benchmarks/cinema-plex.example.toml',
+    'VERSION := $(shell sed -n \'/^\\[workspace.package\\]/,/^\\[/p\' Cargo.toml | sed -n \'s/^version = "\\(.*\\)"/\\1/p\' | head -1)',
+    'BUILD_REF := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)',
+    'BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)',
+    'SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))',
+    'HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)',
+    'INSTALL_FLAGS ?=',
+    'PI_SETUP_FLAGS ?=',
+    'APPLE_DERIVED_DATA := build/DerivedData',
+    'ANDROID_OUTPUTS ?= clients/android/app/build/outputs',
+)
+MAKE_PROTECTED_SHA256 = '337ccf7fa94c1e2ba972697fb191f458b72a476e937cb1595ee85ff764cc66b8'
+MAKE_NATIVE_BLOCK_SHA256 = '42dd53ee2e7741f227f6b3fbfcba4dc23eb0f8ec521ecc2f03e44e8ee1d04c54'
+MAKE_NATIVE_TARGETS = frozenset(('desktop-macos-build','desktop-macos-test','desktop-macos-check'))
+MAKE_NATIVE_PHONY = '.PHONY: desktop-macos-build desktop-macos-test desktop-macos-check'
+MAKE_NAME = r'[a-z][a-z0-9_-]*'
+MAKE_NAMES = MAKE_NAME + r'(?: ' + MAKE_NAME + r')*'
+MAKE_RULE = re.compile(r'(?P<targets>' + MAKE_NAMES + r'):(?: (?P<needs>' + MAKE_NAMES + r'))?(?: \#.*)?')
+MAKE_PHONY = re.compile(r'\.PHONY: (?P<targets>' + MAKE_NAMES + r')')
+
 MAX_WORKFLOW_BYTES, MAX_WORKFLOW_JOBS = 128*1024, 64
 WORKFLOW_SCOPE_PINS = {
     'preamble':'4d7d1fba026f898d1f9f809414bd2a43e78744aab0ecda3f92e0ced06139742d',
@@ -136,6 +182,120 @@ def git(workspace, *args, limit=MAX_SOURCE):
     return data
 
 
+class NativeManifest(list):
+    """A raw list manifest carrying the actual Make bytes, omitted by JSON."""
+    def __init__(self, entries, make_bytes):
+        super().__init__(entries)
+        self.make_bytes = make_bytes
+
+
+def git_blob_id(data):
+    return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+
+
+def native_make_scope(raw):
+    """Recognize only the reviewed global language and native invocation graph."""
+    require(type(raw) is bytes and 0 < len(raw) <= MAX_BLOB and raw.endswith(b'\n'),
+        'Unsupported native Makefile size/type/LF; closure review required')
+    try: source = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        raise receipts.ReceiptError('Unsupported native Makefile UTF-8; closure review required') from None
+    require(not any(ord(ch) < 32 and ch not in '\n\t' or ord(ch) == 127 or 0x80 <= ord(ch) <= 0x9f or ord(ch) in (0x2028,0x2029)
+        for ch in source), 'Unsupported native Makefile controls; closure review required')
+    lines = source[:-1].split('\n')
+    require(len(lines) <= MAX_MAKE_LINES, 'Unsupported native Makefile line bound; closure review required')
+    protected_at = 0
+    conditional = []
+    rule = None
+    continued = False
+    definitions = set()
+    native_phony = None
+    native_headers = {}
+    for index,line in enumerate(lines):
+        if continued:
+            require(line.startswith('\t'), 'Unsupported native Makefile recipe continuation; closure review required')
+        if line.startswith('\t'):
+            require(rule is not None and rule != 'desktop-macos-check',
+                'Unsupported native Makefile orphan/check recipe; closure review required')
+            continued = line.endswith('\\')
+            continue
+        continued = False
+        require(not line.endswith('\\'), 'Unsupported native Makefile nonrecipe continuation; closure review required')
+        if not line or line.startswith('#'):
+            continue
+        require(not line[0].isspace(), 'Unsupported native Makefile leading whitespace; closure review required')
+        if protected_at < len(MAKE_PROTECTED_LINES) and line == MAKE_PROTECTED_LINES[protected_at]:
+            protected_at += 1
+            rule = None
+            if line.startswith(('ifndef ','ifdef ','ifeq ','ifneq ')):
+                conditional.append(False)
+            elif line == 'else':
+                require(conditional and not conditional[-1],
+                    'Unsupported native Makefile conditional; closure review required')
+                conditional[-1] = True
+            elif line == 'endif':
+                require(conditional, 'Unsupported native Makefile conditional; closure review required')
+                conditional.pop()
+            continue
+        phony = MAKE_PHONY.fullmatch(line)
+        if phony:
+            names = phony['targets'].split(' ')
+            require(len(names) == len(set(names)) and not any(
+                name.casefold() in ('makefile','gnumakefile') for name in names),
+                'Unsupported native Makefile selector/duplicate phony; closure review required')
+            if MAKE_NATIVE_TARGETS.intersection(names):
+                require(line == MAKE_NATIVE_PHONY and native_phony is None and not conditional,
+                    'Unsupported native Makefile native phony; closure review required')
+                native_phony = index
+            rule = None
+            continue
+        ordinary = MAKE_RULE.fullmatch(line)
+        require(ordinary is not None, 'Unsupported native Makefile syntax; closure review required')
+        targets = ordinary['targets'].split(' ')
+        needs = (ordinary['needs'] or '').split(' ') if ordinary['needs'] else []
+        require(len(targets) == len(set(targets)) and not any(
+            name.casefold() in ('makefile','gnumakefile') for name in targets),
+            'Unsupported native Makefile selector/duplicate target; closure review required')
+        require(not any(name in definitions for name in targets),
+            'Unsupported native Makefile duplicate rule; closure review required')
+        definitions.update(targets)
+        native = MAKE_NATIVE_TARGETS.intersection(targets)
+        if native:
+            require(len(targets) == 1 and not conditional and native_phony is not None,
+                'Unsupported native Makefile native co-target/condition; closure review required')
+            native_headers[targets[0]] = (index,needs)
+        else:
+            require(not MAKE_NATIVE_TARGETS.intersection(needs),
+                'Unsupported native Makefile native dependency; closure review required')
+        rule = targets[0]
+    require(not continued and not conditional and protected_at == len(MAKE_PROTECTED_LINES)
+        and native_phony is not None and set(native_headers) == MAKE_NATIVE_TARGETS,
+        'Unsupported native Makefile protected/native scope; closure review required')
+    expected_needs = {'desktop-macos-build':[], 'desktop-macos-test':[],
+        'desktop-macos-check':['desktop-macos-build','desktop-macos-test']}
+    require(all(native_headers[name][1] == needs for name,needs in expected_needs.items())
+        and native_phony < min(index for index,_ in native_headers.values()),
+        'Unsupported native Makefile prerequisite scope; closure review required')
+    protected_raw = ('\n'.join(MAKE_PROTECTED_LINES)+'\n').encode()
+    require(digest(protected_raw) == MAKE_PROTECTED_SHA256,
+        'Native Makefile policy protected statements differ')
+    last = native_headers['desktop-macos-check'][0]
+    block = ('\n'.join(lines[native_phony:last+1])+'\n').encode()
+    require(digest(block) == MAKE_NATIVE_BLOCK_SHA256,
+        'Unsupported native Makefile native recipe scope; closure review required')
+
+
+def validated_make_row(entries, raw):
+    require(type(raw) is bytes and all(type(row) is dict and 'path' in row for row in entries)
+        and sum(row['path'] == 'Makefile' for row in entries) == 1,
+        'Native applicability requires one actual Makefile')
+    row = next(row for row in entries if type(row) is dict and row.get('path') == 'Makefile')
+    require(row == {'path':'Makefile','mode':'100644','blob':git_blob_id(raw),'sha256':digest(raw)},
+        'Unsupported native Makefile raw identity; closure review required')
+    native_make_scope(raw)
+    return row
+
+
 def manifest(workspace, commit):
     require(isinstance(commit,str) and re.fullmatch('[0-9a-f]{40}',commit), 'Invalid native source commit')
     require(git(workspace,'cat-file','-t',commit).strip() == b'commit', 'Native source is not a commit')
@@ -161,7 +321,7 @@ def manifest(workspace, commit):
         'clients/server-tray/macos/build'} <= paths and any(p.startswith('brand/export/') for p in paths),
         'Incomplete native source closure')
     supported_recipe(workspace,commit,entries,contents)
-    return entries, contents
+    return NativeManifest(entries, contents['Makefile']), contents
 
 
 def supported_recipe(workspace,commit,entries,contents):
@@ -175,8 +335,7 @@ def supported_recipe(workspace,commit,entries,contents):
         require(name == 'Makefile' or name.casefold() not in ('gnumakefile','makefile'),
             'Unsupported native root Make selector; closure review required: '+name)
     by_path = {row['path']:row for row in entries}
-    require(by_path.get('Makefile') in MAKEFILE_FAMILY and digest(contents['Makefile']) == by_path['Makefile']['sha256'],
-        'Unsupported native Makefile identity; closure review required')
+    validated_make_row(entries, contents['Makefile'])
     for path,(mode,sha) in RECIPE_PINS.items():
         row = by_path.get(path)
         require(row is not None and row['mode'] == mode and row['sha256'] == sha
@@ -432,17 +591,12 @@ def checkout_evidence(raw, commit, scope, job, *, complete=False):
 
 
 def applicability_inputs(entries):
-    """Copy actual inputs; project only either exact reviewed Make row."""
-    require(sum(row.get('path') == 'Makefile' for row in entries) == 1,
-        'Native applicability requires one reviewed Makefile')
-    projected = []
-    for row in entries:
-        if row.get('path') == 'Makefile':
-            require(row in MAKEFILE_FAMILY, 'Unsupported native Makefile identity; closure review required')
-            projected.append(dict(CANONICAL_MAKEFILE))
-        else:
-            projected.append(dict(row))
-    return projected
+    """Project only actual Make bytes proven compatible with the native scope."""
+    require(isinstance(entries,NativeManifest),
+        'Native applicability requires actual validated Makefile bytes')
+    validated_make_row(entries, entries.make_bytes)
+    return [dict(CANONICAL_MAKEFILE) if row['path'] == 'Makefile' else dict(row)
+        for row in entries]
 
 
 def execution_key(entries, expected):
@@ -724,7 +878,10 @@ def policy_fingerprint():
         'workflow_sha256':PRODUCER_WORKFLOW,
         'workflow_scope':{'version':1,'grammar':'bounded-plain-job-map-LF-UTF8-v1','pins':WORKFLOW_SCOPE_PINS,
             'protected_dependencies':PROTECTED_DEPENDENCIES,'apple_job':'apple_compile','max_bytes':MAX_WORKFLOW_BYTES,'max_jobs':MAX_WORKFLOW_JOBS},'recipe_version':RECIPE_VERSION,'recipe_pins':RECIPE_PINS,
-        'makefile_family':MAKEFILE_FAMILY,'canonical_makefile':CANONICAL_MAKEFILE,'applicability_projection':APPLICABILITY_PROJECTION,
+        'known_makefile_provenance':MAKEFILE_FAMILY,'canonical_makefile':CANONICAL_MAKEFILE,'applicability_projection':APPLICABILITY_PROJECTION,
+        'native_make_scope':{'version':1,'grammar':'restricted-literal-rules-and-reviewed-globals',
+            'protected_lines':MAKE_PROTECTED_LINES,'protected_sha256':MAKE_PROTECTED_SHA256,
+            'native_block_sha256':MAKE_NATIVE_BLOCK_SHA256,'max_lines':MAX_MAKE_LINES},
         'forbidden_make_selectors':['GNUmakefile','makefile'],'forbidden_package_selectors':['Package@*','Package.resolved','.swiftpm'],
         'upload_section_limits':[32,16*1024],'live_selector_policy':{'actual_names':True,'casefold':True,'allow_root_spelling':'Makefile','directory_limit':MAX_ROOT_ENTRIES},'committed_selector_policy':{'nonrecursive_root_bytes':MAX_ROOT_BYTES,'root_entries':MAX_ROOT_ENTRIES,'casefold':True,'allow_root_spelling':'Makefile'},
         'limits':[MAX_FILES,MAX_BLOB,MAX_SOURCE,MAX_ZIP,MAX_LOG,MAX_HISTORY,MAX_V1_ZIP,MAX_V1_JSON,MAX_V1_TOTAL]}))

@@ -40,7 +40,8 @@ an input manifest. The original build/test commands, desktop scope, Apple labels
 and Xcode 27.1/build 27A9275 contract remain unchanged.
 
 The closure policy pins Cargo.toml, package `build` and Package.swift bytes and
-Git modes, and recognizes exactly two reviewed whole Makefile identities.
+Git modes, and validates the bounded native Make scope rather than allowing
+arbitrary whole-file revisions.
 Cargo.toml supplies the version expanded
 by Make; treating arbitrary manifest changes as harmless could introduce shell
 inputs outside the closure. Alternate root Make selectors (`GNUmakefile` and
@@ -57,22 +58,34 @@ for untracked alternate selectors, without following child symlinks or probing
 a case-insensitive alias of Makefile. These restrictions preserve the original 45-file provenance; they
 do not claim that future command/dependency changes have the same closure.
 
-The accepted Makefile pair is the original blob `917e9879ebac1006dc7267caffc3e08c2755b5a0`
-and blob `53f6271a48d8acfc96e394edf24a790f6c4d56af`, both mode `100644`.
-Their complete SHA-256 identities are fixed in the adapter. The second adds only
-a comment and one Node test invocation under `web-unit-check` on main
-`9bcfa9ca1f792d214122762981c84c85ba5b3e64`; native targets, prerequisites,
-global variables and VERSION extraction are identical. No third revision is
-accepted automatically, even if it appears to be another web-only change.
+The restricted Make recognizer classifies every physical line. It preserves
+34 exact ordered global assignments/directives and their balanced conditional
+context, plus the exact unconditional native build/test/check block and
+prerequisites. It permits unrelated literal lowercase rules, tabbed recipes
+and ordinary `.PHONY` names. Unknown syntax, dynamic or pattern headers,
+includes/eval/define, new special targets, target overrides, Makefile-remake
+selectors, duplicate/native co-targets and nonrecipe continuation escapes
+refuse before source applicability. It is a finite source-language guard,
+not a Make evaluator. Inputs stay within 256 KiB and 4096 physical lines.
 
-A copied applicability projection maps only either exact Makefile row to the
-original row when computing the native key or comparing current/original input
-applicability. All other entries stay exact. This retains the prior 75-case
-execution across this reviewed web-only change while preserving both actual raw
-manifests. Producer receipt equality, checkout manifest hashes and final launch
-raw equality remain strict. The pair, canonical row and projection version are
-authenticated policy; they grant no compatibility to older v1 adapter bytes.
-Missing or corrupt original evidence still refuses instead of running 75 again.
+The protected globals have SHA-256
+`337ccf7fa94c1e2ba972697fb191f458b72a476e937cb1595ee85ff764cc66b8`;
+the native block has SHA-256
+`42dd53ee2e7741f227f6b3fbfcba4dc23eb0f8ec521ecc2f03e44e8ee1d04c54`.
+Both match the original producer and the integrated main source. Every
+manifest carries the actual Make bytes internally, and each applicability
+projection revalidates their mode, Git blob and SHA-256 against its raw row
+and reruns the scope guard. A row-only manifest cannot claim compatibility.
+
+Only that validated applicability copy maps Make to the original representative
+row. All other source entries remain exact. Actual raw current/original
+manifests, checkout hashes, producer receipt equality and final launch equality
+retain the real file identities. This preserves the prior 75-case key for
+proven unchanged native inputs without treating a new web test as a native
+execution. Scope/version/protected identities enter the policy fingerprint;
+no older v1 adapter or policy check is waived. The known original path still
+authenticates the actual legacy execution before considering v1 candidates.
+Missing or corrupt original evidence refuses instead of running 75 again.
 
 A v1 upload hash belongs to its unique native uploader transaction, bounded to
 32 lines and 16 KiB. Its ordered start, byte count, completion, hash, finalization,

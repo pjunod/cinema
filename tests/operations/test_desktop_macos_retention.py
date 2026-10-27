@@ -162,7 +162,9 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             self.assertEqual(zipped.namelist(),[native.MEMBER])
             self.assertEqual(zipped.read(native.MEMBER),self.native)
         self.log = job_log(archive_sha=native.digest(self.zip)); self.api = FakeAPI(self.log)
-        self.entries = [dict(native.CANONICAL_MAKEFILE),{'path':'native-source','mode':'100644','blob':'1'*40,'sha256':'2'*64}]
+        make = subprocess.check_output(['git','show',native.PRODUCER+':Makefile'],cwd=ROOT)
+        self.entries = native.NativeManifest(
+            [dict(native.CANONICAL_MAKEFILE),{'path':'native-source','mode':'100644','blob':'1'*40,'sha256':'2'*64}],make)
         self.policy = mock.patch.multiple(native,ORIGIN_ZIP_SHA=native.digest(self.zip),ORIGIN_JOB_SHA=native.digest(self.log))
         self.policy.start(); self.addCleanup(self.policy.stop)
     def retained(self):
@@ -504,7 +506,8 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
 
     def test_fresh_execution_starts_once_with_scrubbed_environment_and_preserves_failure(self):
         legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
-        changed = [dict(self.entries[0]),{**self.entries[1],'sha256':'3'*64}]
+        changed = native.NativeManifest(
+            [dict(self.entries[0]),{**self.entries[1],'sha256':'3'*64}],self.entries.make_bytes)
         def sources(workspace,commit):return (self.entries if commit==native.PRODUCER else changed),self.contents
         def git_value(workspace,*args,**kwargs):
             return legacy if args[-1]==native.PRODUCER+':'+native.WORKFLOW else b'identity'
@@ -691,34 +694,88 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
 
     def test_reviewed_make_pair_shares_applicability_without_mutating_raw_inputs(self):
         rows,read_git = source_tree()
-        revised_make = subprocess.check_output(['git','show','9bcfa9ca1f792d214122762981c84c85ba5b3e64:Makefile'],cwd=ROOT)
+        candidate = subprocess.check_output(['git','show','b7368b684da720fd90697fa25a0540e4ec0f875d:Makefile'],cwd=ROOT)
+        main = subprocess.check_output(['git','show','94da6eb93d7199e1d92e38ffbbcc53451b075303:Makefile'],cwd=ROOT)
         with mock.patch.object(native,'git',side_effect=read_git):
-            original,contents = native.manifest(ROOT,native.PRODUCER)
-            rows['Makefile'] = ('100644',revised_make)
-            revised,_ = native.manifest(ROOT,CURRENT)
-            before = copy.deepcopy((original,revised))
-            self.assertNotEqual(original,revised)
-            self.assertEqual(native.applicability_inputs(original),original)
-            self.assertEqual(native.applicability_inputs(revised),original)
-            self.assertEqual(native.execution_key(original,self.expected),native.execution_key(revised,self.expected))
-            self.assertEqual((original,revised),before)
-            self.assertNotEqual(native.digest(native.canonical(original)),native.digest(native.canonical(revised)))
-            for value in (('100644',revised_make+b'\n# third web-only revision\n'),
-                          ('100644',revised_make+b'\nquiet: scripts/outside-helper\n'),('100755',revised_make)):
-                rows['Makefile'] = value
-                with self.subTest(value=value[0]),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
-                    native.manifest(ROOT,CURRENT)
-            rows['Makefile'] = ('100644',revised_make)
+            original,_ = native.manifest(ROOT,native.PRODUCER)
+            manifests = [original]
+            for raw in (candidate,main,main+b'\nunrelated-native-fixture: ## Independent literal rule\n\t@echo unrelated\n'):
+                rows['Makefile'] = ('100644',raw)
+                item,_ = native.manifest(ROOT,CURRENT)
+                manifests.append(item)
+            before = copy.deepcopy(manifests)
+            self.assertEqual(len({native.digest(native.canonical(item)) for item in manifests}),4)
+            self.assertTrue(all(native.applicability_inputs(item) == original for item in manifests))
+            self.assertEqual(len({native.execution_key(item,self.expected) for item in manifests}),1)
+            self.assertEqual(manifests,before)
             rows['brand/export/new-resource.txt'] = ('100644',b'new resource')
             changed,_ = native.manifest(ROOT,CURRENT)
-            self.assertNotEqual(native.execution_key(changed,self.expected),native.execution_key(revised,self.expected))
+            self.assertNotEqual(native.execution_key(changed,self.expected),
+                native.execution_key(original,self.expected))
         for entries in ([],original+original,[{**native.CANONICAL_MAKEFILE,'blob':'0'*40}]):
             with self.assertRaisesRegex(native.receipts.ReceiptError,'Makefile'):
                 native.applicability_inputs(entries)
 
+    def test_native_make_scope_refuses_unsafe_constructs_and_raw_row_mismatch(self):
+        old = subprocess.check_output(['git','show',native.PRODUCER+':Makefile'],cwd=ROOT)
+        main = subprocess.check_output(['git','show','94da6eb93d7199e1d92e38ffbbcc53451b075303:Makefile'],cwd=ROOT)
+        self.assertEqual(native.digest(main),'b987ff3b2170f6222c4900a4a1063591bdd0f4b17fbaa095a029ab586e5e6d20')
+        native.native_make_scope(old)
+        native.native_make_scope(main)
+        changed = {
+            'native-prerequisite': old.replace(b'desktop-macos-check: desktop-macos-build desktop-macos-test',
+                b'desktop-macos-check: desktop-macos-build'),
+            'native-body': old.replace(b'swift test --package-path clients/server-tray/macos',
+                b'swift test --package-path clients/server-tray/other'),
+            'native-duplicate': old+b'\ndesktop-macos-build:\n\t@true\n',
+            'native-co-target': old+b'\ndesktop-macos-build unrelated:\n\t@true\n',
+            'native-phony': old+b'\n.PHONY: desktop-macos-build\n',
+            'check-recipe': old.replace(
+                b'desktop-macos-check: desktop-macos-build desktop-macos-test ## Build both slices and test on the native macOS architecture\n',
+                b'desktop-macos-check: desktop-macos-build desktop-macos-test ## Build both slices and test on the native macOS architecture\n\t@echo unsafe\n'),
+            'selector-phony': old+b'\n.PHONY: makefile\n',
+            'version': old.replace(b'VERSION := $(shell sed',b'VERSION := $(shell echo unsafe) # sed'),
+            'eager-shell': old.replace(b'BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)',
+                b'BUILD_SHA := $(shell echo unsafe)'),
+            'include': old+b'\ninclude another.mk\n',
+            'eval': old+b'\n$(eval VERSION := unsafe)\n',
+            'define': old+b'\ndefine UNSAFE\n\t@echo unsafe\nendef\n',
+            'oneshell': old+b'\n.ONESHELL:\n',
+            'recipeprefix': old+b'\n.RECIPEPREFIX := >\n',
+            'second-expansion': old+b'\n.SECONDEXPANSION:\n',
+            'default': old+b'\n.DEFAULT_GOAL := unsafe\n',
+            'pattern': old+b'\n%.out: %.in\n\t@true\n',
+            'make-remake': old+b'\nmakefile:\n\t@true\n',
+            'override': old+b'\ndesktop-macos-build: override VERSION := unsafe\n',
+            'conditional-native': old.replace(b'.PHONY: desktop-macos-build desktop-macos-test desktop-macos-check',
+                b'ifeq (1,1)\n.PHONY: desktop-macos-build desktop-macos-test desktop-macos-check\nendif'),
+            'comment-continuation': old+b'\n# comment \\\ninclude unsafe.mk\n',
+            'header-continuation': old+b'\nquiet: \\\ninclude unsafe.mk\n',
+            'orphan-recipe': old+b'\n.PHONY: quiet\n\t@true\n',
+            'recipe-continuation': old+b'\nquiet:\n\t@true \\\ninclude unsafe.mk\n',
+            'bad-utf8': old+b'\n# \xff\n',
+            'crlf': old.replace(b'\n',b'\r\n',1),
+            'nul': old+b'\n# \x00\n',
+            'line-bound': old+b'\n'*native.MAX_MAKE_LINES,
+            'byte-bound': old+b'\n# '+b'x'*native.MAX_BLOB,
+        }
+        for label,raw in changed.items():
+            with self.subTest(shape=label),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
+                native.native_make_scope(raw)
+        row = dict(native.CANONICAL_MAKEFILE)
+        for item in ([],[{**row,'blob':'0'*40}],[{**row,'sha256':'0'*64}],
+                [{**row,'mode':'100755'}]):
+            proof = native.NativeManifest(item,old)
+            with self.subTest(row=item),self.assertRaisesRegex(native.receipts.ReceiptError,'Makefile'):
+                native.applicability_inputs(proof)
+        with self.assertRaisesRegex(native.receipts.ReceiptError,'Makefile'):
+            native.applicability_inputs(native.NativeManifest([row],old+b'\n# drift\n'))
+        with self.assertRaisesRegex(native.receipts.ReceiptError,'Makefile'):
+            native.applicability_inputs([row])
+
     def test_reviewed_make_pair_retains_known_origin_with_actual_current_provenance(self):
         old_rows,old_read = source_tree();new_rows,new_read = source_tree()
-        new_rows['Makefile'] = ('100644',subprocess.check_output(['git','show','9bcfa9ca1f792d214122762981c84c85ba5b3e64:Makefile'],cwd=ROOT))
+        new_rows['Makefile'] = ('100644',subprocess.check_output(['git','show','94da6eb93d7199e1d92e38ffbbcc53451b075303:Makefile'],cwd=ROOT))
         legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
         active = [old_read]
         def read_git(workspace,*args,**kwargs):
@@ -741,7 +798,8 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             self.assertEqual(receipt['decision'],'retained_prior_execution')
             self.assertEqual(receipt['current_source_manifest'],actual)
             self.assertNotEqual(actual,origin)
-            self.assertEqual(next(row for row in actual if row['path']=='Makefile'),native.MAKEFILE_FAMILY[1])
+            self.assertEqual(next(row for row in actual if row['path']=='Makefile')['sha256'],
+                'b987ff3b2170f6222c4900a4a1063591bdd0f4b17fbaa095a029ab586e5e6d20')
             self.assertEqual(receipt['checkout_attestation']['source_manifest_sha256'],native.digest(native.canonical(actual)))
             self.assertEqual(receipt['execution_origin']['commit'],native.PRODUCER)
             self.assertFalse(receipt['current_native_commands_executed'])
@@ -754,7 +812,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
 
     def test_equivalent_make_key_does_not_normalize_v1_producer_raw_identity(self):
         rows,read_git = source_tree()
-        revised_make = subprocess.check_output(['git','show','9bcfa9ca1f792d214122762981c84c85ba5b3e64:Makefile'],cwd=ROOT)
+        revised_make = subprocess.check_output(['git','show','94da6eb93d7199e1d92e38ffbbcc53451b075303:Makefile'],cwd=ROOT)
         with mock.patch.object(native,'git',side_effect=read_git):
             original,contents = native.manifest(ROOT,CURRENT)
             rows['Makefile'] = ('100644',revised_make);revised,_ = native.manifest(ROOT,CURRENT)

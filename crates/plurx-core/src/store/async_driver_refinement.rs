@@ -1422,13 +1422,17 @@ async fn apply_primitive(
     })
 }
 
-// These omitted rows are constant for the selected library-only protocol.
+// These omitted extension rows are constant for the selected library-only protocol.
 // Observe them separately so the original nine-table canonical bytes stay exact.
 async fn omitted_dv_state(store: &SqliteStore) -> Result<Value, String> {
     let rows = store.queue_sql(
         r#"SELECT json_object(
           'files',(SELECT count(*) FROM files),
           'demand',(SELECT count(*) FROM dv_title_jobs_demand),
+          'handoffs',(SELECT count(*) FROM playback_handoffs),
+          'handoff_tokens',(SELECT count(*) FROM playback_handoffs_tokens),
+          'handoff_marker',json((SELECT json_group_array(json_array(singleton,version))
+            FROM (SELECT singleton,version FROM playback_handoffs_schema ORDER BY singleton,version))),
           'marker',json((SELECT json_group_array(json_array(singleton,version))
             FROM (SELECT singleton,version FROM dv_title_jobs_schema ORDER BY singleton,version))),
           'sequence',json((SELECT json_group_array(json_array(name,seq))
@@ -1451,10 +1455,13 @@ fn check_omitted_dv(fixture: &Fixture, state: &Value) -> Result<(), String> {
     if state["files"] != json!(0)
         || state["demand"] != json!(0)
         || state["marker"] != json!([[1, 1]])
+        || state["handoffs"] != json!(0)
+        || state["handoff_tokens"] != json!(0)
+        || state["handoff_marker"] != json!([[1, 1]])
         || !state["sequence"].is_array()
         || state["sequence"] != fixture.omitted_dv_sequence
     {
-        return Err("OmittedDvState: selected protocol changed fixed DV rows or sequence".into());
+        return Err("OmittedDvState: selected protocol changed fixed omitted extension rows, markers or sequence".into());
     }
     Ok(())
 }
@@ -1533,7 +1540,8 @@ async fn invariants(fixture: &Fixture, episode: &Episode) -> Result<(), String> 
 
 /// One actual sequential writer boundary, never a database restoration image.
 /// The complete nine-table rows and exact Episode determine canonical identity;
-/// omitted DV rows/sequence are independently observed and checked each time.
+/// omitted DV rows/sequence and empty handoff rows/marker are independently
+/// observed and checked each time.
 /// No SQL action or mutable Episode change may occur while carrying this value.
 struct BoundaryObservation {
     rows: Value,
@@ -3674,6 +3682,33 @@ async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
         uncertified.states[0].canonical,
         "failed certification still rolls back actual SQL"
     );
+
+    // Real SQL perturbs rows outside the original canonical frame. Both the
+    // independent-check reference and certified path must refuse every form.
+    for reuse in [false, true] {
+        for (kind, mutation) in [
+            ("marker", "DELETE FROM playback_handoffs_schema;"),
+            ("handoff", "INSERT INTO users(id,username,password_hash,is_admin,created_at) VALUES(314159,'omitted-handoff-fixture','hash',0,0); INSERT INTO playback_handoffs(id,code_hash,user_id,file_id,source_token_hash,created_at,expires_at) VALUES('outside-D','code',314159,1,'source',0,1);"),
+            ("token", "INSERT INTO users(id,username,password_hash,is_admin,created_at) VALUES(314159,'omitted-handoff-fixture','hash',0,0); INSERT INTO playback_handoffs_tokens(token_hash,handoff_id,user_id,file_id,source_token_hash,created_at,expires_at) VALUES('outside-D','handoff',314159,1,'source',0,1);"),
+        ] {
+            let mut hidden = Oracle::new(None).await.expect("omitted handoff fixture");
+            hidden.reuse_certificates = reuse;
+            let edge = hidden.apply(0, &action).await.expect("certified claim");
+            let parent = hidden.edges[edge].to;
+            hidden.apply(parent, &Action::ReadClaimJob { job: 0 }).await.expect("actual retained parent");
+            let counts = (hidden.states.len(), hidden.edges.len());
+            hidden.fixture.store.async_refinement_control(mutation.into()).await.expect("legal omitted-extension SQL perturbation");
+            assert_eq!(canonical(&hidden.fixture, &hidden.states[parent].episode).await,
+                hidden.states[parent].canonical, "{kind}: original nine-table frame is unchanged");
+            let error = hidden.apply(parent, &Action::ReadClaimJob { job: 1 }).await
+                .expect_err("actual omitted extension observation must reject drift");
+            assert!(error.starts_with("OmittedDvState:"), "{kind}/{reuse}: {error}");
+            assert!(hidden.materialization_failed);
+            assert_eq!((hidden.states.len(), hidden.edges.len()), counts, "no state/edge published");
+            assert!(hidden.apply(0, &action).await.expect_err("no certified fallback")
+                .starts_with("MaterializationPoisoned:"));
+        }
+    }
 
     let mut hidden = Oracle::new(None).await.expect("omitted-state fixture");
     let claim = hidden.apply(0, &action).await.expect("cached claim");

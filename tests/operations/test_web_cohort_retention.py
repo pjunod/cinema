@@ -441,6 +441,46 @@ class WebCohortRetentionTests(unittest.TestCase):
                 self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,{**current,'baseline':baseline}))
                 result.assert_not_called()
 
+    def test_supported_different_history_is_classified_before_positive_adapter_authentication(self):
+        api,pull,event,run,job=self.context();job['status']='success'
+        artifacts=[{'id':7001,'name':'web-cohort-6000-1','run_id':6000,'expired':False,'size_in_bytes':128}]
+        api.pages=lambda path,query=None,field=None:([job] if path.endswith('/jobs') else
+            artifacts if path.endswith('/artifacts') else [run])
+        original=fixture_inputs();current={**original,'files':[{'path':'reviewed-new-input'}]}
+        order=[]
+        def source(*args):order.append('source');return original
+        def adapter(*args):order.append('adapter');raise receipts.ReceiptError('Web adapter compatibility unknown')
+        with mock.patch.object(web,'git',return_value=b'validation.web_cohort_retention'), \
+             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1'}), \
+             mock.patch.object(web,'manifest',side_effect=source) as manifest, \
+             mock.patch.object(web,'producer_adapter',side_effect=adapter) as producer, \
+             mock.patch.object(web,'v1_result') as result, \
+             mock.patch.object(web.subprocess,'run') as launch:
+            self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,current))
+            self.assertEqual(order,['source']);producer.assert_not_called();result.assert_not_called();launch.assert_not_called()
+            # Exact matching inputs still need positive protocol authentication.
+            order.clear()
+            with self.assertRaisesRegex(receipts.ReceiptError,'adapter compatibility unknown'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,original)
+            self.assertEqual(order,['source','adapter']);result.assert_not_called()
+            # Unknown closure cannot be misclassified as different inputs.
+            manifest.side_effect=receipts.ReceiptError('Unsupported web executable/recipe/dependency shape; closure review required')
+            producer.reset_mock()
+            with self.assertRaisesRegex(receipts.ReceiptError,'Unsupported web executable'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,current)
+            producer.assert_not_called();result.assert_not_called();launch.assert_not_called()
+            # Matching successful producers still require a complete artifact.
+            manifest.side_effect=None;manifest.return_value=original
+            producer.side_effect=None;producer.return_value='f'*64;artifacts.clear()
+            with self.assertRaisesRegex(receipts.ReceiptError,'Matching web cohort artifact missing'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,original)
+            result.assert_not_called();launch.assert_not_called()
+            artifacts.append({'name':'web-cohort-malformed'})
+            manifest.reset_mock()
+            with self.assertRaisesRegex(receipts.ReceiptError,'artifact name malformed'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,current)
+            manifest.assert_not_called();launch.assert_not_called()
+
     def test_retained_effective_baseline_keeps_original_pointer_log_and_producer_inputs(self):
         api,pull,event,run,job=self.context();current=fixture_inputs();current['baseline']['event_base']='d'*40
         original=fixture_inputs();raw=('WEB-COHORT-START '+web.execution_key(original)+'\noriginal log\n').encode()

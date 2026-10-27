@@ -93,13 +93,18 @@ The source-reconstructed closure contains every tracked regular path/mode/blob
 and SHA-256 under the audited test, playback, daemon-source and fixture roots,
 plus their external contract data, helpers, Make/Cargo parse inputs and locked
 TypeScript configuration. The reviewed executable/helper/member-set aggregate
-is pinned. The exact fbbf and observed-main 087 shape families both include
+is pinned. The exact fbbf, observed-main 087 and integrated-main 94da shape
+families include
 Acorn and the transitively invoked startup-lab helper. Every row under
 `tests/web` and `tests/playback` is a reviewed shape, regardless of suffix:
 source, bytecode, native modules, extensionless files, package members and data
 that can select further inputs. These are raw supported families, with no
 applicability normalization: the reviewed changed inputs
-still produce a genuinely different key. Executable and loader inputs under
+still produce a genuinely different key. The integrated family adds the
+`linux-player-handoff.test.js` command: 78 Make programs plus the two direct
+workflow programs. Its reviewed new reads remain inside the web root and use
+the captured Acorn helper; no new external helper or subprocess is selected.
+Executable and loader inputs under
 `crates/plurxd/src/web` include `.js`, `.mjs`, `.cjs`, `.ts` (including `.d.ts`),
 `.html` and `.json`, with exact member sets. Their changes require closure
 review before fresh execution or retention: tests execute production bodies,
@@ -168,7 +173,13 @@ chains and cycles refuse. Pre-v1 heads without eligible cohort evidence are
 outside this protocol, not proven passes or input differences; they do not
 poison new-key execution through current-family parsing. A matching v1
 producer with missing, invalid or ambiguous evidence still refuses. Raw source
-manifests and log bytes remain original.
+manifests and log bytes remain original. For authenticated same-scope
+historical candidates with a supported workflow and complete supported source
+closure, raw applicability is reconstructed first. Proven different inputs can
+continue history without adopting a pass. Matching inputs still require exact
+producer adapter/policy and complete positive evidence; unknown closure or
+malformed/ambiguous artifact metadata refuses. The existing never-started and
+terminal nonproducer classifications keep their own identity guards.
 
 Web producer validation recognizes the exact complete reviewed predecessor
 adapter SHA-256 `fa61446a54fb35cf1c836dd6dac8b5fe90dfb239326345c8bdedcc33aa4485ef`

@@ -101,7 +101,7 @@ LEGACY_JOB = '''  web_compile:
         run: make web-unit-check
 
 '''
-SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '97f338f93705406847d3987b80bf2f0fa8402755a4d1b80003f2434d5d44b814', '9569dd03dcbd4a84b408078f90601d075fe726a9': '4bddf7fb49972695846029e71e65c488052eefbd39a52e747b17b9c86dd28c6c'}
+SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '97f338f93705406847d3987b80bf2f0fa8402755a4d1b80003f2434d5d44b814', '9569dd03dcbd4a84b408078f90601d075fe726a9': '4bddf7fb49972695846029e71e65c488052eefbd39a52e747b17b9c86dd28c6c', '80fa9bcfadf54ef89acf893eb485824ef5685549': '3a867b364c0ee5f39d94fee816e3b2bcd100ac2fe3150b0aafec412a9af6b628'}
 HELPERS = ('scripts/js-check', 'scripts/web-types', 'scripts/web-jsconfig', 'scripts/playback-lab', 'scripts/playback-frame-clock.js', 'scripts/continuous-quality-qualification', 'scripts/player-contract-table', 'scripts/ui-baseline', 'scripts/subtitle-readiness-browser-check', 'scripts/cq-native-shipping/check-evidence.js', 'tests/vendor/acorn.js', 'scripts/playback-startup-lab')
 WRAPPER = '''      - name: Retain or execute the reviewed whole web cohort
         env:
@@ -630,14 +630,19 @@ def matching_result(api,scope,workspace,current,current_run,current_inputs):
         require(len(possible_artifacts) == len(artifacts),'Web cohort artifact name malformed; no fallback execution')
         require(workflow_identity(workspace,run['commit_sha'])['kind'] == 'v1',
             'Eligible web producer has unsupported recipe; closure review required')
-        producer_adapter(workspace,run['commit_sha'],current)
         if not artifacts and len(jobs) == 1 and jobs[0].get('status') == 'skipped' and type(jobs[0].get('task_id')) is int and jobs[0]['task_id'] == 0:
+            producer_adapter(workspace,run['commit_sha'],current)
             require(jobs[0].get('repo_id') == scope['repository'] and jobs[0].get('run_id') == rid,
                 'Never-started web producer identity differs')
             continue
         adoption.bind_event(run,scope)
         inputs = manifest(workspace,run['commit_sha'],event['pull_request']['base']['sha'])
+        # Source applicability is separate from positive result authority.
+        # A supported, independently reconstructed different closure accepts no
+        # pass and may continue before adapter authentication. Matching inputs
+        # still require the exact producer protocol and all positive evidence.
         if applicability_inputs(inputs) != applicability_inputs(current_inputs): continue
+        producer_adapter(workspace,run['commit_sha'],current)
         require(len(jobs) == 1 and jobs[0].get('status') == 'success',
             'Matching web history is incomplete/ambiguous; no fallback execution')
         require(len(artifacts) == 1 and artifacts[0].get('name') == f'web-cohort-{rid}-1'

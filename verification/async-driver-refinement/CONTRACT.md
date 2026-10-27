@@ -91,6 +91,20 @@ source/invocation validators decide receipt reuse without an exception. The
 sampled actual-backend history retains its default non-DV file probe and adds
 no DV workload or prefix-reuse claim for Hiqlite.
 
+Migration 115 adds the excluded playback handoff extension. Selected D calls
+no handoff/user operation; the migration creates only its own tables, indexes
+and marker, without triggers or alterations of the nine canonical tables.
+The same actual omitted-extension observation additionally requires empty
+`playback_handoffs` and `playback_handoffs_tokens` and the complete ordered
+`playback_handoffs_schema` marker `[[1,1]]`. These are full empty-table checks,
+not sampled rows. No matching canonical certificate may bypass them at any
+boundary. Compiled migrations and the installed schema inventory bind the
+actual v115 SQL automatically; canonical state, D and fairness stay unchanged.
+The existing registered reset fixture defines real SQL marker deletion and
+legal handoff/token insertion negatives in both independent-check and certified
+modes. Those definitions remain unrun pending independent source review and
+qualification; they claim no handoff behavior coverage or accepted result.
+
 ## The proof closes a selected product, not arbitrary Store D
 
 The Rust test `store::async_driver_product::actual_sql_two_worker_product_is_closed`
