@@ -43,6 +43,7 @@ mod fragindex;
 mod fragment_index_cluster;
 mod hevc_census;
 mod http;
+mod https;
 mod job_lease;
 mod library_search;
 mod live_tv;
@@ -2229,6 +2230,7 @@ async fn boot_observing(
         Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
         _ => None,
     };
+    let prepared_https = https::Prepared::open(&config).await?;
     let Boot {
         source_activation_at_boot,
         store,
@@ -2278,6 +2280,13 @@ async fn boot_observing(
         system,
         logs,
     );
+    state.https = Some(Arc::new(https::Control::new(
+        node_id.clone(),
+        config.clone(),
+        prepared_https
+            .as_ref()
+            .map(|prepared| prepared.identity.clone()),
+    )?));
     state
         .sharing
         .observe_source_activation_at_boot(source_activation_at_boot);
@@ -2389,6 +2398,13 @@ async fn boot_observing(
     } else {
         None
     };
+    let public_listener_stop = tokio_util::sync::CancellationToken::new();
+    let https_serving = https::Serving::start(
+        prepared_https,
+        app.clone(),
+        public_listener_stop.clone(),
+        leave_shutdown.clone(),
+    );
     #[cfg(windows)]
     crate::windows_service::report_listener_ready()?;
     trigger_shutdown_registration_failpoint("after-listener-bind");
@@ -2434,21 +2450,26 @@ async fn boot_observing(
         }
         // The main listener stops accepting when this future completes;
         // the Jellyfin standard port stops at the same moment.
+        public_listener_stop.cancel();
         jellyfin_stop.cancel();
     };
     let served = if let Some(owner) = observation {
-        match owner.serve_normal(app, shutdown).await {
-            Ok(drain) => {
-                let drain = drain.and(jellyfin.drain().await);
-                drain_serving_state(progress, mdns).await.map(|()| drain)
-            }
-            Err(error) => Err(error),
-        }
+        serve_observed(
+            owner,
+            app,
+            jellyfin,
+            https_serving,
+            progress,
+            mdns,
+            shutdown,
+        )
+        .await
     } else {
         serve(
             listener.expect("normal startup owns its listener"),
             app,
             jellyfin,
+            https_serving,
             progress,
             mdns,
             shutdown,
@@ -3671,17 +3692,38 @@ async fn serve(
     listener: tokio::net::TcpListener,
     app: axum::Router,
     jellyfin: JellyfinStandardListener,
+    https: https::Serving,
     progress: Arc<crate::progress::ProgressCoalescer>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<HttpDrain> {
     // The shutdown future stops both listeners at once; the standard port
     // finishes draining before progress is flushed, like the main one.
-    let drain = serve_http(listener, app, shutdown, HTTP_TIMEOUTS)
-        .await?
-        .and(jellyfin.drain().await);
-    drain_serving_state(progress, mdns).await?;
-    Ok(drain)
+    let main = serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await;
+    let tls = https.drain().await;
+    let jellyfin = jellyfin.drain().await;
+    let cleanup = drain_serving_state(progress, mdns).await;
+    main.and_then(|main| tls.map(|tls| main.and(tls).and(jellyfin)))
+        .and_then(|drain| cleanup.map(|()| drain))
+}
+
+/// The observation socket transfers its router per request, but shares the
+/// same TLS/Jellyfin/progress ownership order as ordinary startup.
+async fn serve_observed(
+    owner: Arc<StartupObservationHttp>,
+    app: axum::Router,
+    jellyfin: JellyfinStandardListener,
+    https: https::Serving,
+    progress: Arc<crate::progress::ProgressCoalescer>,
+    mdns: Option<mdns_sd::ServiceDaemon>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<HttpDrain> {
+    let main = owner.serve_normal(app, shutdown).await;
+    let tls = https.drain().await;
+    let jellyfin = jellyfin.drain().await;
+    let cleanup = drain_serving_state(progress, mdns).await;
+    main.and_then(|main| tls.map(|tls| main.and(tls).and(jellyfin)))
+        .and_then(|drain| cleanup.map(|()| drain))
 }
 
 /// How `serve_http`'s shutdown drain ended. Only `Complete` proves that no
@@ -4077,6 +4119,9 @@ async fn serve_http<A: HttpAcceptor>(
         });
     }
 
+    // Cancel owned pending TLS handshakes before waiting on active bodies.
+    // This also releases the listening socket immediately on shutdown.
+    drop(listener);
     let _ = drain_started.send(());
     connection_shutdown.cancel();
     let connections_drained = async { while connections.join_next().await.is_some() {} };

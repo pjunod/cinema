@@ -130,6 +130,13 @@ The [`effort-ci.yml`](../.github/workflows/effort-ci.yml) gate runs only:
 | Apple | iOS and tvOS compilation | XCTest and physical-device acceptance |
 | Android | Debug application compilation | JVM tests, lint, emulator tests, and physical-device acceptance |
 
+The effort Rust job has a bounded 20-minute whole-job budget, including
+checkout, pinned-toolchain setup, cache restoration, all-target compilation
+and vendored Hiqlite denied-warning Clippy. The earlier ten-minute ceiling
+repeatedly expired during compilation without compiler diagnostics; this
+budget change removes no check and changes no runner, cache or service limit.
+Focused regressions remain local and final qualification remains mandatory.
+
 The aggregate result is named `Effort development gate`. Receipt-bearing
 attempts serialize without automatic cancellation so successful Python units
 cannot lose their evidence. [Once-per-PR Python receipts](ci/PYTHON-UNIT-PR-RECEIPTS.md)

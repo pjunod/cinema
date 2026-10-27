@@ -28,6 +28,7 @@ pub(crate) mod file_grants;
 pub(crate) mod playback_handoffs;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
+mod https_admin;
 pub(crate) mod images;
 pub(crate) mod index_coverage;
 pub(crate) mod internal_activity;
@@ -533,6 +534,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/trakt/link"
         | "/api/v1/trakt/sync"
         | "/api/v1/system"
+        | "/api/v1/system/https"
+        | "/api/v1/system/https/certificate"
         | "/api/v1/system/logs"
         | "/api/v1/system/playback-events"
         | "/api/v1/system/library-shape"
@@ -1536,6 +1539,8 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(auth::me))
         .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
+        .route("/system/https", get(https_admin::get))
+        .route("/system/https/certificate", get(https_admin::certificate))
         .route(
             "/subtitle-transcription",
             get(crate::subtitle_transcription::settings),
@@ -1831,6 +1836,10 @@ pub fn router(state: AppState) -> Router {
             get(crate::subtitle_models::api::options).post(crate::subtitle_models::generate),
         )
         .route("/settings", put(system::update_settings))
+        .route(
+            "/system/https",
+            put(https_admin::put).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route(
             "/subtitle-provider",
             put(subtitle_downloads::update_settings),
@@ -2459,6 +2468,9 @@ const NODE_MAINTENANCE_JSON: &str = r#"{"code":"node_maintenance","message":"thi
 /// refused, including catalogue browsing that may lead a client to select this
 /// ingress for a new stream.
 fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
+    if https_admin::eligible(method, path) {
+        return true;
+    }
     if method == Method::GET
         && (matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
             || path.starts_with("/assets/")
@@ -2589,7 +2601,8 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
 /// admitted only through the existing serving fence, so a learner also needs
 /// a fresh quorum/apply proof before any node-local work starts.
 fn learner_route_eligible(method: &Method, path: &str) -> bool {
-    if remote::eligible(method, path)
+    if https_admin::eligible(method, path)
+        || remote::eligible(method, path)
         || crate::diagnostics::eligible(method, path)
         || crate::diagnostics_delivery::eligible(method, path)
     {
@@ -2771,15 +2784,40 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     node_local_get || node_local_create || node_local_close || live_keepalive
 }
 
-async fn cluster_capacity_gate(
-    State(state): State<AppState>,
-    request: Request<axum::body::Body>,
-    next: Next,
-) -> Response {
-    let path = request.uri().path();
-    let method = request.method();
-    if state.membership.local_maintenance_active() && !maintenance_route_eligible(method, path) {
-        return (
+fn capacity_role_refusal(
+    role: Option<LocalServingRole>,
+    method: &Method,
+    path: &str,
+) -> Option<Response> {
+    match role {
+        Some(LocalServingRole::Unclustered | LocalServingRole::Voter) => None,
+        Some(LocalServingRole::Learner) if learner_route_eligible(method, path) => None,
+        Some(LocalServingRole::Learner) => Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                LEARNER_ROUTE_INELIGIBLE_JSON,
+            )
+                .into_response(),
+        ),
+        Some(LocalServingRole::Fenced) if matches!(path, "/healthz" | "/metrics") => None,
+        Some(LocalServingRole::Fenced) | None => Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (header::RETRY_AFTER, "1"),
+                ],
+                NODE_REMOVAL_FENCED_JSON,
+            )
+                .into_response(),
+        ),
+    }
+}
+
+fn capacity_maintenance_refusal(active: bool, method: &Method, path: &str) -> Option<Response> {
+    (active && !maintenance_route_eligible(method, path)).then(|| {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             [
                 (header::CONTENT_TYPE, "application/json"),
@@ -2787,32 +2825,27 @@ async fn cluster_capacity_gate(
             ],
             NODE_MAINTENANCE_JSON,
         )
-            .into_response();
+            .into_response()
+    })
+}
+
+async fn cluster_capacity_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if let Some(refusal) = capacity_maintenance_refusal(
+        state.membership.local_maintenance_active(),
+        request.method(),
+        request.uri().path(),
+    ) {
+        return refusal;
     }
-    match state.membership.local_serving_role().await {
-        Ok(LocalServingRole::Unclustered | LocalServingRole::Voter) => next.run(request).await,
-        Ok(LocalServingRole::Learner) if learner_route_eligible(method, path) => {
-            next.run(request).await
-        }
-        Ok(LocalServingRole::Learner) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::CONTENT_TYPE, "application/json")],
-            LEARNER_ROUTE_INELIGIBLE_JSON,
-        )
-            .into_response(),
-        Ok(LocalServingRole::Fenced) if matches!(path, "/healthz" | "/metrics") => {
-            next.run(request).await
-        }
-        Ok(LocalServingRole::Fenced) | Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (header::RETRY_AFTER, "1"),
-            ],
-            NODE_REMOVAL_FENCED_JSON,
-        )
-            .into_response(),
+    let role = state.membership.local_serving_role().await.ok();
+    if let Some(refusal) = capacity_role_refusal(role, request.method(), request.uri().path()) {
+        return refusal;
     }
+    next.run(request).await
 }
 
 fn safe_trace_target(uri: &Uri) -> String {

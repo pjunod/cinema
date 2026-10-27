@@ -376,6 +376,16 @@ class LinuxDolbySdkCase(unittest.TestCase):
                 assert row["url"].endswith((".tar.gz", ".tar.xz", ".tar.bz2", ".tgz")) or "/tar.gz/" in row["url"] or "/legacy.tar.gz/" in row["url"]
             if row.get("historical_archive_equivalence"):
                 assert row["source_tree_sha256"] == row["historical_archive_equivalence"]["normalized_tree_sha256"]
+        # Fontconfig's upstream has no HTTPS archive endpoint; main #1123 fetches
+        # the pinned public commit through its declared Git archive provider and
+        # reproduces the historical source offer without changing its checksum.
+        fc = lock["sources"]["fc"]
+        assert fc["archive_provider"] == "git-archive"
+        assert fc["url"] == "https://chromium.googlesource.com/external/fontconfig"
+        assert fc["commit"] == "6d0a98982ec351c165c9224c8b7dbdfca3010e47"
+        assert fc["archive"] == "fc-" + fc["commit"] + ".tar.gz"
+        assert fc["archive_sha256"] == "00a589ef0a455d9cf3db55a13e1aa15090a96e65b18a3fe89c182b7be277576d"
+        assert fc["license_members"] == ["COPYING"]
         assert {module["path"] for module in lock["sources"]["freetype"]["submodules"]} == {"subprojects/dlg"}
         placebo = lock["sources"]["libplacebo"]
         assert {module["path"] for module in placebo["submodules"]} == {"3rdparty/glad", "3rdparty/jinja", "3rdparty/markupsafe", "3rdparty/fast_float", "3rdparty/Vulkan-Headers"}

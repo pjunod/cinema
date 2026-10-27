@@ -90,6 +90,10 @@ planned work in detail.
 - **Compatibility and history.** A bounded Plex-compatible API for supported
   clients, plus optional Trakt history and scrobbling. See the
   [feature inventory](docs/FEATURES.md) for the supported directions and limits.
+- **Optional HTTPS.** Enable an additional node-local listener in Settings →
+  Developer, using a persistent self-signed identity or supplied certificate
+  files. Restart to apply; HTTP remains available. Client trust and physical
+  playback qualification remain explicit in the [HTTPS ledger](docs/server/HTTPS-BUILD.md).
 - **Operations you can inspect.** Live activity, scan results, logs, readiness
   checks, Prometheus metrics, and playback diagnostics. Replicated storage,
   cluster membership, transport recovery, and media-pool tooling have

@@ -708,6 +708,8 @@ impl StoreMetricsCache {
 /// Everything a request handler needs. Cheap to clone (all shared via `Arc`).
 #[derive(Clone)]
 pub struct AppState {
+    /// Addressed-node HTTPS intent and the actually loaded public identity.
+    pub(crate) https: Option<Arc<crate::https::Control>>,
     pub store: Arc<dyn Store>,
     pub(crate) sharing: Arc<crate::sharing::SharingManager>,
     pub(crate) link_receipts: Arc<crate::http::hls::link_receipts::LinkReceipts>,
@@ -1296,6 +1298,7 @@ impl AppState {
         );
         live_tv.set_settings_changes(settings_changes.clone());
         AppState {
+            https: None,
             store,
             sharing,
             link_receipts: Default::default(),
