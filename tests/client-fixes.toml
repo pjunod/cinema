@@ -7948,3 +7948,21 @@ source = "clients/linux-player/packaging/apt-snapshot.sh"
 source_anchor = "apt-get -q -o APT::Update::Error-Mode=any update"
 test = "clients/linux-player/tests/test_packaging.py"
 test_anchor = "def test_every_container_shares_the_snapshot_apt_cache(self):"
+
+# A live session shows the whole film on mpv's OSC (patch 0005) and seeks outside the stream restart it there.
+[[fixes]]
+id = "claude.linux-player-film-timeline"
+commits = ["d1acb127c26c09b0674eba96bf7b051790bd698a"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def show_film_timeline(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):"
+
+[[fixes]]
+id = "claude.mpv-osc-film-timeline"
+commits = []
+supplements = "claude.linux-player-film-timeline"
+source = "clients/linux-player/packaging/patches/mpv/0005-osc-draw-a-film-timeline-the-application-provides.patch"
+source_anchor = "+-- A film timeline the embedding application sets in user-data/osc/film as"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_the_osc_reads_the_film_timeline_and_hands_back_outside_seeks(self):"
