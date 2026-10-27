@@ -104,6 +104,9 @@ WORKFLOW_SCOPE_PINS = {
     'legacy_apple':'c6bd7e2361ac9055999c183f2f53b36b4a40fdf72b7cf1167a5990d271639e19',
     'adapted_apple':'519df6d3b88a2ba381cd1633379b1a040ea04ce962471c7783f124d8fd887194',
 }
+APPLE_CACHE_START = b'      - name: Cache DerivedData\n'
+APPLE_COMPILE_STEP = b'      - name: Compile iOS and tvOS without running simulator tests\n'
+APPLE_CACHE_SHA256 = '9fdac9fa65689d8b5e09cc2ecf0f739c1ba0ba7d5b94b99673c2d26a42870961'
 PROTECTED_DEPENDENCIES = ('paperwork','scope','preflight')
 RECIPE_PINS = {
     'Cargo.toml':('100644','72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f'),
@@ -423,6 +426,30 @@ def workflow_parts(raw):
     return ''.join(lines[:marker+1]).encode(),blocks
 
 
+def reviewed_apple_cache(legacy_apple):
+    """Pin the original mobile-only cache step from the authenticated producer."""
+    require(legacy_apple.count(APPLE_CACHE_START) == 1
+        and legacy_apple.count(APPLE_COMPILE_STEP) == 1,
+        'Reviewed native Apple cache anchors differ')
+    start = legacy_apple.index(APPLE_CACHE_START)
+    end = legacy_apple.index(APPLE_COMPILE_STEP)
+    cache = legacy_apple[start:end]
+    require(start < end and len(cache) == 645 and digest(cache) == APPLE_CACHE_SHA256,
+        'Reviewed native Apple cache bytes differ')
+    return cache
+
+
+def apple_without_reviewed_cache(apple, cache):
+    """Allow zero or one exact cache step only at its original adjacency."""
+    require(apple.count(APPLE_COMPILE_STEP) == 1 and apple.count(cache) <= 1,
+        'Unsupported native Apple cache placement or count')
+    if cache in apple:
+        require(apple.count(cache + APPLE_COMPILE_STEP) == 1,
+            'Unsupported native Apple cache placement')
+        return apple.replace(cache + APPLE_COMPILE_STEP, APPLE_COMPILE_STEP, 1)
+    return apple
+
+
 def workflow_scope(workspace,commit,legacy):
     require(isinstance(commit,str) and re.fullmatch('[0-9a-f]{40}',commit),'Invalid native workflow commit')
     require(digest(legacy) == PRODUCER_WORKFLOW,'Unrecognized native producer workflow')
@@ -433,14 +460,21 @@ def workflow_scope(workspace,commit,legacy):
         and digest(baseline['apple_compile']) == WORKFLOW_SCOPE_PINS['legacy_apple']
         and digest(adapted['apple_compile']) == WORKFLOW_SCOPE_PINS['adapted_apple'],
         'Reviewed native workflow scope identities differ')
+    cache = reviewed_apple_cache(baseline['apple_compile'])
+    require(reviewed_apple_cache(adapted['apple_compile']) == cache,
+        'Reviewed native adapted Apple cache differs')
+    legacy_apple = apple_without_reviewed_cache(baseline['apple_compile'], cache)
+    adapted_apple = apple_without_reviewed_cache(adapted['apple_compile'], cache)
     current = git(workspace,'show',commit+':'+WORKFLOW,limit=MAX_WORKFLOW_BYTES)
     current_preamble,blocks = workflow_parts(current)
     require(current_preamble == preamble and all(name in blocks and blocks[name] == baseline[name]
         for name in PROTECTED_DEPENDENCIES),'Unsupported native workflow preamble/dependency scope')
     apple = blocks.get('apple_compile')
-    require(apple in (baseline['apple_compile'],adapted['apple_compile']),
+    require(apple is not None, 'Unsupported native Apple job scope')
+    scoped_apple = apple_without_reviewed_cache(apple, cache)
+    require(scoped_apple in (legacy_apple,adapted_apple),
         'Unsupported native Apple job scope')
-    return {'sha256':digest(current),'kind':'legacy' if apple == baseline['apple_compile'] else 'adapted'}
+    return {'sha256':digest(current),'kind':'legacy' if scoped_apple == legacy_apple else 'adapted'}
 
 
 def workflow_identity(workspace,commit,legacy):
@@ -876,7 +910,10 @@ def policy_fingerprint():
         'origin_job':ORIGIN_JOB,'origin_artifact':ORIGIN_ARTIFACT,'archive_sha256':ORIGIN_ZIP_SHA,
         'job_log_sha256':ORIGIN_JOB_SHA,'roots':ROOTS,'command':COMMAND,
         'workflow_sha256':PRODUCER_WORKFLOW,
-        'workflow_scope':{'version':1,'grammar':'bounded-plain-job-map-LF-UTF8-v1','pins':WORKFLOW_SCOPE_PINS,
+        'workflow_scope':{'version':2,'grammar':'bounded-plain-job-map-LF-UTF8-v1','pins':WORKFLOW_SCOPE_PINS,
+            'optional_apple_cache':{'version':1,'sha256':APPLE_CACHE_SHA256,'bytes':645,
+                'placement':'immediately-before-single-compile-step','cardinality':[0,1],
+                'comparison':'remove-exact-legacy-bytes-both-sides-scope-only'},
             'protected_dependencies':PROTECTED_DEPENDENCIES,'apple_job':'apple_compile','max_bytes':MAX_WORKFLOW_BYTES,'max_jobs':MAX_WORKFLOW_JOBS},'recipe_version':RECIPE_VERSION,'recipe_pins':RECIPE_PINS,
         'known_makefile_provenance':MAKEFILE_FAMILY,'canonical_makefile':CANONICAL_MAKEFILE,'applicability_projection':APPLICABILITY_PROJECTION,
         'native_make_scope':{'version':1,'grammar':'restricted-literal-rules-and-reviewed-globals',

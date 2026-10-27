@@ -99,6 +99,14 @@ job. Current execution and v1 producers require the adapted kind. The bounded
 UTF-8/LF plain-job-map splitter rejects tabs, duplicate or complex keys, late
 globals, unsupported indentation and more than 64 jobs within 128 KiB.
 Unrelated job bodies may change without changing the protected native scope.
+One exact original DerivedData cache step is an optional isolated capability:
+its complete 645 bytes and pinned action/path/key/condition are checked, and it
+may occur once only at its original position immediately before the mobile/TV
+compile step. Scope comparison removes only that exact block from both sides;
+modified, moved, duplicated or additional cache recipes still refuse. Its
+`clients/apple/build/DerivedData` path is outside the native tray source and
+scratch closure. This supports cache removal without changing native commands
+or accepting modified mobile/TV cases as old passes.
 Receipts still record the SHA-256 of the actual complete producer/consumer
 workflow bytes; scoped kind is separate and never replaces raw provenance.
 The scope version and protected identities enter the policy fingerprint;

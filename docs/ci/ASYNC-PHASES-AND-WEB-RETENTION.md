@@ -93,7 +93,7 @@ The source-reconstructed closure contains every tracked regular path/mode/blob
 and SHA-256 under the audited test, playback, daemon-source and fixture roots,
 plus their external contract data, helpers, Make/Cargo parse inputs and locked
 TypeScript configuration. The reviewed executable/helper/member-set aggregate
-is pinned. The exact fbbf, observed-main 087 and integrated-main 94da shape
+is pinned. The exact fbbf, observed-main 087 and integrated-main 94da/656a shape
 families include
 Acorn and the transitively invoked startup-lab helper. Every row under
 `tests/web` and `tests/playback` is a reviewed shape, regardless of suffix:
@@ -101,9 +101,15 @@ source, bytecode, native modules, extensionless files, package members and data
 that can select further inputs. These are raw supported families, with no
 applicability normalization: the reviewed changed inputs
 still produce a genuinely different key. The integrated family adds the
-`linux-player-handoff.test.js` command: 78 Make programs plus the two direct
-workflow programs. Its reviewed new reads remain inside the web root and use
-the captured Acorn helper; no new external helper or subprocess is selected.
+`linux-player-handoff.test.js` command. The later integrated family also adds
+`cinema-remote-browser-support.test.js`: 79 Make programs plus the two direct
+workflow programs. That unit reads its captured sibling CJS into a VM and
+intercepts Playwright and process launch with mocks; it exercises local temporary
+profile cleanup without launching a browser. HTTPS settings checks use captured
+production code and mocked API/DOM calls. The changed baseline helper is read as
+source; its self-host browser/daemon path is not selected by this cohort. These
+reviewed changes stay within the captured roots/helpers, and require a fresh
+current cohort. No real-browser execution or prior-pass applicability is implied.
 Executable and loader inputs under
 `crates/plurxd/src/web` include `.js`, `.mjs`, `.cjs`, `.ts` (including `.d.ts`),
 `.html` and `.json`, with exact member sets. Their changes require closure

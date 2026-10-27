@@ -264,6 +264,58 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         with mock.patch.object(native,'git',return_value=added):
             self.assertEqual(native.workflow_identity(ROOT,CURRENT,legacy),native.digest(added))
 
+    def test_native_apple_cache_scope_accepts_only_original_optional_step(self):
+        legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
+        adapted = native.transformed_workflow(legacy)
+        cache = native.reviewed_apple_cache(native.workflow_parts(legacy)[1]['apple_compile'])
+        self.assertEqual((len(cache),native.digest(cache)),(645,native.APPLE_CACHE_SHA256))
+        policy = native.policy_fingerprint()
+        with mock.patch.object(native,'APPLE_CACHE_SHA256','f'*64):
+            self.assertNotEqual(native.policy_fingerprint(),policy)
+        adjacency = cache + native.APPLE_COMPILE_STEP
+        self.assertEqual(legacy.count(adjacency),1)
+        self.assertEqual(adapted.count(adjacency),1)
+        without_legacy = legacy.replace(adjacency,native.APPLE_COMPILE_STEP,1)
+        without_adapted = adapted.replace(adjacency,native.APPLE_COMPILE_STEP,1)
+        self.assertEqual(len({native.digest(raw) for raw in
+            (legacy,without_legacy,adapted,without_adapted)}),4)
+        for raw,kind in ((legacy,'legacy'),(without_legacy,'legacy'),
+                (adapted,'adapted'),(without_adapted,'adapted')):
+            with self.subTest(kind=kind,sha=native.digest(raw)),mock.patch.object(native,'git',return_value=raw):
+                self.assertEqual(native.workflow_scope(ROOT,CURRENT,legacy),
+                    {'sha256':native.digest(raw),'kind':kind})
+                self.assertEqual(native.workflow_identity(ROOT,CURRENT,legacy),native.digest(raw))
+
+        variants = (
+            cache.replace(b'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830',
+                b'actions/cache@1057852bfaa89a56745cba8c7296529d2fc39830'),
+            cache.replace(b'clients/apple/build/DerivedData',b'clients/apple/build/OtherData'),
+            cache.replace(b'clients/apple/build/DerivedData',b'clients/server-tray/macos/build'),
+            cache.replace(b'key: main-fast-apple-dd-',b'key: other-apple-dd-'),
+            cache.replace(b"if: needs.scope.outputs.apple == 'true'",b'if: always()'),
+            cache.replace(b'Cache DerivedData',b'Cache unknown'),
+        )
+        changes = [adapted.replace(adjacency,variant+native.APPLE_COMPILE_STEP,1)
+            for variant in variants]
+        apple = native.workflow_parts(adapted)[1]['apple_compile']
+        def changed_apple(before,after):
+            self.assertEqual(apple.count(before),1)
+            return adapted.replace(apple,apple.replace(before,after,1),1)
+        changes += [adapted.replace(adjacency,native.APPLE_COMPILE_STEP,1).replace(
+            b'      - name: Verify the pinned mobile Apple toolchain\n',
+            cache+b'      - name: Verify the pinned mobile Apple toolchain\n',1),
+            adapted.replace(adjacency,cache+adjacency,1),
+            changed_apple(b'--fresh-on-new-inputs',b'--skip-native-check'),
+            changed_apple(b'DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer',
+                b'DEVELOPER_DIR: /tmp/other-xcode'),
+            changed_apple(b'    needs: [scope, preflight]\n',b'    needs: [scope]\n')]
+        for raw in changes:
+            self.assertNotEqual(raw,adapted)
+            with self.subTest(sha=native.digest(raw)),mock.patch.object(native,'git',return_value=raw), \
+                 self.assertRaisesRegex(native.receipts.ReceiptError,
+                    'Unsupported native Apple (cache placement|job scope)'):
+                native.workflow_scope(ROOT,CURRENT,legacy)
+
     def test_native_workflow_scope_refuses_protected_globals_jobs_and_ambiguous_maps(self):
         legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
         actual = (ROOT/native.WORKFLOW).read_bytes();preamble,blocks=native.workflow_parts(actual)
