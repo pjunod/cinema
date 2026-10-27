@@ -2745,7 +2745,7 @@ fn assert_descriptor(_pause: &resource::SourceResourceJobPause, _open: bool, _wh
 /// Real accepted Hyper custody for factory fixtures. This transport setup is
 /// not distributed playback qualification; it prevents a fabricated permission
 /// or closure token from standing in for an accepted writer.
-struct SourceFactoryIngressFixture {
+pub(crate) struct SourceFactoryIngressFixture {
     state: Arc<crate::state::AppState>,
     assignment: SourceDispatchAssignment,
     obligation: crate::sharing_connection_custody::CapturedIngressObligation,
@@ -2806,7 +2806,7 @@ fn source_fixture_ack_race_committed(
             == plurx_core::sharing_ingress_custody::CustodyMutation::Replay
 }
 impl SourceFactoryIngressFixture {
-    async fn new(
+    pub(crate) async fn new(
         state: Arc<crate::state::AppState>,
         assignment: &SourceDispatchAssignment,
     ) -> Self {
@@ -2928,7 +2928,7 @@ impl SourceFactoryIngressFixture {
             stop: Some(stop),
         }
     }
-    async fn permission(&self) -> SourceIngressAdmissionPermission {
+    pub(crate) async fn permission(&self) -> SourceIngressAdmissionPermission {
         let members = self
             .state
             .membership
@@ -2948,7 +2948,7 @@ impl SourceFactoryIngressFixture {
             .expect("guarded permission issuer")
             .expect("registered actual ingress permission")
     }
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         self.close_transport(true, None).await;
     }
     async fn close_transport(mut self, seal: bool, retirement_owner: Option<SourceViewerActor>) {

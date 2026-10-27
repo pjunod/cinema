@@ -127,6 +127,8 @@ impl TranscodeManager {
 #[cfg(test)]
 #[path = "tests/source_actor.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::SourceFactoryIngressFixture;
 
 #[path = "source_control.rs"]
 pub(crate) mod control;
