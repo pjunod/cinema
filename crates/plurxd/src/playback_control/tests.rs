@@ -9195,7 +9195,11 @@ fn the_shadow_decision_metric_publishes_every_axis_and_outcome() {
             .map(|(index, _)| index)
             .collect();
         // Every platform × five axes × two outcomes.
-        assert_eq!(samples.len(), CLIENT_PLATFORM_LABELS.len() * 5 * 2, "{name}");
+        assert_eq!(
+            samples.len(),
+            CLIENT_PLATFORM_LABELS.len() * 5 * 2,
+            "{name}"
+        );
         assert_eq!(
             samples.last().expect("samples") - samples[0],
             samples.len() - 1,
