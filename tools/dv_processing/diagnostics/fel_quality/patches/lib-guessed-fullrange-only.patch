@@ -1,0 +1,27 @@
+--- a/libplacebo/src/renderer.c
++++ b/libplacebo/src/renderer.c
+@@ -2096,8 +2096,8 @@
+             struct pl_color_repr diag_before_copy = pass->img.repr;
+             pl_color_repr_normalize(&diag_before_copy);
+             pl_transform3x3 diag_before_affine = pl_color_repr_decode(&diag_before_copy, params->color_adjustment);
+-            bool diag_apply = image->repr.levels == PL_COLOR_LEVELS_FULL &&
+-                              pass->img.repr.levels == PL_COLOR_LEVELS_FULL &&
++            bool diag_apply = pl_color_levels_guess(&image->repr) == PL_COLOR_LEVELS_FULL &&
++                              pl_color_levels_guess(&pass->img.repr) == PL_COLOR_LEVELS_FULL &&
+                               diag_source_signal_depth == 10 &&
+                               pass->img.repr.bits.bit_shift == 0 &&
+                               !image->lut && !params->lut && params->num_hooks == 0;
+@@ -2107,11 +2107,12 @@
+                 pass->img.repr.bits.bit_shift = 0;
+             }
+             PL_WARN(rr, "{\"kind\":\"diagnostic_dv_bitdepth_control\",\"applied\":%s,"
+-                    "\"original_signal_depth\":%d,\"before_bits\":[%d,%d,%d],\"after_bits\":[%d,%d,%d],"
++                    "\"original_signal_depth\":%d,\"image_raw_levels\":%d,\"image_guessed_levels\":%d,\"pass_raw_levels\":%d,\"pass_guessed_levels\":%d,\"before_bits\":[%d,%d,%d],\"after_bits\":[%d,%d,%d],"
+                     "\"copy_before_decode_matrix\":[[%.9g,%.9g,%.9g],[%.9g,%.9g,%.9g],[%.9g,%.9g,%.9g]],"
+                     "\"copy_before_decode_offset\":[%.9g,%.9g,%.9g],"
+                     "\"scope\":\"diagnostic observed full-range DV10, normalized shift0, no LUT or hooks\"}",
+                     diag_apply?"true":"false",diag_source_signal_depth,
++                    image->repr.levels,pl_color_levels_guess(&image->repr),pass->img.repr.levels,pl_color_levels_guess(&pass->img.repr),
+                     diag_before.sample_depth,diag_before.color_depth,diag_before.bit_shift,
+                     pass->img.repr.bits.sample_depth,pass->img.repr.bits.color_depth,pass->img.repr.bits.bit_shift,
+                     (double)diag_before_affine.mat.m[0][0],(double)diag_before_affine.mat.m[0][1],(double)diag_before_affine.mat.m[0][2],

@@ -1,0 +1,22 @@
+--- a/src/renderer.c
++++ b/src/renderer.c
+@@ -1622,7 +1622,7 @@
+     struct pl_color_repr el_repr = el->repr;
+     float el_scale = pl_color_repr_normalize(&el_repr);
+ 
+-#pragma GLSL vec4 color = vec4(0.0), tmp;
++#pragma GLSL vec4 color = vec4(0.0); precise vec4 tmp;
+ 
+     for (int i = 0; i < el->num_planes; i++) {
+         const struct pl_plane *plane = &el->planes[i];
+--- a/src/shaders/colorspace.c
++++ b/src/shaders/colorspace.c
+@@ -140,7 +140,7 @@
+     // sign(0) == 0 covers the spec's rr==0 carve-out exactly.
+ #pragma GLSL /* sh_dovi_compose_nlq */                                  \
+     {                                                                   \
+-    vec3 el_centered = $el_signal().rgb - $off;                         \
++    precise vec3 el_centered = $el_signal().rgb - $off;                         \
+     color.rgb += sign(el_centered) * (abs(el_centered) * $slp + $thr);  \
+     }
+ #endif

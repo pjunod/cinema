@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "frozen_source": "087e836d369eb2b8f94ec1d0454ea6c157612df9",
+  "status": "Open investigation. No selected candidate passes the strict shadow-tail criterion. No live change.",
+  "private_evidence_parent": "~/.local/state/plurx-fel-quality",
+  "prior_calibration": {
+    "directory": "20261026-measurement-calibration",
+    "manifest": "MANIFEST.calibration-batch.json",
+    "sha256": "86e5711ab195e75716b976fce74b85e96b395ed1a547c194b9a431fabe84b24d",
+    "files": 2731,
+    "bytes": 22110198508
+  },
+  "shadow_followup": {
+    "directory": "20261026-shadow-followup",
+    "status": "Archive sealing follows this checkpoint; working evidence retained separately.",
+    "combined_results": "shadow-stage-comparison-v4.json",
+    "combined_results_sha256": "6f82852a828ed932d01a36edf562ab9e1e1a1dc9d624857aa5fc498809f8cf28"
+  },
+  "source_copies": [
+    {
+      "file": "four_model_audit.py",
+      "retained_source": "calibration/four-model-tools/four_model_audit.py",
+      "original_sha256": "5269e01224be889a45a657fb346984db584186a8935c038fe9520261a8bf1380",
+      "committed_sha256": "5269e01224be889a45a657fb346984db584186a8935c038fe9520261a8bf1380",
+      "change": "none"
+    },
+    {
+      "file": "vector_metrics.py",
+      "retained_source": "calibration/four-model-tools/vector_metrics.py",
+      "original_sha256": "b8c4afd3bb6d2ad8fa6389f7d443233d2da53df9b113786a14b27c5931ae63c6",
+      "committed_sha256": "b8c4afd3bb6d2ad8fa6389f7d443233d2da53df9b113786a14b27c5931ae63c6",
+      "change": "none"
+    },
+    {
+      "file": "collect_rgb48.py",
+      "retained_source": "calibration/window-tools/collect_rgb48.py",
+      "original_sha256": "35021575a9ddd53ed8546ef9cff6bbc41eaf5dea85dfed5c9b0024fb5e5490ec",
+      "committed_sha256": "35021575a9ddd53ed8546ef9cff6bbc41eaf5dea85dfed5c9b0024fb5e5490ec",
+      "change": "none"
+    },
+    {
+      "file": "score_collections.py",
+      "retained_source": "calibration/window-tools/score_collections.py",
+      "original_sha256": "9b99bb6d233d7c16b614530d07817a399d0f0379392fca08279bbc9c7f1fc6cc",
+      "committed_sha256": "9b99bb6d233d7c16b614530d07817a399d0f0379392fca08279bbc9c7f1fc6cc",
+      "change": "none"
+    },
+    {
+      "file": "prepare_author_request.py",
+      "retained_source": "calibration/author/prepare_request.py",
+      "original_sha256": "ea7f653cf60f67347082d1b5c13d1af7218968ccbe102f16e07c96bd15e4ea17",
+      "committed_sha256": "ea7f653cf60f67347082d1b5c13d1af7218968ccbe102f16e07c96bd15e4ea17",
+      "change": "none"
+    },
+    {
+      "file": "audit_picture_payload.py",
+      "retained_source": "calibration/tooling/audit_authored_picture_payload.py",
+      "original_sha256": "1c6e4193c6d13c382c86f81efd4192953be706858f2023c4840046f06c2c4f5c",
+      "committed_sha256": "1c6e4193c6d13c382c86f81efd4192953be706858f2023c4840046f06c2c4f5c",
+      "change": "none"
+    },
+    {
+      "file": "encode_candidate.py",
+      "retained_source": "shadow/tooling/encode_shadow_combination.py",
+      "original_sha256": "e942944622ff1ee094a687fe157764fe9f200209d51ef9f8acb05d93bf67a0e7",
+      "committed_sha256": "a8f13e8b61947fb280b6867a625f9e94b9b8a0aa5799c04e7e72d6250542c120",
+      "change": "Required --output-root replaces source-file-relative output root; numerical/encoder settings unchanged. Adapter not the historical executed producer."
+    },
+    {
+      "file": "patches/bitdepth-only.patch",
+      "retained_source": "calibration/bitdepth-control-build/bitdepth-only.patch",
+      "original_sha256": "9127b0b339eda5e368fcd1947e3a7576bb006b9c6f0ed44a0f7ba5dae0c5e60f",
+      "committed_sha256": "9127b0b339eda5e368fcd1947e3a7576bb006b9c6f0ed44a0f7ba5dae0c5e60f",
+      "change": "none; diagnostic-only source delta, not automatically applied"
+    },
+    {
+      "file": "patches/bitdepth-precise.patch",
+      "retained_source": "calibration/bitdepth-control-build/bitdepth-precise.patch",
+      "original_sha256": "f825c16ee05e7dd52b1c9108b2446f6117fa3aaf86bc90633e9307e6eaf77ff8",
+      "committed_sha256": "f825c16ee05e7dd52b1c9108b2446f6117fa3aaf86bc90633e9307e6eaf77ff8",
+      "change": "none; diagnostic-only source delta, not automatically applied"
+    },
+    {
+      "file": "patches/precision-only.patch",
+      "retained_source": "calibration/precise-lib-build/precision-only.patch",
+      "original_sha256": "7fed98c8ca732c963b9cbf878247687a147404a41b7383fa184291854c92fa93",
+      "committed_sha256": "7fed98c8ca732c963b9cbf878247687a147404a41b7383fa184291854c92fa93",
+      "change": "none; diagnostic-only source delta, not automatically applied"
+    },
+    {
+      "file": "patches/relative-chroma-only.patch",
+      "retained_source": "calibration/relative-chroma-bias-build/relative-chroma-only.patch",
+      "original_sha256": "fe271bbb848c368f3dadde9e2f7bd9ea25491b60c08ebebfa3de2122d4d1856e",
+      "committed_sha256": "fe271bbb848c368f3dadde9e2f7bd9ea25491b60c08ebebfa3de2122d4d1856e",
+      "change": "none; diagnostic-only source delta, not automatically applied"
+    },
+    {
+      "file": "patches/base-color-reset.patch",
+      "retained_source": "calibration/helper-build/base-color-reset.patch",
+      "original_sha256": "a5766025ca3a5762081dfe6b432c2f2a35138b2cfb8eb7bcf7c1984d2a562bc2",
+      "committed_sha256": "a5766025ca3a5762081dfe6b432c2f2a35138b2cfb8eb7bcf7c1984d2a562bc2",
+      "change": "none; diagnostic-only source delta, not automatically applied"
+    },
+    {
+      "file": "patches/helper-calibration-only.patch",
+      "retained_source": "calibration/calibrated-diagnostic-build/helper-calibration-only.patch",
+      "original_sha256": "26f139b990aa209ddd6ef361402a8aedf97614ef7ee0912141113821ac1f9faa",
+      "committed_sha256": "26f139b990aa209ddd6ef361402a8aedf97614ef7ee0912141113821ac1f9faa",
+      "change": "none; diagnostic-only source delta, not automatically applied"
+    },
+    {
+      "file": "patches/lib-guessed-fullrange-only.patch",
+      "retained_source": "calibration/calibrated-diagnostic-build/lib-guessed-fullrange-only.patch",
+      "original_sha256": "cf6fa86c9af7e7e32317781fb18c5b653d3377c6b71ac67ad5b3c01b6454cfb1",
+      "committed_sha256": "cf6fa86c9af7e7e32317781fb18c5b653d3377c6b71ac67ad5b3c01b6454cfb1",
+      "change": "none; diagnostic-only source delta, not automatically applied"
+    },
+    {
+      "file": "patches/point-export-only.patch",
+      "retained_source": "calibration/point-export-build/point-export-only.patch",
+      "original_sha256": "4998878fc733b1843e469747fa7d95c8c6b614ad172b64d099ba7b064f54f13e",
+      "committed_sha256": "4998878fc733b1843e469747fa7d95c8c6b614ad172b64d099ba7b064f54f13e",
+      "change": "none; diagnostic-only source delta, not automatically applied"
+    },
+    {
+      "file": "patches/canonical-dump-observer-only.patch",
+      "retained_source": "calibration/canonical-dump-build/canonical-dump-observer-only.patch",
+      "original_sha256": "15b2edc19f338e8d094849806be2fbb8e24fd7f3a18f929ac938a36c2135bd6c",
+      "committed_sha256": "15b2edc19f338e8d094849806be2fbb8e24fd7f3a18f929ac938a36c2135bd6c",
+      "change": "none; diagnostic-only source delta, not automatically applied"
+    }
+  ],
+  "retention_limit": "Raw media, decoded planes/RGB, machine paths and unsanitized original receipts are private retained artifacts, not Git blobs. A Git commit does not itself back up those large assets."
+}

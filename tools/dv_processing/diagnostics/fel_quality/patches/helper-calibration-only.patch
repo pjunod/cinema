@@ -1,0 +1,14 @@
+--- a/helper/base_dv_renderer.h
++++ b/helper/base_dv_renderer.h
+@@ -155,6 +155,11 @@
+                   .component_mapping = {0, 1, 2}}},
+       .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL,
+                .bits = {.color_depth = 32}}, .color = pl_color_space_hdr10};
++  source.color = pl_color_space_hdr10;
++  for (int c = 1; c < source.num_planes; c++) {
++    source.planes[c].shift_x -= 1.0f / 64;
++    source.planes[c].shift_y -= 1.0f / 64;
++  }
+   dv_diag_state("base", "before-hdr-override", index, &source);
+   source.color.hdr.max_luma = destination.color.hdr.max_luma = 10000;
+   source.color.hdr.min_luma = destination.color.hdr.min_luma = 0.005;

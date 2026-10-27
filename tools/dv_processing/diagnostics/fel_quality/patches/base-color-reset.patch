@@ -1,0 +1,13 @@
+diff -ruN /private/tmp/plurx-fel-measurement-20261026/helper-build/context/diagnostic-variants/instrumented/base_dv_renderer.h /private/tmp/plurx-fel-measurement-20261026/helper-build/context/diagnostic-variants/base-color-reset/base_dv_renderer.h
+--- /private/tmp/plurx-fel-measurement-20261026/helper-build/context/diagnostic-variants/instrumented/base_dv_renderer.h	2026-10-26 17:17:36
++++ /private/tmp/plurx-fel-measurement-20261026/helper-build/context/diagnostic-variants/base-color-reset/base_dv_renderer.h	2026-10-26 17:17:36
+@@ -155,6 +155,9 @@
+                   .component_mapping = {0, 1, 2}}},
+       .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL,
+                .bits = {.color_depth = 32}}, .color = pl_color_space_hdr10};
++  dv_diag_state("base", "before-source-color-reset", index, &source);
++  source.color = pl_color_space_hdr10; // external diagnostic variant only
++  dv_diag_state("base", "after-source-color-reset", index, &source);
+   dv_diag_state("base", "before-hdr-override", index, &source);
+   source.color.hdr.max_luma = destination.color.hdr.max_luma = 10000;
+   source.color.hdr.min_luma = destination.color.hdr.min_luma = 0.005;
