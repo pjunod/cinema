@@ -2403,14 +2403,19 @@ fn measured_index_budget_secs(
 /// cluster pass. Dropping the losing build kills its child and removes its
 /// partial subtitle stage; callers must return without recording a refusal
 /// or advancing the cursor so the interrupted file remains due.
+///
+/// The read runs under `admission`, its turn on the heavy-background lane,
+/// so the pool is never idle while it runs: what preempts it is foreground
+/// demand beyond that admission's own claim, not the claim itself.
 pub(crate) async fn local_index_until_foreground<T>(
     transcode: &TranscodeManager,
+    admission: &crate::transcode::FragmentAdmission,
     build: impl std::future::Future<Output = T>,
 ) -> Option<T> {
     tokio::select! {
         biased;
         () = async {
-            while transcode.pretranscode_worker_idle() {
+            while !transcode.fragment_must_yield(admission) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         } => None,
@@ -8284,7 +8289,10 @@ impl JobManager {
             {
                 break;
             }
-            if !transcode.pretranscode_worker_idle() {
+            // Foreground demand ends the pass; other background work (a
+            // Dolby Vision title scan holding its admission) does not -- the
+            // read below queues behind it for the heavy lane.
+            if transcode.background_yield_reason().is_some() {
                 return;
             }
             last_examined = Some(file_id);
@@ -8390,13 +8398,20 @@ impl JobManager {
                 continue;
             }
             // One read of the source builds every missing identity (§5.4).
-            // Preemption is checked before the read, as it was before each
-            // identity's own read; a shared pass is no longer than one of
-            // those. Deliberately a return: it skips the cursor stamp, so a
-            // preempted pass leaves the file due rather than half done.
-            if !transcode.pretranscode_worker_idle() {
+            // It first takes this node's heavy-background turn: queued FIFO
+            // behind background work already holding the lane (a Dolby Vision
+            // title scan) rather than abandoning the pass whenever the pool is
+            // not idle, and still refused when foreground work holds the pool
+            // once the turn comes. Deliberately a return: it skips the cursor
+            // stamp, so a preempted pass leaves the file due rather than half
+            // done.
+            let Some(admission) = transcode.admit_fragment_queued().await else {
+                tracing::info!(
+                    file_id,
+                    "local fragment index yielded to foreground work before its read"
+                );
                 return;
-            }
+            };
             attempted += missing.len();
             // Asked per pass, so the switch turning off stops the next
             // pass from riding without a restart.
@@ -8443,9 +8458,13 @@ impl JobManager {
                 });
             let Some(mut builds) = local_index_until_foreground(
                 &transcode,
+                &admission,
                 crate::fragindex::build_riding_shared(
                     &file,
-                    &missing.iter().map(|(video, _, _)| *video).collect::<Vec<_>>(),
+                    &missing
+                        .iter()
+                        .map(|(video, _, _)| *video)
+                        .collect::<Vec<_>>(),
                     &runtime_cache,
                     missing
                         .iter()
@@ -8487,13 +8506,14 @@ impl JobManager {
                     {
                         continue;
                     }
-                    if !transcode.pretranscode_worker_idle() {
+                    if transcode.fragment_must_yield(&admission) {
                         // As above: no cursor stamp, the file stays due.
                         return;
                     }
                     attempted += 1;
                     let Some(build) = local_index_until_foreground(
                         &transcode,
+                        &admission,
                         crate::fragindex::build_riding(
                             &file,
                             *video,

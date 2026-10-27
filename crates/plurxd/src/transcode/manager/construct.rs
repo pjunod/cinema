@@ -1317,6 +1317,20 @@ impl TranscodeManager {
         self.admit_source_work(1).await
     }
 
+    /// The node-local fragment index pass's turn on the heavy lane. It waits
+    /// behind background work already holding the lane (a Dolby Vision title
+    /// scan, a speech pass) in the lane's FIFO order instead of abandoning
+    /// the pass, and is still refused when foreground work holds the pool
+    /// once its turn comes. Dropping the future leaves the queue.
+    pub(crate) async fn admit_fragment_queued(&self) -> Option<FragmentAdmission> {
+        let heavy = Arc::clone(&self.background_heavy)
+            .acquire_owned()
+            .await
+            .ok()?;
+        self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
+            .await
+    }
+
     async fn admit_source_work(&self, threads: usize) -> Option<FragmentAdmission> {
         if !self.pretranscode_worker_idle() {
             return None;
@@ -1409,6 +1423,20 @@ impl TranscodeManager {
             && !self
                 .offline_waiting
                 .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether background work holding `admission` must yield now: a viewer
+    /// waits or holds capacity beyond the admission's own claim. The job's
+    /// own reservation is not competing work.
+    pub(crate) fn fragment_must_yield(&self, admission: &FragmentAdmission) -> bool {
+        !self.fragment_worker_idle(admission) || self.admissions.background_must_yield()
+    }
+
+    /// Why background work that holds no admission should not start now:
+    /// foreground demand or an offline download, but not another
+    /// background job, which it queues behind instead.
+    pub(crate) fn background_yield_reason(&self) -> Option<&'static str> {
+        self.pretranscode_publication_yield_reason()
     }
 
     /// What the Developer card reports about rolling retention on this node:

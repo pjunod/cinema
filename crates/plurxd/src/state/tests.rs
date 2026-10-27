@@ -4267,6 +4267,109 @@ async fn the_non_cluster_index_pass_rides_and_publishes() {
     );
 }
 
+/// A local pass over one catalogued fixture, with what it needs.
+async fn local_index_fixture() -> (
+    crate::subtitle_ride_along::testing::Fixture,
+    Arc<SqliteStore>,
+    MediaFile,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Arc<JobManager>,
+    Arc<TranscodeManager>,
+) {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    let fixture = fixture(0, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file = catalogued_fixture(&store, &fixture).await;
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = manager(store.clone(), artwork.path());
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    (
+        fixture,
+        store,
+        file,
+        artwork,
+        transcode_dir,
+        jobs,
+        transcode,
+    )
+}
+
+/// Lab5 (2026-10-26): the local pass quit whenever the pool was not idle,
+/// and a Dolby Vision title scan holds a background admission for minutes at
+/// a time, back to back, so titles waited days for an index. The pass now
+/// queues behind that work for the heavy lane and builds once it is free.
+#[tokio::test]
+async fn the_local_index_pass_queues_behind_background_work_instead_of_quitting() {
+    use plurx_core::store::FragmentIndexStore as _;
+    let (_fixture, store, file, _artwork, _transcode_dir, jobs, transcode) =
+        local_index_fixture().await;
+    // What a title scan holds while it runs: the heavy lane and its threads.
+    let scan = transcode
+        .admit_fragment()
+        .await
+        .expect("the scan's background admission");
+    let pass = tokio::spawn(Arc::clone(&jobs).build_fragment_indexes(Arc::clone(&transcode)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !pass.is_finished(),
+        "the pass waits its turn rather than giving up"
+    );
+    drop(scan);
+    tokio::time::timeout(Duration::from_secs(60), pass)
+        .await
+        .expect("the pass finishes once the lane is free")
+        .expect("the pass");
+    assert!(
+        store
+            .holds_fragment_index_for_source(file.id, file.size, file.mtime)
+            .await
+            .expect("read"),
+        "built after the scan released the lane"
+    );
+}
+
+/// The queued pass still yields to a viewer: when its turn on the lane comes
+/// while playback waits for capacity, it leaves the file due and the pool to
+/// the viewer, and the next pass builds it.
+#[tokio::test]
+async fn a_queued_local_index_pass_yields_to_a_waiting_viewer() {
+    use plurx_core::store::FragmentIndexStore as _;
+    let (_fixture, store, file, _artwork, _transcode_dir, jobs, transcode) =
+        local_index_fixture().await;
+    let scan = transcode
+        .admit_fragment()
+        .await
+        .expect("the scan's background admission");
+    let pass = tokio::spawn(Arc::clone(&jobs).build_fragment_indexes(Arc::clone(&transcode)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!pass.is_finished(), "queued behind the scan");
+    let viewer = transcode.test_mark_live_waiting();
+    drop(scan);
+    tokio::time::timeout(Duration::from_secs(10), pass)
+        .await
+        .expect("the pass yields promptly")
+        .expect("the pass");
+    let built = || async {
+        store
+            .holds_fragment_index_for_source(file.id, file.size, file.mtime)
+            .await
+            .expect("read")
+    };
+    assert!(!built().await, "the waiting viewer keeps the pool");
+    drop(viewer);
+    Arc::clone(&jobs)
+        .build_fragment_indexes(Arc::clone(&transcode))
+        .await;
+    assert!(built().await, "the next pass builds the file it left due");
+}
+
 /// Lab N4 (2026-10-11): a changed title waited for the round-robin
 /// cursor to wrap the whole library, 4 files a pass. A file a scan just
 /// added or changed is now examined before the backlog, under the same
