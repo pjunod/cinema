@@ -266,3 +266,37 @@ fresh per-window statistics; first-pass48-record identity and successful
 second-pass consumption are checked. The horizon is48frames, not a whole
 stream. All quality criteria, rate screens, source inputs and models remain
 unchanged. Two-pass results are pending. No live or packaging change.
+
+## Smaller quantization groups test spatial allocation next
+
+The [spatial protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-spatial-20261026.json)
+is fixed before new outputs. It changes only requested `qg-size=32` to8
+against the retained single-pass target115/max125/buffer136 HDRopt0/chroma−9
+policy. Both baseline bitstreams report qg32; their logs report AQ2,
+strength1 and cu-tree1. At pinned x265 e9b8812, the AQ energy sample size and
+QP-group granularity change with qg8. This tests local allocation, not guaranteed
+shadow protection. RDOQ2/psy-RDOQ1 and the other coding settings remain fixed.
+Actual rates may differ; the same selected-frame quality rule and130Mb/s
+packet-average screen apply. Both two-pass outputs have completed authoring
+with all48 VCL/RPU/clocks preserved; their quality scores are still pending.
+No live playback or packaging changes are included.
+
+## Two-pass misses the same shadow tail; source capture now covers48frames
+
+The [two-pass summaries](../../tools/dv_processing/diagnostics/fel_quality/results/twopass-20261026.json)
+retain all sixteen model/frame rows. Michael5400 frame24 ModelB shadow
+mean/p99 are1.6386/4.5113, versus fallback1.7528/4.1938 and single-pass115
+1.5972/4.3402. All four models retain the p99 regression; Michael1800 passes
+all eight selected-frame rows. Actual authored packet rates are114.842 and
+116.159Mb/s. Both passes successfully used identical requested coding policies
+and fresh48-record statistics. Lower actual allocation prevents attributing
+this outcome to pass mode alone. No candidate is selected.
+
+The new decoder-only capture and [bound comparison receipts](../../tools/dv_processing/diagnostics/fel_quality/results/layer-capture-20261026.json)
+match all48 original Michael1800 BL/EL canonical plane hashes, RPUs, packet
+hashes, timestamps, durations and rasters. Every dumped payload is rehashed.
+The source has304 coded AUs and302 paired outputs, with two explicitly retained
+pre-initial-random-access non-output AUs outside the requested window; their
+classification is by timestamp, not a proven RASL NAL type. A clean C build
+and five admission/refusal checks pass. This establishes source identity for
+broader offline measurements; no full-window pixel-quality score follows yet.

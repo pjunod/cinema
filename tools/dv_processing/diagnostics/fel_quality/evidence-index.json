@@ -130,5 +130,24 @@
       "change": "none; diagnostic-only source delta, not automatically applied"
     }
   ],
-  "retention_limit": "Raw media, decoded planes/RGB, machine paths and unsanitized original receipts are private retained artifacts, not Git blobs. A Git commit does not itself back up those large assets."
+  "retention_limit": "Raw media, decoded planes/RGB, machine paths and unsanitized original receipts are private retained artifacts, not Git blobs. A Git commit does not itself back up those large assets.",
+  "spatial_control": {
+    "tool": "encode_spatial_control.py",
+    "tool_sha256": "c1772345fbf6298100c2f8c383a2df3e292dd7aefd6e9ec2a9ae3f2180d43931",
+    "protocol": "protocol-spatial-20261026.json",
+    "protocol_sha256": "7f303eb515d05845c78820db4afafeed84e83a6959c708416db8ff417d87e023",
+    "status": "Fixed before outputs; pending. No live or packaging change."
+  },
+  "two_pass_results": {
+    "file": "results/twopass-20261026.json",
+    "sha256": "10b0120fe5261845228e98ba8c9dcb3bcb58e4e775d50e258e979519348c1157",
+    "status": "No candidate selected. M5400f24shadowp99 fails in all4models; M1800 all8selectedrows pass. Actualrates114.842/116.159Mbps, coarseaverageguard only."
+  },
+  "layer_capture": {
+    "C_source_sha256": "4706982a77d5c9c90b2f482d6ee8434f40d3fc7f57c25b6460a227e3650afd3e",
+    "verifier_sha256": "ca5f542d23ed1d2ab482e4045f9a70c552e93dcd690aac39b584180c6d67c62b",
+    "receipts": "results/layer-capture-20261026.json",
+    "receipts_sha256": "87868a5aecc3651a5fe280de1c4eb425ceee04fd0f69fecc72684a9cdfffa144",
+    "status": "48/48 canonical BL/EL/RPU/packet/clock matches M1800 retainedtrace; sourceidentity only."
+  }
 }

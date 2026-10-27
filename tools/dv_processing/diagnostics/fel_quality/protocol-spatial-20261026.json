@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "written_utc": "2026-10-27T03:11:10.194195+00:00",
+  "status": "Fixed before new spatial-granularity outputs.",
+  "baseline_commit": "ea7545329",
+  "fixtures": [
+    "michael5400",
+    "michael1800"
+  ],
+  "policy": "Single-pass HDRopt0/CbCr-9/AQ2strength1/psy-rd2/RDOQ2/psy-RDOQ1/SAO1/slow/cu-tree/native48/TL2 target115/max125/buffer136. Only requested qg-size32\u21928 changes; sourcehash/cadence/staticmetadata and originalRPUs unchanged.",
+  "hypothesis": "Finer AQ energy sampling and QP groups can improve local shadow UV allocation. This changes spatial granularity and realized allocation, not a direct shadow protection guarantee or isolated FEL coefficient test.",
+  "bar": "Existing fullmean advantage plus reference<0.1nit mean/p99 no worseF on both0/24, bothwindows, all4frozenmodels; actualauthoredpacketaverage<=130Mbps screen only. Otherbands/max/parities/luma reported. No HRD/CPB/level/native conformance inferred.",
+  "tool_sha256": "c1772345fbf6298100c2f8c383a2df3e292dd7aefd6e9ec2a9ae3f2180d43931",
+  "baseline_reported_qg_size": 32,
+  "candidate_required_reported_qg_size": 8,
+  "causal_boundary": "Actual bits may differ. No equal-realized-rate claim. Current qg32 is verified in both retained baseline bitstreams.",
+  "source": "https://raw.githubusercontent.com/Multicorewareinc/x265/e9b8812/source/encoder/slicetype.cpp",
+  "live_changes": false,
+  "packaging_changes": false,
+  "source_frozen": "087e836d369eb2b8f94ec1d0454ea6c157612df9"
+}

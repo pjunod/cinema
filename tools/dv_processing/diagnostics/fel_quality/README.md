@@ -9,12 +9,15 @@ locations. Media, decoded frames and binaries stay outside Git.
 
 | Tool | Purpose |
 |---|---|
+| `capture_layers.c` | Local decoder-only source-layer capture with independent BL/EL software decoders, canonical planes and original clocks/RPUs. |
+| `verify_layer_capture.py` | Rehash every captured plane/RPU and bind it to both retained events and case receipt; source identity only. |
 | `four_model_audit.py` | Hash-bound selected-frame R/F/C comparison in four explicit composition/colour models; not normative Dolby conformance. |
 | `vector_metrics.py` | Shared signal-domain metric implementation used by the retained experiments. |
 | `collect_rgb48.py` | Bounded raw-RGB transport, deterministic parity lattices and full frames 0/24. |
 | `score_collections.py` | Hash/clock-bound 48-frame collection scoring, luminance strata and black-floor sensitivity. |
 | `prepare_author_request.py` | Preserve actual encoded native packet clocks and ordered RPU hashes when preparing the frozen Rust-author request. |
 | `audit_picture_payload.py` | Check all 48 coded-picture NAL sequences and clocks survive authoring; no presentation claim. |
+| `encode_spatial_control.py` | Fixed qg-size8 spatial-allocation control at the retained single-pass115/125 budget. |
 | `encode_two_pass_control.py` | Two-pass allocation control with fresh 48-record statistics and identical requested coding settings across passes. |
 | `encode_quantization_control.py` | Fixed RDOQ/psy-RDOQ control, separate output root; protocol committed before its results. |
 | `encode_candidate.py` | Mac/Homebrew FFmpeg adapter for the recorded fixed controls; requires a separate output root. |
