@@ -249,3 +249,20 @@ and strict quality criterion before new outputs. The tool requires a separate
 output root. Results remain pending; no live or packaging change is proposed.
 A later two-pass comparison, if needed, will retain the same115/125 budget:
 125/125 would also change the encoder's internal rate-control regime.
+
+## RDOQ-off result retains the shadow-tail failure
+
+The paired control is complete and [all model/frame summaries are retained](../../tools/dv_processing/diagnostics/fel_quality/results/rdoq0-20261026.json).
+Disabling RDOQ and coupled psy-RDOQ does not fix the difficult frame: Model B
+below0.1nit p99 rises 4.3402→4.4356, versus fallback4.1938. Its mean changes
+1.5972→1.6423. The four models agree on the remaining failure. Actual rates
+fall to122.506/126.200Mb/s, so this is a coupled policy/allocation outcome,
+not an isolated coefficient-group diagnosis. No candidate is selected.
+
+The next [fixed protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-two-pass-20261026.json)
+tests two-pass allocation at the same requested115/125/136 rate settings,
+returning to RDOQ2/psy-RDOQ1. Both passes use the same coding settings and
+fresh per-window statistics; first-pass48-record identity and successful
+second-pass consumption are checked. The horizon is48frames, not a whole
+stream. All quality criteria, rate screens, source inputs and models remain
+unchanged. Two-pass results are pending. No live or packaging change.

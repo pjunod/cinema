@@ -15,6 +15,7 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `score_collections.py` | Hash/clock-bound 48-frame collection scoring, luminance strata and black-floor sensitivity. |
 | `prepare_author_request.py` | Preserve actual encoded native packet clocks and ordered RPU hashes when preparing the frozen Rust-author request. |
 | `audit_picture_payload.py` | Check all 48 coded-picture NAL sequences and clocks survive authoring; no presentation claim. |
+| `encode_two_pass_control.py` | Two-pass allocation control with fresh 48-record statistics and identical requested coding settings across passes. |
 | `encode_quantization_control.py` | Fixed RDOQ/psy-RDOQ control, separate output root; protocol committed before its results. |
 | `encode_candidate.py` | Mac/Homebrew FFmpeg adapter for the recorded fixed controls; requires a separate output root. |
 | `patches/` | Exact experimental reconstruction, export and observer deltas; not production patches or one cumulative patch stack. |

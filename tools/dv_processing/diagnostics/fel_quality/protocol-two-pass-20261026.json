@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "written_utc": "2026-10-27T02:51:04.832625+00:00",
+  "status": "Fixed before new two-pass outputs.",
+  "source_protocol_commit": "72a73c99a",
+  "fixtures": [
+    "michael5400",
+    "michael1800"
+  ],
+  "policy": "Same retained RDOQ2/psy-RDOQ1 HDRopt0/CbCr-9/AQ2/psy-rd2/SAO1/slow/bf0/TL2/48frames target115/max125/buffer136 in BOTH passes. slow-firstpass1; fresh per-window48-recordstats, successfulpass2 and unchangedstatsrequired.",
+  "causal_boundary": "Changes pass mode and realized allocation; actual output bits can differ. 125/125 not used because it also enables internal CBR regime at pinned revision. No continuous-history claim.",
+  "bar": "Existing fullmean+below0.1nitmean/p99 vsF inboth0/24/bothwindows/all4models; <=130Mbpsactualauthoredpacket-average screening only. Allotherbands/max/luma/gradientreported.",
+  "source": "https://x265.readthedocs.io/en/master/cli.html#cmdoption-slow-firstpass",
+  "tool_sha256": "617133b4caedef9f7c4ba5f95e878cf20c5acc648258f186f6b68e2e62c5f45c",
+  "live_changes": false,
+  "packaging_changes": false,
+  "tool_scope": "Michael24000/1001 inputs only; no general24fps clock claim."
+}
