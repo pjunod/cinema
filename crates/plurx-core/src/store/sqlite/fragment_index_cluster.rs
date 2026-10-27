@@ -629,7 +629,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
                       AND json_extract(prediction.request_json,'$.pipeline_version') = ?6
                       AND json_extract(prediction.request_json,'$.target_node_id') = ?12))
                     AND (SELECT COUNT(*) FROM analysis_requests
-                          WHERE state IN ('queued', 'running', 'submitted')) < ?16
+                          WHERE state IN ('queued', 'running', 'submitted'))
+                        < ?16 + CASE WHEN ?9 = 'foreground' AND ?10 = 'playback'
+                                     THEN ?17 ELSE 0 END
                     AND (?11 = 0 OR ?5 <> 'fragment_index' OR NOT EXISTS (
                       SELECT 1 FROM analysis_requests legacy
                        WHERE legacy.file_id = ?2 AND legacy.source_size = ?3
@@ -675,6 +677,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     request.not_before_ms,
                     request.created_at_ms,
                     MAX_ANALYSIS_REQUESTS,
+                    super::super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM,
                 ],
             )?;
             if request.force_rebuild {
@@ -822,6 +825,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         now_ms: i64,
         lease_expires_ms: i64,
         viewer_only: bool,
+        targeted_only: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if node_id.is_empty()
             || node_id.len() > 128
@@ -837,6 +841,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
             let viewer = if viewer_only {
                 super::super::fragment_index_cluster::analysis_live_viewer_clause("?3")
             } else { "1".to_owned() };
+            let untargeted = if targeted_only {
+                "0"
+            } else {
+                "(component IN ('skip_markers','subtitle_source') AND target_node_id = '')"
+            };
             let max_attempts = configured_max_attempts(conn)?;
             let backoff_base_ms = configured_backoff_base_ms(conn)?;
             let backoff_max_ms = configured_backoff_max_ms(conn)?.max(backoff_base_ms);
@@ -884,8 +893,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 .query_row(
                     &format!(
                         "SELECT {REQUEST_COLS} FROM analysis_requests
-                          WHERE (target_node_id = ?1
-                              OR (component IN ('skip_markers','subtitle_source') AND target_node_id = ''))
+                          WHERE (target_node_id = ?1 OR {untargeted})
                             AND component <> 'subtitle_source' AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
                             AND (?5 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?5)
@@ -968,6 +976,42 @@ impl ClusterFragmentIndexStore for SqliteStore {
             )?;
             transaction.commit()?;
             Ok(Some(candidate))
+        })
+        .await
+    }
+
+    async fn retire_analysis_requests_for_node(
+        &self,
+        node_id: &str,
+        now_ms: i64,
+    ) -> Result<u64, StoreError> {
+        if node_id.is_empty() {
+            return Err(StoreError::Task("invalid removed node".to_owned()));
+        }
+        let node_id = node_id.to_owned();
+        self.with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "UPDATE analysis_attempts
+                    SET phase = 'canceled', phase_updated_at_ms = ?1,
+                        terminal_code = 'node_removed'
+                  WHERE (request_id, claim_epoch) IN (
+                    SELECT request_id, fence FROM analysis_requests
+                     WHERE target_node_id = ?2
+                       AND state IN ('queued', 'running', 'submitted'))",
+                params![now_ms, node_id],
+            )?;
+            let retired = transaction.execute(
+                "UPDATE analysis_requests
+                    SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+                        fence = fence + 1, cancel_requested = 1,
+                        last_error_code = 'node_removed', updated_at_ms = ?1
+                  WHERE target_node_id = ?2
+                    AND state IN ('queued', 'running', 'submitted')",
+                params![now_ms, node_id],
+            )?;
+            transaction.commit()?;
+            Ok(u64::try_from(retired).unwrap_or(u64::MAX))
         })
         .await
     }

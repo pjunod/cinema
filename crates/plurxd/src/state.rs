@@ -3210,8 +3210,21 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
             requested_generation,
             pipeline_version,
             video_identity,
-            priority: "normal".to_owned(),
-            trigger: "background".to_owned(),
+            // A viewer waiting on this preparation makes it foreground work:
+            // the row says so, and the queue's playback headroom admits it
+            // even when background discovery has filled the active ceiling.
+            priority: if viewer.is_some() {
+                "foreground"
+            } else {
+                "normal"
+            }
+            .to_owned(),
+            trigger: if viewer.is_some() {
+                "playback"
+            } else {
+                "background"
+            }
+            .to_owned(),
             force_rebuild: false,
             target_node_id: node_id.to_owned(),
             not_before_ms: now,
@@ -9017,9 +9030,12 @@ impl JobManager {
         // fence, leaving the artifact and delivery pass available to another
         // wake while the analysis reader is active. Store claims retain their
         // durable owner/fence and do not depend on this local pass guard.
+        // Settling, pruning and artifact delivery are cluster-wide duties
+        // and stay with the voters. Resolving is not: a learner allowed to
+        // execute this job (above) resolves the requests targeted at itself,
+        // which no other node ever claims.
         let may_produce = self.may_run_cluster_jobs().await;
-        let analysis = if may_produce && !self.cluster_analysis_working.swap(true, Ordering::AcqRel)
-        {
+        let analysis = if !self.cluster_analysis_working.swap(true, Ordering::AcqRel) {
             let analysis_state = Arc::clone(&self);
             let analysis_transcode = Arc::clone(&transcode);
             Some(tokio::spawn(async move {
@@ -9134,6 +9150,9 @@ impl JobManager {
         let retry_policy = self.analysis_retry_policy().await;
         let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
         let have_dovi = transcode.dv_strippable();
+        // A learner takes only what names it; untargeted requests any node
+        // may take stay with the voters.
+        let targeted_only = !self.may_run_cluster_jobs().await;
         for _ in 0..MAX_REQUESTS_PER_PASS {
             if !self.cluster_fragment_index_enabled().await {
                 break;
@@ -9147,6 +9166,7 @@ impl JobManager {
                     now,
                     now.saturating_add(retry_policy.lease_ms),
                     !transcode.pretranscode_worker_idle(),
+                    targeted_only,
                 )
                 .await
             {

@@ -1675,6 +1675,75 @@ impl HiqliteAuthStore {
     }
 }
 
+impl HiqliteAuthStore {
+    /// Cancel the active analysis requests `target` selects (`$1` is the
+    /// time, the rest its own parameters) with `node_removed`.
+    async fn retire_analysis_requests_where(
+        &self,
+        target: &str,
+        params: Vec<hiqlite::Param>,
+    ) -> Result<u64, StoreError> {
+        let results = self
+            .client()
+            .txn(vec![
+                (
+                    format!(
+                        "UPDATE analysis_attempts
+                            SET phase = 'canceled', phase_updated_at_ms = $1,
+                                terminal_code = 'node_removed'
+                          WHERE (request_id, claim_epoch) IN (
+                            SELECT request_id, fence FROM analysis_requests
+                             WHERE {target}
+                               AND state IN ('queued', 'running', 'submitted'))"
+                    ),
+                    params.clone(),
+                ),
+                (
+                    format!(
+                        "UPDATE analysis_requests
+                            SET state = 'cancelled', owner_node_id = NULL,
+                                lease_expires_ms = NULL, fence = fence + 1,
+                                cancel_requested = 1, last_error_code = 'node_removed',
+                                updated_at_ms = $1
+                          WHERE {target}
+                            AND state IN ('queued', 'running', 'submitted')"
+                    ),
+                    params,
+                ),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(results.get(1).copied().unwrap_or_default() as u64)
+    }
+
+    /// [`Self::retire_analysis_requests_where`] for every node membership
+    /// has removed. A store used before membership created `cluster_nodes`
+    /// (the store contract, a fresh install) has no removed node to consult.
+    async fn retire_requests_of_removed_nodes(&self, now_ms: i64) -> Result<u64, StoreError> {
+        let membership = self
+            .client()
+            .query_consistent_map::<SchemaCountRow, _>(
+                "SELECT COUNT(*) AS count FROM sqlite_master
+                  WHERE type = 'table' AND name = 'cluster_nodes'",
+                params!(),
+            )
+            .await?
+            .first()
+            .is_some_and(|row| row.0 != 0);
+        if !membership {
+            return Ok(0);
+        }
+        self.retire_analysis_requests_where(
+            "target_node_id <> '' AND target_node_id IN (
+               SELECT node_id FROM cluster_nodes WHERE removed_at IS NOT NULL)",
+            params!(now_ms),
+        )
+        .await
+    }
+}
+
 #[async_trait]
 impl ClusterFragmentIndexStore for HiqliteAuthStore {
     async fn subtitle_backfill_diagnostics(
@@ -1963,7 +2032,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       AND json_extract(prediction.request_json,'$.pipeline_version') = $6
                       AND json_extract(prediction.request_json,'$.target_node_id') = $12))
                     AND (SELECT COUNT(*) FROM analysis_requests
-                      WHERE state IN ('queued', 'running', 'submitted')) < $16
+                      WHERE state IN ('queued', 'running', 'submitted'))
+                    < $16 + CASE WHEN $9 = 'foreground' AND $10 = 'playback'
+                                 THEN $17 ELSE 0 END
                 AND ($11 = 0 OR $5 <> 'fragment_index' OR NOT EXISTS (
                   SELECT 1 FROM analysis_requests legacy
                    WHERE legacy.file_id = $2 AND legacy.source_size = $3
@@ -2005,7 +2076,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         semantic_fingerprint,
                         request.not_before_ms,
                         request.created_at_ms,
-                        MAX_ANALYSIS_REQUESTS
+                        MAX_ANALYSIS_REQUESTS,
+                        super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM
                     ),
                 ),
                 (
@@ -2151,6 +2223,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         now_ms: i64,
         lease_expires_ms: i64,
         viewer_only: bool,
+        targeted_only: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if node_id.is_empty()
             || node_id.len() > 128
@@ -2220,13 +2293,17 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             } else {
                 "1".to_owned()
             };
+            let untargeted = if targeted_only {
+                "0"
+            } else {
+                "(component IN ('skip_markers','subtitle_source') AND target_node_id = '')"
+            };
             let candidate = self
                 .client()
                 .query_consistent_map::<RequestRow, _>(
                     format!(
                         "SELECT {REQUEST_COLS} FROM analysis_requests
-                          WHERE (target_node_id = $1
-                              OR (component IN ('skip_markers','subtitle_source') AND target_node_id = ''))
+                          WHERE (target_node_id = $1 OR {untargeted})
                             AND component <> 'subtitle_source' AND attempts < $2
                             AND state = 'queued' AND not_before_ms <= $3
                             AND ($4 IS NULL OR component <> 'fragment_index' OR pipeline_version = $4)
@@ -2547,7 +2624,23 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         Ok(results.first() == Some(&1))
     }
 
+    async fn retire_analysis_requests_for_node(
+        &self,
+        node_id: &str,
+        now_ms: i64,
+    ) -> Result<u64, StoreError> {
+        if node_id.is_empty() {
+            return Err(StoreError::Task("invalid removed node".to_owned()));
+        }
+        self.retire_analysis_requests_where("target_node_id = $2", params!(now_ms, node_id))
+            .await
+    }
+
     async fn settle_analysis_requests(&self, now_ms: i64) -> Result<u64, StoreError> {
+        // Rows targeted at a node membership has removed can never be
+        // claimed. Removal retires them as it finishes; this catches the rows
+        // a removal predating that, or one that could not, left behind.
+        let retired = self.retire_requests_of_removed_nodes(now_ms).await?;
         let results = self
             .client()
             .txn(vec![
@@ -2656,7 +2749,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(results.get(1).copied().unwrap_or_default() as u64)
+        Ok((results.get(1).copied().unwrap_or_default() as u64).saturating_add(retired))
     }
 
     async fn prune_analysis_requests(

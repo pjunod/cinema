@@ -725,6 +725,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
+        method: "retire_analysis_requests_for_node",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
         method: "cancel_analysis_request_admin",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,

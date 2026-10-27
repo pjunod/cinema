@@ -4657,6 +4657,168 @@ async fn the_queue_worker_row_carries_its_ride_along() {
     assert!(row.fragments_indexed > 0, "{row:?}");
 }
 
+/// A learner membership lets execute fragment-index work.
+struct ArtifactLearnerAuthority;
+
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+impl ClusterJobAuthority for ArtifactLearnerAuthority {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        false
+    }
+
+    async fn may_execute_job(&self, kind: plurx_core::store::background_jobs::JobKind) -> bool {
+        kind.permits_artifact_execution()
+    }
+}
+
+/// Lab3 (2026-10-26): resolving analysis requests was gated on the voters'
+/// singleton authority, so a learner allowed to execute fragment-index work
+/// never resolved the requests targeted at it -- and nothing else claims a
+/// targeted request. They sat queued for as long as it was a learner.
+#[tokio::test]
+async fn a_learner_resolves_the_analysis_request_targeted_at_it() {
+    use crate::subtitle_ride_along::testing::{fixture, Sub};
+    use plurx_core::store::ClusterFragmentIndexStore as _;
+
+    let fixture = fixture(0, &[Sub::Pgs]);
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+        .await
+        .expect("the queue on");
+    let file = catalogued_fixture(&store, &fixture).await;
+    let artwork = tempfile::tempdir().expect("artwork");
+    let transcode_dir = crate::test_tempdir().expect("transcode");
+    let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+        store.clone(),
+        artwork.path().to_path_buf(),
+        plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+        "learner-node".to_owned(),
+        Arc::new(ArtifactLearnerAuthority),
+    ));
+    let transcode = Arc::new(TranscodeManager::new(
+        store.clone(),
+        transcode_dir.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let (request, _) = jobs
+        .request_file_analysis(file.id, false, "fragment_index", "admin")
+        .await
+        .expect("requested");
+    assert_eq!(request.target_node_id, "learner-node");
+    let mut state = request.state.clone();
+    for _ in 0..40 {
+        Arc::clone(&jobs)
+            .work_cluster_fragment_index_queue(Arc::clone(&transcode))
+            .await;
+        state = store
+            .analysis_request(&request.request_id)
+            .await
+            .expect("read")
+            .expect("request")
+            .state;
+        if state != "queued" && state != "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        matches!(state.as_str(), "submitted" | "ready"),
+        "the learner resolved its own request: {state}"
+    );
+}
+
+/// Lab3 (2026-10-26): background discovery had filled the analysis queue to
+/// its active ceiling, and a viewer's copy preparation -- queued as ordinary
+/// background work -- was refused with the rest. A viewer's request is
+/// foreground work with its own headroom above that ceiling.
+#[tokio::test]
+async fn a_viewer_preparation_is_queued_when_background_work_fills_the_ceiling() {
+    use plurx_core::store::UserStore as _;
+    let dir = crate::test_tempdir().expect("db dir");
+    let path = dir.path().join("ceiling.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Movies".to_owned(),
+            kind: LibraryKind::Movies,
+            paths: Vec::new(),
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Ceiling".to_owned(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let id = store
+        .upsert_file(
+            item,
+            "/absent/ceiling.mkv",
+            100,
+            1,
+            &ProbeResult {
+                video_codec: Some("h264".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    let file = store.get_file(id).await.expect("read").expect("file");
+    rusqlite::Connection::open(&path)
+        .expect("seed connection")
+        .execute_batch(&format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {ceiling})
+             INSERT INTO analysis_requests (request_id, file_id, source_size, source_mtime,
+                 component, pipeline_version, video_identity, requested_generation, priority,
+                 trigger, force_rebuild, target_node_id, state, not_before_ms, created_at_ms,
+                 updated_at_ms)
+             SELECT 'filler-' || i, {id}, 100, 1, 'fragment_index', 'filler', '',
+                    'filler-' || i, 'normal', 'background', 0, 'node-filler', 'queued', 0, 0, 0
+               FROM n",
+            ceiling = plurx_core::store::MAX_ACTIVE_ANALYSIS_REQUESTS,
+        ))
+        .expect("fill the active ceiling");
+    let video = plurx_core::transcode::CopyVideoOptions::new(false, false);
+    assert!(
+        enqueue_copy_preparation_for_object(&store, "node-a", &file, video, None)
+            .await
+            .is_err(),
+        "background preparation still stops at the ceiling"
+    );
+    let viewer = store
+        .create_user("ceiling-viewer", "hash", false)
+        .await
+        .expect("viewer");
+    let request = enqueue_copy_preparation_for_object_with_viewer(
+        &store,
+        "node-a",
+        &file,
+        video,
+        None,
+        Some(&PlaybackViewerDemand {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: viewer.id,
+            },
+            playback_id: "ceiling-play".into(),
+        }),
+    )
+    .await
+    .expect("a viewer's preparation is admitted above the ceiling");
+    assert_eq!(request.state, "queued");
+    assert_eq!(request.priority, "foreground");
+    assert_eq!(request.trigger, "playback");
+}
+
 /// #463 review finding 3: the switch turned off while a riding pass runs
 /// stops that pass's tracks reaching the store, and is counted.
 #[tokio::test]
