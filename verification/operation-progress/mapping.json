@@ -189,13 +189,13 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "1ab61cf6f74621c22ae56670ea59d0062bde3d6ae97d47698ba0d4b2e526e03c"
+        "sha256": "9078f1ddff1cde6b5cce421badc535bcf9be84cc85f9ee65f9b9366769ef6f50"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "1ab61cf6f74621c22ae56670ea59d0062bde3d6ae97d47698ba0d4b2e526e03c"
+        "sha256": "9078f1ddff1cde6b5cce421badc535bcf9be84cc85f9ee65f9b9366769ef6f50"
       },
       {
         "table": "33 local raft metrics authority",
@@ -249,19 +249,19 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "fa4c1ecbd9a26ca68cb308afc47f9f73261fca8632fec3b1db6ca61cb3443e5b"
+        "sha256": "11faff3f0e75c0ff50deca26e24bd69fa7bb6aea04a8fe529f81e01c814017b7"
       },
       {
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "fe827597c40656adbccf4c5a5940f68938c380ac731291673fcd15896c27c009"
+        "sha256": "1310cb5e57e5acccc650c66191274f198f4eb2cf40e734d2a33cc3f37b566ac3"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "fe827597c40656adbccf4c5a5940f68938c380ac731291673fcd15896c27c009"
+        "sha256": "1310cb5e57e5acccc650c66191274f198f4eb2cf40e734d2a33cc3f37b566ac3"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
