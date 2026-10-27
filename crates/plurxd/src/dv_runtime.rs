@@ -609,12 +609,11 @@ pub(crate) fn completed_window_encoder(
     }
 }
 
-pub(crate) use plurx_core::transcode::dv_processing::{
-    held_source_mastering, held_source_minimum, source_mastering_metadata, source_mastering_minimum,
-};
+pub(crate) use plurx_core::transcode::dv_processing::{held_source_mastering, held_source_minimum};
 #[cfg(test)]
 use plurx_core::transcode::dv_processing::{
-    source_mastering_from_frames, source_mastering_minimum_from_frames,
+    source_mastering_from_frames, source_mastering_metadata, source_mastering_minimum,
+    source_mastering_minimum_from_frames,
 };
 
 #[cfg(target_os = "linux")]
