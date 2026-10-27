@@ -74,6 +74,12 @@ runtime log and source review. This proves the controlled source, worker and
 readback path; physical Apple TV acceptance follows the user's deployment.
 PR #1292 records the current-head main fast lane and landing receipt.
 
+Final policy preflight corrections are reviewed: bounded knowledge-context
+negotiation, explicit records for the four real-runtime fixtures and a typed
+Android caption-task chooser with unchanged wire values. All eight failed or
+affected policy checks and Android compilation pass; the final fast lane and
+merge remain tracked on PR #1292. The unadmitted ignored-test budget stays 38.
+
 
 ## Final ownership and main integration — 2026-10-26
 

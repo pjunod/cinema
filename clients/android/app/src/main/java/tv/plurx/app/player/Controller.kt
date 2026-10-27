@@ -6508,6 +6508,12 @@ private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole):
     return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput)
 }
 
+// Keep the pending language choice tied to one of the two supported caption tasks.
+private enum class CaptionMenuTask(val wireValue: String, val label: String) {
+    TRANSCRIBE("transcribe", "Generate captions (spoken language)"),
+    TRANSLATE("translate", "Translate audio to English"),
+}
+
 /**
  * A slide-in panel listing the embedded audio and subtitle tracks ExoPlayer
  * found (populated for direct play; a transcode usually carries the single
@@ -6535,7 +6541,7 @@ internal fun TrackMenu(
     }
     var textSource by remember { mutableStateOf<tv.plurx.app.data.SubtitleTextSource?>(null) }
     var textSourceLanguage by remember { mutableStateOf("") }
-    var captionLanguageTask by remember { mutableStateOf<String?>(null) }
+    var captionLanguageTask by remember { mutableStateOf<CaptionMenuTask?>(null) }
     val tracks = player.currentTracks
     val audio = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
     val text = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
@@ -6663,27 +6669,27 @@ internal fun TrackMenu(
 
             Text("Generate captions", style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 14.dp, bottom = 4.dp))
-            listOf("transcribe" to "Generate captions (spoken language)", "translate" to "Translate audio to English").forEach { (task, label) ->
+            CaptionMenuTask.entries.forEach { task ->
                 val profile = progressiveCaptions.options?.let { options -> runCatching {
-                    captionPreferredProfile(options.models, options.default_profile_id, task,
+                    captionPreferredProfile(options.models, options.default_profile_id, task.wireValue,
                         progressiveCaptions.selected?.profileId)
                 }.getOrNull() }
-                TrackRow(label, progressiveCaptions.selected?.task == task, enabled = profile != null) {
+                TrackRow(task.label, progressiveCaptions.selected?.task == task.wireValue, enabled = profile != null) {
                     val known = progressiveCaptions.options?.audio_tracks?.singleOrNull { it.audio_ordinal == selectedServerAudio }
                         ?.normalized_language?.takeIf { it in profile!!.input_languages }
-                    if (known != null) { onGenerateCaptions(ProgressiveCaptionSelection(task, known, profile!!.profile_id)); onDismiss() }
+                    if (known != null) { onGenerateCaptions(ProgressiveCaptionSelection(task.wireValue, known, profile!!.profile_id)); onDismiss() }
                     else captionLanguageTask = task
                 }
             }
             captionLanguageTask?.let { task ->
                 Text("Choose the language spoken in the selected audio track", style = MaterialTheme.typography.bodySmall)
                 val languageProfile = progressiveCaptions.options?.let { options -> runCatching {
-                    captionPreferredProfile(options.models, options.default_profile_id, task,
+                    captionPreferredProfile(options.models, options.default_profile_id, task.wireValue,
                         progressiveCaptions.selected?.profileId)
                 }.getOrNull() }
                 languageProfile?.input_languages?.forEach { language ->
                     TrackRow(languageName(language) ?: language, false, true) {
-                        onGenerateCaptions(ProgressiveCaptionSelection(task, language, languageProfile.profile_id)); onDismiss()
+                        onGenerateCaptions(ProgressiveCaptionSelection(task.wireValue, language, languageProfile.profile_id)); onDismiss()
                     }
                 }
             }
