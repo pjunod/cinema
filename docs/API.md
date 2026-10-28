@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-26, plurx has 403 routes declared by the ordinary listener's
+As of 2026-10-28, plurx has 405 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 403 routes across the registered routers.
+plurx has 405 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -136,7 +136,7 @@ audience (`TokenAudience` in `crates/plurx-core/src/store/mod.rs`):
 |---|---|---|
 | `Native` | a `tokens` row with no Jellyfin marker | `AuthUser` and every extractor built on it |
 | `JellyfinCompatibility` | a `tokens` row with a `jellyfin_login_tokens` marker | the Jellyfin façade only (§22) |
-| `PlaybackHandoff` | a `playback_handoffs_tokens` row (not in `tokens`), unexpired, whose minting token still exists | `PlaybackPrincipal` (the decision, HLS create, direct play, text subtitle, item progress and client-log routes, for one file) and `HandoffToken` (`DELETE /api/v1/playback-handoffs/self`) — §13.2 |
+| `PlaybackHandoff` | a `playback_handoffs_tokens` row (not in `tokens`), unexpired, whose minting token still exists | `PlaybackPrincipal` (the decision, HLS create, direct play, text subtitle, item progress and client-log routes, for one file) and `HandoffToken` (self-revocation, restricted context and explicit next-episode advancement) — §13.2 |
 
 `AuthUser` asks for the native audience, so a Jellyfin login or a playback
 handoff token is an unknown bearer there: 401, exactly as for a token that was
@@ -2693,6 +2693,8 @@ row updates nothing and returns the existing winning row.
 | POST | `/api/v1/playback-handoffs/redeem` | **none** — the code is the credential | Body `{code, device?}`; 200 `{token, handoff_id, file_id, item_id, start_ms, audio, subtitle, user, origin, expires_at}` (`item_id` is the file's item, for progress). A code never minted (or not code-shaped) 404; a code already redeemed, past its 120 s, or minted by a token since revoked 410 `handoff_gone` |
 | GET | `/api/v1/playback-handoffs/{id}` | the minting bearer | `{redeemed: bool}`. Any other bearer, even the same user's, 404 |
 | DELETE | `/api/v1/playback-handoffs/self` | playback handoff token only | Revoke the presented handoff token; 204. A native bearer 401 |
+| GET | `/api/v1/playback-handoffs/self/context` | playback handoff token only | Restricted metadata for the token's current file plus its immediate next episode; 200 context below. No requested item/file id or library browsing; missing current item/file 404 |
+| POST | `/api/v1/playback-handoffs/self/next` | playback handoff token only | Body `{expected_file_id}`. Resolve the immediate next episode on the server and atomically replace the token's file scope; 200 updated context. Stale predecessor 409 `handoff_stale`; no successor/file 404. Native, expired or revoked bearer 401. Unknown body fields are refused |
 
 **Why.** A web session sometimes has to give another local app — the Linux
 player ([LINUX-PLAYER-PLAN.md](clients/LINUX-PLAYER-PLAN.md) §3.1) — playback
@@ -2715,7 +2717,28 @@ It lives six hours from redemption and dies
 with the token that minted it — logout, a password change, revoking that
 device — so signing out of the web app stops the player too.
 
-It is accepted only here, and only for the handed-off file:
+**Player context and next episode.** Context is
+`{file_id, item_id, start_ms: 0, audio: null, subtitle: null, metadata, next}`.
+`metadata` contains only `title`, `series_title`, `kind`, `overview`, `year`,
+`season_number`, `episode_number`, `runtime_ms`, and `air_date`; optional facts
+are `null`. `next` is `null` or `{file_id, item_id, metadata}`. No filesystem
+paths, credentials, sibling lists or generic library access are exposed.
+The next episode follows the existing ordered children within the current
+season, then the first episode of the immediate next season. The selected
+file is the first in the ordinary quality-ordered file list whose bounded
+availability observation is not confirmed missing; an unknown observation
+remains eligible and the source open decides. Movies, a final episode, missing
+hierarchy or a successor without an eligible file have no next entry.
+
+Reading next metadata grants no playback access. Only an explicit Next request
+changes the existing token's one-file scope; it preserves the original expiry,
+login binding and token identity. The expected predecessor is compared inside
+the write, so a repeated request cannot skip another episode. Old-file playback
+and progress requests then fail their scope checks. Clients complete the old
+item's final progress before requesting Next and open the returned file at zero.
+A lost response can be resolved by reading context with the same token.
+
+It is accepted only here, and only for its currently authorized file:
 
 | Route | Scope check |
 |---|---|
@@ -2726,6 +2749,8 @@ It is accepted only here, and only for the handed-off file:
 | `POST /api/v1/items/{id}/progress` | `id` is the handed-off file's item |
 | `POST /api/v1/client-log` | none: reports are attributed to the user |
 | `DELETE /api/v1/playback-handoffs/self` | itself |
+| `GET /api/v1/playback-handoffs/self/context` | current file metadata and the server-resolved successor summary only |
+| `POST /api/v1/playback-handoffs/self/next` | expected current file; only the server-resolved immediate successor can become authorized |
 
 A route above for another file or item answers 403 `handoff_scope`. Every other
 user route answers 401, because the token is not a native bearer. HLS control,

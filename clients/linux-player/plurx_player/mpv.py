@@ -7,6 +7,7 @@ route needs the bearer, it is set over this socket as an HTTP header field.
 
 import json
 import os
+from pathlib import Path
 import queue
 import shutil
 import socket
@@ -33,6 +34,7 @@ SAFETY_ARGS = ["--ytdl=no"]
 # environment without them.
 LOADER_OVERRIDES = ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")
 CLOSED = "__closed__"
+CINEMA_SCRIPT = Path(__file__).resolve().parent / "scripts" / "cinema.lua"
 
 
 class MpvError(Exception):
@@ -54,8 +56,8 @@ class Mpv:
         self.binary = binary
         # plurx Player's own mpv configuration directory instead of the
         # user's ~/.config/mpv: a stray vo= or tone-mapping= there would
-        # silently defeat the mapping. mpv's built-in key bindings and OSC
-        # still work, and every option below is on the command line, which
+        # silently defeat the mapping. Cinema supplies the on-screen controls;
+        # every option below is on the command line, which
         # wins over anything in this directory.
         self.config_dir = config_dir
         self.socket_path = socket_path
@@ -70,11 +72,12 @@ class Mpv:
         self.closed = False
 
     def args(self):
-        # idle=once: wait for our loadfile, quit when that playback ends.
+        # Keep the window alive at EOF: the launcher owns next-episode transitions.
         config = [f"--config-dir={self.config_dir}"] if self.config_dir else []
-        return [self.binary, *config, "--idle=once", "--force-window=yes", "--no-terminal",
+        return [self.binary, *config, "--idle=yes", "--keep-open=yes", "--force-window=yes", "--no-terminal",
                 f"--input-ipc-server={self.socket_path}", f"--title={self.title}",
-                *VIDEO_ARGS, *SEEK_ARGS, *SAFETY_ARGS]
+                *VIDEO_ARGS, *SEEK_ARGS, *SAFETY_ARGS,
+                "--osc=no", f"--script={CINEMA_SCRIPT}"]
 
     def start(self, connect_timeout=15.0):
         env = {key: value for key, value in os.environ.items() if key not in LOADER_OVERRIDES}

@@ -211,9 +211,16 @@ def _redeem_and_play(args, deps, handoff, http, gate):
         mpv = Mpv(binary, os.path.join(runtime, "mpv.sock"),
                   config_dir=os.path.join(deps.config_dir or default_config_dir(), "mpv"))
         mpv.start()
-        playback = Playback(http, mpv, redeemed, device_caps(VERSION), deps.clock, deps.sleep,
-                            deps.timing, log)
-        code = playback.run()
+        from .cinema import Preferences
+        preferences = Preferences(deps.config_dir or default_config_dir())
+        while True:
+            playback = Playback(http, mpv, redeemed, device_caps(VERSION), deps.clock, deps.sleep,
+                                deps.timing, log, preferences)
+            code = playback.run()
+            if playback.next_handoff is None or mpv.closed:
+                break
+            redeemed = playback.next_handoff
+            playback.finish()
     except (PlaybackError, MpvError) as error:
         if playback is not None and playback.failure is None:
             playback.failure = str(error)

@@ -59,6 +59,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- Linux player 0.4.0 uses Cinema-style playback controls with scoped library
+  metadata and next episode, saved autoplay, and Auto/Original/advertised
+  quality choices that retain playback position and paused state.
+
 - The closed-form CM v2.9 display management (`tools/dv_processing/dv_dm.h`)
   evaluates its output lattice once per frame instead of eight vertices per
   pixel, and CM v4.0 and CM v2.9 compile as separate shaders. The output is

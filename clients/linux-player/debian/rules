@@ -33,6 +33,7 @@ ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	# any skip.
 	python3 -B packaging/run-tests tests \
 	  --allow-skip test_caps_and_trust.CapsTests.test_every_field_is_a_caps_rs_field
+	lua5.2 tests/test_cinema.lua plurx_player/scripts/cinema.lua
 	meson test -C build/libplacebo --print-errorlogs --num-processes $(JOBS)
 endif
 
