@@ -1,3 +1,12 @@
+# Adaptive/current-main ownership source audit (2026-10-28, e1d42fb2):
+# Reconciles35 exact counts against main6a2f8156 and effort5cf30d147;
+# per-row notes explain guarded production moves and authored fixture sites.
+# New title inputs retain the same admission and cancellation through scanner,
+# original reaper/pipe tasks, held FD and existing blocking input/result jobs.
+# Scan roots and existing forbidden zeroes are unchanged. The positive wait
+# anchor follows the actual supervisor-settlement API. This is source
+# correspondence, not executed regressions, native closure or peak qualification.
+
 # DV title analysis ownership review (PR #1301, 2026-10-28; source 7d2d4a9c7):
 # +1 namespaced task and +1 Command are DvTitleRide's companion scanner.
 # build_attested_pass retains DvTitleScan through the index pass and finish;
@@ -332,7 +341,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # `post_media_retirement_keeps_exact_resources_after_caller_cancellation` asserts that
 # `child_transition.try_lock()` fails while retirement is held at its cleanup-handoff point. A
 # test-only probe that is expected to fail and takes nothing; no transition owner is created.
-expected_occurrences = 19
+# Adaptive source audit e1d42fb2: The additional retirement.rs own_prepublication_cleanup
+# child_transition lock serializes the original child slot before actual cleanup. The session
+# refresh lock merely moved into refresh_segments_inner.
+expected_occurrences = 20
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -448,7 +460,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # reap before returning. It registers no shipped producer. The migration's own
 # constructor split (`new` and `new_with_job` both delegating to the private
 # `new_with_hooks`) adds no `new(`/`new_with_job(` call.
-expected_occurrences = 23
+# Adaptive source audit e1d42fb2: attempt_settlement.rs session_with_pending_drain constructs
+# one actual AttemptChild fixture; no shipped supervisor constructor is added.
+expected_occurrences = 24
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
@@ -496,10 +510,15 @@ replacement = "prepublication and published exact-attempt cleanup owners request
 
 [[symbols]]
 id = "prepublication-terminal-wait"
-pattern = "\\.wait_for_terminal\\(\\)"
+pattern = "\\.wait_for_settlement\\(\\)"
+# Adaptive source audit e1d42fb2: Both status-only wait_for_terminal calls became
+# wait_for_settlement in rolling/prepublication.rs and retirement.rs. They retain/join the
+# actual supervisor and diagnostic drains before confirming try_wait_observed. This positive
+# anchor follows those two production replacements; test-only status observations remain
+# outside this source scope and confer no closure authority.
 expected_occurrences = 2
 kind = "process_action"
-replacement = "prepublication and published cleanup owners wait on the supervisor's shared terminal proof before releasing scratch or admission"
+replacement = "prepublication and published cleanup owners join the original supervisor and diagnostic drains before releasing scratch or admission"
 
 [[symbols]]
 id = "raw-child-wait"
@@ -656,7 +675,13 @@ also_in = ["crates/plurxd/src/transcode"]
 # releaser in `a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_one`
 # stands in for a qualification that lets go of the slot when told; the test
 # awaits its JoinHandle before asserting.
-expected_occurrences = 119
+# Adaptive source audit e1d42fb2: The net16 transcode additions are local_direct original
+# worker/two original-ticket finalizers; source_direct original worker/two original-ticket
+# finalizers; adaptive_attempts two retained start-latched control/coordinator handles plus
+# one test; core-copy result owner retaining producer/output; and six
+# joined/panic/cancellation fixture tasks. Existing retirement/reader/supervisor task sites
+# were rewritten without additional launch authority.
+expected_occurrences = 135
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -668,7 +693,10 @@ replacement = "every detached task requires ownership-catalog review; published 
 [[symbols]]
 id = "all-runtime-owned-async-tasks"
 pattern = "\\.spawn\\(async move"
-expected_occurrences = 2
+# Adaptive source audit e1d42fb2: attempt_child.rs Drop transfers the same supervisor
+# JoinHandle to its retained join_runtime; it starts no replacement producer and grants no
+# successful settlement from Drop.
+expected_occurrences = 3
 kind = "structural_task_scan"
 replacement = "every new runtime-owned detached task requires ownership-catalog review; producer recovery moves only to the actor executor"
 
@@ -799,7 +827,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # owns no producer and decides nothing.
 # +1 in the same releaser: a 50 ms stand-in for the qualification's kill and
 # reap before it drops the slot. Test-only, joined.
-expected_occurrences = 81
+# Adaptive source audit e1d42fb2: Three additional retirement sleeps repeat original
+# reap/close attempts while retaining original owners, and two source_direct sleeps retry
+# original SQL settlement. No timer selects an independent replacement producer.
+expected_occurrences = 86
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -847,7 +878,11 @@ replacement = "one session executor acquires process capacity and cleanup regist
 [[symbols]]
 id = "prepublication-start-cancellation-settlement"
 pattern = "PrepublicationStartSettlement"
-expected_occurrences = 5
+# Adaptive source audit e1d42fb2: manager/start.rs adds the
+# Option<PrepublicationStartSettlement> adapter type mention and selected-versus-legacy
+# fallback construction. Selected finite copy uses its original typed owner; ordinary fallback
+# installs the existing legacy settlement guard.
+expected_occurrences = 7
 kind = "resource_owner"
 replacement = "retained until manager publication so cancellation reaps the child, clears scratch, ends the actor, and releases admissions"
 
@@ -876,7 +911,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # cleanup owners, exercising the same bounded production owners rather than
 # adding one. The six left in `transcode.rs` are the three definitions and the
 # three production launch sites.
-expected_occurrences = 8
+# Adaptive source audit e1d42fb2: Two attempt_settlement.rs fixture calls exercise the shipped
+# completion cleanup owner and actual supervisor join/cancellation boundaries.
+expected_occurrences = 10
 kind = "lifecycle_owner"
 replacement = "typed failure, successful completion, and executor-loss paths transfer cleanup before awaiting; repeated test calls exercise the same bounded production owners"
 
@@ -897,7 +934,10 @@ replacement = "bounds each individual prepublication or published physical reap 
 [[symbols]]
 id = "prepublication-reap-retry-cadence"
 pattern = "PREPUBLICATION_REAP_RETRY"
-expected_occurrences = 5
+# Adaptive source audit e1d42fb2: retirement.rs adds original PREPUBLICATION_REAP_RETRY waits
+# in retired-presentation cleanup and two phases of own_rolling_retirement. These retain the
+# original session/child and do not retry playback policy.
+expected_occurrences = 8
 kind = "lifecycle_timer"
 replacement = "bounded prepublication or published physical-cleanup repair only; cannot retry, replace, or make a playback verdict"
 
@@ -1077,7 +1117,10 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-attempt-status-admission"
 pattern = "AttemptStatus"
-expected_occurrences = 8
+# Adaptive source audit e1d42fb2: AdaptiveAttemptStatusV1 adds its DTO declaration, internal
+# endpoint import/deserialize and origin request. Requests remain bound to original
+# claim/binding/worker before adoption; no child/task constructor is represented.
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "m4-vod-resurrection-deadline"
@@ -1150,7 +1193,10 @@ pattern = "SegmentPublication"
 # the existing request owner still resolves one typed outcome.
 # Review59: +1 NEW integrity regression asserts the actual HTTP Failed arm,
 # not the legacy probe facade's lossy Option result; no new response owner.
-expected_occurrences = 47
+# Adaptive source audit e1d42fb2: manager/publication.rs adds two
+# Missing(Some(current_owner())) returns on selected finite ownership checks. They preserve
+# the exact response owner and do not launch a producer.
+expected_occurrences = 49
 
 [[module_symbols]]
 id = "m4-typed-presentation-resolution"
@@ -1200,7 +1246,9 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-start-cancellation-settlement"
 pattern = "PrepublicationStartSettlement"
-expected_occurrences = 5
+# Adaptive source audit e1d42fb2: Same optional legacy settlement adapter/construction changes
+# as prepublication-start-cancellation-settlement; count is not a new native owner count.
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "removed-published-lifetime-watchdog-handoff"
@@ -1215,7 +1263,10 @@ pattern = "actor_prepublication_producer"
 # after admitting the exact attempt. The retained executor registration owns
 # the actor for the fixture lifetime; no shipped ownership projection changed.
 # S10 retained attachment initializes false: it owns no producer.
-expected_occurrences = 24
+# Adaptive source audit e1d42fb2: manager/start.rs pure selected_copy_session_fixed_heap_bytes
+# now names actor_prepublication_producer while sizing its existing AtomicBool allocation. The
+# added occurrence is a sizing comment, not a new actor/owner.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-decision-wake"
@@ -1263,7 +1314,10 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-published-retention-policy"
 pattern = "RetainPublished"
-expected_occurrences = 15
+# Adaptive source audit e1d42fb2: Removed occurrence is copyseg.rs run_observed_retained
+# comment naming RetainPublished. Production retention dispatch remains; raw symbol census
+# intentionally counts this comment removal.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-successful-exit-probe"
@@ -1276,7 +1330,10 @@ pattern = "RollingProducerCompletionDisposition"
 # S10 remaining output: +2 normal-completion variants in the existing
 # Copy executor's observation callback. This grants no retained authority.
 # S10 retained collection requires the existing CompleteVerifiedDuration verdict.
-expected_occurrences = 23
+# Adaptive source audit e1d42fb2: Two actual attempt_settlement.rs tests name
+# CompleteUnverifiedDuration. Existing enum/impl relocation within playback_control.rs is
+# count-neutral.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-expected-executor-settlement"
@@ -1341,7 +1398,9 @@ pattern = "VodPublication"
 # F1/N2 landing repair: +1 test-only VodPublication match in
 # an_unplaced_start_entry_does_not_refuse_a_seek_elsewhere. It inspects the
 # existing owner-bearing refusal; no producer or response owner is created.
-expected_occurrences = 54
+# Adaptive source audit e1d42fb2: finite_software.rs adds two VodPublication
+# observations/assertions against the actual selected producer/output.
+expected_occurrences = 56
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1425,7 +1484,10 @@ pattern = "ServingAuthority"
 # real `ServingFence`, and `test_manager_with_system`'s always-ready argument
 # in its new position.
 # Measured on the merge with main at 36: 36 + (-9) = 27.
-expected_occurrences = 27
+# Adaptive source audit e1d42fb2: New occurrences carry the existing ServingAuthority through
+# media-pool quality contexts, adaptive adoption, and VOD Store-adopt attachment. One is a
+# control.rs ownership comment; none grants a native witness.
+expected_occurrences = 37
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1711,7 +1773,10 @@ pattern = "publication_ready_at_ms"
 # sentinel. None moves a shipped fence.
 # #978: +2, test-only. The create.rs epoch-fence regression builds a blocked
 # activation and then the confirmed row a takeover produces.
-expected_occurrences = 147
+# Adaptive source audit e1d42fb2: Three actual publication_ready_at_ms checks bind adaptive
+# claim/adopt/origin readiness to MEDIA_SESSION_PUBLICATION_BLOCKED; one terminal_memory.rs
+# destructuring occurrence sizes the actual retained route.
+expected_occurrences = 151
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -1779,7 +1844,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # #978: +1, test-only, the same blocked activation as the handoff fence above.
 # PR1225: +1 in manager/processed_reuse_tests.rs:1425, the test incumbent's
 # blocked activation before its existing Confirm settlement; no shipped write.
-expected_occurrences = 55
+# Adaptive source audit e1d42fb2: The three new MEDIA_SESSION_PUBLICATION_BLOCKED references
+# are the same origin/adoption/claim readiness guards; they add no publication authority.
+expected_occurrences = 58
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1820,7 +1887,10 @@ pattern = "(?:spawn_rolling_scratch_cleanup_owner|scratch_cleanup_started)"
 # (a string). The three production calls are unchanged apart from losing their `cfg(test)` pause
 # argument; the owner now takes its point where it is spawned.
 # S10 retained attachment initializes the existing cleanup latch; cached bodies are not scratch.
-expected_occurrences = 16
+# Adaptive source audit e1d42fb2: The additional latch sites are selected-presentation cleanup
+# selection/guard Drop/reconciliation in retirement.rs. The latch serializes original scratch
+# cleanup; retry restores eligibility without releasing native/application charge.
+expected_occurrences = 19
 
 [[module_symbols]]
 id = "m4-bounded-rolling-scratch-cleanup"
@@ -1954,7 +2024,10 @@ pattern = "terminal_reason"
 # 50 -> 52 with the VOD index recovery (PR1299), both test-only: the budget
 # test's outcome fixture initializes the field to None, and the vod test reads
 # the `attempt_limit` cause the recovery wrote. No route cause changes.
-expected_occurrences = 52
+# Adaptive source audit e1d42fb2: playback_control.rs excludes a replaced route from unrelated
+# End authority; terminal_memory.rs adds destructuring and actual optional-string sizing of
+# terminal_reason.
+expected_occurrences = 55
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -2130,7 +2203,11 @@ pattern = "rendition_build_gate"
 # Cleanup and conservative cold revalidation take the existing exact-key gate;
 # neither creates a competing build owner.
 # Shared cache eviction takes this same keyed gate before retiring a title.
-expected_occurrences = 34
+# Adaptive source audit e1d42fb2: Three net production gate references retain exact-key
+# serialization across resolve/adaptive prepare/original finite close; two finite_software
+# fixture references exercise abandoned build/metadata wait. Existing purge gate moved within
+# the same owner.
+expected_occurrences = 39
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -2201,7 +2278,9 @@ pattern = "TerminalCleanup"
 # #844: +1. begin_end splits into begin_end_inner, which may be given the
 # exact ResponseOwner it is allowed to end; a different incarnation returns
 # None before any terminal state is touched. Same single compaction owner.
-expected_occurrences = 23
+# Adaptive source audit e1d42fb2: vod/serve/control.rs adds size_of::<TerminalCleanup>() to
+# the real retained terminal memory projection, not another cleanup task.
+expected_occurrences = 24
 
 [[module_symbols]]
 id = "m4-vod-terminal-rendition-compaction"
@@ -2225,7 +2304,10 @@ pattern = "purge_if_dormant"
 # `dormant_purge_point_precedes_producer_termination` calls `purge_if_dormant` once, test-only,
 # from a task it awaits within a five-second bound. No production caller was added; the
 # settlement owner is unchanged.
-expected_occurrences = 14
+# Adaptive source audit e1d42fb2: One maintain() call reconciles actual idle/dormant state;
+# three new selected finite/restart test calls exercise existing purge settlement. Existing
+# processed-instance test reformatting is count-neutral.
+expected_occurrences = 18
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -3239,7 +3321,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # PR1299 VOD index recovery: +4 test-only tasks in state/tests.rs: three runs
 # of the queued local index pass and one queued speech admission behind it.
 # Each is awaited under a timeout; none outlives its test.
-expected_occurrences = 1022
+# Adaptive source audit e1d42fb2: Includes core fixed_probe relocation of old decode_facts
+# launches/tests (not new workers), same-admission wrappers around existing blocking
+# model/inference work, original registered writer/join owners, retained local/Source
+# retirement workers and adaptive actors, process observation sampling, finite VOD
+# registry/close owners, and finite fixtures. Namespaced helper calls such as
+# DvTitleScanInput::spawn and admitted_work::spawn_blocking also match this broad shape; the
+# count is not the number of new Tokio tasks.
+expected_occurrences = 1080
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3480,7 +3569,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # kill_on_drop guard; no production launcher or separate reap owner is added.
 # Main contributes one HTTPS transport JoinSet.spawn; its driver is joined by
 # the listener owner. Both parent additions are present in the source union.
-expected_occurrences = 79
+# Adaptive source audit e1d42fb2: Adds the job-custodied process launcher, same-supervisor
+# off-runtime join owner and same diagnostic-reader join owner; fixed_probe native parser
+# threads relocate existing decode_facts workers. Title ride.spawn is an owned Rust helper
+# invocation. Remaining delta is bounded test launch sites, not independent production
+# authority.
+expected_occurrences = 83
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3501,7 +3595,10 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # both use the same retained cancellation/reap owner, not separate launchers.
 # PR1225: +1 is vod/driver.rs:1245's cfg(test) controlled_driver::spawn
 # declaration, not a second task. Its actual task/cancellation is noted above.
-expected_occurrences = 17
+# Adaptive source audit e1d42fb2: The two new title occurrences are fn spawn declarations on
+# DvTitleRide and DvTitleScanInput, not detached calls. Two admitted_work test calls use the
+# unaliased production helper; one such helper definition already exists in the effort.
+expected_occurrences = 20
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4938,7 +5035,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps that let the pass and the speech pass take their places in the
 # heavy lane's queue, four timeouts bounding those awaited tasks, and one
 # sleep in the ride-along worker test's polling loop.
-expected_occurrences = 1895
+# Adaptive source audit e1d42fb2: Includes fixed_probe relocation (old decode_facts
+# deadlines/tests), original operation/HTTP/reader/SQL deadline bounds, original retirement
+# retry cadence, selected finite lifecycle bounds and fixtures. Title-versus-E adds one actual
+# finish timeout plus four test-only waits, including the final5s keeper/reaper observation.
+expected_occurrences = 1998
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -4964,7 +5065,11 @@ expected_occurrences = 1895
 id = "bare-time-constructor"
 pattern = "(?<![:.\\w])(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
 # J4 shared startup: Two calls to the local timeout error factory in the shared-start observer return ApiError only; they construct no timer.
-expected_occurrences = 3
+# Adaptive source audit e1d42fb2: All10 added occurrences are calls to ready_file.rs private
+# timeout(deadline,future), bounding actual local/finite reads, buffer acquisition and range-
+# reader setup under the existing absolute deadline; this is not an imported/aliased Tokio
+# timer or independent service.
+expected_occurrences = 13
 
 [[module_structures]]
 id = "tokio-time-import"
@@ -5420,7 +5525,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 303
+# Adaptive source audit e1d42fb2: Five fixed_probe Command sites relocate the old decode_facts
+# implementation. fixed_planning_engine uses its original admitted command and registered
+# child; process/mod.rs includes a non-launching empty Command replacement for transferring
+# the original launcher command and a test self-exec. observation.rs Command is test-only.
+# Other new constructors are isolated finite/probe fixtures and the title scanner using the
+# existing bounded collector with the original keeper.
+expected_occurrences = 311
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6067,7 +6178,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in-process responses, while the finite FFmpeg fixture is explicitly awaited.
 # Main's HTTPS admin/transport/startup owners and source/status reads remain in
 # the source scan; none changes launch authorization.
-expected_occurrences = 808
+# Adaptive source audit e1d42fb2: Broad matches include HTTP status(), finite owner.output()
+# selectors, Rust title helper spawn, retained join-runtime spawns, moved native parser
+# threads, custodied process launch, and test child/status calls. Each actual changed
+# production launch remains in its original registered/admitted owner; these totals do not
+# equate every output/status match with an OS launch.
+expected_occurrences = 831
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6363,7 +6479,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 354
+# Adaptive source audit e1d42fb2: fixed_probe lifecycle methods relocate existing probe
+# controls; fixed_planning_engine uses the original child wait/kill; prodrun physical wrappers
+# retain the exact child; priority adds exact registered-control actions and fixture waits.
+# Test-only finite/attempt fixtures account for the remaining calls. No raw numeric-
+# descriptor/native absence authority is inferred.
+expected_occurrences = 371
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6442,7 +6563,12 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 72
+# Adaptive source audit e1d42fb2: Includes checked original-group kill/absence observation in
+# fixed_planning_engine, moved fixed_probe Unix/Windows controls, exact prodrun signal
+# wrapper, and method declarations named wait/signal that match this broad shape. Group
+# signaling/reaping uncertainty remains explicit; the census does not qualify native group
+# absence.
+expected_occurrences = 78
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6587,7 +6713,11 @@ pattern = "kill_on_drop\\s*\\("
 # `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
 # counts once). Each is also explicitly waited, or killed and waited, by its
 # owner; kill-on-drop is the backstop, not the settlement.
-expected_occurrences = 117
+# Adaptive source audit e1d42fb2: Five fixed_probe kill_on_drop sites relocate old
+# decode_facts controls. Added fixed_planning_engine/observation sites are original bounded
+# launch and test child; finite restart adds a fixture guard. kill_on_drop remains a request,
+# never a confirmed native-close receipt.
+expected_occurrences = 120
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6601,7 +6731,9 @@ pattern = "AttemptChild::new(?:_with_job)?\\s*\\("
 # module-wide twin of `supervisor-registration`, and the same one test-only
 # `new_with_job(` in `attempt_child_shipped_shape`, which reaps its own fixture
 # child before returning.
-expected_occurrences = 23
+# Adaptive source audit e1d42fb2: One AttemptChild::new fixture in attempt_settlement.rs; same
+# site counted by supervisor-registration, not a second shipped supervisor.
+expected_occurrences = 24
 
 [[module_structures]]
 id = "forbidden-timer-or-task-alias"
