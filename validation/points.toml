@@ -1594,6 +1594,7 @@ paths = [
   "scripts/decoder-diagnostic-qualification",
   "scripts/validate-docker-startup-budget",
   "scripts/docker-hardware",
+  "scripts/docker-https-ports.py",
   "scripts/registry-push",
   "scripts/release-cut",
   "scripts/sign-android-release",
