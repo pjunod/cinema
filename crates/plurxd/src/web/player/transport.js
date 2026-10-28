@@ -233,7 +233,8 @@ function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry
   }
   p.controlSeek={sequence,intentGeneration,
     targetMs:Math.max(0,Math.round(targetSec*1000)),
-    executed:false,frameFloor,audioPositionMs:null,seekTelemetry};
+    executed:false,frameFloor,audioPositionMs:null,seekTelemetry,captionViewerSeek:supersedeIntent};
+  if(supersedeIntent&&typeof translationPlaybackSeek==="function")translationPlaybackSeek(p,p.controlSeek);
   if(preserveContinuousManualQuality)p.continuousQuality?.noteSeek?.(targetSec);
   const reporter=p.controlReporter;
   const predicted=reporter&&!reporter.stopped?(Number(reporter.sequence)||0)+1:null;
@@ -253,6 +254,7 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   // request (contract §3.4).
   playbackSurfaceStep({intent_settled:pending.sequence});
   pending.executed=true;
+  if(pending.captionViewerSeek&&typeof translationPlaybackSeek==="function")translationPlaybackSeek(p,pending);
   pending.executedAt=performance.now();
   pending.attachment=p.mediaAttachment;
   pending.targetFrame=null;

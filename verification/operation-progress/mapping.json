@@ -9,43 +9,43 @@
         "table": "01 candidate admission",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+        "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
       },
       {
         "table": "02 claim ambiguity deadline",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn claim_with_resolution_inner(",
-        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+        "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
       },
       {
         "table": "03 queue heartbeat lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
-        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+        "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
       },
       {
         "table": "04 bind queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn bind_library(",
-        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+        "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
       },
       {
         "table": "05 complete queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn complete_library(",
-        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+        "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
       },
       {
         "table": "06 queue heartbeat retirement",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn finish(mut self) {",
-        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+        "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
       },
       {
         "table": "07 queue retirement lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
-        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+        "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
       },
       {
         "table": "08 worker acquisition and cleanup",
@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,19 +183,19 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12"
+        "sha256": "a71c9b2a3e1e1fd5f7fd9b248af402ee95263075f836ef0881203a86fd984f88"
       },
       {
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "304a14ebe29335906f72931b21bbc23b03e1aced2db3c0c470db80d468fbb548"
+        "sha256": "9078f1ddff1cde6b5cce421badc535bcf9be84cc85f9ee65f9b9366769ef6f50"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "304a14ebe29335906f72931b21bbc23b03e1aced2db3c0c470db80d468fbb548"
+        "sha256": "9078f1ddff1cde6b5cce421badc535bcf9be84cc85f9ee65f9b9366769ef6f50"
       },
       {
         "table": "33 local raft metrics authority",
@@ -249,25 +249,25 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "16491b46e6cb9cd1fc744c99af8509277a54770373618fa33f317ac2fc659121"
+        "sha256": "11faff3f0e75c0ff50deca26e24bd69fa7bb6aea04a8fe529f81e01c814017b7"
       },
       {
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "b800ba362d1f0570712c79fc3d6b7443f75765301427f08cfd5434b6ca15240f"
+        "sha256": "1310cb5e57e5acccc650c66191274f198f4eb2cf40e734d2a33cc3f37b566ac3"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "b800ba362d1f0570712c79fc3d6b7443f75765301427f08cfd5434b6ca15240f"
+        "sha256": "1310cb5e57e5acccc650c66191274f198f4eb2cf40e734d2a33cc3f37b566ac3"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "44ebf717c9f9a772375968fed3c292aeb43eba2ccf565e6058c297487975cb80"
+        "sha256": "40b4eeef5e9bddf172420c38e6bde66bc79f347b495672fd22a4a27b73567aab"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -309,10 +309,34 @@
         "table": "daemon retry settlement delegates to the shared worker-control helper",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) use plurx_worker_control::retry_policy::retry_delay_ms;",
-        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+        "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
+      },
+      {
+        "table": "caption migration exact-shape recognizer outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_schema.rs",
+        "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2.",
+        "sha256": "2ddca167f66170b385677f38469df4bdfe9d0520a7d63547f0822baed1c8c7d1"
+      },
+      {
+        "table": "caption retarget queue effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_retarget.sql",
+        "anchor": "last_error_code='producer_retargeted'",
+        "sha256": "775b12add23c672d863292db2b0b6c266a243d337c0eda437a316b67812831bf"
+      },
+      {
+        "table": "caption claim-continuity effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_continuity.sql",
+        "anchor": "WHEN NEW.kind='subtitle_translation_range' AND NEW.state='running' AND NEW.fence>OLD.fence",
+        "sha256": "fdd2ba41bacde0935f63499b197e944a0b59358b15901e528e0f71a13346807f"
+      },
+      {
+        "table": "caption demand revocation affects only captured caption grants outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_continuity.sql",
+        "anchor": "CREATE TRIGGER subtitle_translation_revoke_continuity BEFORE UPDATE ON subtitle_translation_demands",
+        "sha256": "fdd2ba41bacde0935f63499b197e944a0b59358b15901e528e0f71a13346807f"
       }
     ],
-    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. PR1263 source refresh: the SQLite source adds only a cfg(test) transaction-control bridge and the queue-fence source adds only conformance tests; their mapped production bodies are unchanged. The unchanged library processing/completion helpers remain mapped in library_work.rs; domain acquisition and binding moved to library_work/env.rs, while work_library_queue calls the shared library_driver interpreter. Fable 5.1 FINAL-REVIEW at c37c4d610 inspected that extraction and preserved cleanup order; its conditional verdict and R1 retirement boundary remain unresolved by this metadata refresh. No model/configuration semantics or execution evidence changes are claimed. Source-pin refresh at 12dcb179c: the daemon now re-exports and calls the shared worker-control retry_delay_ms helper, whose module export and implementation are pinned below. The core worker-control dependency is test-only and is recorded as package-test closure, not a runtime premise. These legacy models continue to abstract the numeric retry schedule as an input; the new source pins do not claim that either model proves the helper arithmetic. Only source hashes for the changed lockfile/daemon file and these directly related dependency/helper inputs are refreshed; model/configuration identities and prior review provenance remain unchanged. Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes. Codex and the parent coordinator reviewed completion source 5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9 on 2026-10-25. Only identity-repair result classification changes in the shared publication file: the optional guarded annotation set-copy accepts zero-to-many rows, while complete-vector and all other exact-one checks remain. Identity repair is outside the selected library-worker progress model and is not proved here. atomic_publication renewal, authority binding, wait/lock order, selected publication SQL/anchors and worker cancellation/settlement are unchanged. Two whole-file pins are refreshed for source correspondence only. Model/configuration/source-anchor/validator/scope bytes are unchanged; this adds no liveness, runtime, theorem, physical or qualification guarantee. Integration of HTTPS 67b09d29c with main 167af4616 preserves the selected library-worker protocol. Upstream adds three FEL trait/delegation methods outside the selected library scope and an off-boot VAAPI probe plus independent handoff-pruning loop; HTTPS retains fragment-only receipt fencing, publication result classification and TLS ownership. The Store parent composes strict historical fixtures and source-backed inventory; formal_publication remains unchanged. Only reviewed whole-file correspondence pins change; no model, configuration, exact anchor, validator or governed scope changes. FEL, handoffs, identity repair, historical migrations and public TLS remain excluded; no new theorem or qualification is claimed. The integration platform repair gates only extend_fragment_admission to Linux, matching its FEL-only consumers. The selected admit_fragment body and try-only admission order are unchanged; row 41 is a whole-file correspondence refresh, not proof of the FEL extension."
+    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. PR1263 source refresh: the SQLite source adds only a cfg(test) transaction-control bridge and the queue-fence source adds only conformance tests; their mapped production bodies are unchanged. The unchanged library processing/completion helpers remain mapped in library_work.rs; domain acquisition and binding moved to library_work/env.rs, while work_library_queue calls the shared library_driver interpreter. Fable 5.1 FINAL-REVIEW at c37c4d610 inspected that extraction and preserved cleanup order; its conditional verdict and R1 retirement boundary remain unresolved by this metadata refresh. No model/configuration semantics or execution evidence changes are claimed. Source-pin refresh at 12dcb179c: the daemon now re-exports and calls the shared worker-control retry_delay_ms helper, whose module export and implementation are pinned below. The core worker-control dependency is test-only and is recorded as package-test closure, not a runtime premise. These legacy models continue to abstract the numeric retry schedule as an input; the new source pins do not claim that either model proves the helper arithmetic. Only source hashes for the changed lockfile/daemon file and these directly related dependency/helper inputs are refreshed; model/configuration identities and prior review provenance remain unchanged. Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes. Codex and the parent coordinator reviewed completion source 5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9 on 2026-10-25. Only identity-repair result classification changes in the shared publication file: the optional guarded annotation set-copy accepts zero-to-many rows, while complete-vector and all other exact-one checks remain. Identity repair is outside the selected library-worker progress model and is not proved here. atomic_publication renewal, authority binding, wait/lock order, selected publication SQL/anchors and worker cancellation/settlement are unchanged. Two whole-file pins are refreshed for source correspondence only. Model/configuration/source-anchor/validator/scope bytes are unchanged; this adds no liveness, runtime, theorem, physical or qualification guarantee. Integration of HTTPS 67b09d29c with main 167af4616 preserves the selected library-worker protocol. Upstream adds three FEL trait/delegation methods outside the selected library scope and an off-boot VAAPI probe plus independent handoff-pruning loop; HTTPS retains fragment-only receipt fencing, publication result classification and TLS ownership. The Store parent composes strict historical fixtures and source-backed inventory; formal_publication remains unchanged. Only reviewed whole-file correspondence pins change; no model, configuration, exact anchor, validator or governed scope changes. FEL, handoffs, identity repair, historical migrations and public TLS remain excluded; no new theorem or qualification is claimed. The integration platform repair gates only extend_fragment_admission to Linux, matching its FEL-only consumers. The selected admit_fragment body and try-only admission order are unchanged; row 41 is a whole-file correspondence refresh, not proof of the FEL extension. Upstream source-review history preserved during main-77e985 integration: Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. Construction correspondence reconciliation on 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: selected library candidate/claim, queue heartbeat, bind/complete, heartbeat join and local retirement paths are unchanged. BackgroundJobStore adds separately kind-scoped text-caption methods; Hiqlite adds independent schema installation without changing the mapped transaction timeout. main.rs only declares the text-translation module at this boundary. admit_fragment remains try-only and retains its existing source-work helper. Two-thread speech work shares the background-heavy gate, while one-thread read attestation uses ordinary speculative CPU admission; their competition is outside this selected-worker model and supplies no new fairness guarantee. The obsolete unused queued-fragment wrapper is removed; speech qualification uses its own cancellable FIFO path. This authored construction mapping refresh is not the pending final adversarial review, test execution or TLC qualification; model/configuration bytes, fairness premises and prior receipts retain their identities. Final construction rustfmt refresh on 2026-10-26 changes only line wrapping in read_shared_captions trait/adapter arguments and module declaration ordering; mapped selected-worker behavior, anchors, model/configuration bytes and pending evidence boundaries are unchanged. Independent final adversarial correspondence review on 2026-10-26 of the frozen completion/retarget delta atop be9ee45ae: shared queue changes add producer-node/preparation-incarnation predicates only for subtitle_translation_prepare/range and a legacy-defaulted subtitle range payload field. Selected library_scan/metadata_refresh enqueue/claim, binding, renewal, cancellation, publication and cleanup behavior is unchanged. The exact legacy-caption trigger migration and its shared-queue effects were inspected: only caption jobs for the same operation are cancelled; library kinds are excluded. SQLite v117 and Hiqlite recognize the complete old shape before the transactional trigger replacement and reject unknown shapes. Added store-contract module wiring is test-only. New mapping dependencies pin the migration recognizer and replacement trigger so their isolation cannot drift silently. This supersedes the earlier construction-only correspondence status for these changes; source hashes and unchanged anchors do not establish Rust test execution, TLC qualification, remote-worker liveness or new modeled caption guarantees. Model/configuration/fairness bytes and historical receipts remain unchanged. Independent bounded moving-playback correspondence review on 2026-10-26 atop 352137f764d8cf87d530352222d5948a77275d4f: Hiqlite only chains exact recognized caption extensions and SQLite adds caption migration118; selected library transaction/publication/timeout paths are unchanged. The exact original0/retarget1/continuity2 recognizer and new continuity SQL were inspected. Capture/retirement triggers select only subtitle_translation_range; demand revocation deletes only matching caption grant rows; the replacement mutation trigger retains the previously reviewed caption-only job effects. New dependency anchors pin those isolation boundaries. Selected library enqueue/claim/renewal/binding/settlement semantics, model/configuration bytes, fairness premises and historical receipts remain unchanged. This is source correspondence, not runtime execution, TLC qualification, caption liveness proof or a refinement theorem. Incoming main correspondence record: Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes. Codex and the parent coordinator reviewed completion source 5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9 on 2026-10-25. Only identity-repair result classification changes in the shared publication file: the optional guarded annotation set-copy accepts zero-to-many rows, while complete-vector and all other exact-one checks remain. Identity repair is outside the selected library-worker progress model and is not proved here. atomic_publication renewal, authority binding, wait/lock order, selected publication SQL/anchors and worker cancellation/settlement are unchanged. Two whole-file pins are refreshed for source correspondence only. Model/configuration/source-anchor/validator/scope bytes are unchanged; this adds no liveness, runtime, theorem, physical or qualification guarantee. Integration of HTTPS 67b09d29c with main 167af4616 preserves the selected library-worker protocol. Upstream adds three FEL trait/delegation methods outside the selected library scope and an off-boot VAAPI probe plus independent handoff-pruning loop; HTTPS retains fragment-only receipt fencing, publication result classification and TLS ownership. The Store parent composes strict historical fixtures and source-backed inventory; formal_publication remains unchanged. Only reviewed whole-file correspondence pins change; no model, configuration, exact anchor, validator or governed scope changes. FEL, handoffs, identity repair, historical migrations and public TLS remain excluded; no new theorem or qualification is claimed. The integration platform repair gates only extend_fragment_admission to Linux, matching its FEL-only consumers. The selected admit_fragment body and try-only admission order are unchanged; row 41 is a whole-file correspondence refresh, not proof of the FEL extension. Construction integration on 2026-10-28 retains both parents' mapping obligations. Existing Bind and AcquireDomain obligations follow the previously extracted library_work/env.rs Request arms; upstream caption/continuity obligations remain separate from selected library semantics. Source pins identify actual merged bytes; independent final review and execution remain pending."
   },
   "configs": {
     "progress.cfg": {

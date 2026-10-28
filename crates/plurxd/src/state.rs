@@ -2312,6 +2312,18 @@ const INDEX_FILE_BUDGET_FLOOR_SECS: u64 = 90;
 const INDEX_FILE_BUDGET_CEILING_SECS: u64 = 30 * 60;
 const INDEX_EXPECTED_MIN_SPEED: u64 = 8;
 const INDEX_FILE_HEADROOM_SECS: u64 = 30;
+/// The slowest whole-file read rate a first attempt plans for. A duration-only
+/// budget assumes the read keeps up with eight times real time, which a
+/// 50-90 Mb/s remux on a network mount does not: lab5 measured 33-40 MB/s and
+/// killed every 70-80 GB remux it tried at 40-64%. 24 MiB/s leaves a margin
+/// under the slowest disk rate measured there, so a healthy first read is not
+/// cut off at the very end.
+const INDEX_EXPECTED_MIN_READ_BYTES_PER_SEC: u64 = 24 * 1024 * 1024;
+/// The ceiling a budget derived from the file's size or from a measured read
+/// may reach. The 30-minute ceiling is a guess about time; these budgets are
+/// derived from what the file and this node actually are, and both local and
+/// queued passes yield to viewers, so a long one costs playback nothing.
+const INDEX_MEASURED_BUDGET_CEILING_SECS: u64 = 6 * 60 * 60;
 
 /// The progress-row key of a local (non-queue) index pass: the file and the
 /// pipeline's argv fingerprint, so a file's identities get a row each, and a
@@ -2324,15 +2336,68 @@ fn local_index_job_id(file_id: i64, identity: &plurx_core::segplan::SourceIdenti
     format!("local-index:{file_id}:{fingerprint}")
 }
 
-fn index_file_budget(duration_ms: Option<i64>) -> Duration {
+/// The wall-clock budget for one whole-file index read.
+///
+/// Three bounds, the largest wins: the film's length read at eight times real
+/// time (capped at 30 minutes, as before); the file's size read at the slowest
+/// rate a network mount is expected to sustain; and, after an attempt that ran
+/// out of budget, what that attempt measured. The last two are capped
+/// separately and higher, because they are derived from this file and this
+/// node rather than guessed.
+fn index_file_budget(
+    duration_ms: Option<i64>,
+    size_bytes: i64,
+    previous: Option<&plurx_core::segplan::FragmentIndexOutcome>,
+) -> Duration {
     let film_secs = duration_ms
         .filter(|milliseconds| *milliseconds > 0)
         .map_or(0, |milliseconds| (milliseconds as u64).div_ceil(1_000));
     let estimated = film_secs
         .div_ceil(INDEX_EXPECTED_MIN_SPEED)
-        .saturating_add(INDEX_FILE_HEADROOM_SECS);
-    Duration::from_secs(
-        estimated.clamp(INDEX_FILE_BUDGET_FLOOR_SECS, INDEX_FILE_BUDGET_CEILING_SECS),
+        .saturating_add(INDEX_FILE_HEADROOM_SECS)
+        .clamp(INDEX_FILE_BUDGET_FLOOR_SECS, INDEX_FILE_BUDGET_CEILING_SECS);
+    let by_size = u64::try_from(size_bytes.max(0))
+        .unwrap_or(0)
+        .div_ceil(INDEX_EXPECTED_MIN_READ_BYTES_PER_SEC)
+        .saturating_add(INDEX_FILE_HEADROOM_SECS)
+        .min(INDEX_MEASURED_BUDGET_CEILING_SECS);
+    let measured = measured_index_budget_secs(duration_ms, previous).unwrap_or(0);
+    Duration::from_secs(estimated.max(by_size).max(measured))
+}
+
+/// What an attempt that ran out of budget measured: the time it would have
+/// needed for the whole film at the rate it actually read, plus a quarter.
+///
+/// `None` unless the previous attempt is a typed `index_budget_exceeded` with
+/// the elapsed time and the coverage it reached, which is what every budget
+/// failure records.
+fn measured_index_budget_secs(
+    duration_ms: Option<i64>,
+    previous: Option<&plurx_core::segplan::FragmentIndexOutcome>,
+) -> Option<u64> {
+    let previous = previous?;
+    if previous.typed_code
+        != Some(plurx_core::content_analysis::IndexFailureCode::IndexBudgetExceeded)
+    {
+        return None;
+    }
+    let diagnostic = previous.diagnostic.as_ref()?;
+    let elapsed = u128::from(diagnostic.elapsed_ms.filter(|value| *value > 0)?);
+    let covered = u128::try_from(diagnostic.covered_ms.filter(|value| *value > 0)?).ok()?;
+    let expected = diagnostic
+        .expected_ms
+        .or(duration_ms)
+        .filter(|value| *value > 0)
+        .and_then(|value| u128::try_from(value).ok())?;
+    let needed_ms = elapsed
+        .saturating_mul(expected.max(covered))
+        .checked_div(covered)?
+        .saturating_mul(5)
+        / 4;
+    let secs = u64::try_from(needed_ms.div_ceil(1_000)).unwrap_or(u64::MAX);
+    Some(
+        secs.saturating_add(INDEX_FILE_HEADROOM_SECS)
+            .min(INDEX_MEASURED_BUDGET_CEILING_SECS),
     )
 }
 
@@ -2340,14 +2405,23 @@ fn index_file_budget(duration_ms: Option<i64>) -> Duration {
 /// cluster pass. Dropping the losing build kills its child and removes its
 /// partial subtitle stage; callers must return without recording a refusal
 /// or advancing the cursor so the interrupted file remains due.
+///
+/// The read runs under `admission`, its turn on the heavy-background lane,
+/// so the pool is never idle while it runs: what preempts it is foreground
+/// demand beyond that admission's own claim, not the claim itself.
+///
+/// Known limit: only work that holds an admission is visible here. A
+/// copy-mode or VOD viewer reading the source without one does not preempt
+/// the read, and a preempted read starts over from the beginning next time.
 pub(crate) async fn local_index_until_foreground<T>(
     transcode: &TranscodeManager,
+    admission: &crate::transcode::FragmentAdmission,
     build: impl std::future::Future<Output = T>,
 ) -> Option<T> {
     tokio::select! {
         biased;
         () = async {
-            while transcode.pretranscode_worker_idle() {
+            while !transcode.fragment_must_yield(admission) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         } => None,
@@ -3142,8 +3216,21 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
             requested_generation,
             pipeline_version,
             video_identity,
-            priority: "normal".to_owned(),
-            trigger: "background".to_owned(),
+            // A viewer waiting on this preparation makes it foreground work:
+            // the row says so, and the queue's playback headroom admits it
+            // even when background discovery has filled the active ceiling.
+            priority: if viewer.is_some() {
+                "foreground"
+            } else {
+                "normal"
+            }
+            .to_owned(),
+            trigger: if viewer.is_some() {
+                "playback"
+            } else {
+                "background"
+            }
+            .to_owned(),
             force_rebuild: false,
             target_node_id: node_id.to_owned(),
             not_before_ms: now,
@@ -8209,6 +8296,11 @@ impl JobManager {
         let mut attempted = 0usize;
         let mut last_examined = None;
         let mut cursor_at = None;
+        // The heavy lane has one permit, and every other heavy worker
+        // try-acquires it, so a waiter would win every turn. The pass waits
+        // for the lane once; after that it takes the lane only when it is
+        // free and nobody is queued for it, and otherwise ends here.
+        let mut took_queued_turn = false;
         for (examined, (file_id, _path, backlog)) in paths.into_iter().enumerate() {
             // Both bounds stop different runaways: attempts bound the
             // whole-file reads a pass will start, while examined bounds a
@@ -8221,7 +8313,10 @@ impl JobManager {
             {
                 break;
             }
-            if !transcode.pretranscode_worker_idle() {
+            // Foreground demand ends the pass; other background work (a
+            // Dolby Vision title scan holding its admission) does not -- the
+            // read below queues behind it for the heavy lane.
+            if transcode.background_yield_reason().is_some() {
                 return;
             }
             last_examined = Some(file_id);
@@ -8313,27 +8408,41 @@ impl JobManager {
                 // title holds up to three, and one refusing is not the others
                 // refusing. It costs a cheap keyed read per identity examined,
                 // which is what `ordered_index_paths`' own bound is for.
-                match self.store.fragment_index_outcome(file_id, &identity).await {
+                let previous = match self.store.fragment_index_outcome(file_id, &identity).await {
                     Ok(Some(outcome)) if !outcome.is_due(clock_ms()) => continue,
-                    Ok(_) => {}
+                    Ok(previous) => previous,
                     Err(error) => {
                         tracing::warn!(file_id, error = %error, "reading a fragment index outcome");
                         break;
                     }
-                }
-                missing.push((video, identity));
+                };
+                missing.push((video, identity, previous));
             }
             if missing.is_empty() {
                 continue;
             }
-            // One read of the source builds every missing identity (§5.4).
-            // Preemption is checked before the read, as it was before each
-            // identity's own read; a shared pass is no longer than one of
-            // those. Deliberately a return: it skips the cursor stamp, so a
-            // preempted pass leaves the file due rather than half done.
-            if !transcode.pretranscode_worker_idle() {
+            // One read of the source builds every missing identity (§5.4),
+            // under this node's heavy-background lane, held for this file
+            // only. The pass's first read waits for the lane in its FIFO queue
+            // behind whoever holds it (a Dolby Vision title scan) instead of
+            // abandoning the pass whenever the pool is not idle; later reads
+            // in the same pass take it only if it is free with nobody queued
+            // (a speech pass waiting goes first). Either is still refused when
+            // foreground work holds the pool. Deliberately a return: it skips
+            // the cursor stamp, so the file stays due rather than half done.
+            let admission = if took_queued_turn {
+                transcode.admit_fragment().await
+            } else {
+                took_queued_turn = true;
+                transcode.admit_fragment_queued().await
+            };
+            let Some(admission) = admission else {
+                tracing::info!(
+                    file_id,
+                    "local fragment index left the heavy lane to other work before its read"
+                );
                 return;
-            }
+            };
             attempted += missing.len();
             // Asked per pass, so the switch turning off stops the next
             // pass from riding without a restart.
@@ -8348,7 +8457,7 @@ impl JobManager {
             // file and pipeline, on this node; dropped when the pass ends.
             let progress_jobs = missing
                 .iter()
-                .map(|(_, identity)| local_index_job_id(file_id, identity))
+                .map(|(_, identity, _)| local_index_job_id(file_id, identity))
                 .collect::<Vec<_>>();
             let _progress = progress_jobs
                 .iter()
@@ -8380,11 +8489,21 @@ impl JobManager {
                 });
             let Some(mut builds) = local_index_until_foreground(
                 &transcode,
+                &admission,
                 crate::fragindex::build_riding_shared(
                     &file,
-                    &missing.iter().map(|(video, _)| *video).collect::<Vec<_>>(),
+                    &missing
+                        .iter()
+                        .map(|(video, _, _)| *video)
+                        .collect::<Vec<_>>(),
                     &runtime_cache,
-                    index_file_budget(file.duration_ms),
+                    missing
+                        .iter()
+                        .map(|(_, _, previous)| {
+                            index_file_budget(file.duration_ms, file.size, previous.as_ref())
+                        })
+                        .max()
+                        .unwrap_or_else(|| index_file_budget(file.duration_ms, file.size, None)),
                     ride_along.as_ref(),
                     Some(reporter),
                 ),
@@ -8411,25 +8530,26 @@ impl JobManager {
                     identities = missing.len(),
                     "a shared index read failed as a pass; building its identities one at a time"
                 );
-                for (slot, (video, _)) in missing.iter().enumerate() {
+                for (slot, (video, _, previous)) in missing.iter().enumerate() {
                     if !builds
                         .get(slot)
                         .is_some_and(|build| failed_as_a_shared_pass(&build.outcome))
                     {
                         continue;
                     }
-                    if !transcode.pretranscode_worker_idle() {
+                    if transcode.fragment_must_yield(&admission) {
                         // As above: no cursor stamp, the file stays due.
                         return;
                     }
                     attempted += 1;
                     let Some(build) = local_index_until_foreground(
                         &transcode,
+                        &admission,
                         crate::fragindex::build_riding(
                             &file,
                             *video,
                             &runtime_cache,
-                            index_file_budget(file.duration_ms),
+                            index_file_budget(file.duration_ms, file.size, previous.as_ref()),
                             None,
                             Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
                         ),
@@ -8445,7 +8565,7 @@ impl JobManager {
                     builds[slot] = build;
                 }
             }
-            for ((_, identity), build) in missing.iter().zip(builds) {
+            for ((_, identity, _), build) in missing.iter().zip(builds) {
                 let crate::fragindex::IndexBuild {
                     outcome,
                     ride_along: harvest,
@@ -8928,9 +9048,12 @@ impl JobManager {
         // fence, leaving the artifact and delivery pass available to another
         // wake while the analysis reader is active. Store claims retain their
         // durable owner/fence and do not depend on this local pass guard.
+        // Settling, pruning and artifact delivery are cluster-wide duties
+        // and stay with the voters. Resolving is not: a learner allowed to
+        // execute this job (above) resolves the requests targeted at itself,
+        // which no other node ever claims.
         let may_produce = self.may_run_cluster_jobs().await;
-        let analysis = if may_produce && !self.cluster_analysis_working.swap(true, Ordering::AcqRel)
-        {
+        let analysis = if !self.cluster_analysis_working.swap(true, Ordering::AcqRel) {
             let analysis_state = Arc::clone(&self);
             let analysis_transcode = Arc::clone(&transcode);
             Some(tokio::spawn(async move {
@@ -9045,6 +9168,9 @@ impl JobManager {
         let retry_policy = self.analysis_retry_policy().await;
         let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
         let have_dovi = transcode.dv_strippable();
+        // A learner takes only what names it; untargeted requests any node
+        // may take stay with the voters.
+        let targeted_only = !self.may_run_cluster_jobs().await;
         for _ in 0..MAX_REQUESTS_PER_PASS {
             if !self.cluster_fragment_index_enabled().await {
                 break;
@@ -9058,6 +9184,7 @@ impl JobManager {
                     now,
                     now.saturating_add(retry_policy.lease_ms),
                     !transcode.pretranscode_worker_idle(),
+                    targeted_only,
                 )
                 .await
             {
@@ -10861,13 +10988,26 @@ impl JobManager {
         )
         .await;
         let cancel = lost.child_token();
+        // The lead's last attempt on this node, if it ran out of budget, says
+        // how long this node needs for this file (`index_file_budget`).
+        let previous = match self
+            .store
+            .fragment_index_outcome(file.id, &crate::fragindex::identity_for(&file, video))
+            .await
+        {
+            Ok(previous) => previous,
+            Err(error) => {
+                tracing::debug!(file_id = file.id, %error, "reading the last index outcome");
+                None
+            }
+        };
         let build = crate::fragindex::build_shared_from_attested_file_with_progress(
             &file,
             &attested.handle,
             &attested.observation.object_version,
             &pass_videos,
             transcode.runtime_cache_dir(),
-            index_file_budget(file.duration_ms),
+            index_file_budget(file.duration_ms, file.size, previous.as_ref()),
             report_progress,
             ride_along.as_ref(),
             &cancel,

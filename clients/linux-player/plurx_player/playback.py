@@ -13,6 +13,7 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass
 
+from .caps import control_capabilities
 from .api import ApiError, error_text
 from .mpv import CLOSED, MpvError
 
@@ -42,12 +43,24 @@ class PlaybackError(Exception):
     """This playback cannot continue; the message is for the viewer."""
 
 
+class NoVideoWindow(PlaybackError):
+    """mpv has no window to show the message in, so the launcher's dialog says it."""
+
+
 def _track(value):
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _float(text):
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    return value if value == value and abs(value) != float("inf") else None
 
 
 class Playback:
@@ -90,6 +103,8 @@ class Playback:
         self.last_position_ms = None
         self.mapper = None
         self.mapper_logged = False
+        # mpv's fatal "Error opening/initializing the ... (--vo) device" line.
+        self.vo_failed = False
         self.facts = None
         self.failure = None
         self.stopped_by_server = None
@@ -231,8 +246,42 @@ class Playback:
             url = self.http.url(self.session["playlist_url"])
             start_local = (self.start_ms - self.origin_ms) / 1000
         self.load(url, start_local)
+        self.show_film_timeline()
         if self.notice:
             self.mpv.osd(self.notice, 4000)
+
+    def show_film_timeline(self):
+        """Tell mpv's OSC the whole film's timeline when the stream holds only part of it.
+
+        A live session (the server's fallback while a title's VOD index is
+        not ready) starts at the session origin and grows, so mpv's own
+        duration is only what has been produced. The OSC patch (mpv patch
+        0005) draws user-data/osc/film instead, and hands a seek outside the
+        stream back as an "osc-film-seek" script message (on_event).
+        """
+        duration = self.duration_ms()
+        live = self.session is not None and not self.session.get("vod")
+        try:
+            if live and duration:
+                self.mpv.set("user-data/osc/film", {"origin": self.origin_ms / 1000,
+                                                    "duration": duration / 1000})
+            else:
+                self.mpv.command("del", "user-data/osc/film")
+        except MpvError as error:
+            self.log(f"film timeline: {error}")
+
+    def on_film_seek(self, args):
+        """A seek on the OSC's film timeline outside what the live stream holds."""
+        if self.session is None or self.session.get("vod") or len(args) < 2:
+            return
+        target = _number(_float(args[1]))
+        if target is None:
+            return
+        duration = self.duration_ms()
+        target_ms = max(0, round(target * 1000))
+        if duration:
+            target_ms = min(target_ms, max(0, duration - SEEK_MARGIN_MS))
+        self.recreate(target_ms)
 
     def on_file_loaded(self):
         try:
@@ -304,6 +353,7 @@ class Playback:
         self.origin_ms = max(0, _track(self.session.get("media_origin_ms")) or 0)
         self.last_position_ms = target_ms
         self.load(self.http.url(self.session["playlist_url"]), (target_ms - self.origin_ms) / 1000)
+        self.show_film_timeline()
         self.mpv.set("pause", False)
         self.recreations += 1
 
@@ -341,7 +391,7 @@ class Playback:
             "selection": {"quality": {"mode": "original"} if self.mode == "remux" else {"mode": "auto"},
                           "audio_track": self.audio, "subtitle": subtitle, "audio_offset_ms": 0,
                           "codec": "auto", "dynamic_range": "auto"},
-            "capabilities": None, "observation": None, "acknowledgement": None,
+            "capabilities": control_capabilities(), "observation": None, "acknowledgement": None,
         }
 
     def heartbeat(self):
@@ -383,6 +433,9 @@ class Playback:
     def on_log(self, event):
         text = event.get("text") or ""
         prefix = str(event.get("prefix") or "")
+        if prefix == "cplayer" and event.get("level") in ("fatal", "error") \
+                and text.startswith("Error opening/initializing the"):
+            self.vo_failed = True
         match = EXPLICIT_MAPPER.search(text)
         if match is None and ("placebo" in prefix or prefix.startswith("vo")):
             match = BARE_MAPPER.search(text)
@@ -402,6 +455,20 @@ class Playback:
                       "target_nits": round(nits) if nits else None,
                       "target_gamma": target.get("gamma") if isinstance(target, dict) else None,
                       "target_primaries": target.get("primaries") if isinstance(target, dict) else None}
+
+    def require_video_output(self):
+        """A title with video that mpv could not open a window for is a failure, not audio only.
+
+        mpv answers a video output it cannot open by deselecting the video
+        track ("Video: no video") and playing the audio, so the question is
+        whether the title *has* video (cover art aside), not whether a video
+        track is still selected.
+        """
+        tracks = self.mpv.get("track-list") or []
+        video = any(isinstance(t, dict) and t.get("type") == "video" and not t.get("albumart")
+                    for t in tracks)
+        if video and (self.vo_failed or self.mpv.get("vo-configured") is False):
+            raise NoVideoWindow("mpv could not open a video window: is a graphical session running?")
 
     def log_mapper(self):
         """One /client-log line per playback: the DV profile, the mapper and the target."""
@@ -439,6 +506,7 @@ class Playback:
             first = not self.started
             self.started, self.loading, self.seeking = True, False, False
             if first:
+                self.require_video_output()
                 self.capture_facts()
             else:
                 self.progress("seek")
@@ -458,6 +526,10 @@ class Playback:
                 self.failure = f"mpv could not play the stream ({event.get('file_error') or 'error'})"
         elif name == "log-message":
             self.on_log(event)
+        elif name == "client-message":
+            args = event.get("args") or []
+            if args and args[0] == "osc-film-seek":
+                self.on_film_seek(args)
         return True
 
     def loop(self):
@@ -494,6 +566,9 @@ class Playback:
             self.sleep(self.timing.stop_osd_s)
             self.mpv.quit()
             return 0
+        except NoVideoWindow as error:
+            self.failure = str(error)
+            raise
         except PlaybackError as error:
             self.failure = str(error)
             self.log(str(error))

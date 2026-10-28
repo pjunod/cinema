@@ -3,43 +3,43 @@
     "table": "01 candidate admission",
     "source": "crates/plurxd/src/background_jobs.rs",
     "anchor": "pub(crate) async fn claim_library(",
-    "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+    "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
   },
   {
     "table": "02 claim ambiguity deadline",
     "source": "crates/plurxd/src/background_jobs.rs",
     "anchor": "async fn claim_with_resolution_inner(",
-    "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+    "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
   },
   {
     "table": "03 queue heartbeat lock",
     "source": "crates/plurxd/src/background_jobs.rs",
     "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
-    "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+    "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
   },
   {
     "table": "04 bind queue owner",
     "source": "crates/plurxd/src/background_jobs.rs",
     "anchor": "pub(crate) async fn bind_library(",
-    "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+    "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
   },
   {
     "table": "05 complete queue owner",
     "source": "crates/plurxd/src/background_jobs.rs",
     "anchor": "pub(crate) async fn complete_library(",
-    "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+    "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
   },
   {
     "table": "06 queue heartbeat retirement",
     "source": "crates/plurxd/src/background_jobs.rs",
     "anchor": "pub(crate) async fn finish(mut self) {",
-    "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+    "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
   },
   {
     "table": "07 queue retirement lock",
     "source": "crates/plurxd/src/background_jobs.rs",
     "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
-    "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+    "sha256": "2d1759a1d1c0fa9af6109bcf2e1f28958b550e88876897893952583db594e189"
   },
   {
     "table": "08 worker acquisition and cleanup",
@@ -123,19 +123,19 @@
     "table": "21 timed client transaction",
     "source": "crates/plurx-core/src/store/hiqlite.rs",
     "anchor": "pub(super) async fn txn<C, Q>(",
-    "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
+    "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d"
   },
   {
     "table": "22 store timeout constant",
     "source": "crates/plurx-core/src/store/hiqlite.rs",
     "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-    "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
+    "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d"
   },
   {
     "table": "23 timeout drops operation future",
     "source": "crates/plurx-core/src/store/hiqlite.rs",
     "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-    "sha256": "6cd6daad6050cb3472d51622a2c381426e259156d4992c6d8100a1b7e3426972"
+    "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d"
   },
   {
     "table": "24 vendor transaction rate limit",
@@ -177,19 +177,19 @@
     "table": "30 authority job-kind boundary",
     "source": "crates/plurx-core/src/store/background_jobs.rs",
     "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-    "sha256": "8307497d42ec5c619f6cc8992288f49d17c2054d0787183427d4eaf1f6955a12"
+    "sha256": "a71c9b2a3e1e1fd5f7fd9b248af402ee95263075f836ef0881203a86fd984f88"
   },
   {
     "table": "31 authority implementation",
     "source": "crates/plurx-core/src/cluster/membership.rs",
     "anchor": "impl ClusterJobAuthority for MembershipManager {",
-    "sha256": "304a14ebe29335906f72931b21bbc23b03e1aced2db3c0c470db80d468fbb548"
+    "sha256": "9078f1ddff1cde6b5cce421badc535bcf9be84cc85f9ee65f9b9366769ef6f50"
   },
   {
     "table": "32 voter authority read",
     "source": "crates/plurx-core/src/cluster/membership.rs",
     "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-    "sha256": "304a14ebe29335906f72931b21bbc23b03e1aced2db3c0c470db80d468fbb548"
+    "sha256": "9078f1ddff1cde6b5cce421badc535bcf9be84cc85f9ee65f9b9366769ef6f50"
   },
   {
     "table": "33 local raft metrics authority",
@@ -243,25 +243,25 @@
     "table": "41 fragment admission try-only",
     "source": "crates/plurxd/src/transcode/manager/construct.rs",
     "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-    "sha256": "16491b46e6cb9cd1fc744c99af8509277a54770373618fa33f317ac2fc659121"
+    "sha256": "11faff3f0e75c0ff50deca26e24bd69fa7bb6aea04a8fe529f81e01c814017b7"
   },
   {
     "table": "42 daemon schedule loop no token",
     "source": "crates/plurxd/src/state.rs",
     "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-    "sha256": "b800ba362d1f0570712c79fc3d6b7443f75765301427f08cfd5434b6ca15240f"
+    "sha256": "1310cb5e57e5acccc650c66191274f198f4eb2cf40e734d2a33cc3f37b566ac3"
   },
   {
     "table": "43 daemon worker loop no token",
     "source": "crates/plurxd/src/state.rs",
     "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-    "sha256": "b800ba362d1f0570712c79fc3d6b7443f75765301427f08cfd5434b6ca15240f"
+    "sha256": "1310cb5e57e5acccc650c66191274f198f4eb2cf40e734d2a33cc3f37b566ac3"
   },
   {
     "table": "44 main worker spawn no shutdown arg",
     "source": "crates/plurxd/src/main.rs",
     "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-    "sha256": "44ebf717c9f9a772375968fed3c292aeb43eba2ccf565e6058c297487975cb80"
+    "sha256": "40b4eeef5e9bddf172420c38e6bde66bc79f347b495672fd22a4a27b73567aab"
   },
   {
     "table": "45 completion trigger updates waiter and parent job",

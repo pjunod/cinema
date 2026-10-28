@@ -1935,7 +1935,10 @@ pattern = "terminal_reason"
 # or chooses a cause: retirement and the playback actor retain ownership.
 # Shared libraries: the Source actor and its tests read the terminal cause
 # of a settled Source route. The terminal causes are unchanged.
-expected_occurrences = 50
+# 50 -> 52 with the VOD index recovery (PR1299), both test-only: the budget
+# test's outcome fixture initializes the field to None, and the vod test reads
+# the `attempt_limit` cause the recovery wrote. No route cause changes.
+expected_occurrences = 52
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -3209,10 +3212,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # probe in `main.rs`, moved off the boot path. The warm-up owns one bounded
 # probe child (`status_job_owned`, kill-on-drop, 5 s deadline), logs, and
 # exits; it holds no session, permit or lock past that.
-# Main's 999 plus 13 retained HTTPS owners: listener supervision (4),
-# finite admin tests (2), transport tests (5), startup/drain tests (2).
-# The driver/serve relocation is net zero; their existing joins remain.
-expected_occurrences = 1012
+# Subtitle completion: +5 namespaced task sites: subtitle_text_translation/engine.rs
+# keeps admission inside its blocking inference closure; mod.rs
+# cached_engine_identity retains the cache mutex and publishes after requester
+# cancellation; read_attestation owns one weak-cache hash task. The requester is
+# aborted and awaited in the single-flight proof.
+# Main: +13 net retained task sites: HTTPS listener supervision (4), admin tests
+# (2), transport tests (5), startup/drain tests (2); vodserve gains one and
+# vod/driver loses one in the driver/serve relocation. Existing joins remain.
+# PR1299 VOD index recovery: +4 test-only tasks in state/tests.rs: three runs
+# of the queued local index pass and one queued speech admission behind it.
+# Each is awaited under a timeout; none outlives its test.
+expected_occurrences = 1021
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3447,7 +3458,13 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # regression creates a second pair. Existing ProducerSlot registrations own
 # encoder retirement/reap; helper futures await their children, killing on
 # cancellation.
-expected_occurrences = 77
+# Subtitle completion: +1 ignored Unix installer::qualification FFmpeg fixture;
+# progressive_case awaits child.wait(), or child.kill().await at its 60s limit.
+# The same child adds one Command, two lifecycle calls and one unwind-only
+# kill_on_drop guard; no production launcher or separate reap owner is added.
+# Main contributes one HTTPS transport JoinSet.spawn; its driver is joined by
+# the listener owner. Both parent additions are present in the source union.
+expected_occurrences = 78
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4906,11 +4923,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # its own reason; nothing is spawned); the 50 ms test releaser sleep; and in
 # the qualification fixture tests the 250 ms measurement beats, the 5 s bound
 # on waiting for the fixture to take the slot, and its 10 ms poll.
-# Integration census (2026-10-27): the actual combined structural source has
-# 1873 occurrences: upstream 1872 plus the branch-owned library_work/env.rs
-# pressure interval. Preserve the 13 HTTPS/font bounds (font refusal 2, admin 3,
-# transport 7, startup 1); expiry refuses, never acknowledges settlement/reap.
-expected_occurrences = 1873
+# Integration census (2026-10-28): actual merged source adds the branch-owned
+# library_work/env.rs pressure interval to the upstream timer census. All
+# upstream ownership records remain; expiry never acknowledges settlement/reap.
+# Subtitle completion: +13 timers. Five inline production observations belong
+# to text progress, accepted-demand recovery and source-read attestation. Eight
+# test timers bound qualification/heartbeats/fixture/observations and the two
+# cached_engine_identity cancellation waits; worker cancellation is awaited.
+# Main: +13 retained HTTPS/font fixture bounds: font refusal (2), admin (3),
+# transport (7), startup (1). Each bounds owned work; expiry is refusal, never
+# shutdown or settlement acknowledgement.
+# PR1299 VOD index recovery: +9 test-only timers in state/tests.rs: four
+# sleeps that let the pass and the speech pass take their places in the
+# heavy lane's queue, four timeouts bounding those awaited tasks, and one
+# sleep in the ride-along worker test's polling loop.
+expected_occurrences = 1895
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5392,7 +5419,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 301
+expected_occurrences = 302
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6034,7 +6061,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # FR398-1 (0e1e4224d): +1 directly awaited FFprobe .output() in
 # vodencode_manager_tests.rs:614, assert_native_sdr_window. It collects the
 # test-owned child normally; its kill-on-drop backstop is not reap evidence.
-expected_occurrences = 801
+# Subtitle completion contributes six launch-shaped matches in its HTTP and
+# installer qualification owners; HTTP Response.status() calls inspect
+# in-process responses, while the finite FFmpeg fixture is explicitly awaited.
+# Main's HTTPS admin/transport/startup owners and source/status reads remain in
+# the source scan; none changes launch authorization.
+expected_occurrences = 807
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6327,8 +6359,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `source_probe/fel_qualification.rs`: the helper's `wait` and the consumer's
 # `wait` in `finish` (normal reaping), and `start_kill` + `wait` in `reap`,
 # which a failed, expired or cancelled stage runs on each of its children.
-# The integrated HTTPS fixture retains its separate owned wait boundary.
-expected_occurrences = 352
+# Subtitle completion adds two installer qualification child lifecycle calls;
+# the child remains owned through wait or kill-and-wait on its 60s bound.
+# Main retains the HTTPS transport listener's awaited task/connection boundary.
+expected_occurrences = 354
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6552,7 +6586,7 @@ pattern = "kill_on_drop\\s*\\("
 # `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
 # counts once). Each is also explicitly waited, or killed and waited, by its
 # owner; kill-on-drop is the backstop, not the settlement.
-expected_occurrences = 116
+expected_occurrences = 117
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

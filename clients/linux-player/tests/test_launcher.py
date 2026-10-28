@@ -123,6 +123,28 @@ class Position(LauncherCase):
         self.assertEqual(control["render_state"], "rendering")
 
 
+class ControlContract(LauncherCase):
+    def test_the_first_control_exchange_is_the_one_the_server_validates(self):
+        # tests/fixtures/control-request-v1.json is also parsed and validated by
+        # the server's own ControlRequestV1 (crates/plurxd/src/playback_control/
+        # tests.rs), so a body the server would refuse cannot pass here. The
+        # first exchange must carry capabilities: without them the server
+        # answers 400 and every later exchange 409 (the launcher shipped so).
+        self.close_at(8)
+        self.run_launcher()
+        first = self.server.calls("POST", pattern=r"/control$")[0]["body"]
+        with open(os.path.join(support.PACKAGE_ROOT, "tests", "fixtures", "control-request-v1.json")) as handle:
+            fixture = json.load(handle)
+        self.assertEqual(first["sequence"], 1)
+        ids = {key: fixture[key] for key in ("client_instance_id", "generation")}  # per-run UUIDs
+        # The first heartbeat races mpv's first playback-restart; the server
+        # validates both states, and the fixture carries one of them.
+        self.assertIn(first["render_state"], ("starting", "rendering"))
+        ids["render_state"] = fixture["render_state"]
+        self.maxDiff = None
+        self.assertEqual({**first, **ids}, fixture)
+
+
 class Seeking(LauncherCase):
     def test_seek_outside_the_range_recreates_the_session(self):
         self.server.origins = [60_000, 559_000]
@@ -491,6 +513,131 @@ class NoTokenOnDisk(LauncherCase):
         # The only place it went is the IPC socket, as a header field.
         carried = [c for c in self.mpv.commands() if TOKEN in json.dumps(c)]
         self.assertEqual(carried, [["set_property", "http-header-fields", [f"Authorization: Bearer {TOKEN}"]]])
+
+
+DISPLAY_VARS = ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP")
+SESSION = ("PATH=/home/someone/bin:/usr/bin\nWAYLAND_DISPLAY=wayland-0\nDISPLAY=:0\n"
+           "XAUTHORITY=/run/user/1000/.mutter-Xwaylandauth.ABC\nXDG_SESSION_TYPE=wayland\n"
+           "XDG_CURRENT_DESKTOP=ubuntu:GNOME\nLD_PRELOAD=/home/someone/evil.so\n")
+
+
+class SessionDisplay(LauncherCase):
+    """Started by xdg-desktop-portal without a display, the launcher takes the session's."""
+
+    def run_without_display(self, session):
+        self.close_at(4)
+        bare = {key: value for key, value in os.environ.items() if key not in DISPLAY_VARS}
+        with mock.patch.dict(os.environ, bare, clear=True):
+            code = self.run_launcher(session_environment=session)
+        return code
+
+    def test_a_portal_started_launcher_gives_mpv_the_sessions_display(self):
+        self.assertEqual(self.run_without_display(SESSION), 0)
+        self.assertEqual(self.mpv.display(), {
+            "WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0",
+            "XAUTHORITY": "/run/user/1000/.mutter-Xwaylandauth.ABC",
+            "XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "ubuntu:GNOME"})
+        self.assertEqual(self.mpv.env(), {}, "only display variables are taken from the session")
+        self.assertNotIn("/home/someone/bin", os.environ.get("PATH", ""))
+
+    def test_a_launcher_with_a_display_keeps_its_own(self):
+        environ = {"WAYLAND_DISPLAY": "wayland-1"}
+        self.assertEqual(launcher_module.adopt_session_display(environ, lambda: SESSION), [])
+        self.assertEqual(environ, {"WAYLAND_DISPLAY": "wayland-1"})
+
+    def test_a_session_without_a_display_changes_nothing(self):
+        environ = {}
+        self.assertEqual(launcher_module.adopt_session_display(
+            environ, lambda: "XDG_SESSION_TYPE=tty\nXAUTHORITY=/x\n"), [])
+        self.assertEqual(environ, {})
+
+    def test_the_session_display_is_taken_as_a_set(self):
+        environ = {"XAUTHORITY": "/stale/Xauthority", "XDG_SESSION_TYPE": "tty", "HOME": "/home/someone"}
+        launcher_module.adopt_session_display(environ, lambda: SESSION)
+        self.assertEqual(environ["XAUTHORITY"], "/run/user/1000/.mutter-Xwaylandauth.ABC")
+        self.assertEqual(environ["XDG_SESSION_TYPE"], "wayland")
+        self.assertEqual(environ["HOME"], "/home/someone")
+
+    def test_an_escaped_value_is_not_taken(self):
+        environ = {}
+        launcher_module.adopt_session_display(environ, lambda: "DISPLAY=$'\\033:0'\nWAYLAND_DISPLAY=wayland-0\n")
+        self.assertEqual(environ, {"WAYLAND_DISPLAY": "wayland-0"})
+
+
+class VideoWindow(LauncherCase):
+    def test_a_title_with_video_but_no_window_fails_instead_of_playing_audio_only(self):
+        # What mpv really does without a display: it deselects the video
+        # track and goes on with the audio.
+        self.mpv.props(track_list=[{"type": "video", "selected": False, "albumart": False},
+                                   {"type": "audio", "selected": True}], vo_configured=False)
+        self.clock.at(30, self.mpv.close)
+        self.assertEqual(self.run_launcher(), launcher_module.EXIT_PLAYBACK)
+        self.assertEqual(self.errors, ["plurx Player: mpv could not open a video window: "
+                                       "is a graphical session running?"])
+        failures = [r["body"] for r in self.server.calls("POST", "/api/v1/client-log")
+                    if r["body"]["event"] == "playback_failed"]
+        self.assertEqual(len(failures), 1)
+        self.assertTrue(self.server.revoked)
+
+    def test_mpvs_vo_error_line_is_a_failure_too(self):
+        self.mpv.props(track_list=[{"type": "video", "selected": False}])
+        self.mpv.emit({"event": "log-message", "prefix": "cplayer", "level": "fatal",
+                       "text": "Error opening/initializing the selected video_out (--vo) device.\n"})
+        self.clock.at(30, self.mpv.close)
+        self.assertEqual(self.run_launcher(), launcher_module.EXIT_PLAYBACK)
+        self.assertEqual(len(self.errors), 1)
+
+    def test_an_audio_file_with_cover_art_plays_without_a_window(self):
+        self.mpv.props(track_list=[{"type": "video", "selected": False, "albumart": True},
+                                   {"type": "audio", "selected": True}], vo_configured=False)
+        self.close_at(4)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.errors, [])
+
+    def test_a_title_with_a_window_plays(self):
+        self.mpv.props(track_list=[{"type": "video", "selected": True}], vo_configured=True)
+        self.close_at(4)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.errors, [])
+
+
+
+class FilmTimeline(LauncherCase):
+    """A live session shows the whole film on mpv's OSC (mpv patch 0005)."""
+
+    def film_settings(self):
+        return [c for c in self.mpv.commands()
+                if c[:2] == ["set_property", "user-data/osc/film"] or c == ["del", "user-data/osc/film"]]
+
+    def test_a_live_session_tells_the_osc_the_film_timeline(self):
+        self.close_at(4)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.film_settings(),
+                         [["set_property", "user-data/osc/film", {"origin": 60.0, "duration": 7200.0}]])
+        self.assertIn("--force-seekable=yes", self.mpv.argv())
+
+    def test_a_vod_session_has_no_film_timeline(self):
+        self.server.vod = True
+        self.close_at(4)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(self.film_settings(), [["del", "user-data/osc/film"]])
+
+    def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):
+        self.server.origins = [60_000, 3_000_000]
+        self.clock.at(6, lambda: self.mpv.emit({"event": "client-message", "args": ["osc-film-seek", "3000.5"]}))
+        self.close_at(30)
+        self.assertEqual(self.run_launcher(), 0)
+        creates = self.server.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions")
+        self.assertEqual(len(creates), 2)
+        self.assertEqual(creates[1]["body"]["start"], 3000.5)
+        self.assertEqual(self.film_settings()[-1],
+                         ["set_property", "user-data/osc/film", {"origin": 3000.0, "duration": 7200.0}])
+
+    def test_a_malformed_film_seek_is_ignored(self):
+        self.clock.at(6, lambda: self.mpv.emit({"event": "client-message", "args": ["osc-film-seek", "nan"]}))
+        self.close_at(12)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(len(self.server.calls("POST", f"/api/v1/files/{FILE_ID}/hls/sessions")), 1)
 
 
 if __name__ == "__main__":

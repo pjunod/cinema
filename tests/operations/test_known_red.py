@@ -76,6 +76,10 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login",
             "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope",
             "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection",
+            "crates/plurxd/src/subtitle_text_translation/engine.rs::subtitle_text_translation::engine::qualification::pinned_publisher_bundle_passes_production_multilingual_self_test",
+            "crates/plurxd/src/subtitle_translation/installer.rs::subtitle_translation::installer::qualification::pinned_whisper_install_and_verify_qualify_both_speech_tasks",
+            "crates/plurxd/src/subtitle_translation/installer.rs::subtitle_translation::installer::qualification::pinned_progressive_worker_commits_both_tasks_for_selected_audio_two",
+            "crates/plurxd/src/subtitle_translation/installer.rs::subtitle_translation::installer::qualification::pinned_progressive_worker_covers_advancing_playback_for_both_tasks",
         })
         # #811 adds three ffmpeg 8 fixture checks of the repeated-HEVC
         # description collapse (generations, output, copy pipe), each needing

@@ -185,6 +185,7 @@ impl TranscodeManager {
                     aac,
                     preserve_dolby_vision,
                     convert_dolby_vision,
+                    ..
                 } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
                 _ => None,
             },
@@ -382,6 +383,7 @@ impl TranscodeManager {
                     aac,
                     preserve_dolby_vision,
                     convert_dolby_vision,
+                    dual_layer_as_copied: false,
                 },
                 None => SessionKind::Transcode {
                     height: i64::from(
@@ -512,6 +514,7 @@ impl TranscodeManager {
             aac,
             preserve_dolby_vision,
             convert_dolby_vision,
+            ..
         } = request.kind
         else {
             return Ok(());
@@ -842,6 +845,7 @@ impl TranscodeManager {
                 aac: intent.aac,
                 preserve_dolby_vision: intent.preserve_dolby_vision,
                 convert_dolby_vision: intent.convert_dolby_vision,
+                dual_layer_as_copied: false,
             },
             start_seconds: 0.0,
             audio_index: intent.audio_index,

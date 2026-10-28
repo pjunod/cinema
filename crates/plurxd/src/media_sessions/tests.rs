@@ -1548,6 +1548,7 @@ fn a_successor_overlaps_a_whole_segment_of_its_own_shape() {
 
     let copy = SessionKind::Copy {
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: false,
     };
@@ -2990,6 +2991,7 @@ fn remote_start_response_is_bound_to_the_session_capability_and_reports_presenta
     let mut unknown_copy = valid_start_response();
     unknown_copy.kind = SessionKind::Copy {
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
         aac: false,
         preserve_dolby_vision: false,
     };

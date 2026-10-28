@@ -4790,6 +4790,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                 .expect("probe");
             // A provider identity never shares the generated-caption namespace.
             let online = plurx_core::domain::DownloadedSubtitle {
+                text_translation: None,
                 source_size: file.size,
                 source_mtime: file.mtime,
                 provider_file_id: 123,
@@ -4891,6 +4892,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                 panic!("{backend}: claim refused")
             };
             let caption = plurx_core::domain::DownloadedSubtitle {
+                text_translation: None,
                 source_size: file.size,
                 source_mtime: file.mtime,
                 provider_file_id: 0,
@@ -5271,6 +5273,8 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
             .observe_subtitle_job(ObserveSubtitleJob {
                 token: token.clone(),
                 phase: SubtitlePhase::Downloading,
+                completed_cues: None,
+                total_cues: None,
                 now_ms: now + 1
             })
             .await
@@ -5299,6 +5303,8 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
             .observe_subtitle_job(ObserveSubtitleJob {
                 token: token.clone(),
                 phase: SubtitlePhase::Verifying,
+                completed_cues: None,
+                total_cues: None,
                 now_ms: now + 2
             })
             .await
@@ -5409,6 +5415,8 @@ async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_
                 .observe_subtitle_job(ObserveSubtitleJob {
                     token,
                     phase: SubtitlePhase::Verifying,
+                    completed_cues: None,
+                    total_cues: None,
                     now_ms: now + 3
                 })
                 .await
@@ -5583,6 +5591,7 @@ async fn managed_caption_execution_provenance_survives_publish_reopen_and_legacy
         }),
     };
     let caption = DownloadedSubtitle {
+        text_translation: None,
         source_size: file.size,
         source_mtime: file.mtime,
         provider_file_id: 0,
@@ -5717,6 +5726,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             .expect("save unready");
         assert_eq!(saved["outcome"], "saved", "{backend}");
         let profile = TranslationProfile {
+            task: Default::default(),
             version: 1,
             model_id: "small".into(),
             model_sha256: "a".repeat(64),
@@ -5732,6 +5742,8 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             source_size: file.size,
             source_mtime: file.mtime,
         };
+        let continuity = uuid::Uuid::new_v4().to_string();
+        let playback = uuid::Uuid::new_v4().to_string();
         let input = TranslationMutation {
             user_id: user.id,
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -5745,10 +5757,11 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
                 spoken_language: "de".into(),
                 duration_ms: 61000,
                 target_node_id: "worker".into(),
-                playback_id: uuid::Uuid::new_v4().to_string(),
+                playback_id: playback.clone(),
                 position_ms: 0,
                 playback_rate: 1.0,
                 paused: false,
+                continuity_id: Some(continuity.clone()),
             },
         };
         let accepted = store
@@ -5825,6 +5838,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             file_id: id,
             recipe: recipe.clone(),
             target_node_id: "worker".into(),
+            producer_preparation_job_id: prep.id.clone(),
         };
         store
             .enqueue_job(EnqueueJob {
@@ -5870,6 +5884,42 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             panic!("{backend}: {claimed:?}");
         };
         let token = job.token.expect("token");
+        let advanced = store
+            .mutate_subtitle_translation(TranslationMutation {
+                user_id: user.id,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request_digest: "6".repeat(64),
+                intent_expires_at_ms: 300000,
+                now_ms: 1550,
+                action: TranslationAction::Demand {
+                    operation_id: op.clone(),
+                    expected_operation_epoch: 1,
+                    demand_id: accepted["demand_id"].as_str().expect("demand").into(),
+                    expected_generation: 1,
+                    playback_id: playback,
+                    position_ms: 31000,
+                    playback_rate: 1.0,
+                    paused: false,
+                    continuity_id: Some(continuity.clone()),
+                },
+            })
+            .await
+            .expect("advance across core boundary");
+        assert_eq!(advanced["continuity_id"], continuity, "{backend}");
+        let interest = store
+            .read_subtitle_translation(TranslationRead {
+                user_id: 0,
+                now_ms: 1551,
+                query: TranslationQuery::RangeInterest {
+                    job_id: job.id.clone(),
+                },
+            })
+            .await
+            .expect("owned continuity");
+        assert_eq!(
+            interest[0]["interested"], true,
+            "{backend}: running core survives advancing viewer"
+        );
         let segment = SegmentDraft {
             asset_id: asset.clone(),
             core_index: 0,
@@ -5907,7 +5957,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             store
                 .acquire_translation_lease(AcquireTranslationLease {
                     user_id: user.id,
-                    asset_id: asset,
+                    asset_id: asset.clone(),
                     now_ms: 1700
                 })
                 .await
@@ -5919,6 +5969,110 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
             .maintain_translation_cache(1800)
             .await
             .expect("bounded cache upkeep");
+        for (offset, core_index) in [2, 1].into_iter().enumerate() {
+            let now = 1810 + (offset as i64) * 30;
+            let mut next = recipe.clone();
+            next.core_index = core_index;
+            let job_id = uuid::Uuid::new_v4().to_string();
+            let payload = JobPayload::SubtitleTranslationRange {
+                file_id: id,
+                recipe: next.clone(),
+                target_node_id: "worker".into(),
+                producer_preparation_job_id: prep.id.clone(),
+            };
+            store
+                .enqueue_job(EnqueueJob {
+                    id: job_id.clone(),
+                    payload: payload.clone(),
+                    dedupe_key: job_id.clone(),
+                    priority: 1,
+                    not_before_ms: now,
+                    now_ms: now,
+                    request: JobRequest {
+                        scope: "translation".into(),
+                        request_id: job_id.clone(),
+                        request_digest: "5".repeat(64),
+                        consumer_kind: "subtitle_translation_range".into(),
+                        consumer_ref: op.clone(),
+                        target_node_id: Some("worker".into()),
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("remaining core enqueue");
+            let queued = store
+                .background_job(&job_id)
+                .await
+                .expect("job")
+                .expect("queued core");
+            let claim = store
+                .claim_artifact_job(ClaimJob {
+                    job_id,
+                    expected_revision: queued.revision,
+                    node_id: "worker".into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::SubtitleTranslationRange,
+                    payload_version: 1,
+                    now_ms: now + 1,
+                    dispatched_at_ms: now + 1,
+                })
+                .await
+                .expect("claim remaining core");
+            let ClaimOutcome::Claimed { job } = claim else {
+                panic!("{backend}: {claim:?}")
+            };
+            let token = job.token.expect("core token");
+            let (start_ms, end_ms) = next.core_bounds().expect("core bounds");
+            let segment = SegmentDraft {
+                asset_id: asset.clone(),
+                core_index,
+                start_ms,
+                end_ms,
+                cues: vec![],
+                provenance: ExecutionProvenance {
+                    engine_sha256: "c".repeat(64),
+                    model_sha256: profile.model_sha256.clone(),
+                    operation_epoch: 1,
+                    platform: "linux-x86_64".into(),
+                    profile_id: profile.id().expect("profile"),
+                    source_sha256: "b".repeat(64),
+                    worker_fence: token.fence,
+                },
+            };
+            assert!(
+                store
+                    .publish_translation_segment(PublishTranslationSegment {
+                        token,
+                        source: payload,
+                        segment,
+                        now_ms: now + 2
+                    })
+                    .await
+                    .expect("remaining publication"),
+                "{backend}"
+            );
+            let rows = store
+                .read_subtitle_translation(TranslationRead {
+                    user_id: user.id,
+                    now_ms: now + 3,
+                    query: TranslationQuery::Operation {
+                        operation_id: op.clone(),
+                    },
+                })
+                .await
+                .expect("operation completion");
+            assert_eq!(
+                rows[0]["state"],
+                if core_index == 1 {
+                    "complete"
+                } else {
+                    "partial"
+                },
+                "{backend}: all expected readable cores, not the last core or row count alone"
+            );
+        }
         let stop = store
             .mutate_subtitle_translation(TranslationMutation {
                 user_id: user.id,

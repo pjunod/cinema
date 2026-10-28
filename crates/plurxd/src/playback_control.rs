@@ -782,7 +782,15 @@ pub(crate) enum ClientPlatform {
     Web,
     Apple,
     Android,
+    /// plurx Player, the Linux launcher driving mpv (clients/linux-player).
+    Linux,
 }
+
+/// How many [`ClientPlatform`]s there are, and their metric labels in the
+/// enum's own order: every per-platform counter is indexed by it.
+pub(crate) const CLIENT_PLATFORMS: usize = 4;
+pub(crate) const CLIENT_PLATFORM_LABELS: [&str; CLIENT_PLATFORMS] =
+    ["web", "apple", "android", "linux"];
 
 impl DynamicCapabilities {
     fn validate(&self) -> Result<(), &'static str> {
@@ -14665,7 +14673,8 @@ static CONTROL_EXCHANGES: [AtomicU64; 10] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
 ];
-static CONTROL_PLATFORMS: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
+static CONTROL_PLATFORMS: [[AtomicU64; CLIENT_PLATFORMS]; 2] =
+    [const { [const { AtomicU64::new(0) }; CLIENT_PLATFORMS] }; 2];
 static CONTROL_RELAY_OUTCOMES: [AtomicU64; 3] =
     [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static CONTROL_RELAY_BUCKETS: [AtomicU64; RELAY_BUCKETS_MS.len() + 1] =
@@ -14674,7 +14683,8 @@ static CONTROL_RELAY_DURATION_MICROS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RENEWALS: [AtomicU64; 3] =
     [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 /// Resolved actions by kind and client platform.
-static CONTROL_ACTIONS: [[AtomicU64; 3]; 5] = [const { [const { AtomicU64::new(0) }; 3] }; 5];
+static CONTROL_ACTIONS: [[AtomicU64; CLIENT_PLATFORMS]; 5] =
+    [const { [const { AtomicU64::new(0) }; CLIENT_PLATFORMS] }; 5];
 /// Holds actually sent, by reason.
 static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// What M6 decides about a selection change, by platform, axis and outcome.
@@ -14691,8 +14701,8 @@ static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// Indexed `[platform][axis][outcome]`. Platform order is `ClientPlatform`'s
 /// own; axis is `PreparationAxis`'s; outcome is prepare, then
 /// `client_cannot_prepare`.
-static PREPARATION_DECISIONS: [[[AtomicU64; 2]; 5]; 3] =
-    [const { [const { [const { AtomicU64::new(0) }; 2] }; 5] }; 3];
+static PREPARATION_DECISIONS: [[[AtomicU64; 2]; 5]; CLIENT_PLATFORMS] =
+    [const { [const { [const { AtomicU64::new(0) }; 2] }; 5] }; CLIENT_PLATFORMS];
 /// The same measurement with the client capability assumed satisfied.
 ///
 /// Same shape and same indices as `PREPARATION_DECISIONS` so the two are
@@ -14705,27 +14715,30 @@ static PREPARATION_DECISIONS: [[[AtomicU64; 2]; 5]; 3] =
 /// **today**, `preparation_counterfactual` is what M6 would do **after a
 /// client release flipped the literal**, and the difference between them is
 /// the value of shipping that release.
-static PREPARATION_COUNTERFACTUAL: [[[AtomicU64; 2]; 5]; 3] =
-    [const { [const { [const { AtomicU64::new(0) }; 2] }; 5] }; 3];
+static PREPARATION_COUNTERFACTUAL: [[[AtomicU64; 2]; 5]; CLIENT_PLATFORMS] =
+    [const { [const { [const { AtomicU64::new(0) }; 2] }; 5] }; CLIENT_PLATFORMS];
 /// Exchanges where an action transaction was available but the client had
 /// not declared its vocabulary, so it was told nothing. Watch this fall as
 /// clients roll out.
-static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; CLIENT_PLATFORMS] =
+    [const { AtomicU64::new(0) }; CLIENT_PLATFORMS];
 /// Holds withheld by the serving predicate, by reason and platform. A hold the
 /// client would have understood, not sent because the client was stalled with
 /// published media it had not fetched.
-static CONTROL_RECOVERY_WITHHELD: [[AtomicU64; 3]; 7] =
-    [const { [const { AtomicU64::new(0) }; 3] }; 7];
+static CONTROL_RECOVERY_WITHHELD: [[AtomicU64; CLIENT_PLATFORMS]; 7] =
+    [const { [const { AtomicU64::new(0) }; CLIENT_PLATFORMS] }; 7];
 /// Clients by platform and whether they declared they accept a hold. This is
 /// the fleet's rollout progress, readable without touching a device.
-static CONTROL_VOCABULARY: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
+static CONTROL_VOCABULARY: [[AtomicU64; CLIENT_PLATFORMS]; 2] =
+    [const { [const { AtomicU64::new(0) }; CLIENT_PLATFORMS] }; 2];
 /// Clients by platform that declared `prepare_replacement`, whatever else they
 /// declared. Separate from `CONTROL_VOCABULARY` because that one answers "is
 /// this client fully managed" and needs all four actions, while the prepared
 /// handoff only ever asked about this one. Folding them let a report say no
 /// client had asked for a handoff while a client that omitted
 /// `retry_resource` was asking for exactly that.
-static CONTROL_PREPARE_CAPABLE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static CONTROL_PREPARE_CAPABLE: [AtomicU64; CLIENT_PLATFORMS] =
+    [const { AtomicU64::new(0) }; CLIENT_PLATFORMS];
 /// Clients by platform that declared the three actions a passive reporter is
 /// made of — `hold`, `terminal`, `retry_resource`.
 ///
@@ -14735,8 +14748,8 @@ static CONTROL_PREPARE_CAPABLE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3
 /// declares exactly these three — counts as partial there, forever, until a
 /// client ships `prepare_replacement`. A report that read "is there a passive
 /// reporter" off that counter would answer no on every fleet that has one.
-static CONTROL_PASSIVE_VOCABULARY: [[AtomicU64; 3]; 2] =
-    [const { [const { AtomicU64::new(0) }; 3] }; 2];
+static CONTROL_PASSIVE_VOCABULARY: [[AtomicU64; CLIENT_PLATFORMS]; 2] =
+    [const { [const { AtomicU64::new(0) }; CLIENT_PLATFORMS] }; 2];
 static ROLLING_LEASE_EXPIRATIONS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RETIREMENTS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_HOLDS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
@@ -14813,12 +14826,7 @@ pub(crate) fn record_platform(outcome: MetricOutcome, platform: ClientPlatform) 
         MetricOutcome::Replay => 1,
         _ => return,
     };
-    let platform_index = match platform {
-        ClientPlatform::Web => 0,
-        ClientPlatform::Apple => 1,
-        ClientPlatform::Android => 2,
-    };
-    CONTROL_PLATFORMS[outcome_index][platform_index].fetch_add(1, Ordering::Relaxed);
+    CONTROL_PLATFORMS[outcome_index][platform_index(platform)].fetch_add(1, Ordering::Relaxed);
 }
 
 fn hold_reason_index(reason: crate::transcode::AheadHoldReason) -> usize {
@@ -14835,6 +14843,7 @@ fn platform_index(platform: ClientPlatform) -> usize {
         ClientPlatform::Web => 0,
         ClientPlatform::Apple => 1,
         ClientPlatform::Android => 2,
+        ClientPlatform::Linux => 3,
     }
 }
 
@@ -15162,7 +15171,7 @@ pub(crate) fn record_action(
 pub(crate) struct ControlVocabularySnapshot {
     /// Exchanges from clients declaring the whole passive vocabulary —
     /// `hold`, `terminal`, `retry_resource` — whatever else they declared,
-    /// indexed web/apple/android.
+    /// indexed web/apple/android/linux.
     ///
     /// The four-action "fully managed" counter is deliberately not here. It
     /// still exists and `prometheus()` still exports it, but nothing has to
@@ -15171,18 +15180,14 @@ pub(crate) struct ControlVocabularySnapshot {
     /// reading it would answer the prepared-handoff question under the
     /// passive reporter's name. That question has its own row and its own
     /// counter.
-    pub passive_complete: [u64; 3],
+    pub passive_complete: [u64; CLIENT_PLATFORMS],
     /// Exchanges from clients missing at least one of those three.
-    pub passive_partial: [u64; 3],
+    pub passive_partial: [u64; CLIENT_PLATFORMS],
 }
 
 pub(crate) fn control_vocabulary_snapshot() -> ControlVocabularySnapshot {
-    let read = |row: &[AtomicU64; 3]| {
-        [
-            row[0].load(Ordering::Relaxed),
-            row[1].load(Ordering::Relaxed),
-            row[2].load(Ordering::Relaxed),
-        ]
+    let read = |row: &[AtomicU64; CLIENT_PLATFORMS]| {
+        std::array::from_fn(|platform| row[platform].load(Ordering::Relaxed))
     };
     ControlVocabularySnapshot {
         passive_complete: read(&CONTROL_PASSIVE_VOCABULARY[1]),
@@ -15204,12 +15209,8 @@ pub(crate) fn preparation_staged_snapshot() -> PreparationStagedSnapshot {
 
 /// Exchanges from clients declaring `prepare_replacement`, indexed
 /// web/apple/android.
-pub(crate) fn prepare_capable_snapshot() -> [u64; 3] {
-    [
-        CONTROL_PREPARE_CAPABLE[0].load(Ordering::Relaxed),
-        CONTROL_PREPARE_CAPABLE[1].load(Ordering::Relaxed),
-        CONTROL_PREPARE_CAPABLE[2].load(Ordering::Relaxed),
-    ]
+pub(crate) fn prepare_capable_snapshot() -> [u64; CLIENT_PLATFORMS] {
+    std::array::from_fn(|platform| CONTROL_PREPARE_CAPABLE[platform].load(Ordering::Relaxed))
 }
 
 /// Record one partial-vocabulary exchange, so a test that reads the
@@ -15273,7 +15274,7 @@ pub(crate) fn prometheus() -> String {
          # TYPE plurx_playback_control_platform_exchanges_total counter\n",
     );
     for (outcome_index, outcome) in ["accepted", "replay"].iter().enumerate() {
-        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+        for (platform_index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
             output.push_str(&format!(
                 "plurx_playback_control_platform_exchanges_total{{outcome=\"{outcome}\",platform=\"{platform}\"}} {}\n",
                 CONTROL_PLATFORMS[outcome_index][platform_index].load(Ordering::Relaxed)
@@ -15288,7 +15289,7 @@ pub(crate) fn prometheus() -> String {
         .iter()
         .enumerate()
     {
-        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+        for (platform_index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
             output.push_str(&format!(
                 "plurx_playback_control_actions_total{{action=\"{action}\",platform=\"{platform}\"}} {}\n",
                 CONTROL_ACTIONS[action_index][platform_index].load(Ordering::Relaxed)
@@ -15315,7 +15316,7 @@ pub(crate) fn prometheus() -> String {
             "# HELP {name} {help}\n\
              # TYPE {name} counter\n"
         ));
-        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+        for (platform_index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
             for (axis_index, axis) in [
                 PreparationAxis::ResolutionOrBitrate,
                 PreparationAxis::AudioTrackOrOffset,
@@ -15405,7 +15406,7 @@ pub(crate) fn prometheus() -> String {
         "# HELP plurx_playback_control_actions_suppressed_total Exchanges where an action transaction was available but the client had not declared its vocabulary, so it was told nothing.\n\
          # TYPE plurx_playback_control_actions_suppressed_total counter\n",
     );
-    for (index, platform) in ["web", "apple", "android"].iter().enumerate() {
+    for (index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
         output.push_str(&format!(
             "plurx_playback_control_actions_suppressed_total{{platform=\"{platform}\"}} {}\n",
             CONTROL_ACTIONS_SUPPRESSED[index].load(Ordering::Relaxed)
@@ -15427,7 +15428,7 @@ pub(crate) fn prometheus() -> String {
     .iter()
     .enumerate()
     {
-        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+        for (platform_index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
             output.push_str(&format!(
                 "plurx_playback_control_recovery_withheld_total{{reason=\"{reason}\",platform=\"{platform}\"}} {}\n",
                 CONTROL_RECOVERY_WITHHELD[reason_index][platform_index].load(Ordering::Relaxed)
@@ -15439,7 +15440,7 @@ pub(crate) fn prometheus() -> String {
          # TYPE plurx_playback_control_vocabulary_total counter\n",
     );
     for (accepts_index, accepts) in ["false", "true"].iter().enumerate() {
-        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+        for (platform_index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
             output.push_str(&format!(
                 "plurx_playback_control_vocabulary_total{{complete=\"{accepts}\",platform=\"{platform}\"}} {}\n",
                 CONTROL_VOCABULARY[accepts_index][platform_index].load(Ordering::Relaxed)
