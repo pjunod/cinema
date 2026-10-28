@@ -52,7 +52,7 @@ pub(super) async fn exercise(
             .store
             .activate_source_media_session(
                 &activation,
-                &plurx_core::store::MediaSessionActivation {
+                &plurx_core::domain::MediaSessionActivation {
                     incarnation_id: incarnation.clone(),
                     session_id: session.clone(),
                     principal: assignment.binding().principal().clone(),
@@ -289,7 +289,7 @@ async fn cleanup_sql(state: &crate::state::AppState, assignment: &SourceDispatch
         } else {
             state
                 .store
-                .end_media_session_if_owner(&plurx_core::store::MediaSessionEnd {
+                .end_media_session_if_owner(&plurx_core::domain::MediaSessionEnd {
                     incarnation_id: route.incarnation_id,
                     session_id: route.session_id,
                     expected_owner_node_id: route.owner_node_id,
