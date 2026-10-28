@@ -26,7 +26,10 @@ async fn cancelled_original_engine_custody_wait_resumes_the_same_registered_nati
         tokio::pin!(collect);
         tokio::select! {
             started = gate.started() => started,
-            _result = &mut collect => panic!("must observe actual installed native custody"),
+            result = &mut collect => panic!(
+                "must observe actual installed native custody; original collect error: {:?}",
+                result.err().map(|error| error.0)
+            ),
         }
         // Dropping only this borrowed collector leaves the SAME task handle
         // and native custody installed. This PID is diagnostic, not liveness.
@@ -61,7 +64,11 @@ async fn cancelled_original_engine_custody_wait_resumes_the_same_registered_nati
             .await
             .err()
             .expect("API deadline while the same native custody is paused");
-        assert!(matches!(error.0, OperationError::Deadline));
+        assert!(
+            matches!(&error.0, OperationError::Deadline),
+            "expected only the API deadline while original engine custody remains paused: {:?}",
+            error.0
+        );
     }
     {
         let bundle = selection.state.lock().await;
@@ -115,7 +122,10 @@ async fn actual_original_engine_task_panic_after_native_return_keeps_p_and_m_unk
         tokio::pin!(collect);
         let started = tokio::select! {
             started = gate.started() => started,
-            _result = &mut collect => panic!("must observe actual installed native custody"),
+            result = &mut collect => panic!(
+                "must observe actual installed native custody; original collect error: {:?}",
+                result.err().map(|error| error.0)
+            ),
         };
         assert_eq!(
             started.close_operation_id,

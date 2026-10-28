@@ -543,6 +543,11 @@ impl NodeResourceRuntime {
             let native = match joined {
                 Ok(Ok(native)) => native,
                 Ok(Err(failure)) => {
+                    #[cfg(all(test, feature = "fixtures"))]
+                    eprintln!(
+                        "original planning probe native failure: {:?}",
+                        failure.error
+                    );
                     tracing::warn!(reason = ?failure.error.fallback_reason(), "original planning probe failed; retaining native owners for cleanup");
                     task.probe_failure = Some(failure);
                     task.unknown = true;
@@ -564,7 +569,13 @@ impl NodeResourceRuntime {
                 task.observed_source
                     .as_deref()
                     .ok_or(OperationError::State)?,
-            )?;
+            )
+            .inspect_err(|error| {
+                #[cfg(all(test, feature = "fixtures"))]
+                eprintln!("original planning probe completion proof refused: {error:?}");
+                #[cfg(not(all(test, feature = "fixtures")))]
+                let _ = error;
+            })?;
             let (report, closure) = known.split();
             task.probe_observed = Some(v2::FixedProbeDiscoverTaskObservedV1 {
                 task: task.probe_plan.clone(),
@@ -585,6 +596,11 @@ impl NodeResourceRuntime {
             let native = match joined {
                 Ok(Ok(native)) => native,
                 Ok(Err(failure)) => {
+                    #[cfg(all(test, feature = "fixtures"))]
+                    eprintln!(
+                        "original planning engine native failure: phase={:?}, error={:?}",
+                        failure.phase, failure.error
+                    );
                     task.engine_failure = Some(failure);
                     task.unknown = true;
                     self.retain_planning_uncertainty(binding)?;
