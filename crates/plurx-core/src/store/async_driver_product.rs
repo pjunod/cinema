@@ -3818,6 +3818,14 @@ async fn actual_sql_two_worker_product_is_closed() {
     eprintln!("async_product_coverage={}", bundle["coverage"]);
 }
 
+pub(super) fn catalog_fixture_payload(id: &str) -> Value {
+    let context = contexts()
+        .into_iter()
+        .find(|context| context.id == id)
+        .expect("catalog fixture context");
+    product_payload(&context, &wire_fixture_valuation())
+}
+
 fn wire_fixture_valuation() -> Valuation {
     Valuation {
         sql: 0,

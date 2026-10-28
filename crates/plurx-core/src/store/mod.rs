@@ -6756,6 +6756,9 @@ mod item_sort_order_tests;
 mod sharing_recovery_principal_tests;
 
 #[cfg(test)]
+pub mod async_driver_catalog;
+
+#[cfg(test)]
 mod async_driver_refinement;
 
 #[cfg(test)]
