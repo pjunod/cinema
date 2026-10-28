@@ -36,7 +36,7 @@ PREDECESSOR_ADAPTER_SHA256 = 'fa61446a54fb35cf1c836dd6dac8b5fe90dfb239326345c8bd
 BASELINE = 'tests/web/tsc-baseline.tsv'
 RUNTIME = {'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','typescript_lock':'6.0.3'}
 POLICY_VERSION = 2
-SCRIPTS_RESOLVER_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '48743b916c2a75d4e0e9531a52abff0b9f318d726be407f84d5fe1cc760e3a99', '087e836d369eb2b8f94ec1d0454ea6c157612df9': '72f0accba4f82129287fb12cb8b53c5739cf49f4dff530eb6d64bc464be6ec61'}
+SCRIPTS_RESOLVER_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '48743b916c2a75d4e0e9531a52abff0b9f318d726be407f84d5fe1cc760e3a99', '087e836d369eb2b8f94ec1d0454ea6c157612df9': '72f0accba4f82129287fb12cb8b53c5739cf49f4dff530eb6d64bc464be6ec61', 'integrated-main-77e985-v1': '1ba18caa8750ee8b6f3a1b3aeaf5ed7954c531fd92faa7fb1ff548c2dca8caf2'}
 PYTHON_POLICY = 'python3 stdlib planning, summary and loopback HTTP fixtures v1'
 NODE_PACKAGE_SCOPES = ('crates/package.json', 'crates/plurxd/package.json', 'crates/plurxd/src/package.json', 'crates/plurxd/src/web/core/package.json', 'crates/plurxd/src/web/detail/package.json', 'crates/plurxd/src/web/layouts/package.json', 'crates/plurxd/src/web/package.json', 'crates/plurxd/src/web/pages/package.json', 'crates/plurxd/src/web/player/package.json', 'crates/plurxd/src/web/types/package.json', 'package.json', 'scripts/cq-native-shipping/package.json', 'scripts/package.json', 'tests/package.json', 'tests/playback/continuous-quality/package.json', 'tests/playback/package.json', 'tests/vendor/package.json', 'tests/web/package.json')
 NODE_PACKAGE_PINS = {}
@@ -101,7 +101,7 @@ LEGACY_JOB = '''  web_compile:
         run: make web-unit-check
 
 '''
-SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '97f338f93705406847d3987b80bf2f0fa8402755a4d1b80003f2434d5d44b814', '9569dd03dcbd4a84b408078f90601d075fe726a9': '4bddf7fb49972695846029e71e65c488052eefbd39a52e747b17b9c86dd28c6c', 'integrated-main-94da-census-v1': 'fb5fd36641c7a21899f01dc9f20473c8085f794739c5de0c907eac251a9969ea', 'integrated-main-656a-v1': 'e11a97162c43e2637c83af099533a3024dc2302872d05e17f4791d0c80dfe35a'}
+SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '97f338f93705406847d3987b80bf2f0fa8402755a4d1b80003f2434d5d44b814', '9569dd03dcbd4a84b408078f90601d075fe726a9': '4bddf7fb49972695846029e71e65c488052eefbd39a52e747b17b9c86dd28c6c', 'integrated-main-94da-census-v1': 'fb5fd36641c7a21899f01dc9f20473c8085f794739c5de0c907eac251a9969ea', 'integrated-main-656a-v1': 'e11a97162c43e2637c83af099533a3024dc2302872d05e17f4791d0c80dfe35a', 'integrated-main-77e985-v1': 'ccdc1e9b04e7e77ef72d48c93b77481ade06d20d56dd044051daa6a16dc9a951'}
 HELPERS = ('scripts/js-check', 'scripts/web-types', 'scripts/web-jsconfig', 'scripts/playback-lab', 'scripts/playback-frame-clock.js', 'scripts/continuous-quality-qualification', 'scripts/player-contract-table', 'scripts/ui-baseline', 'scripts/subtitle-readiness-browser-check', 'scripts/cq-native-shipping/check-evidence.js', 'tests/vendor/acorn.js', 'scripts/playback-startup-lab')
 WRAPPER = '''      - name: Retain or execute the reviewed whole web cohort
         env:
@@ -350,7 +350,7 @@ def policy_fingerprint():
         'runtime':RUNTIME,'python_policy':PYTHON_POLICY,'fresh_python_cache':PYTHON_CACHE_POLICY,'cache_roots':CACHE_ROOTS,
         'cache_bounds':[MAX_CACHE_FILES,MAX_CACHE_BYTES],'node_package_scopes':NODE_PACKAGE_SCOPES,'node_package_pins':NODE_PACKAGE_PINS,'script_resolver_families':SCRIPTS_RESOLVER_FAMILIES,'commands':COMMANDS,'legacy_job':digest(LEGACY_JOB.encode()),
         'adapter_job':digest(adapted_job().encode()),
-        'producer_eligibility':'terminal-failure-cancelled-no-cohort-artifact-execution-unknown-v1','baseline':'event-base+merge-base+bytes',
+        'producer_eligibility':'terminal-failure-cancelled-skipped-no-cohort-artifact-typed-draft-execution-unknown-v2','baseline':'event-base+merge-base+bytes',
         'host':'Linux/X64 host; python3 stdlib and fixed Make recipe compatibility v1'}))
 
 
@@ -428,14 +428,14 @@ def check_job(job,scope,rid,successful=True):
 
 
 def check_nonproducer_job(job,scope,rid):
-    # Negative eligibility may include a cancelled job never assigned a task.
+    # Terminal nonproducers may have an allocated task or a draft event.
     # This never authenticates a completed cohort or current execution.
     require(type(job.get('id')) is int and job['id'] > 0 and job.get('name') == JOB
         and type(job.get('repo_id')) is int and job['repo_id'] == scope['repository']
         and type(job.get('run_id')) is int and job['run_id'] == rid
         and type(job.get('attempt')) is int and job['attempt'] == 1
         and type(job.get('task_id')) is int and job['task_id'] >= 0
-        and job.get('status') in ('failure','cancelled'),
+        and job.get('status') in ('failure','cancelled','skipped'),
         'Web nonproducer job repository/run/task/attempt/status differs')
 
 
@@ -616,11 +616,13 @@ def matching_result(api,scope,workspace,current,current_run,current_inputs):
             if re.fullmatch(r'web-cohort-'+str(rid)+r'-[1-9][0-9]*',str(item.get('name','')))]
         possible_artifacts = [item for item in all_artifacts if str(item.get('name','')).startswith('web-cohort-')]
         jobs = [j for j in api.pages('/actions/runs/'+str(rid)+'/jobs') if j.get('name') == JOB]
-        # Eligibility is separate from applicability: a terminal failed job
+        # Eligibility is separate from applicability: a terminal nonproducer
         # without any cohort artifact offers no accepted whole-cohort result.
-        # Its individual execution history remains unknown; claim no zero/pass.
-        if not possible_artifacts and len(jobs) == 1 and jobs[0].get('status') in ('failure','cancelled'):
-            adoption.bind_event(run,scope)
+        # Draft readiness grants no authority here; individual execution remains
+        # unknown. Positive producers still require the strict ready binding.
+        if not possible_artifacts and len(jobs) == 1 and jobs[0].get('status') in ('failure','cancelled','skipped'):
+            require(type(event['pull_request'].get('draft')) is bool,
+                'Web nonproducer event draft field malformed')
             check_nonproducer_job(jobs[0],scope,rid)
             print('Web history: no accepted whole-cohort result; execution unknown',flush=True)
             continue
@@ -630,11 +632,6 @@ def matching_result(api,scope,workspace,current,current_run,current_inputs):
         require(len(possible_artifacts) == len(artifacts),'Web cohort artifact name malformed; no fallback execution')
         require(workflow_identity(workspace,run['commit_sha'])['kind'] == 'v1',
             'Eligible web producer has unsupported recipe; closure review required')
-        if not artifacts and len(jobs) == 1 and jobs[0].get('status') == 'skipped' and type(jobs[0].get('task_id')) is int and jobs[0]['task_id'] == 0:
-            producer_adapter(workspace,run['commit_sha'],current)
-            require(jobs[0].get('repo_id') == scope['repository'] and jobs[0].get('run_id') == rid,
-                'Never-started web producer identity differs')
-            continue
         adoption.bind_event(run,scope)
         inputs = manifest(workspace,run['commit_sha'],event['pull_request']['base']['sha'])
         # Source applicability is separate from positive result authority.

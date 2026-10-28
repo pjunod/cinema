@@ -1433,6 +1433,13 @@ async fn omitted_dv_state(store: &SqliteStore) -> Result<Value, String> {
           'handoff_tokens',(SELECT count(*) FROM playback_handoffs_tokens),
           'handoff_marker',json((SELECT json_group_array(json_array(singleton,version))
             FROM (SELECT singleton,version FROM playback_handoffs_schema ORDER BY singleton,version))),
+          'text_cues',(SELECT count(*) FROM subtitle_text_translation_cues),
+          'text_marker',json((SELECT json_group_array(json_array(singleton,version))
+            FROM (SELECT singleton,version FROM subtitle_text_translation_schema ORDER BY singleton,version))),
+          'caption_leases',(SELECT count(*) FROM shared_caption_read_leases),
+          'caption_marker',json((SELECT json_group_array(json_array(singleton,version))
+            FROM (SELECT singleton,version FROM shared_caption_schema ORDER BY singleton,version))),
+          'range_continuities',(SELECT count(*) FROM subtitle_translation_range_continuities),
           'marker',json((SELECT json_group_array(json_array(singleton,version))
             FROM (SELECT singleton,version FROM dv_title_jobs_schema ORDER BY singleton,version))),
           'sequence',json((SELECT json_group_array(json_array(name,seq))
@@ -1458,6 +1465,11 @@ fn check_omitted_dv(fixture: &Fixture, state: &Value) -> Result<(), String> {
         || state["handoffs"] != json!(0)
         || state["handoff_tokens"] != json!(0)
         || state["handoff_marker"] != json!([[1, 1]])
+        || state["text_cues"] != json!(0)
+        || state["text_marker"] != json!([[1, 1]])
+        || state["caption_leases"] != json!(0)
+        || state["caption_marker"] != json!([[1, 1]])
+        || state["range_continuities"] != json!(0)
         || !state["sequence"].is_array()
         || state["sequence"] != fixture.omitted_dv_sequence
     {
@@ -1855,7 +1867,7 @@ pub(super) fn domain_metadata() -> Value {
         "foreign_holder_boundary": "foreign-holder is a third adversarial domain-lease owner, not either worker node, with one independent acquisition budget",
         "retirement_sequence_boundary": "the graph supplies separate actual settle and logical resolve primitives; daemon drain/local-token/first-settle/resolve/optional-second-settle sequencing is a reviewed source and daemon-conformance boundary composed by the temporal model",
         "cleanup_boundary": "local cleanup needs bounded retirement calls to return, not eventual successful acknowledgement; errors are logged and finish returns while durable authority may remain",
-        "omitted_dv_state_boundary": "selected library_scan/metadata_refresh inputs preserve empty files and DV demand, marker [(1,1)] and exact initialized dv_title_jobs_demand sqlite_sequence rows; omitted-state drift aborts the whole run without changing nine-table canonical identity",
+        "omitted_dv_state_boundary": "selected library_scan/metadata_refresh inputs preserve empty files, DV demand, handoffs/tokens, text cues, shared caption read leases and range continuities; DV, handoff, text and shared-caption markers remain [(1,1)] with exact initialized dv_title_jobs_demand sqlite_sequence rows; omitted-state drift aborts the whole run without changing nine-table canonical identity",
         "snapshot_tables": SNAPSHOT_TABLES,
         "dispatch_time_noninterference": "for retirement fence Some(F), resolve_claim reads dispatched_at_ms only in its skipped fence-is-none window branch; neither SQL query nor later classification reads it, so a representative dispatch sample preserves results at fixed now/read outcomes; this is a reviewed source lemma, not a machine proof",
         "queue_sql_boundary": "all generated queue primitives use QueueSql::queue_sql, not queue_transaction; ReplyBoundary passes queue_transaction through without fault injection, so multi-statement transaction faults are outside this slice",
@@ -3695,10 +3707,13 @@ async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
     for reuse in [false, true] {
         for (kind, mutation) in [
             ("marker", "DELETE FROM playback_handoffs_schema;"),
+            ("text-marker", "DELETE FROM subtitle_text_translation_schema;"),
+            ("caption-marker", "DELETE FROM shared_caption_schema;"),
+            ("text-cue", "INSERT INTO subtitle_text_translation_cues(job_id,recipe_digest,cue_index,input_sha256,start_ms,end_ms,body,created_at_ms) SELECT id,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,1,'[]',0 FROM background_jobs WHERE kind='library_scan' LIMIT 1;"),
             ("handoff", "INSERT INTO users(id,username,password_hash,is_admin,created_at) VALUES(314159,'omitted-handoff-fixture','hash',0,0); INSERT INTO playback_handoffs(id,code_hash,user_id,file_id,source_token_hash,created_at,expires_at) VALUES('outside-D','code',314159,1,'source',0,1);"),
             ("token", "INSERT INTO users(id,username,password_hash,is_admin,created_at) VALUES(314159,'omitted-handoff-fixture','hash',0,0); INSERT INTO playback_handoffs_tokens(token_hash,handoff_id,user_id,file_id,source_token_hash,created_at,expires_at) VALUES('outside-D','handoff',314159,1,'source',0,1);"),
         ] {
-            let mut hidden = Oracle::new(None).await.expect("omitted handoff fixture");
+            let mut hidden = Oracle::new(None).await.expect("omitted extension fixture");
             hidden.reuse_certificates = reuse;
             let edge = hidden.apply(0, &action).await.expect("certified claim");
             let parent = hidden.edges[edge].to;

@@ -200,6 +200,13 @@ class WebCohortRetentionTests(unittest.TestCase):
                     saved=job.copy();job.update(change)
                     with self.subTest(change=change),self.assertRaises(receipts.ReceiptError):web.current_context(ROOT)
                     job.clear();job.update(saved)
+                # Draft nonproducer history grants no current-job authority.
+                ready_payload=run['event_payload'];draft_event=json.loads(original_event)
+                draft_event['pull_request']['draft']=True
+                event_path.write_text(json.dumps(draft_event));run['event_payload']=json.dumps(draft_event)
+                with self.assertRaisesRegex(receipts.ReceiptError,'not a ready PR event'):
+                    web.current_context(ROOT)
+                event_path.write_bytes(original_event);run['event_payload']=ready_payload
                 pull['head']={**pull['head'],'sha':'d'*40}
                 with self.assertRaisesRegex(receipts.ReceiptError,'Main receipt must match'):web.current_context(ROOT)
 
@@ -399,7 +406,7 @@ class WebCohortRetentionTests(unittest.TestCase):
         self.assertEqual(web.digest(predecessor),web.PREDECESSOR_ADAPTER_SHA256)
         api,run,job,inputs,receipt,state,seal,adapter,tree=self.v1_fixture()
         receipt['adapter_sha256']=web.PREDECESSOR_ADAPTER_SHA256
-        self.assertEqual(web.policy_fingerprint(),'4e5b45bd19a0396b71d239a8c6c84c59bb28c0d217d4e81e63b741a13eee9aab')
+        self.assertEqual(web.policy_fingerprint(),'bb540c2601ca45d4987225b361171fea73bf475657fd3097f307ef461492df5d')
         source={'raw':predecessor};consumer='e'*40
         def source_git(workspace,*args,**kw):
             if args[0]=='rev-parse':return tree.encode()
@@ -601,36 +608,56 @@ class WebCohortRetentionTests(unittest.TestCase):
 
     def test_terminal_failed_nonproducer_history_is_classified_before_source_compatibility(self):
         api,pull,event,run,job=self.context()
+        original_payload=run['event_payload'];original_event=json.loads(original_payload)
         state={'artifacts':[],'jobs':[job]}
         def pages(path,query=None,field=None):
             return state['jobs'] if path.endswith('/jobs') else state['artifacts'] if path.endswith('/artifacts') else [run]
         api.pages=pages
         with mock.patch.object(web,'git',return_value=b'validation.web_cohort_retention unsupported old wrapper/adapter') as source, \
              mock.patch.object(web,'manifest') as manifest,mock.patch.object(web,'v1_result') as result, \
+             mock.patch.object(web,'producer_adapter',return_value='f'*64) as producer, \
              mock.patch.object(web.subprocess,'run') as launch,mock.patch('builtins.print') as report:
-            for status in ('failure','cancelled'):
-                for task in (0,6002):
-                    job.update(status=status,attempt=1,task_id=task)
-                    self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs()))
-                    report.assert_called_with('Web history: no accepted whole-cohort result; execution unknown',flush=True)
-            source.assert_not_called();manifest.assert_not_called();result.assert_not_called();launch.assert_not_called()
-            # Walk both candidates in one invocation: an earlier assigned
-            # failure must not hide a later pre-v1 unassigned cancellation.
-            later=copy.deepcopy(run);later.update(id=6003,commit_sha='d'*40)
-            event=json.loads(later['event_payload']);event['pull_request']['head']['sha']='d'*40
-            later['event_payload']=json.dumps(event)
-            unassigned={**job,'id':6004,'run_id':6003,'task_id':0,'status':'cancelled'}
-            saved_job=job.copy();job.update(status='failure',task_id=6002)
-            original_get,original_pages=api.get,api.pages
-            api.get=lambda path:later if path=='/actions/runs/6003' else original_get(path)
-            api.pages=lambda path,query=None,field=None:([unassigned] if path=='/actions/runs/6003/jobs'
-                else [run,later] if path=='/actions/runs' else original_pages(path,query,field))
-            source.return_value=('jobs:\n'+web.LEGACY_JOB).encode()
-            report.reset_mock()
+            for draft in (False,True):
+                for status in ('failure','cancelled','skipped'):
+                    for task in (0,6002):
+                        event=copy.deepcopy(original_event);event['pull_request']['draft']=draft
+                        run['event_payload']=json.dumps(event)
+                        job.update(status=status,attempt=1,task_id=task)
+                        with self.subTest(draft=draft,status=status,task=task):
+                            self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs()))
+                            report.assert_called_with('Web history: no accepted whole-cohort result; execution unknown',flush=True)
+            event['action']='converted_to_draft';run['event_payload']=json.dumps(event)
             self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs()))
-            self.assertEqual(report.call_count,2);source.assert_not_called()
-            api.get,api.pages=original_get,original_pages;job.clear();job.update(saved_job)
+            for value in (None,'false',0,1):
+                event=copy.deepcopy(original_event);event['pull_request']['draft']=value
+                run['event_payload']=json.dumps(event)
+                with self.subTest(draft=value),self.assertRaisesRegex(receipts.ReceiptError,'nonproducer event draft field malformed'):
+                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
+            del event['pull_request']['draft'];run['event_payload']=json.dumps(event)
+            with self.assertRaisesRegex(receipts.ReceiptError,'nonproducer event draft field malformed'):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
+            run['event_payload']=original_payload
+            source.assert_not_called();manifest.assert_not_called();producer.assert_not_called();result.assert_not_called();launch.assert_not_called()
+            # Actual-shaped traversal: allocated skipped6088 then draft/pre-v1
+            # skipped5849. Neither record grants a pass or source compatibility.
+            earlier=copy.deepcopy(run);earlier['id']=6088
+            later=copy.deepcopy(run);later.update(id=5849,commit_sha='d'*40)
+            event=json.loads(later['event_payload']);event['pull_request'].update(draft=True)
+            event['pull_request']['head']['sha']='d'*40;later['event_payload']=json.dumps(event)
+            allocated={**job,'id':58960,'run_id':6088,'task_id':23810,'status':'skipped'}
+            unassigned={**job,'id':56915,'run_id':5849,'task_id':0,'status':'skipped'}
+            original_get,original_pages=api.get,api.pages
+            api.get=lambda path:earlier if path=='/actions/runs/6088' else later if path=='/actions/runs/5849' else original_get(path)
+            api.pages=lambda path,query=None,field=None:([allocated] if path=='/actions/runs/6088/jobs'
+                else [unassigned] if path=='/actions/runs/5849/jobs' else [earlier,later] if path=='/actions/runs'
+                else original_pages(path,query,field))
+            source.return_value=('jobs:\n'+web.LEGACY_JOB).encode();report.reset_mock()
+            self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs()))
+            self.assertEqual(report.call_count,2)
+            source.assert_not_called();manifest.assert_not_called();producer.assert_not_called()
+            api.get,api.pages=original_get,original_pages
             source.return_value=b'validation.web_cohort_retention unsupported old wrapper/adapter'
+            job.update(status='skipped',task_id=6002)
             for change in ({'attempt':0},{'attempt':2},{'attempt':True},{'task_id':-1},{'task_id':True},{'task_id':0.0},{'task_id':'0'},{'task_id':None},{'repo_id':2},{'repo_id':True},{'run_id':1},{'run_id':True},{'id':0},{'id':True}):
                 saved=job.copy();job.update(change)
                 with self.subTest(change=change),self.assertRaisesRegex(receipts.ReceiptError,'repository/run/task/attempt'):
@@ -642,28 +669,57 @@ class WebCohortRetentionTests(unittest.TestCase):
             job['task_id']=task
             with self.assertRaisesRegex(receipts.ReceiptError,'Web nonproducer job repository/run/task/attempt/status differs'):
                 web.check_nonproducer_job({**job,'name':'other job'},SCOPE,run['id'])
-            for status in ('success','running','queued'):
-                job['status']=status
-                with self.subTest(status=status),self.assertRaisesRegex(receipts.ReceiptError,'Web job shape missing/ambiguous'):
+            for path,value in ((('number',),1264),(('repository','id'),2),(('repository','full_name'),'other/project'),
+                (('pull_request','head','sha'),'e'*40),(('pull_request','head','repo','id'),2),
+                (('pull_request','base','repo','id'),2),(('pull_request','base','ref'),'effort/topic'),
+                (('pull_request','state'),'closed'),(('action',),'unknown')):
+                event=copy.deepcopy(original_event);target=event
+                for key in path[:-1]:target=target[key]
+                target[path[-1]]=value;run['event_payload']=json.dumps(event)
+                with self.subTest(event_path=path),self.assertRaises(receipts.ReceiptError):
                     web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            job['status']='failure'
+            run['event_payload']=original_payload;saved_workflow=run['workflow_id'];run['workflow_id']='other.yml'
+            with self.assertRaises(receipts.ReceiptError):
+                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
+            run['workflow_id']=saved_workflow
+            # Use the supported recipe so status/artifact guards, rather than
+            # unrelated recipe rejection, enforce these refusal boundaries.
+            source.return_value=('jobs:\n'+web.adapted_job()).encode()
+            manifest.return_value=fixture_inputs()
+            for status in ('success','running','queued','unknown'):
+                job['status']=status
+                with self.subTest(status=status),self.assertRaisesRegex(receipts.ReceiptError,'Matching web history is incomplete/ambiguous|Matching web cohort artifact missing'):
+                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
+            job['status']='skipped'
             for artifacts in ([{'name':'web-cohort-6000-1'}],[{'name':'web-cohort-malformed'}]):
                 state['artifacts']=artifacts
-                with self.subTest(artifacts=artifacts),self.assertRaisesRegex(receipts.ReceiptError,'Web job shape missing/ambiguous|artifact name malformed'):
+                with self.subTest(artifacts=artifacts),self.assertRaisesRegex(receipts.ReceiptError,'Matching web history is incomplete/ambiguous|artifact name malformed'):
                     web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
             state['artifacts']=[{'name':None}]
             with self.assertRaisesRegex(receipts.ReceiptError,'artifact listing has malformed names'):
                 web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
             state['artifacts']=[];state['jobs']=[job,job.copy()]
-            with self.assertRaisesRegex(receipts.ReceiptError,'Web job shape missing/ambiguous'):
+            with self.assertRaisesRegex(receipts.ReceiptError,'Matching web history is incomplete/ambiguous'):
                 web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            # Even a recognized artifact-bearing producer may not use the
-            # negative task-zero predicate to authenticate positive evidence.
-            state['jobs']=[job];job.update(status='failure',task_id=0)
+            # Positive authority stays ready-only, including artifact-bearing
+            # skipped/task-zero history and success without a required artifact.
+            state['jobs']=[job];source.return_value=('jobs:\n'+web.adapted_job()).encode()
+            event=copy.deepcopy(original_event);event['pull_request']['draft']=True
+            run['event_payload']=json.dumps(event)
+            with mock.patch.object(web,'check_nonproducer_job') as negative:
+                for status in ('failure','cancelled','skipped','success'):
+                    job.update(status=status,task_id=0)
+                    state['artifacts']=[{'name':'web-cohort-6000-1','run_id':6000,'expired':False}]
+                    with self.subTest(draft_artifact_status=status),self.assertRaisesRegex(receipts.ReceiptError,'not a ready PR event'):
+                        web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
+                state['artifacts']=[];job['status']='success'
+                with self.assertRaisesRegex(receipts.ReceiptError,'not a ready PR event'):
+                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
+                negative.assert_not_called()
+            run['event_payload']=original_payload;job.update(status='failure',task_id=0)
             state['artifacts']=[{'name':'web-cohort-6000-1','run_id':6000,'expired':False}]
             inputs=fixture_inputs();manifest.return_value=inputs
-            with mock.patch.object(web,'workflow_identity',return_value={'kind':'v1'}), \
-                 mock.patch.object(web,'check_nonproducer_job') as negative:
+            with mock.patch.object(web,'check_nonproducer_job') as negative:
                 with self.assertRaisesRegex(receipts.ReceiptError,'Matching web history is incomplete/ambiguous'):
                     web.matching_result(api,SCOPE,ROOT,COMMIT,7000,inputs)
                 negative.assert_not_called()
