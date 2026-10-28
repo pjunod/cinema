@@ -55,7 +55,9 @@ def source_generation_tools(prepared, env):
                         "url": f"https://ftp.gnu.org/gnu/{name}/{name}-{version}.tar.gz"}, archive)
         source = directory / f"{name}-{version}"
         helper.extract(archive, source)
-        run(["/bin/sh", source / "configure", "--prefix=" + str(prefix)], cwd=source, env=env)
+        # Keep Autoconf's srcdir as "." for this in-source build. Absolute paths
+        # through macOS's /var alias can make GNUmakefile link back to itself.
+        run(["/bin/sh", "./configure", "--prefix=" + str(prefix)], cwd=source, env=env)
         run(["make", "-j4"], cwd=source, env=env)
         run(["make", "install"], cwd=source, env=env)
 
