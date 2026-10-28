@@ -559,7 +559,9 @@ async fn speech_admission_retains_original_restart_barrier_through_last_owner() 
     let retained = Arc::clone(&original);
     assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 1);
     fence
-        .begin_restart_preparation_until(crate::state::clock_ms() + 60_000)
+        .begin_restart_preparation_until(
+            u64::try_from(crate::state::clock_ms()).expect("positive current wall clock") + 60_000,
+        )
         .await
         .expect("actual restart fence");
     drop(original);
