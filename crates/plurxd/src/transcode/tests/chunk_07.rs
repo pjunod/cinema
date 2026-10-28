@@ -542,6 +542,41 @@ async fn heavy_background_admission_is_shared_and_released_with_its_guard() {
 }
 
 #[tokio::test]
+async fn speech_admission_retains_original_restart_barrier_through_last_owner() {
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let fence = crate::serving_fence::ServingFence::new(
+        plurx_core::cluster::migration::status::ReplicationMonitor::sqlite().metrics_handle(),
+    );
+    let (manager, _work, _cache) = cached_manager(&store);
+    let manager = manager.with_serving_authority(fence.authority());
+    let original = Arc::new(
+        manager
+            .admit_speech()
+            .await
+            .expect("actual speech admission"),
+    );
+    let retained = Arc::clone(&original);
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 1);
+    fence
+        .begin_restart_preparation_until(crate::state::clock_ms() + 60_000)
+        .await
+        .expect("actual restart fence");
+    drop(original);
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 1);
+    assert!(!fence.restart_drain_status(0).await.drained);
+    drop(retained);
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+    assert_eq!(manager.admissions.software_in_use(), 0);
+    assert!(manager.admit_speech().await.is_none());
+    assert!(manager
+        .admit_speech_queued(&tokio_util::sync::CancellationToken::new())
+        .await
+        .is_none());
+    assert!(!manager.background_worker_in_use());
+}
+
+#[tokio::test]
 async fn queued_background_admission_keeps_its_turn_without_bypassing_foreground() {
     use std::{future::Future, task::Poll};
     use tokio_util::sync::CancellationToken;

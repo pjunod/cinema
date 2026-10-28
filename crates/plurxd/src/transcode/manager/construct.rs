@@ -1283,6 +1283,7 @@ impl TranscodeManager {
         &self,
         heavy: tokio::sync::OwnedSemaphorePermit,
     ) -> Option<FragmentAdmission> {
+        let restart_admission = self.serving_authority.try_restart_admission().await?;
         let threads = 2;
         let budget = self.software_budget().await;
         // This work may never use the pool's lone-job oversized exception.
@@ -1306,6 +1307,7 @@ impl TranscodeManager {
                 Priority::Speculative,
             )
             .map(|permit| FragmentAdmission {
+                _restart_admission: restart_admission,
                 _heavy: heavy,
                 threads,
                 _permit: permit,

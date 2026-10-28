@@ -287,6 +287,7 @@ impl TranscodeManager {
             transcode_audio: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         let mut planning = self
             .collect_selected_copy_planning(
@@ -517,6 +518,7 @@ impl TranscodeManager {
                     transcode_audio: false,
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                 },
                 "actual-copy-quota-test",
                 &uuid::Uuid::new_v4().to_string(),
@@ -566,6 +568,7 @@ impl TranscodeManager {
             transcode_audio: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         let mut planning = self
             .collect_selected_copy_planning(
