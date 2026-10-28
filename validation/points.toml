@@ -526,6 +526,7 @@ paths = [
   "crates/plurx-core/src/adaptive_resources/physical_graph/fixed_probe.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/fixed_engine.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/copy_vod.rs",
+  "crates/plurx-core/src/adaptive_resources/physical_graph/copy_vod/syscall_fixture.rs",
   "crates/plurx-core/src/process/fixed_planning_engine.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/budgets.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/live_close.rs",

@@ -145,11 +145,11 @@ actual syscall EBADF rather than checked-close result loss (R9),
 every possible cleanup await/certainty combination (R19), and actual wait failure/non-ESRCH driver
 signal failure (R20). R11 now authors real drain refusal of the original latch.
 R21 covers a committed settlement with its original reply delayed, not an
-unknown storage transaction outcome. None of these bodies or controls ran.
+unknown storage transaction outcome. At that source-review checkpoint none of these bodies or controls had run; section14 records later execution.
 
-## 5. Current source and review boundary
+## 5. Earlier published source and review boundary
 
-Current source is `9903421c871c0146b8030bc88c51340403ba8134` in ordinary Git and task PR #1293, against effort
+The earlier published source is `9903421c871c0146b8030bc88c51340403ba8134` in ordinary Git and task PR #1293, against effort
 `5cf30d1470eb40ca0359eb2372e8a46dc447cc53` with main `77e9858277813456bb94e855ec62ed3e9fd65af8` merged. The current manifest hashes previous
 dependencies and changed Rust/JavaScript/Cargo files, including both isolated
 spike lockfiles. Later documentation/manifest commits do not change that code
@@ -160,7 +160,7 @@ the original bounded design review remains at46dc/8b6331e. Neither review is
 silently transferred to changed source. The compiler receipts below establish
 only their exact source and environment. The user manages Opus review because
 Fable quota is exhausted; no Hermes or external API review is dispatched.
-Behavioral/native-workload/model/mutation execution remains explicitly held.
+The user has since authorized required behavioral tests; actual incomplete results and repairs are in section14. Native workload/model/mutation qualification remains open.
 Do not infer acceptance of V1–V5/R1/M0–M7 or complete native/allocator bounds.
 
 ## 6. Supplied implementation review and policy decision
@@ -419,3 +419,38 @@ These repairs and real missing-owner/checked-close regressions require their
 own current-source execution; earlier failures and isolated passes do not
 establish a complete candidate pass. The Direct typed-prepare schema rejection,
 publication/full-window failures, and broader delivery milestones remain open.
+
+## 15. Earlier published compiler receipts
+
+The following receipts describe the earlier published candidate. New source
+requires fresh checks; these results confer no behavioral acceptance.
+
+**Earlier published compiler evidence:** exact source `9903421c871c0146b8030bc88c51340403ba8134` passed
+native x86_64 Rust1.97.1 core+daemon all-target+cluster strict Clippy in
+375.492s, source stable; log SHA-256
+`919eea478ff0ea42843fee5443505c4e82bf6757cb6b8f698accf5fc758fa675`.
+Host source `93d9bf1bdb621336fa88c70582d92cc3667daa53` passed the full-workspace
+compile/format/locked-spike check in 322.64s and strict
+core+daemon Clippy in 341.224s. Only the Linux-only Source
+settlement and core Direct fixtures changed afterward. Their parent modules
+and Linux cfg guards are unchanged; all 7032 other
+host-guard source blobs match the current pin. The changed fixtures are
+covered by exact native compilation; no host compilation of those files or
+exact-new-source host pass is claimed.
+Host log SHA-256 respectively:
+`11fadca8157bbbd1097c8caf102dfc97ddd6b56bf6b5b1ae99191d49197fb700` and
+`4284e07eba21995cc2234a59f8e9df64c036e0bb3cd1112e007c52a761fa9c48`. Standalone vendored Hiqlite Clippy passed in
+6.979s; log SHA-256 `51b8531a346691fcf813bb77ae192a992a37da677df0abf9b7d9607c62c524e7`.
+The vendor target can report the existing root Clippy configuration's
+unreachable-path warnings; no zero-diagnostic claim is made. All90 task
+regression declarations resolve against this source. These are compiler and
+source-name checks; no regression body was executed. Fresh current-head
+compile-only CI remains required before task integration.
+
+Earlier source `5267b8721312b86e205ac99217c20a159b0fec4a` passed native strict
+Clippy in612.846s (log SHA-256
+`811cf9dbfee5dd6d355e44ecb9aa1b5880033f47391b50dff6d70b2279ee8489`)
+and matching host/Linux-target checks in267.793s/320.812s. Those receipts remain
+bound to that earlier source; they are not the current candidate's proof.
+CI6082/index6053 failed locked spike metadata before Rust compilation; its
+other platform/static passes are historical results, not current-head credit.

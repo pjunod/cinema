@@ -44,36 +44,12 @@ executor peaks, P/legacy CPU coexistence, shared storage/provisional recovery,
 broader adapters and selective recovery remain open. Earlier compiler results
 and authored regressions do not close these acceptance gaps.
 
-**Earlier published compiler evidence:** exact source `9903421c871c0146b8030bc88c51340403ba8134` passed
-native x86_64 Rust1.97.1 core+daemon all-target+cluster strict Clippy in
-375.492s, source stable; log SHA-256
-`919eea478ff0ea42843fee5443505c4e82bf6757cb6b8f698accf5fc758fa675`.
-Host source `93d9bf1bdb621336fa88c70582d92cc3667daa53` passed the full-workspace
-compile/format/locked-spike check in 322.64s and strict
-core+daemon Clippy in 341.224s. Only the Linux-only Source
-settlement and core Direct fixtures changed afterward. Their parent modules
-and Linux cfg guards are unchanged; all 7032 other
-host-guard source blobs match the current pin. The changed fixtures are
-covered by exact native compilation; no host compilation of those files or
-exact-new-source host pass is claimed.
-Host log SHA-256 respectively:
-`11fadca8157bbbd1097c8caf102dfc97ddd6b56bf6b5b1ae99191d49197fb700` and
-`4284e07eba21995cc2234a59f8e9df64c036e0bb3cd1112e007c52a761fa9c48`. Standalone vendored Hiqlite Clippy passed in
-6.979s; log SHA-256 `51b8531a346691fcf813bb77ae192a992a37da677df0abf9b7d9607c62c524e7`.
-The vendor target can report the existing root Clippy configuration's
-unreachable-path warnings; no zero-diagnostic claim is made. All90 task
-regression declarations resolve against this source. These are compiler and
-source-name checks; no regression body was executed. Fresh current-head
-compile-only CI remains required before task integration.
-
-Earlier source `5267b8721312b86e205ac99217c20a159b0fec4a` passed native strict
-Clippy in612.846s (log SHA-256
-`811cf9dbfee5dd6d355e44ecb9aa1b5880033f47391b50dff6d70b2279ee8489`)
-and matching host/Linux-target checks in267.793s/320.812s. Those receipts remain
-bound to that earlier source; they are not the current candidate's proof.
-CI6082/index6053 failed locked spike metadata before Rust compilation; its
-other platform/static passes are historical results, not current-head credit.
-
+Earlier published compiler receipts are preserved in
+[the copy review record](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md#15-earlier-published-compiler-receipts).
+Host source `04836e370995182a71a58b7158f9701580d63b73` later passed the
+workspace/format check, strict core+daemon Clippy and vendored Hiqlite Clippy,
+with stable source. Subsequent source fixes require new checks. Core-only
+native debug checks do not supply complete task qualification.
 
 Bounded direct recovery retains its held-lock and positive
 same-boot/PID-namespace old-daemon-exit requirements. Separate obsolete
