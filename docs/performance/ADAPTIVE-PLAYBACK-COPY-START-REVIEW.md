@@ -1,7 +1,7 @@
 # Copy start cleanup — accepted decisions and implementation review
 
-**Status:** open · implementation review received; blocking fixes and qualification pending.
-**Updated:** 2026-10-26.
+**Status:** open · blocking review fixes implemented; behavioral qualification held.
+**Updated:** 2026-10-28.
 
 Companion to the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) and
 [delivery checklist](ADAPTIVE-PLAYBACK-DELIVERY.md). PR #1293 targets effort
@@ -17,8 +17,8 @@ execution. That original request and manifest remain available at `8b6331e`.
 The supplied review's SHA-256 is
 `dc9df50930130a30adee9ec91a52e62bf06392509d25e8bff677dc7439505672`.
 The current [source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW-SOURCE.json)
-pins implementation `5267b8721312b86e205ac99217c20a159b0fec4a` for the next review; it is source identity, not
-execution or approval evidence.
+pins implementation `9903421c871c0146b8030bc88c51340403ba8134` after the review fixes; it establishes source identity,
+not execution or approval evidence.
 
 **Original** means the same retained instance: Child/ChildJob, JoinHandle,
 source or pipe cell, latch, graph custody and named operation. Reopening a
@@ -140,43 +140,26 @@ review does not close those obligations.
 The authored-source map leaves these cases explicitly incomplete: actual
 post-root budget refusal (R8), actual syscall EBADF rather than checked-close
 result loss (R9), cancellation at the literal take-start mutex wait (R10),
-caller abort while an entered parser is pending (R15), every possible cleanup
-await/certainty combination (R19), and actual wait failure/non-ESRCH driver
+every possible cleanup await/certainty combination (R19), and actual wait failure/non-ESRCH driver
 signal failure (R20). R11 now authors real drain refusal of the original latch.
 R21 covers a committed settlement with its original reply delayed, not an
 unknown storage transaction outcome. None of these bodies or controls ran.
 
-## 5. Next independent implementation review
+## 5. Current source and review boundary
 
-Review committed source `5267b8721312b86e205ac99217c20a159b0fec4a` through ordinary
-Git and task PR #1293 into effort PR #1248. Use effort `48eccfd748741bab47d945e68c7713a4c213ea60`
-as the task diff base. Historical `8b6331e` retains the original bounded design
-request and manifest. The current source manifest includes original dependencies
-and changed Source/private-constructor/product files; review the task diff too.
-The implementation code pin remains unchanged. Subsequent commits add status/
-review text, the source manifest, a client-history anchor and the isolated
-Hiqlite spike lockfile refresh for the existing macOS Wasmtime dependency.
-No Rust source or root-workspace dependency changes follow that code pin.
-Behavioral and mutation execution remains held for independent review.
+Current source is `9903421c871c0146b8030bc88c51340403ba8134` in ordinary Git and task PR #1293, against effort
+`5cf30d1470eb40ca0359eb2372e8a46dc447cc53` with main `77e9858277813456bb94e855ec62ed3e9fd65af8` merged. The current manifest hashes previous
+dependencies and changed Rust/JavaScript/Cargo files, including both isolated
+spike lockfiles. Later documentation/manifest commits do not change that code
+pin. Read the task diff and section7 for the implemented dispositions.
 
-Check the S0–S4 boundaries, original latch/handle identity, kill/join/wait
-ordering, same-operation journal replay, complete preflight before witness
-takes, rich-bundle destruction and last application-owner release. Challenge
-Source P/M construction and report lifetime, the factory restart admission's
-unresolved Drop behavior, and direct actor → original ticket custody while
-actual readers remain. Dropping the redundant actor application reference
-must not become native-close evidence or a refund.
-
-Report concrete blockers with source locations, missing regression cases and
-any mismatch between implementation and the accepted decisions. Preserve
-Unknown where authority or measurements are absent. The earlier availability
-file probes, same-boot S1 recovery, shared storage/provisional work, broader
-adapters and complete native/allocator bounds remain explicit open scope.
-Do not run behavior or mutation tests as part of this source review. Return
-whether the examined implementation can proceed to the identified focused
-qualification after findings are fixed; do not label the whole adaptive
-playback effort accepted from a bounded review.
-
+The supplied implementation review examined5267/c108, as recorded in section6;
+the original bounded design review remains at46dc/8b6331e. Neither review is
+silently transferred to changed source. The compiler receipts below establish
+only their exact source and environment. The user manages Opus review because
+Fable quota is exhausted; no Hermes or external API review is dispatched.
+Behavioral/native-workload/model/mutation execution remains explicitly held.
+Do not infer acceptance of V1–V5/R1/M0–M7 or complete native/allocator bounds.
 
 ## 6. Supplied implementation review and policy decision
 
@@ -186,8 +169,8 @@ The user supplied a source-only Opus 5.5 implementation review of code
 SHA-256: `97f0d42b524143dced18f03975acae890106292d265a21a1a8107c954359fccc`.
 Its verdict is **not ready** until B1–B4 and C1–C2 are fixed and their
 regressions authored. C3–C4 regressions are also required. Nothing was compiled
-or executed by that review. The fixes are being integrated and compiled;
-this section grants no passing result for an unfinished candidate.
+or executed by that review. Section7 records the subsequent source fixes and exact compiler
+evidence; the historical verdict is preserved and grants no new approval.
 
 The user selected the operation-local reservation policy recorded in
 [contract history](ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md#native-uncertainty-admission-policy--2026-10-26):
@@ -212,3 +195,72 @@ finding does not authorize hiding any held reservation or changing native
 proof. Earlier coverage gaps and V1–V5/R1/M0–M7 remain open. The user's explicit
 behavioral-test hold remains in force while these fixes and compiler checks
 are completed.
+
+
+## 7. Implemented review dispositions — 2026-10-28
+
+The source changes below are pinned at `9903421c871c0146b8030bc88c51340403ba8134`. They address the supplied
+review's blockers and required regression authorship. This is an implementation
+record, not a second independent review or permission to run behavior tests.
+
+| Finding | Implemented disposition and authored regression boundary |
+|---|---|
+| B1 — Source factory admission versus SQL | Actual matching producer/preparation closure and zero real bodies disarm only this factory guard. SQL transient exhaustion/refusal remains unresolved SQL, independently of native closure. Actual existing-route, expired-start and Store-failure fixtures cover these paths in [Source settlement tests](../../crates/plurxd/src/transcode/source_actor/settlement_tests.rs). |
+| B2 — Direct pre-R checks | Pure validation before the first typed preparation is tagged BeforeReservation. Actual prepare and post-R failures retain their original classification; native uncertainty is never inferred from a known pre-R refusal. |
+| B3 — fixed planning pre-R checks | Deadline, path/mount and arithmetic validation before the first reservation receive the same precise classification. Tests age the same real observation after first proving freshness. |
+| B4 — unpublished Direct start | An unowned Source SQL route cannot trap the worker after native closure. It returns the same sealed ticket through actual worker join, ToSettling and finalizer join; [the open-failure regression](../../crates/plurxd/src/http/direct_start_failure_tests.rs) asserts the original reservation through those boundaries. |
+| C1 — post-Arm refusal | Only the matching invoked root with positive never-entry conditions is eligible for the graph's original NeverRoot witness. Actual drain and epoch refusals are authored; uncertain post-entry launch stays held. |
+| C2 — full-window parser | Actual retirement/cleanup/logical seal records closing intent and wakes the same progress Notify before natural task join. The closing check precedes transition waiting; ordinary graph seal on normal completion retains publication behavior. No task abort supplies closure. |
+| C3 — post-mint contradiction | Fact identity rejection after RootOnly/Joined minting becomes TerminalIdentityMismatch. The same witness and full reservation remain held, and maintenance does not retry native termination. Both actual cleanup-driver cases are authored. |
+| C4 — missing selector | The driver is exercised with a missing runtime task selector while the actual graph retains its registered writer. It keeps the original reservation held; absence never becomes NeverAcquired. |
+| M2 — original planning owner | A known original planning owner moves into retained resumable cleanup before the first await. Waiter cancellation resumes that cleanup; a genuinely missing owner remains unresolved. |
+| Policy2 / M1 | Genuine native uncertainty retains the operation's existing charge and blocks restart drain/commit while ordinary unrelated intake uses normal checks. No uncertainty bit is cleared and no reservation is invented for pre-budget I/O. Earlier availability-I/O ownership remains an explicit limitation. |
+
+R15 is required and authored in
+[the real copy runtime fixture](../../crates/plurx-core/src/adaptive_resources/runtime/operations/copy_vod/runtime_tests.rs):
+the original entered parser fills its immutable five-file window without reader
+acknowledgment, remains pending, then wakes and naturally joins on actual
+retirement within a deadline. Actual application aliases still retain R until
+released. This covers full-window retirement; caller abort at every possible
+cleanup await/certainty combination remains incomplete. No body was executed.
+
+C5 remains deferred: the failed-admission flag used during normal retirement
+also selects orphan pending-ticket repair. Removing it alone could strand
+cleanup. A later labeling/selection split must preserve that repair path and
+all held reservations. R8/R9/R10/R19/R20 gaps, shared storage/provisional work,
+private native/allocator/executor peaks and V1–V5/R1/M0–M7 remain open.
+
+**Compiler evidence:** exact source `9903421c871c0146b8030bc88c51340403ba8134` passed
+native x86_64 Rust1.97.1 core+daemon all-target+cluster strict Clippy in
+375.492s, source stable; log SHA-256
+`919eea478ff0ea42843fee5443505c4e82bf6757cb6b8f698accf5fc758fa675`.
+Host source `93d9bf1bdb621336fa88c70582d92cc3667daa53` passed the full-workspace
+compile/format/locked-spike check in 322.64s and strict
+core+daemon Clippy in 341.224s. Only the Linux-only Source
+settlement and core Direct fixtures changed afterward. Their parent modules
+and Linux cfg guards are unchanged; all 7032 other
+host-guard source blobs match the current pin. The changed fixtures are
+covered by exact native compilation; no host compilation of those files or
+exact-new-source host pass is claimed.
+Host log SHA-256 respectively:
+`11fadca8157bbbd1097c8caf102dfc97ddd6b56bf6b5b1ae99191d49197fb700` and
+`4284e07eba21995cc2234a59f8e9df64c036e0bb3cd1112e007c52a761fa9c48`. Standalone vendored Hiqlite Clippy passed in
+6.979s; log SHA-256 `51b8531a346691fcf813bb77ae192a992a37da677df0abf9b7d9607c62c524e7`.
+The vendor target can report the existing root Clippy configuration's
+unreachable-path warnings; no zero-diagnostic claim is made. All90 task
+regression declarations resolve against this source. These are compiler and
+source-name checks; no regression body was executed. Fresh current-head
+compile-only CI remains required before task integration.
+
+Earlier source `5267b8721312b86e205ac99217c20a159b0fec4a` passed native strict
+Clippy in612.846s (log SHA-256
+`811cf9dbfee5dd6d355e44ecb9aa1b5880033f47391b50dff6d70b2279ee8489`)
+and matching host/Linux-target checks in267.793s/320.812s. Those receipts remain
+bound to that earlier source; they are not the current candidate's proof.
+CI6082/index6053 failed locked spike metadata before Rust compilation; its
+other platform/static passes are historical results, not current-head credit.
+
+
+Behavioral/native-workload/model/mutation tests remain **NOT RUN** and held by
+the user's instruction. Fresh current-head compile-only CI is still required;
+no current CI pass, merge, deployment, restart or final acceptance is claimed.

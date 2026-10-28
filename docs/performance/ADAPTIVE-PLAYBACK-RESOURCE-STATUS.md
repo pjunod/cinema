@@ -1,73 +1,74 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · updated 2026-10-26. PR #1248 on
-`effort/adaptive-playback-resources` is the sole effort. Draft task PR #1293
-uses normal committed Git source; current main `656a85540` is merged.
-The user supplied the bounded Opus copy-start design review; its accepted
-[decisions and source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) are
-recorded separately from implementation and execution. No Hermes or external
-API review is dispatched. Completed-candidate independent review and fixes
-precede behavioral tests, which remain NOT RUN. V1–V5 and R1/M0–M7 stay OPEN.
+**Status:** open · implementation active · updated 2026-10-28. PR #1248 on
+`effort/adaptive-playback-resources` is the sole effort. Current main
+`77e9858277813456bb94e855ec62ed3e9fd65af8` is merged into effort `5cf30d1470eb40ca0359eb2372e8a46dc447cc53`; draft task PR #1293 remains
+separate and unmerged. The user-supplied Opus implementation review examined
+5267/c108. Its findings and the current source dispositions are recorded in
+[the review document](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md). No new independent
+approval is inferred. Behavioral/native-workload/model/mutation tests remain
+NOT RUN and explicitly held. No Hermes or external API review is dispatched.
+V1–V5 and R1/M0–M7 remain OPEN.
 
-Copy startup now has one driver for original NeverRoot, RootOnly and Joined
-witnesses. It drops an unsent latch before natural join, retains positive
-internal NeverEntered, signals a failing parser's same child before waiting
-stderr, and replays original source/task observations. Complete envelope and
-settlement validation precede one-shot takes; its requested snapshot/frame/
-serialization storage is added before R. S1/no Child and unbound identity add
-no recovery authority and retain full charge. Copy has no R→S transfer.
-Permanent native holds skip maintenance; termination/preflight refusals are
-retryable and retain the same witnesses and settlement ID. System exposes
-the actual held vector and typed reason without implying restart refunds it.
+The copy driver retains the same NeverRoot/RootOnly/Joined witnesses and
+one-shot settlement. Positive post-Arm refusal may close the never-entered
+root; actual retirement wakes the original parser even at its full output
+window. Post-mint identity contradictions retain the witness and full charge
+as a permanent hold. A missing task selector never proves no registered writer.
+R15 now authors the actual entered-parser/full-window retirement case, without
+claiming caller cancellation at every await. Complete preflight still precedes
+one-shot witness consumption; capacity returns only after native and actual
+application owners close. Copy has no R→S transfer.
 
-Preparation now retains its real controller handle through positive join and
-same-operation Store proof. Unknown outcomes and response aliases keep the
-same context/capacity. Selected End probes its actor's actual private plan,
-skips unnecessary preparation ownership and refuses an intervening missing-
-admission race before adoption; input allocation precedes snapshot creation.
-Private task/channel/serializer/allocator and native aggregate peaks remain
-Unknown, so these projections are not complete finite-memory qualification.
+Source physical/preparation closure and the real body barrier determine the
+factory admission disposition independently of SQL release. Before-reservation
+validation is classified precisely; a failed unpublished Direct start returns
+its original sealed ticket through actual join/finalization. Known original
+planning cleanup remains resumable after cancellation. Ordinary SQL failures
+and proven pre-reservation refusals do not invent native uncertainty.
+Genuine uncertainty retains its existing operation reservation and blocks
+planned-restart drain/commit; unrelated starts use normal capacity, phase,
+readiness and identity checks. No sticky uncertainty is cleared or refunded.
+C5's normal-retirement labeling/repair-selector split remains deferred.
 
-Planning retains its deadline, original native/source witnesses and seven-
-member P settlement with structural M. Private construction installs original
-payloads/fences before publishing the charged owner. Selected plain Linux
-software SDR Source planning uses that P and retained M through recipe/media
-retirement; native Unknown still pins metadata. Source factories retain the
-same planned-outage admission through P/producer cleanup. Direct hands it to
-the original retirement ticket, and retires the finished actor's redundant
-application Arc while real body/read aliases remain charged. Before-factory
-availability probes and non-Linux preliminary file opening remain outside
-that guard; the exact direct constructor capacity-refusal fixture is pending.
+Preparation retains its controller through positive join and same-operation
+Store proof. Selected Linux software SDR Source planning retains original P/M
+through recipe/media retirement. Before-factory availability I/O and non-Linux
+preliminary opens remain outside that guard. Complete private/native/allocator/
+executor peaks, P/legacy CPU coexistence, shared storage/provisional recovery,
+broader adapters and selective recovery remain open. Earlier compiler results
+and authored regressions do not close these acceptance gaps.
 
-Root-scoped worker intent, bounded durable-fence retry and foreign-fence
-cleanup are connected. Origin never issues Close or refunds native ownership.
-Shared storage domains and the unclosed-provisional inventory consumer remain
-missing. Original probe/inference/library/subtitle/open-fstat workers retain
-admissions through actual input/results. Selected finite ordinary/static
-encodes bind their software pool and exclusive worker credit to the same
-family attachments; only positive original native close/R→S releases it.
-P/legacy CPU coexistence, private allocator/executor/native peaks, complete
-memory bounds, broader adapters and selective recovery remain open.
+**Compiler evidence:** exact source `9903421c871c0146b8030bc88c51340403ba8134` passed
+native x86_64 Rust1.97.1 core+daemon all-target+cluster strict Clippy in
+375.492s, source stable; log SHA-256
+`919eea478ff0ea42843fee5443505c4e82bf6757cb6b8f698accf5fc758fa675`.
+Host source `93d9bf1bdb621336fa88c70582d92cc3667daa53` passed the full-workspace
+compile/format/locked-spike check in 322.64s and strict
+core+daemon Clippy in 341.224s. Only the Linux-only Source
+settlement and core Direct fixtures changed afterward. Their parent modules
+and Linux cfg guards are unchanged; all 7032 other
+host-guard source blobs match the current pin. The changed fixtures are
+covered by exact native compilation; no host compilation of those files or
+exact-new-source host pass is claimed.
+Host log SHA-256 respectively:
+`11fadca8157bbbd1097c8caf102dfc97ddd6b56bf6b5b1ae99191d49197fb700` and
+`4284e07eba21995cc2234a59f8e9df64c036e0bb3cd1112e007c52a761fa9c48`. Standalone vendored Hiqlite Clippy passed in
+6.979s; log SHA-256 `51b8531a346691fcf813bb77ae192a992a37da677df0abf9b7d9607c62c524e7`.
+The vendor target can report the existing root Clippy configuration's
+unreachable-path warnings; no zero-diagnostic claim is made. All90 task
+regression declarations resolve against this source. These are compiler and
+source-name checks; no regression body was executed. Fresh current-head
+compile-only CI remains required before task integration.
 
-**Compiler evidence:** exact native source `5267b8721312b86e205ac99217c20a159b0fec4a` passed
-Rust1.97.1 core+daemon all-target+cluster strict Clippy, source stable, in
-612.846s; log SHA-256 `811cf9dbfee5dd6d355e44ecb9aa1b5880033f47391b50dff6d70b2279ee8489`.
-Matching host and Linux-target strict checks passed267.793s/320.812s;
-all1472 Rust/Cargo hashes match, with all four library/test artifacts
-and zero diagnostics. Linux-target uses stub C dependencies and links nothing.
-Pinned formatting, web static contracts, offline source mappings and paperwork
-passed;73 declared regression bodies resolve. These checks execute no behavior.
-Current main `656a85540fd3c6d091d0df4aa72f77ee3c1a219c` is merged into effort `48eccfd748741bab47d945e68c7713a4c213ea60`;
-task PR1293 remains unmerged. Gate6071 rejected stale main ancestry before
-compiler jobs; the normal refresh preserves that authenticated check. A fresh
-compile-only gate is required before integration.
+Earlier source `5267b8721312b86e205ac99217c20a159b0fec4a` passed native strict
+Clippy in612.846s (log SHA-256
+`811cf9dbfee5dd6d355e44ecb9aa1b5880033f47391b50dff6d70b2279ee8489`)
+and matching host/Linux-target checks in267.793s/320.812s. Those receipts remain
+bound to that earlier source; they are not the current candidate's proof.
+CI6082/index6053 failed locked spike metadata before Rust compilation; its
+other platform/static passes are historical results, not current-head credit.
 
-Earlier Source012 and native74a passes, the12GiB SIGKILL and precise fixture
-failures remain source-bound in retained receipts; no old result becomes a
-new-source pass. R8/R9/R10/R15/R19/R20 coverage remains partial; R11 authors
-real drain refusal and R21 actual COMMIT/delayed reply, not storage Unknown.
-Current-head compile-only effort gate is required before task integration.
-No complete M2/M3/M6 or native/allocator/executor-peak claim.
 
 Bounded direct recovery retains its held-lock and positive
 same-boot/PID-namespace old-daemon-exit requirements. Separate obsolete
