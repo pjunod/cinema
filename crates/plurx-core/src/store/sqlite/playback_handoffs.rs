@@ -127,6 +127,23 @@ impl PlaybackHandoffStore for SqliteStore {
         .await
     }
 
+    async fn advance_playback_handoff(
+        &self,
+        token_hash: &str,
+        expected_file_id: i64,
+        next_file_id: i64,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let token_hash = token_hash.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                ph::ADVANCE_SQL,
+                params![next_file_id, token_hash, expected_file_id, now],
+            )? > 0)
+        })
+        .await
+    }
+
     async fn revoke_playback_handoff_token(&self, token_hash: &str) -> Result<bool, StoreError> {
         let token_hash = token_hash.to_owned();
         self.with_conn(move |conn| Ok(conn.execute(ph::REVOKE_SQL, params![token_hash])? > 0))

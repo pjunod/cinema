@@ -689,6 +689,7 @@ paths = [
   "crates/plurxd/src/http/{auth,extract,internal_auth_revocation,users}.rs",
   "crates/plurxd/src/http/file_grants.rs",
   "crates/plurxd/src/http/playback_handoffs.rs",
+  "crates/plurxd/src/http/playback_handoffs/**",
   "crates/plurxd/src/http/tests/playback_handoffs.rs",
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",

@@ -52,7 +52,7 @@ def main():
     lock = threading.Lock()
     props = {"pause": False, "speed": 1.0, "seeking": False, "paused-for-cache": False,
              "demuxer-cache-duration": 8.0}
-    loaded = {"value": False}
+    loaded = {"value": False, "count": 0}
 
     def send(message):
         with lock:
@@ -118,6 +118,11 @@ def main():
             elif name == "set_property":
                 props[command[1]] = command[2]
             elif name == "loadfile":
+                loaded["count"] += 1
+                if state().get("props", {}).get("load-error-on") == loaded["count"]:
+                    send(reply)
+                    send({"event": "end-file", "reason": "error", "file_error": "fixture decode failure"})
+                    continue
                 loaded["value"] = True
                 props["path"] = command[1]
                 props["time-pos"] = float(props.get("start", 0) or 0)
