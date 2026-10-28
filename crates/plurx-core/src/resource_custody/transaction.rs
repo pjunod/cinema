@@ -17,9 +17,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
-pub(in crate::resource_custody) use typed::tests::bootstrap::{
-    frozen_source_fixture, frozen_source_fixture_v6,
-};
+pub(in crate::resource_custody) use typed::tests::bootstrap::frozen_source_fixture_v6;
 
 pub(super) fn validate_owner(owner: &OwnerIdentity) -> Result<(), CustodyError> {
     codec::nonnil(owner.owner_id)?;
