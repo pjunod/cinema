@@ -17,10 +17,16 @@ fn observe_asset(
     outcome: NativeOutcomeV1,
     observation: AssetObservationV1,
 ) -> BootstrapFold {
+    // Acquired file identity is the exact Observe operation, as required by
+    // the real codec. Other observations introduce no new file identity.
+    let operation = match &observation {
+        AssetObservationV1::File { observed, .. } => observed.file_id,
+        _ => id(),
+    };
     output_event(
         fold,
         plan,
-        id(),
+        operation,
         AssetEventV1::ObserveIo {
             io_id,
             native_join_operation_id: id(),

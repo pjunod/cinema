@@ -469,7 +469,10 @@ impl NodeResourceRuntime {
         }
         let needs_seal = {
             let bundle = owner.state.lock().await;
-            bundle.roles.get(index).ok_or(OperationError::State)?.phase != Phase::Sealed
+            !matches!(
+                bundle.roles.get(index).ok_or(OperationError::State)?.phase,
+                Phase::Sealed | Phase::UnknownHeld
+            )
         };
         if needs_seal {
             self.seal_role(owner, index, deadline).await?;
@@ -728,7 +731,10 @@ impl NodeResourceRuntime {
     ) -> Result<(), OperationError> {
         let mut bundle = owner.state.lock().await;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
-        if role.phase != Phase::Sealed
+        // A positive original closure may settle an existing hold directly.
+        // Keep UnknownHeld until that exact settlement commits; generic Seal
+        // deliberately cannot erase a hold classification.
+        if !matches!(role.phase, Phase::Sealed | Phase::UnknownHeld)
             || role.transition.is_some()
             || role.graph.is_some()
             || role.retirement.is_some()

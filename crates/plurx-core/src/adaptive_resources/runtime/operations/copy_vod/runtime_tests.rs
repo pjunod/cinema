@@ -2077,6 +2077,10 @@ async fn missing_registered_native_io_keeps_original_charge(publication: bool) {
     original_prefix(&runtime, &mut owner, &preparation).await;
     let member = output_member(&preparation).await;
     let charge = runtime.accounting().expect("same original R").used;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("original lease before closing");
     // A real ftyp box is enough for this native Init publication boundary;
     // no parser or FFmpeg outcome is inferred from its bytes.
     let mut payload = b"\0\0\0\x18ftypisom\0\0\0\0isomiso6".to_vec();
@@ -2132,7 +2136,7 @@ async fn missing_registered_native_io_keeps_original_charge(publication: bool) {
     }
     // Existing helper proves pending command stability, both original alias
     // barriers, one refund, rich bundle destruction and original journal drain.
-    retire_with_actual_alias_barriers(runtime, owner, preparation, false).await;
+    retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
 }
 
 #[tokio::test]
