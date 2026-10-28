@@ -344,6 +344,7 @@ function playbackWaitSurfaceLive(){
 // The half-second sampling tick: resample the wait sentence, then run the
 // presenter step that paints it.
 function playbackSamplingTick(v,p){
+  if(typeof sampleFrameDropRecorder==="function")sampleFrameDropRecorder(v,p);
   renderPlaybackSurface.waitDetail=playbackWaitLiveDetail(v,p);
   playbackProgressTick(v,p);
   updatePlaybackQualityChrome(v,p);
@@ -670,6 +671,8 @@ async function reportProgress(fileId, ended, attachedOwner){
   catch(e){ p.lastBeatMs=null; p.lastBeatAt=null; }
 }
 function closePlayer(options={}){
+  if(typeof sharedCaptionRetire==="function")sharedCaptionRetire("player closed");
+  if(typeof textTranslationRetire==="function")textTranslationRetire(SUBTITLE_TEXT_TRANSLATION);
   if(typeof translationRetire==="function")translationRetire("player closed");
   if(WATCH_CLOSE_PROMISE)return WATCH_CLOSE_PROMISE;
   // Cancellation and first-frame rollback can change the authoritative

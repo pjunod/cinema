@@ -1144,6 +1144,8 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
         // the source bytes changed. Keep all FFprobe-owned fields comparable.
         document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
         document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
+        document.remove(plurx_core::scan::dv_title::PROBE_FIELD);
+        document.remove(plurx_core::transcode::dv_fel_qualification::PROBE_KEY);
     }
     if let Some(format) = value
         .get_mut("format")
@@ -2019,6 +2021,26 @@ static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::c
 static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH_VAAPI: [tokio::sync::OnceCell<bool>; 2] =
     [const { tokio::sync::OnceCell::const_new() }; 2];
+/// What this process knows about the VA-API HEVC Main10 decode: proved (kept
+/// for the process), or failed `failures` times and next tried at `retry_at`.
+struct Main10DecodeProof {
+    proved: bool,
+    failures: u32,
+    retry_at: Option<std::time::Instant>,
+}
+static HEVC_MAIN10_VAAPI_DECODE: std::sync::Mutex<Main10DecodeProof> =
+    std::sync::Mutex::new(Main10DecodeProof {
+        proved: false,
+        failures: 0,
+        retry_at: None,
+    });
+/// One probe at a time; a caller that finds one running does not wait.
+static HEVC_MAIN10_VAAPI_PROBE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// A two-picture 256x144 HEVC Main10 clip (x265, `-bitexact`), so the probe
+/// needs no encoder of its own.
+const HEVC_MAIN10_PROBE_CLIP: &[u8] = include_bytes!("ffmpeg/hevc-main10-probe.mkv");
+/// Decoding two small pictures takes well under a second on a working device.
+const HEVC_MAIN10_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
 static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -4166,6 +4188,115 @@ pub async fn has_hdr10_passthrough_vaapi(
             .is_ok_and(|result| result.is_ok_and(|status| status.success()))
         })
         .await
+}
+
+/// Does the VA-API render device decode HEVC Main10 into GPU surfaces?
+///
+/// The Dolby Vision renderer decodes its layers there when it can, and that
+/// decides the CPU it is debited (`dv_segment::RendererDecode`). The startup
+/// decoder inventory cannot answer it: it decodes an 8-bit clip and reads a
+/// `Reinit context` line FFmpeg's HEVC decoder never prints. Here a shipped
+/// Main10 clip is decoded with `-hwaccel_output_format vaapi` into
+/// `hwdownload`, which accepts only hardware frames, so success means the GPU
+/// decoded it.
+///
+/// A success is kept for the process. A failure is not: it may be a device
+/// still settling at boot, so the probe runs again on the next need after a
+/// backoff (30 s, doubling, at most an hour). Until proved, the answer is
+/// `false` and the renderer is debited its software shape. Warmed off the
+/// boot path at startup; the completed DV window stays the authority.
+pub async fn has_hevc_main10_vaapi_decode() -> bool {
+    let due = |proof: &Main10DecodeProof| {
+        !proof.proved
+            && proof
+                .retry_at
+                .is_none_or(|at| std::time::Instant::now() >= at)
+    };
+    {
+        let proof = HEVC_MAIN10_VAAPI_DECODE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if proof.proved || !due(&proof) {
+            return proof.proved;
+        }
+    }
+    let Ok(_probe) = HEVC_MAIN10_VAAPI_PROBE.try_lock() else {
+        return false;
+    };
+    {
+        let proof = HEVC_MAIN10_VAAPI_DECODE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !due(&proof) {
+            return proof.proved;
+        }
+    }
+    let proved = probe_hevc_main10_vaapi_decode().await;
+    let mut proof = HEVC_MAIN10_VAAPI_DECODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if proved {
+        proof.proved = true;
+        proof.retry_at = None;
+    } else {
+        proof.failures = proof.failures.saturating_add(1);
+        proof.retry_at = Some(std::time::Instant::now() + main10_probe_backoff(proof.failures));
+    }
+    proved
+}
+
+/// The wait before the `failures`th retry of a failed Main10 decode probe.
+fn main10_probe_backoff(failures: u32) -> Duration {
+    Duration::from_secs(30)
+        .saturating_mul(1 << failures.saturating_sub(1).min(7))
+        .min(Duration::from_secs(3600))
+}
+
+async fn probe_hevc_main10_vaapi_decode() -> bool {
+    let device = plurx_core::transcode::vaapi_device();
+    if !std::path::Path::new(&device).exists() {
+        return false;
+    }
+    let Ok(scratch) = tempfile::tempdir() else {
+        return false;
+    };
+    let clip = scratch.path().join("main10.mkv");
+    if tokio::fs::write(&clip, HEVC_MAIN10_PROBE_CLIP)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let mut decode = tokio::process::Command::new(ffmpeg_bin());
+    decode
+        .args(["-hide_banner", "-loglevel", "error", "-hwaccel", "vaapi"])
+        .args([
+            "-hwaccel_device",
+            &device,
+            "-hwaccel_output_format",
+            "vaapi",
+            "-i",
+        ])
+        .arg(&clip)
+        .args([
+            "-vf",
+            "hwdownload,format=p010le",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ])
+        .kill_on_drop(true);
+    tokio::time::timeout(
+        HEVC_MAIN10_PROBE_DEADLINE,
+        crate::process_control::status_job_owned(
+            &mut decode,
+            crate::process_control::ChildWork::background("HEVC Main10 VA-API decode probe"),
+        ),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok_and(|status| status.success()))
 }
 
 /// Can this node accept the software Dolby renderer's 10-bit frames and run

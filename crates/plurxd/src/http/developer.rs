@@ -618,8 +618,10 @@ pub(crate) async fn readiness(
             dolby_vision_convert(convert_on),
             dolby_vision_hdr_processing(plurx_core::store::stored_switch(
                 settings.get(plurx_core::store::keys::DV_HDR_PROCESSING).map(String::as_str), false)),
-            dolby_vision_fel_reencode(plurx_core::store::stored_switch(
-                settings.get(plurx_core::store::keys::DV_FEL_REENCODE).map(String::as_str), false)),
+            display_target_hdr10(&state, &settings).await,
+            dolby_vision_fel_reencode(&state, plurx_core::store::stored_switch(
+                settings.get(plurx_core::store::keys::DV_FEL_REENCODE).map(String::as_str), false),
+                convert_on).await,
             source_probe_comparison().await,
             output_preparation(&state, &settings).await,
             rolling_retention(&state, &settings).await,
@@ -1696,7 +1698,7 @@ fn dolby_vision_convert(enabled: bool) -> DeveloperEnableItem {
 fn dolby_vision_hdr_processing(enabled: bool) -> DeveloperEnableItem {
     DeveloperEnableItem {
         id: "dolby_vision_hdr_processing",
-        title: "Process Dolby Vision for HDR output",
+        title: "Process Dolby Vision for HDR and targeted SDR",
         enabled: Some(enabled),
         setting: Some("dolby_vision_hdr_processing"),
         requirements: vec![
@@ -1728,8 +1730,212 @@ fn dolby_vision_hdr_processing(enabled: bool) -> DeveloperEnableItem {
     }
 }
 
+/// Reconstructed Profile 8.1 (FEL composed into the picture, re-encoded, a
+/// rewritten 8.1 RPU) for Dolby Vision clients of Profile 7 FEL titles.
+///
+/// Every row is read from this node: the helper the worker would run, the
+/// conversion permission the route replaces, the CPU the graph debits against
+/// this node's budget, and the live reconstruction slot. Advisory only: none
+/// of it is read on Save, and the saved choice stays authoritative.
+async fn dolby_vision_fel_reencode(
+    state: &AppState,
+    enabled: bool,
+    convert_on: bool,
+) -> DeveloperEnableItem {
+    #[cfg(target_os = "linux")]
+    {
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture().await;
+        let helper = tools
+            .as_ref()
+            .map(Option::is_some)
+            .map_err(|error| error.to_string());
+        let facts = state.transcode.live_reconstruction_facts().await;
+        let counts = match &tools {
+            Ok(Some(tools)) => match state.transcode.fel_identity(&tools.backend_digest()).await {
+                Ok(identity) => state
+                    .store
+                    .dv_fel_verdict_counts(&identity)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(reason) => Err(reason),
+            },
+            Ok(None) => Err("no processing helper on this node".into()),
+            Err(error) => Err(error.clone()),
+        };
+        let mut item = dolby_vision_fel_reencode_item(enabled, convert_on, helper, Some(facts));
+        let quality = fel_quality_requirement(&FelQualityFacts {
+            capable: state.transcode.fel_qualification_capable(),
+            counts,
+        });
+        if let Some(row) = item
+            .requirements
+            .iter_mut()
+            .find(|row| row.id == quality.id)
+        {
+            *row = quality;
+        }
+        item
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        dolby_vision_fel_reencode_item(enabled, convert_on, Ok(false), None)
+    }
+}
+
+/// What this node knows about the per-title FEL qualification.
+#[derive(Debug, Clone)]
+#[cfg(any(target_os = "linux", test))]
+struct FelQualityFacts {
+    /// radeonsi VA-API with its Main10 graph: the only encoder the route's
+    /// recipe and its verdicts are measured on.
+    capable: bool,
+    /// Titles holding a verdict for this node's renderer and the route's
+    /// recipe, and how many of those admit the reconstruction.
+    counts: Result<(u64, u64), String>,
+}
+
+/// The quality row is the per-title verdicts, never a global claim: each
+/// Profile 7 FEL title is served the reconstruction only when its own
+/// measurement says the enhancement layer adds more than re-encoding loses.
+#[cfg(any(target_os = "linux", test))]
+fn fel_quality_requirement(facts: &FelQualityFacts) -> DeveloperRequirement {
+    use plurx_core::transcode::dv_fel_qualification as q;
+    let rule = format!(
+        "Each Profile 7 FEL title is measured once, in its Dolby Vision title scan, on this \
+         server's GPU: {} two-second windows, Delta E ITP against the FEL master on the active \
+         picture. The reconstruction is served only for a title whose reconstructed picture \
+         beats the plain conversion (EL dropped) by at least {:.0}% on the mean and is no worse \
+         at the 99th percentile; every other title plays the plain conversion with that reason.",
+        q::WINDOWS,
+        q::MIN_MEAN_GAIN * 100.0,
+    );
+    let (status, measured) = match (&facts.counts, facts.capable) {
+        (_, false) => (
+            RequirementStatus::Unmet,
+            "This node's encoder has no qualified reconstruction recipe (the route is measured \
+             on radeonsi VA-API only)."
+                .to_owned(),
+        ),
+        (Err(reason), true) => (
+            RequirementStatus::Unavailable,
+            format!("Verdicts unreadable ({reason})."),
+        ),
+        (Ok((0, _)), true) => (
+            RequirementStatus::Unmet,
+            "No title has been measured with this renderer and recipe yet.".to_owned(),
+        ),
+        (Ok((total, admitted)), true) => (
+            if *admitted > 0 {
+                RequirementStatus::Met
+            } else {
+                RequirementStatus::Unmet
+            },
+            format!(
+                "{total} title{} measured with this renderer and recipe; {admitted} admitted.",
+                if *total == 1 { "" } else { "s" }
+            ),
+        ),
+    };
+    DeveloperRequirement {
+        id: "dv_fel_bitrate_quality",
+        title: "Per-title quality qualification",
+        status,
+        evidence: format!("{rule} {measured}"),
+    }
+}
+
 // Readiness describes missing evidence, never permission or effective processing.
-fn dolby_vision_fel_reencode(enabled: bool) -> DeveloperEnableItem {
+fn dolby_vision_fel_reencode_item(
+    enabled: bool,
+    convert_on: bool,
+    helper: Result<bool, String>,
+    facts: Option<crate::transcode::LiveReconstructionFacts>,
+) -> DeveloperEnableItem {
+    let backend_status = match (&helper, convert_on) {
+        (Err(_), _) => RequirementStatus::Unavailable,
+        (Ok(true), true) => RequirementStatus::Met,
+        (Ok(_), _) => RequirementStatus::Unmet,
+    };
+    let backend_evidence = format!(
+        "Processing helper on this node: {}. Profile 7 to 8.1 conversion: {} (the \
+         reconstructed 8.1 replaces a permitted conversion; with conversion off it is never \
+         offered). Composition is proved offline against the helper's FEL master render in \
+         docs/streaming/FEL-P81-RECONSTRUCTION.md. When a play cannot be reconstructed it gets \
+         the plain conversion, and its FEL row names why.",
+        match &helper {
+            Ok(true) => "installed".to_owned(),
+            Ok(false) => "unavailable".to_owned(),
+            Err(reason) => format!("unreadable ({reason})"),
+        },
+        if convert_on { "on" } else { "off" },
+    );
+    let (budget, slot) =
+        match facts {
+            Some(facts) => {
+                let graph = facts.renderer_threads + facts.encoder_threads;
+                (
+                    DeveloperRequirement {
+                        id: "dv_fel_worker_budget",
+                        title: "Worker CPU budget for one live reconstruction",
+                        status: if graph <= facts.software_budget {
+                            RequirementStatus::Met
+                        } else {
+                            RequirementStatus::Unmet
+                        },
+                        evidence: format!(
+                        "The renderer decodes {} on this node (VA-API render device {}; VA-API \
+                         HEVC Main10 decode {}). One live FEL graph debits {graph} CPU threads \
+                         ({} renderer, {} encoder) against this node's software budget of {}.",
+                        if facts.gpu_decode { "on the GPU" } else { "in software" },
+                        if facts.device_present { "present" } else { "absent" },
+                        if facts.main10_vaapi_decode { "proved" } else { "not proved" },
+                        facts.renderer_threads,
+                        facts.encoder_threads,
+                        facts.software_budget,
+                    ),
+                    },
+                    DeveloperRequirement {
+                        id: "dv_fel_live_slot",
+                        title: "Live reconstruction slot",
+                        status: if facts.slots_in_use < facts.slots {
+                            RequirementStatus::Met
+                        } else {
+                            RequirementStatus::Unmet
+                        },
+                        evidence: format!(
+                            "{} of {} live FEL reconstruction slot{} in use on this node{}. A play \
+                         beyond it gets the plain conversion with that reason until concurrent \
+                         reconstruction is measured; a FEL qualification holding it yields to a \
+                         play.",
+                            facts.slots_in_use,
+                            facts.slots,
+                            if facts.slots == 1 { "" } else { "s" },
+                            if facts.held_by_qualification {
+                                " (by a FEL qualification)"
+                            } else {
+                                ""
+                            },
+                        ),
+                    },
+                )
+            }
+            None => {
+                let unavailable = |id, title| DeveloperRequirement {
+                    id,
+                    title,
+                    status: RequirementStatus::Unavailable,
+                    evidence: "Live FEL reconstruction runs on Linux playback workers only.".into(),
+                };
+                (
+                    unavailable(
+                        "dv_fel_worker_budget",
+                        "Worker CPU budget for one live reconstruction",
+                    ),
+                    unavailable("dv_fel_live_slot", "Live reconstruction slot"),
+                )
+            }
+        };
     DeveloperEnableItem {
         id: "dolby_vision_fel_reencode",
         title: "Preserve FEL when converting to Profile 8.1",
@@ -1739,9 +1945,11 @@ fn dolby_vision_fel_reencode(enabled: bool) -> DeveloperEnableItem {
             DeveloperRequirement {
                 id: "dv_fel_backend_reference",
                 title: "Qualified backend and reference",
-                status: RequirementStatus::Unmet,
-                evidence: "FEL-preserving Profile 8.1 conversion is not yet available on playback workers. Your preference is saved; permitted conversion keeps its existing fallback.".into(),
+                status: backend_status,
+                evidence: backend_evidence,
             },
+            budget,
+            slot,
             DeveloperRequirement {
                 id: "dv_fel_encoder_matrix",
                 title: "Production encoder matrix",
@@ -2331,7 +2539,7 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
             evidence: format!(
                 "{partial} exchange(s) since this process started came from a client that did not \
                  declare all of hold, terminal and retry_resource, so at least one client in the \
-                 fleet has no complete passive reporter. By platform (web/apple/android): partial \
+                 fleet has no complete passive reporter. By platform (web/apple/android/linux): partial \
                  {:?}, complete {:?}.",
                 vocabulary.passive_partial, vocabulary.passive_complete
             ),
@@ -2345,7 +2553,7 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
                 "{complete} exchange(s) since this process started declared all of hold, terminal \
                  and retry_resource, and none were partial \u{2014} but a client with no reporter \
                  never performs an exchange at all, so this cannot speak for clients it has not \
-                 heard from. By platform (web/apple/android): complete {:?}.",
+                 heard from. By platform (web/apple/android/linux): complete {:?}.",
                 vocabulary.passive_complete
             ),
         }
@@ -2949,6 +3157,68 @@ fn jellyfin_standard_port(state: &AppState) -> DeveloperRequirement {
     }
 }
 
+async fn display_target_hdr10(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> DeveloperEnableItem {
+    use plurx_core::store::{keys, stored_switch};
+    let enabled = stored_switch(
+        settings.get(keys::DV_DISPLAY_TARGET).map(String::as_str),
+        false,
+    );
+    let processing = stored_switch(
+        settings.get(keys::DV_HDR_PROCESSING).map(String::as_str),
+        false,
+    );
+    #[cfg(target_os = "linux")]
+    let helper = crate::vodencode::dv_runtime::ToolSet::capture()
+        .await
+        .map(|tools| tools.is_some())
+        .map_err(|error| error.to_string());
+    #[cfg(not(target_os = "linux"))]
+    let helper: Result<bool, String> = Ok(false);
+    let (reports, buckets) = state.transcode.display_target_usage().await;
+    let scans = state.store.dv_title_readiness().await;
+    let cache = [100]
+        .iter()
+        .chain(plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS.iter())
+        .map(|bucket| {
+            let live = match buckets.get(bucket) {
+                Some(Some(bytes)) => format!("{bytes} live materialized media bytes"),
+                Some(None) => "live bytes unavailable (producer busy)".into(),
+                None => "0 live materialized media bytes".into(),
+            };
+            format!("{bucket} nits: 0 retained cache bytes, {live}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    DeveloperEnableItem {
+        id: "dolby_vision_display_target", title: "Display-targeted HDR10-E / SDR",
+        enabled: Some(enabled), setting: Some("dolby_vision_display_target"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "dv_target_helper", title: "Helper installed and HDR10-E enabled",
+                status: match &helper { Ok(true) if processing => RequirementStatus::Met, Ok(_) => RequirementStatus::Unmet, Err(_) => RequirementStatus::Unavailable },
+                evidence: format!("HDR10-E preference: {}. Processing helper: {}. These readings never change the saved targeting choice.", if processing { "on" } else { "off" }, match helper { Ok(true) => "installed".into(), Ok(false) => "unavailable on this node".into(), Err(reason) => reason }),
+            },
+            DeveloperRequirement {
+                id: "dv_target_peak", title: "Client peak reports",
+                status: if reports > 0 { RequirementStatus::Met } else { RequirementStatus::Unobservable },
+                evidence: format!("{reports} active processed roots report a valid peak. This node cannot infer peaks for inactive or other-node clients."),
+            },
+            DeveloperRequirement {
+                id: "dv_target_scan", title: "Complete-title L1 scan",
+                status: match &scans { Ok(count) if count.eligible > 0 => RequirementStatus::Met, Ok(_) => RequirementStatus::Unmet, Err(_) => RequirementStatus::Unavailable },
+                evidence: match scans { Ok(count) => format!("{} current-schema title scans; {} eligible for L1 targeting. Unknown/incomplete scans keep the HDR master or ordinary SDR route.", count.scanned,count.eligible), Err(error) => format!("Title scan reading unavailable: {error}") },
+            },
+            DeveloperRequirement {
+                id: "dv_target_cache", title: "Bucket storage on this node", status: RequirementStatus::Met,
+                evidence: format!("{cache}. Targeted output renders live in private roots, never retained VOD storage; active readers/reservations keep their existing lifetime fences. No reusable bucket cache exists to evict."),
+            },
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2986,6 +3256,119 @@ mod tests {
         ));
         assert_eq!(unavailable.status, RequirementStatus::Unknown);
         assert!(!unavailable.evidence.contains("private detail"));
+    }
+
+    /// The FEL re-encode rows were a fixed "not yet available" string keyed
+    /// only on the saved switch. Each row now follows what this node read.
+    #[test]
+    fn fel_quality_row_reports_per_title_verdicts_for_this_renderer_and_recipe() {
+        let row = |capable, counts| fel_quality_requirement(&FelQualityFacts { capable, counts });
+        let incapable = row(false, Ok((3, 1)));
+        assert_eq!(incapable.status, RequirementStatus::Unmet);
+        assert!(
+            incapable.evidence.contains("radeonsi VA-API only"),
+            "{}",
+            incapable.evidence
+        );
+        assert_eq!(
+            row(true, Err("io".into())).status,
+            RequirementStatus::Unavailable
+        );
+        let none = row(true, Ok((0, 0)));
+        assert_eq!(none.status, RequirementStatus::Unmet);
+        assert!(none.evidence.contains("No title has been measured"));
+        let refused = row(true, Ok((2, 0)));
+        assert_eq!(refused.status, RequirementStatus::Unmet);
+        assert!(
+            refused.evidence.contains("2 titles measured"),
+            "{}",
+            refused.evidence
+        );
+        let admitted = row(true, Ok((2, 1)));
+        assert_eq!(admitted.status, RequirementStatus::Met);
+        assert!(admitted.evidence.contains("1 admitted"));
+        assert!(
+            admitted.evidence.contains("at least 10%"),
+            "{}",
+            admitted.evidence
+        );
+        assert_eq!(admitted.id, "dv_fel_bitrate_quality");
+    }
+
+    #[test]
+    fn fel_reencode_readiness_is_read_from_this_node_and_never_from_the_switch() {
+        let facts =
+            |gpu_decode: bool, slots_in_use: usize| crate::transcode::LiveReconstructionFacts {
+                held_by_qualification: false,
+                device_present: gpu_decode,
+                main10_vaapi_decode: gpu_decode,
+                gpu_decode,
+                renderer_threads: if gpu_decode { 4 } else { 10 },
+                encoder_threads: 5,
+                software_budget: 11,
+                slots: 1,
+                slots_in_use,
+            };
+        let status = |item: &DeveloperEnableItem, id: &str| {
+            item.requirements
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| (row.status, row.evidence.clone()))
+                .expect("row")
+        };
+        for enabled in [false, true] {
+            let ready =
+                dolby_vision_fel_reencode_item(enabled, true, Ok(true), Some(facts(true, 0)));
+            assert_eq!(ready.enabled, Some(enabled));
+            assert_eq!(
+                status(&ready, "dv_fel_backend_reference").0,
+                RequirementStatus::Met
+            );
+            let (budget, evidence) = status(&ready, "dv_fel_worker_budget");
+            assert_eq!(budget, RequirementStatus::Met);
+            assert!(
+                evidence.contains("9 CPU threads (4 renderer, 5 encoder)"),
+                "{evidence}"
+            );
+            assert!(evidence.contains("on the GPU"), "{evidence}");
+            assert_eq!(status(&ready, "dv_fel_live_slot").0, RequirementStatus::Met);
+            assert!(!ready
+                .requirements
+                .iter()
+                .any(|row| row.evidence.contains("not yet available")));
+        }
+        // Conversion off, helper missing or unreadable: the backend row says so.
+        let off = dolby_vision_fel_reencode_item(true, false, Ok(true), Some(facts(true, 0)));
+        assert_eq!(
+            status(&off, "dv_fel_backend_reference").0,
+            RequirementStatus::Unmet
+        );
+        let missing = dolby_vision_fel_reencode_item(true, true, Ok(false), Some(facts(true, 0)));
+        assert_eq!(
+            status(&missing, "dv_fel_backend_reference").0,
+            RequirementStatus::Unmet
+        );
+        let unreadable =
+            dolby_vision_fel_reencode_item(true, true, Err("io".into()), Some(facts(true, 0)));
+        assert_eq!(
+            status(&unreadable, "dv_fel_backend_reference").0,
+            RequirementStatus::Unavailable
+        );
+        // A software-decoding 12-thread node cannot hold one graph; a busy
+        // slot is visible.
+        let software = dolby_vision_fel_reencode_item(true, true, Ok(true), Some(facts(false, 1)));
+        let (budget, evidence) = status(&software, "dv_fel_worker_budget");
+        assert_eq!(budget, RequirementStatus::Unmet);
+        assert!(
+            evidence.contains("15 CPU threads") && evidence.contains("budget of 11"),
+            "{evidence}"
+        );
+        let (slot, evidence) = status(&software, "dv_fel_live_slot");
+        assert_eq!(slot, RequirementStatus::Unmet);
+        assert!(
+            evidence.starts_with("1 of 1 live FEL reconstruction slot in use"),
+            "{evidence}"
+        );
     }
 
     #[test]

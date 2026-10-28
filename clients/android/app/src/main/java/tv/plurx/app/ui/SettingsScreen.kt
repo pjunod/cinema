@@ -153,6 +153,12 @@ fun SettingsScreen(
                     "subtitles from the first frame; After a short pause builds them the first time you turn them on.",
             ) {
                 ChoicePicker("Quality", preferences.playbackQuality, PlaybackQuality.entries, { it.label }, vm::setPlaybackQuality)
+                ChoicePicker("HDR display peak", preferences.hdrDisplayPeak,
+                    tv.plurx.app.data.HdrDisplayPeak.entries, { it.label }, vm::setHdrDisplayPeak)
+                Text("Auto uses the display's desired maximum luminance when known. " +
+                    "Choose a value to override it on this device. Changes and HDMI display " +
+                    "reports apply to the next playback; the current session keeps its target.",
+                    style = MaterialTheme.typography.bodySmall)
                 ChoicePicker("Audio language", audio, LANGS, { it.second }, onSelect = {
                     audio = it
                     vm.setLanguages(audio.first, sub.first)
@@ -168,6 +174,8 @@ fun SettingsScreen(
                     { it.label },
                     vm::setSubtitleReadiness,
                 )
+                CaptionGenerationSettings(vm)
+                SubtitleTextTranslationSettings(vm)
                 PreferenceSwitch("Autoplay next episode", preferences.autoplayNext, vm::setAutoplayNext)
                 PreferenceSwitch("Skip intros and credits", preferences.autoSkip, vm::setAutoSkip)
                 // Graduated from Developer: a finished, device-local switch with

@@ -1521,8 +1521,8 @@ pub fn vod_completed_reconstructed_pipe_args(
     // with what the helper produced; the encoder writes its VUI and the
     // sample entry's colr from these frame properties.
     let mut filter = format!(
-        "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
-        grid.numerator, grid.denominator,
+        "setparams=range=tv:color_primaries={}:color_trc={}:colorspace={},format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
+        output.input_contract().primaries(), output.input_contract().transfer(), output.input_contract().matrix(), grid.numerator, grid.denominator,
     );
     if output.encoder() == super::Encoder::Vaapi {
         filter.push_str(",hwupload=extra_hw_frames=4");
@@ -1621,6 +1621,9 @@ pub fn vod_completed_reconstructed_pipe_args(
     if plan.options().input_has_audio {
         let at = args.len().saturating_sub(1);
         args.splice(at..at, ["-threads:a".into(), "1".into()]);
+    }
+    if output.codec_contract().grade() == super::OutputGrade::Sdr {
+        super::encoder::normalize_reconstructed_sdr_args(&mut args);
     }
     Ok(args)
 }
@@ -2076,6 +2079,18 @@ mod tests {
         // Reconstructed: the RGB video input replaces the source decoder and
         // its offset; the source soundtrack keeps the ordinary held origin.
         assert_eq!(offsets(&reconstructed), ["-1.500000"]);
+        let positive = vod_reconstructed_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            grid,
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(125_000),
+        )
+        .expect("positive common source origin");
+        assert_eq!(offsets(&positive), ["-0.125000"]);
         let zero = vod_reconstructed_pipe_args(
             &source,
             &plan,
@@ -2186,6 +2201,108 @@ mod tests {
             None,
             "ordinary Software source policy remains scoped"
         );
+    }
+
+    #[test]
+    fn the_reconstructed_profile81_rate_is_the_source_average_capped_at_60_mbps() {
+        let (mut source, ..) = encoded_recipe_fixture(true);
+        source.bitrate = Some(48_000_000);
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            48_000
+        );
+        source.bitrate = Some(95_000_000);
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            60_000
+        );
+        // No container bitrate: the whole file over its duration.
+        source.bitrate = None;
+        source.size = 45_000_000_000;
+        source.duration_ms = Some(7_200_000);
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            50_000
+        );
+        source.duration_ms = None;
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            60_000
+        );
+        source.bitrate = Some(200_000);
+        assert_eq!(
+            crate::transcode::reconstructed_p81_video_kbps(&source),
+            1_000,
+            "floor"
+        );
+    }
+
+    #[test]
+    fn the_reconstructed_profile81_route_alone_drops_vbaq_and_never_caps_qp() {
+        use crate::transcode::*;
+        let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
+        let recipe = |output: &CompletedReconstructedOutputPlan<'_>| {
+            vod_completed_reconstructed_pipe_args(
+                &source,
+                output,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("grid"),
+                0.25,
+                "/dev/fd/3",
+                "/dev/fd/4",
+                VodSourceClock::ReportedOrigin(0),
+            )
+            .expect("actual graph")
+        };
+        let value = |args: &[String], flag: &str| {
+            args.windows(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>()
+        };
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("completed VAAPI")
+            .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
+        let ordinary = recipe(&output);
+        let profile81 = recipe(&output.with_reconstructed_profile81());
+        assert_eq!(value(&ordinary, "-compression_level"), ["19"]);
+        assert_eq!(value(&profile81, "-compression_level"), ["0"]);
+        // radeonsi obeys -qmax over -maxrate: a QP cap would break the VBV
+        // the variant's advertised peak is computed from.
+        assert!(!profile81.iter().any(|arg| arg == "-qmax"));
+        assert_eq!(value(&profile81, "-bf"), ["0"]);
+        let rate = |flag: &str| {
+            value(&profile81, flag)[0]
+                .trim_end_matches('k')
+                .parse::<u32>()
+                .expect("kbit/s")
+        };
+        let bitrate = rate("-b:v");
+        assert_eq!(
+            rate("-maxrate"),
+            vbv_maxrate_kbps(bitrate),
+            "the advertised peak"
+        );
+        assert_eq!(rate("-bufsize"), bitrate * 2);
+        // Only the policy flags differ.
+        let strip = |args: &[String]| {
+            args.join(" ")
+                .replace("-compression_level 19", "")
+                .replace("-compression_level 0", "")
+        };
+        assert_eq!(strip(&ordinary), strip(&profile81));
+        // Other encoders are untouched by the route.
+        for encoder in [Encoder::Software, Encoder::Nvenc] {
+            let output = plan
+                .completed_reconstructed_output(encoder)
+                .expect("supported encoder")
+                .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
+            assert_eq!(
+                recipe(&output),
+                recipe(&output.with_reconstructed_profile81())
+            );
+        }
     }
 
     #[test]

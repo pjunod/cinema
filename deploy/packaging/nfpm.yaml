@@ -70,6 +70,14 @@ contents:
     dst: /usr/share/doc/plurxd/plurx.example.toml
     file_info:
       mode: 0644
+  - src: ./subtitle-translation-notice.txt
+    dst: /usr/share/doc/plurxd/subtitle-translation-notice.txt
+    file_info:
+      mode: 0644
+  - src: ./CC-BY-4.0.txt
+    dst: /usr/share/doc/plurxd/CC-BY-4.0.txt
+    file_info:
+      mode: 0644
 
   - src: ./plurx-control
     dst: /usr/lib/plurx-control/plurx-control

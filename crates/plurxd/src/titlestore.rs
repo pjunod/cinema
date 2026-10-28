@@ -85,18 +85,10 @@ pub struct Budgets {
     pub working_set_bytes: u64,
     /// What `cache.max_gb` sizes the per-rendition admission threshold from.
     ///
-    /// It is not a bound on the completed cache, and reading it as one is the
-    /// mistake this comment exists to prevent. Nothing anywhere compares the
-    /// node's total admitted bytes against this number: the only thing it
-    /// feeds is [`Budgets::admission_threshold`], which multiplies it by
-    /// [`Self::admission_share`] to decide whether *one* rendition may ever be
-    /// published. The completed cache itself grows to the disk.
-    ///
-    /// That is a deliberate choice rather than a gap. Bounding the total means
-    /// evicting a completed rendition belonging to some other title — deciding
-    /// which viewer loses their cache hit so this one can have theirs — and
-    /// that is a policy nobody has asked for. `a_full_cache_admits_another_rendition`
-    /// pins the behaviour so it stays a decision rather than drifting into one.
+    /// This controls individual admission, while the shared playback disk
+    /// coordinator bounds physical bytes and evicts idle whole renditions.
+    /// The manifest never evicts a member from an admitted rendition: that
+    /// promise is ended atomically by whole-rendition retirement instead.
     pub admission_sizing_bytes: u64,
     /// The share of [`Self::admission_sizing_bytes`] one rendition may reserve.
     /// A rendition whose planned total exceeds this is inadmissible: it would
@@ -532,21 +524,11 @@ mod tests {
         assert!(!manifest.is_admitted());
     }
 
-    /// The completed cache is not held under a total, and that is on purpose.
-    ///
-    /// `cache.max_gb` reads like a ceiling on the cache and is not one: it
-    /// sizes a *per-rendition* admission threshold and nothing else. A node
-    /// whose completed cache already exceeds it admits the next rendition
-    /// anyway, because no code path compares the node's total admitted bytes
-    /// against anything at all.
-    ///
-    /// Pinned rather than left implicit. Behaviour nobody has written down is
-    /// indistinguishable from behaviour nobody noticed, and the next person to
-    /// read the setting's name will assume the ceiling exists. If a total ever
-    /// is enforced, this test fails and its replacement has to say which
-    /// viewer's cache hit is being taken away to make room.
+    /// Individual manifest admission does not allocate disk: publication has
+    /// already reserved those bytes with the shared playback coordinator.
+    /// Its whole-rendition pressure eviction preserves this member invariant.
     #[test]
-    fn a_full_cache_admits_another_rendition() {
+    fn manifest_admission_is_independent_of_physical_cache_allocation() {
         let budgets = Budgets {
             working_set_bytes: 1 << 40,
             admission_sizing_bytes: 10 * 1024 * 1024,
@@ -560,7 +542,7 @@ mod tests {
             fill(&mut rendition);
             rendition
                 .complete(&budgets)
-                .expect("and completes, however much is already admitted");
+                .expect("and completes after physical allocation");
         }
     }
 

@@ -81,13 +81,109 @@ jobs:
           python3 -m validation.ci_scope
           --event pull_request --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
 
+  worker_control_proof:
+    name: production worker controller proof
+    needs: scope
+    if: github.event.pull_request.draft == false
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 45
+    steps:
+      - name: Check out the candidate
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select affected worker controller proof inputs
+        id: worker-control-inputs
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PR_BASE_SHA" ] || [ -z "$PR_HEAD_SHA" ]; then
+            echo "pull request base/head SHA is missing" >&2
+            exit 1
+          fi
+          changed="$(git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA")"
+          affected=false
+          while IFS= read -r path; do
+            case "$path" in
+              crates/plurx-worker-control/*|verification/worker-control/*|\
+              crates/plurxd/src/library_work.rs|crates/plurxd/Cargo.toml|\
+              Cargo.toml|Cargo.lock|rust-toolchain.toml|\
+              scripts/check-worker-control|validation/worker_control_resume.py|\
+              .github/workflows/main-fast-lane.yml)
+                affected=true
+                break
+                ;;
+            esac
+          done <<< "$changed"
+          printf 'affected=%s\n' "$affected" >> "$GITHUB_OUTPUT"
+          echo "Worker controller proof inputs affected: $affected"
+      - name: Install the pinned Python 3.12 runtime
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        run: |
+          set -euo pipefail
+          python_dir="$GITHUB_WORKSPACE/target/worker-control-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$python_dir"
+          mkdir -p "$python_dir"
+          runtime_archive="$python_dir/runtime.tgz"
+          curl -q --fail --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 20 --max-time 180 --max-filesize 34285590 \
+            --output "$runtime_archive" \
+            'https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.12.15%2B20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+          test "$(wc -c < "$runtime_archive")" -eq 34285590
+          printf '%s  %s\n' '731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91' \
+            "$runtime_archive" | sha256sum --check --status
+          tar -xzf "$runtime_archive" -C "$python_dir"
+          "$python_dir/python/bin/python3" -c \
+            'import platform, sys; assert sys.version_info[:3] == (3, 12, 15) and sys.platform == "linux" and platform.machine() == "x86_64"'
+          rm -- "$runtime_archive"
+          printf '%s\n' "$python_dir/python/bin" >> "$GITHUB_PATH"
+      - name: Prepare same-PR worker proof resumption
+        id: worker-control-resume
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.worker_control_resume
+      - name: Run the pinned production worker controller proof
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        run: >-
+          python3 scripts/check-worker-control full
+          --cache-dir target/worker-control-tools
+          --output-dir "$GITHUB_WORKSPACE/target/verification/worker-control-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          --resume-from "${{ steps.worker-control-resume.outputs.resume_dir }}"
+          --provision
+      - name: Attach worker proof resume provenance
+        if: always() && steps.worker-control-inputs.outputs.affected == 'true'
+        run: |
+          set -euo pipefail
+          output_dir="$GITHUB_WORKSPACE/target/verification/worker-control-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          origin="$GITHUB_WORKSPACE/target/verification/worker-control-resume-origin-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          test -s "$output_dir/receipt.json"
+          test -s "$origin"
+          cp -- "$origin" "$output_dir/resume-origin.json"
+      - name: Preserve worker controller proof receipts and logs
+        if: always() && steps.worker-control-inputs.outputs.affected == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: worker-control-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/verification/worker-control-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Remove this job's Python runtime
+        if: always() && steps.worker-control-inputs.outputs.affected == 'true'
+        run: |
+          python_dir="$GITHUB_WORKSPACE/target/worker-control-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test -n "$GITHUB_WORKSPACE"
+          rm -rf -- "$python_dir"
+
   preflight:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Provisioning, receipt restoration, and the passing contract suites
-    # exhausted ten minutes before final publications in PR #962. Leave room
-    # for those publications and the remaining Node phase; no checks are added.
+    # Allows the 5-minute worker witness smoke, other package smokes, toolchain
+    # provisioning and preflight validation to finish with headroom.
     timeout-minutes: 15
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -149,8 +245,54 @@ jobs:
       # the same diff, and tests/validation/test_regression_field.py refuses
       # one without the other.
       - name: Check validation catalog and static contracts
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          KNOWLEDGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           make validation-lint
+      - name: Check formal protocol source mapping
+        id: formal-inputs
+        env:
+          PLURX_FORMAL_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          mkdir -p target/verification/durable-jobs target/verification/operation-progress target/verification/worker-refinement
+          if [ -n "$PLURX_FORMAL_BASE" ]; then
+            python3 scripts/check-formal check-mapping --package durable-jobs --affected-base "$PLURX_FORMAL_BASE" > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package operation-progress --affected-base "$PLURX_FORMAL_BASE" > target/verification/operation-progress/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package worker-refinement --affected-base "$PLURX_FORMAL_BASE" > target/verification/worker-refinement/ci-inputs.json
+          else
+            python3 scripts/check-formal check-mapping --package durable-jobs > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package operation-progress > target/verification/operation-progress/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package worker-refinement > target/verification/worker-refinement/ci-inputs.json
+          fi
+          python3 -c 'import json, os; from pathlib import Path; base=Path("target/verification"); durable=json.loads((base/"durable-jobs/ci-inputs.json").read_text()); progress=json.loads((base/"operation-progress/ci-inputs.json").read_text()); worker=json.loads((base/"worker-refinement/ci-inputs.json").read_text()); assert all(type(item["affected"]) is bool for item in (durable, progress, worker)); out=open(os.environ["GITHUB_OUTPUT"], "a"); print("affected_durable=" + str(durable["affected"]).lower(), file=out); print("affected_progress=" + str(progress["affected"]).lower(), file=out); print("affected_worker_refinement=" + str(worker["affected"]).lower(), file=out); print("affected=" + str(durable["affected"] or progress["affected"] or worker["affected"]).lower(), file=out)'
+      - name: Provision the pinned formal toolchain
+        if: steps.formal-inputs.outputs.affected == 'true'
+        run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+      - name: Complete the bounded formal smoke configuration
+        id: formal-smoke
+        if: steps.formal-inputs.outputs.affected_durable == 'true'
+        run: python3 scripts/check-formal smoke --package durable-jobs --cache-dir target/formal-toolchain
+      - name: Complete operation-progress formal smoke configurations
+        id: formal-progress-smoke
+        if: steps.formal-inputs.outputs.affected_progress == 'true'
+        run: python3 scripts/check-formal smoke --package operation-progress --cache-dir target/formal-toolchain
+      - name: Complete worker-refinement formal smoke configurations
+        id: formal-worker-refinement-smoke
+        if: steps.formal-inputs.outputs.affected_worker_refinement == 'true'
+        run: python3 scripts/check-formal smoke --package worker-refinement --cache-dir target/formal-toolchain
+      - name: Preserve formal model receipts and counterexamples
+        if: always() && steps.formal-inputs.outcome != 'skipped'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: formal-model-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/verification/durable-jobs/
+            target/verification/operation-progress/
+            target/verification/worker-refinement/
+          if-no-files-found: error
+          retention-days: 90
       - name: Provision checksummed public K08 oracle sources
         run: |
           set -eu
@@ -312,7 +454,7 @@ jobs:
     name: Apple compile and native TV navigation
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
     concurrency:
@@ -325,20 +467,40 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
-          grep -Fxq "Xcode 27.0" <<< "$xcode_version"
-          grep -Fxq "Build version 27A266a" <<< "$xcode_version"
+          printf '%s\n' "$xcode_version"
+          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
+          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
           xcrun --find swift
+      - name: Authenticate compatible original native test receipts
+        id: native_receipts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.native_receipts
+      - name: Preserve native adoption provenance
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .main-preflight-receipts/native/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Build and test native macOS server tray
         if: needs.scope.outputs.desktop_macos == 'true'
         # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
         # The complete native output is preserved independently, including failures.
         run: |
           mkdir -p target/validation
-          make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
-          echo "Native macOS server tray build and unit checks passed."
+          if [ "${{ steps.native_receipts.outputs.desktop_macos }}" = "true" ]; then
+            echo "Native macOS server tray builds and tests adopted from authenticated original evidence; see native-adoption artifact." > target/validation/desktop-macos-check.log
+            echo "Native macOS server tray builds and tests adopted; original provenance is preserved in native-adoption artifact."
+          else
+            make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
+            echo "Native macOS server tray build and unit checks passed."
+          fi
       - name: Preserve native macOS server tray check output
         if: always() && needs.scope.outputs.desktop_macos == 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -351,26 +513,16 @@ jobs:
         if: needs.scope.outputs.apple == 'true'
         run: |
           test "$(xcodegen --version)" = "Version: 2.46.0"
-      - name: Cache DerivedData
-        if: needs.scope.outputs.apple == 'true'
-        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: clients/apple/build/DerivedData
-          key: main-fast-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**') }}
-          restore-keys: |
-            main-fast-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-
-            effort-apple-dd-
-            apple-dd-
       - name: Compile iOS and tvOS without running simulator tests
-        if: needs.scope.outputs.apple == 'true'
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         run: make apple-build
       - name: Require native TV navigation journeys
-        if: needs.scope.outputs.apple == 'true'
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
-        if: always() && needs.scope.outputs.apple == 'true'
+        if: always() && needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
@@ -424,6 +576,7 @@ jobs:
       - paperwork
       - scope
       - preflight
+      - worker_control_proof
       - rust_compile
       - web_compile
       - apple_compile
@@ -436,6 +589,7 @@ jobs:
           PAPERWORK_RESULT: ${{ needs.paperwork.result }}
           SCOPE_RESULT: ${{ needs.scope.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
           WEB_RESULT: ${{ needs.web_compile.result }}
           APPLE_RESULT: ${{ needs.apple_compile.result }}
@@ -445,6 +599,10 @@ jobs:
           # skipped, and a skipped job is otherwise accepted here.
           if [ "$PAPERWORK_RESULT" != success ]; then
             echo "paperwork ended with: $PAPERWORK_RESULT"; exit 1
+          fi
+          if [ "$WORKER_CONTROL_RESULT" != success ]; then
+            echo "The required production worker controller proof ended with: $WORKER_CONTROL_RESULT"
+            exit 1
           fi
           for result in \
             "$SCOPE_RESULT" "$PREFLIGHT_RESULT" \

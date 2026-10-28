@@ -11,7 +11,8 @@ use plurx_core::store::SubtitleSourcePublication;
 use sha2::{Digest, Sha256};
 
 use super::{
-    harness_executable, start_cluster_with_port_retry, ClusterProcesses, Request, Response,
+    harness_executable, harness_node_identity, start_cluster_with_port_retry, ClusterProcesses,
+    Request, Response,
 };
 
 pub(super) async fn subtitle_source_node_b_looks_up_node_a_publication() -> Result<()> {
@@ -35,7 +36,7 @@ pub(super) async fn subtitle_source_node_b_looks_up_node_a_publication() -> Resu
         // A sampled source digest is opaque to the replicated store. Its
         // portability and local-file validation are checked by plurxd.
         source_attestation: hex::encode(Sha256::digest(b"source-attestation-fixture")),
-        node_id: super::harness_node_identity(1),
+        node_id: harness_node_identity(1),
         ordinal: 1,
         kind: "text".to_owned(),
         format: "webvtt".to_owned(),

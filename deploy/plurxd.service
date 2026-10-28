@@ -11,6 +11,12 @@ Group=plurx
 ExecStart=/usr/local/bin/plurxd run
 Environment=PLURX_DATA_DIR=/var/lib/plurx
 Environment=PLURX_BIND=0.0.0.0:32400
+# Optional native HTTPS is saved in Settings -> Developer, then applied on
+# restart. The existing data directory stores persistent generated identity.
+# Supplied paths are server-side files readable by User=plurx, e.g.
+# /etc/plurx/tls/fullchain.pem and /etc/plurx/tls/privkey.pem. ProtectHome below
+# hides home directories; ReadOnlyPaths alone cannot expose a hidden path.
+# HTTP remains available; see deploy/README.md "Optional native HTTPS".
 # Point at a specific ffmpeg build if desired:
 # Environment=PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg
 # HLS master experiments for the copied-Dolby-Vision investigation

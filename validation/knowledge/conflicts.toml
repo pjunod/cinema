@@ -1,0 +1,5 @@
+schema_version = 1
+repository = "plurx"
+
+# No contradiction is asserted resolved by omission. Unknown roles remain explicit in coverage.
+conflicts = []

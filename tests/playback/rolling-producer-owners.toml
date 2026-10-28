@@ -1,3 +1,62 @@
+# DV title analysis ownership review (PR #1301, 2026-10-28; source 7d2d4a9c7):
+# +1 namespaced task and +1 Command are DvTitleRide's companion scanner.
+# build_attested_pass retains DvTitleScan through the index pass and finish;
+# the task owns a cloned held source descriptor, inherited by the child as fd3.
+# The existing bounded collector registers ChildWork::background, isolates its
+# process group, caps each output stream at 64 KiB, and bounds child runtime.
+# Successful collection waits for the child and joins both output readers.
+# Lead-output refusal or join timeout aborts and awaits the scan task.
+# Dropping the pass drops DvTitleScan and requests task abort; bounded child
+# Drop kills the owned group/direct child and schedules its wait on the runtime.
+# Abort/drop is not a confirmed-reap receipt before the pass returns.
+# +1 timer bounds the finish join. +1 bare spawn is the method declaration;
+# +1 method-spawn/+1 launch shape is the same Rust helper invocation.
+# No new rolling-producer authority or independent repair owner is introduced.
+# Patterns, roots, exact equality and forbidden-shape zeroes remain unchanged.
+
+# HTTPS Barrier::wait adds one test-only joined observation to main’s lifecycle census.
+# HTTPS integration 2026-10-25: retain main lifecycle owners and compose the
+# reviewed HTTPS additions: 13 awaited test/serving tasks, one owned JoinSet
+# spawn, 12 bounded TLS/test timers and seven test/client launch-shaped calls.
+# Exact source census remains enforced; no scan roots or patterns change.
+# Shared playback cache ownership review (2026-10-21, source 99a968993):
+# Codex reviewed the lifecycle sites and their exact census against origin/main.
+# Astra independently approved all seven count changes and their lifecycle owners.
+# +10 namespaced tasks: one node-local 15s upkeep loop stops on its shutdown
+# token; three coordinator owners perform physical inventory and owner callbacks;
+# six test-only drivers cover timeout/fencing, cancelled copying and VOD replay.
+# Blocking inventory retains its single I/O permit until the scan actually ends.
+# Callback tasks retain their single-flight permit after waiter timeout; eviction
+# additionally retains its prefix fence through callback completion. Cancellation
+# cannot expose the namespace while unlink is running. A timeout does not
+# forcibly cancel detached filesystem work. Existing copyseg and
+# subtitle copy workers now carry their reservations/pins through physical work;
+# moving those constructors adds no production task site or producer authority.
+# +19 timers: nine bounded coordinator waits/cadence, two scratch PUT/DELETE
+# framing bounds, one post-child pretranscode upload drain and one dependency
+# read before VOD eviction; the other six are finite fixture observations.
+# +2 Command/+2 launch sites are test-only: a 40s kill-on-drop FFmpeg graph
+# output and an awaited finite 16KiB shell writer with a 4KiB child file limit.
+# The other +7 launch-shaped methods are HTTP response status assertions.
+# +1 kill-on-drop is that same FFmpeg fixture, not a confirmed-reap receipt.
+# +1 free/UFCS lifecycle site ignores SIGXFSZ only in the child's pre_exec hook;
+# RLIMIT_FSIZE then returns EFBIG to tee's onfail=ignore, preserving the index.
+# +1 rendition_build_gate reference takes the existing exact-key gate during
+# VOD eviction, before reader/producer/dependency checks; it starts no builder.
+# Resulting structural totals: 995 tasks, 1846 timers, 294 Commands, 792 launch
+# shapes, 72 free/UFCS lifecycle calls and 111 kill-on-drop constructors.
+# Patterns, scan roots, exact equality and every forbidden-shape zero stay intact.
+
+# System comparison ownership review (PR #1243, 2026-10-20):
+# The shared launcher/guard was adversarially reviewed by Astra; Sol reviewed
+# this exact census delta. comparison.rs adds one background job-owned FFmpeg
+# Command, kill_on_drop and awaited child.wait. Its job guard spans that wait
+# and the two joined 64 KiB tail readers; timeout/cancellation drop that owner.
+# The 60s production run timeout and 600s operator-test timeout replace the
+# removed 180s startup synthetic-benchmark timeout: net +1 namespaced timer.
+# No new task, producer authority, independent reader or cleanup loop is added.
+# Structural patterns, scan roots and exact-equality requirements stay intact.
+
 # Media support ownership review (PR #1239, 2026-10-20; Astra reviewed):
 # ffmpeg_support.rs adds one awaited spawn_blocking for local package hashing.
 # It owns only paths/hash inputs, no child or producer authority. An already
@@ -593,7 +652,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
 # raised this count independently; the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
-expected_occurrences = 118
+# +1 with the FEL qualification review fixes (claude/lp-fel-p81): the test-only
+# releaser in `a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_one`
+# stands in for a qualification that lets go of the slot when told; the test
+# awaits its JoinHandle before asserting.
+expected_occurrences = 119
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -734,7 +797,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # branch polls every 50 ms, inside a 30 s `tokio::time::timeout`, for the
 # session's first served snapshot before its playlist request. Test-only; it
 # owns no producer and decides nothing.
-expected_occurrences = 80
+# +1 in the same releaser: a 50 ms stand-in for the qualification's kill and
+# reap before it drops the slot. Test-only, joined.
+expected_occurrences = 81
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1098,7 +1163,14 @@ pattern = "HlsPresentationResolution"
 # Architecture close-out (#814): +1 test-only match —
 # sdr_master_codecs_is_frozen_when_the_session_is_created reads the created
 # session's ready context; no new owner.
-expected_occurrences = 25
+# Processed Dolby Vision signaling (#1257): +1 test-only match in
+# processed_profile81_master_declares_hdr10_compatibility reads the admitted
+# session's ready context; no new response owner or worker.
+# Display-targeted DV FR398-1 (0e1e4224d): +1 test-only Ready match in
+# transcode/manager/processed_reuse_tests.rs:1955, assert_admitted_delivery.
+# It reads the admitted successor's frozen HLS context before/after replay;
+# the existing VOD response owner remains authoritative. No worker is added.
+expected_occurrences = 27
 
 [[module_symbols]]
 id = "m4-executor-registration"
@@ -1879,7 +1951,10 @@ pattern = "terminal_reason"
 # or chooses a cause: retirement and the playback actor retain ownership.
 # Shared libraries: the Source actor and its tests read the terminal cause
 # of a settled Source route. The terminal causes are unchanged.
-expected_occurrences = 50
+# 50 -> 52 with the VOD index recovery (PR1299), both test-only: the budget
+# test's outcome fixture initializes the field to None, and the vod test reads
+# the `attempt_limit` cause the recovery wrote. No route cause changes.
+expected_occurrences = 52
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -2054,7 +2129,8 @@ pattern = "rendition_build_gate"
 # PR #947 after integrating main 1088d7529: base 30; repair delta +2.
 # Cleanup and conservative cold revalidation take the existing exact-key gate;
 # neither creates a competing build owner.
-expected_occurrences = 33
+# Shared cache eviction takes this same keyed gate before retiring a title.
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -3139,7 +3215,31 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # waits for all exits before capacity assertions; it never runs driver_pass.
 # -2 removed production tasks: serve/delivery.rs refresh expiry and
 # vodserve.rs ProcessedProbeLease drop cleanup. Net +1, no new shipped task.
-expected_occurrences = 984
+# Worker-refinement conformance: +1 `tokio::spawn` in the `#[cfg(test)]`
+# `library_work::tests::spawn_worker` helper. Its returned JoinHandle is awaited
+# by each schedule; this adds no production task owner or shipped behavior.
+# Title acquisition inherited at 83c995e9f (322df0d78): +1 test-only spawn in
+# source_probe/title_work_tests.rs:294, title_admission_accounts_one_thread_and_reaps_before_ordinary_admission.
+# The task owns its Arc manager and physical admission while awaiting the
+# cancellable bounded child. The test cancels it and consumes its JoinHandle
+# before asserting released credit; timeout is failure, never reap evidence.
+# +2 with the FEL qualification review fixes (claude/lp-fel-p81): the joined
+# test releaser above, and the boot warm-up of the VA-API HEVC Main10 decode
+# probe in `main.rs`, moved off the boot path. The warm-up owns one bounded
+# probe child (`status_job_owned`, kill-on-drop, 5 s deadline), logs, and
+# exits; it holds no session, permit or lock past that.
+# Subtitle completion: +5 namespaced task sites: subtitle_text_translation/engine.rs
+# keeps admission inside its blocking inference closure; mod.rs
+# cached_engine_identity retains the cache mutex and publishes after requester
+# cancellation; read_attestation owns one weak-cache hash task. The requester is
+# aborted and awaited in the single-flight proof.
+# Main: +13 net retained task sites: HTTPS listener supervision (4), admin tests
+# (2), transport tests (5), startup/drain tests (2); vodserve gains one and
+# vod/driver loses one in the driver/serve relocation. Existing joins remain.
+# PR1299 VOD index recovery: +4 test-only tasks in state/tests.rs: three runs
+# of the queued local index pass and one queued speech admission behind it.
+# Each is awaited under a timeout; none outlives its test.
+expected_occurrences = 1022
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3374,7 +3474,13 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # regression creates a second pair. Existing ProducerSlot registrations own
 # encoder retirement/reap; helper futures await their children, killing on
 # cancellation.
-expected_occurrences = 76
+# Subtitle completion: +1 ignored Unix installer::qualification FFmpeg fixture;
+# progressive_case awaits child.wait(), or child.kill().await at its 60s limit.
+# The same child adds one Command, two lifecycle calls and one unwind-only
+# kill_on_drop guard; no production launcher or separate reap owner is added.
+# Main contributes one HTTPS transport JoinSet.spawn; its driver is joined by
+# the listener owner. Both parent additions are present in the source union.
+expected_occurrences = 79
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3395,7 +3501,7 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # both use the same retained cancellation/reap owner, not separate launchers.
 # PR1225: +1 is vod/driver.rs:1245's cfg(test) controlled_driver::spawn
 # declaration, not a second task. Its actual task/cancellation is noted above.
-expected_occurrences = 16
+expected_occurrences = 17
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4797,7 +4903,42 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # vod/driver.rs:1290/1348 (5s held/exited observations). Timeout is failure,
 # never cleanup evidence. -2 removed refresh timeout/expiry sleep in
 # manager/create.rs and serve/delivery.rs. Net +4; no new shipped timer.
-expected_occurrences = 1825
+# Worker-refinement conformance: +1 15-second `tokio::time::timeout` in the
+# `#[cfg(test)]` `library_work::tests::next_worker_event` barrier helper. It
+# bounds receipt of the selected event; timeout is failure, not join evidence.
+# Title acquisition inherited at 83c995e9f: +4 syntax sites. source_probe.rs:112
+# (171327649) is the existing scheduler's Linux title-poll pacing sleep; the
+# retained non-Linux sleep is cfg-exclusive, not a concurrent timer owner.
+# source_probe/title_work_tests.rs:321/323/333 (322df0d78) adds two five-second
+# observation bounds and a ten-millisecond startup poll inside the first bound.
+# The task retains admission until bounded child completion; none of these
+# observation deadlines grants reap, publication or admission-release evidence.
+# Frame-MDCV repair: +1 awaited creation-budget timeout around held-source
+# metadata resolution; expiry refuses preparation and creates no recovery owner.
+# +2 with the FEL P8.1 qualification (claude/lp-fel-p81): the 20 s deadline
+# around each child of `ffmpeg::has_hevc_main10_vaapi_decode` (spawned once
+# per process at startup through `status_job_owned`, kill-on-drop, so the
+# deadline drops and kills it), and `STAGE_DEADLINE` in
+# `source_probe/fel_qualification.rs::supervised`, which bounds one window
+# stage; on expiry or cancel the stage kills and reaps its children.
+# +5 with the FEL qualification review fixes (claude/lp-fel-p81): the bounded
+# wait (`QUALIFICATION_SLOT_YIELD`, 5 s) a live reconstructed 8.1 gives a FEL
+# qualification it asked to yield the slot (on expiry the play declines with
+# its own reason; nothing is spawned); the 50 ms test releaser sleep; and in
+# the qualification fixture tests the 250 ms measurement beats, the 5 s bound
+# on waiting for the fixture to take the slot, and its 10 ms poll.
+# Subtitle completion: +13 timers. Five inline production observations belong
+# to text progress, accepted-demand recovery and source-read attestation. Eight
+# test timers bound qualification/heartbeats/fixture/observations and the two
+# cached_engine_identity cancellation waits; worker cancellation is awaited.
+# Main: +13 retained HTTPS/font fixture bounds: font refusal (2), admin (3),
+# transport (7), startup (1). Each bounds owned work; expiry is refusal, never
+# shutdown or settlement acknowledgement.
+# PR1299 VOD index recovery: +9 test-only timers in state/tests.rs: four
+# sleeps that let the pass and the speech pass take their places in the
+# heavy lane's queue, four timeouts bounding those awaited tasks, and one
+# sleep in the ride-along worker test's polling loop.
+expected_occurrences = 1895
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5254,7 +5395,32 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # a three-frame control. Each output future is directly awaited and has
 # kill_on_drop(true); no separate per-command timeout or process-group/reap
 # guarantee on cancellation is asserted. No production launcher is added.
-expected_occurrences = 291
+# Title acquisition inherited at 83c995e9f: +2 constructors.
+# source_probe/dv_title.rs:21 (6b060987d) starts the installed scanner through
+# bounded::output_command_clean_env (6h/64KiB); OwnedChild owns kill/reap and
+# joined pipe drains. Tool identity and held-source fences guard its result.
+# source_probe/title_work_tests.rs:341 (322df0d78) synchronously waits for
+# /bin/kill -0 after the cancelled title task joins; it only observes the PID.
+# FR398-1 (0e1e4224d): +1 Linux-test-only FFprobe in
+# vodencode_manager_tests.rs:610, assert_native_sdr_window. Its output future
+# is directly awaited with kill-on-drop; no separate timeout/group-reap claim
+# or production launcher is added by this ignored physical qualification helper.
+# +6 with the FEL P8.1 qualification (claude/lp-fel-p81). Two startup probe
+# children in `ffmpeg::has_hevc_main10_vaapi_decode` (clip encode, VA-API
+# decode): spawned by `status_job_owned` as background ChildWork, kill-on-drop,
+# awaited under a 20 s deadline. Three in `source_probe/fel_qualification.rs`
+# (helper render, its FFmpeg consumer/encoder, the served-window decoder):
+# spawned with `spawn_job_owned` as background ChildWork (listed and
+# stoppable in Activity Processes) inside the `dv_title_scan` job; the stage
+# owns and waits them; a deadline, the job's cancel or foreground preemption
+# makes the stage `start_kill` and `wait` each one before returning, and
+# kill-on-drop backs that up. One test-only ffprobe in the ignored physical
+# qualification test, run through `output_job_owned`.
+# -2 with the FEL qualification review fixes (claude/lp-fel-p81): the VA-API
+# Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
+# is gone; the store-less physical qualification test and its ffprobe child
+# are replaced by the real title-job physical test.
+expected_occurrences = 303
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5890,7 +6056,18 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # awaited output calls for the test mux/probe/control commands above. Ordinary
 # completion waits for each child; kill-on-drop is a cancellation backstop,
 # not independent confirmed-reap evidence. No production launch is added.
-expected_occurrences = 783
+# Title acquisition inherited at 83c995e9f: +1 synchronous .status() in
+# source_probe/title_work_tests.rs:345 (322df0d78), the finite /bin/kill -0
+# liveness observation after the title task's joined cancellation above.
+# FR398-1 (0e1e4224d): +1 directly awaited FFprobe .output() in
+# vodencode_manager_tests.rs:614, assert_native_sdr_window. It collects the
+# test-owned child normally; its kill-on-drop backstop is not reap evidence.
+# Subtitle completion contributes six launch-shaped matches in its HTTP and
+# installer qualification owners; HTTP Response.status() calls inspect
+# in-process responses, while the finite FFmpeg fixture is explicitly awaited.
+# Main's HTTPS admin/transport/startup owners and source/status reads remain in
+# the source scan; none changes launch authorization.
+expected_occurrences = 808
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6179,7 +6356,14 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # the existing supervisor result, not an OS process. The other five are the
 # two test helper children's actual wait/start_kill sites (three in the shared
 # capture fixture, two in the backpressure fixture); each child is awaited.
-expected_occurrences = 346
+# +4 with the FEL P8.1 qualification (claude/lp-fel-p81), all in
+# `source_probe/fel_qualification.rs`: the helper's `wait` and the consumer's
+# `wait` in `finish` (normal reaping), and `start_kill` + `wait` in `reap`,
+# which a failed, expired or cancelled stage runs on each of its children.
+# Subtitle completion adds two installer qualification child lifecycle calls;
+# the child remains owned through wait or kill-and-wait on its 60s bound.
+# Main retains the HTTPS transport listener's awaited task/connection boundary.
+expected_occurrences = 354
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6258,7 +6442,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 71
+expected_occurrences = 72
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6393,7 +6577,17 @@ pattern = "kill_on_drop\\s*\\("
 # PR1225: +3 in manager/processed_reuse_tests.rs:825/845/1103, the same
 # directly awaited test mux/probe/control commands. These guards request child
 # kill if their output future drops; they are not confirmed-reap receipts.
-expected_occurrences = 109
+# FR398-1 (0e1e4224d): +1 Linux-test-only FFprobe guard in
+# vodencode_manager_tests.rs:613, assert_native_sdr_window. The test directly
+# awaits the output future. Dropping requests a kill; the guard alone proves
+# neither confirmed reap nor process-group cleanup. No shipped owner is added.
+# +4 with the FEL P8.1 qualification (claude/lp-fel-p81): the two startup
+# probe children of `ffmpeg::has_hevc_main10_vaapi_decode` (one shared
+# `run` closure) and the three window-stage children in
+# `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
+# counts once). Each is also explicitly waited, or killed and waited, by its
+# owner; kill-on-drop is the backstop, not the settlement.
+expected_occurrences = 117
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

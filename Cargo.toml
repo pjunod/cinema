@@ -11,6 +11,7 @@ members = [
     "crates/plurxd",
     "crates/plurx-notification-broker",
     "crates/plurx-support",
+    "crates/plurx-worker-control",
 ]
 exclude = [
     "vendor/bitvec_helpers",

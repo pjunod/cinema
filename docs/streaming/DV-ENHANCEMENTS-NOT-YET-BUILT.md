@@ -39,8 +39,8 @@ into the output beyond static HDR10 metadata.
 - Prove it on one HDR10+ display per client family (the narrow real check,
   not a matrix).
 
-**Planned:** the display-targeted variant (per-shot L1, then L2/L8 trims,
-mapped on the server for the viewer's display peak) has a build plan:
+**Shipping:** the display-targeted variant maps per-shot L1 on the server for
+the viewer's display peak (#1271); the L2/L8 trims are still open. Build plan:
 [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md).
 
 ## 2. Dolby Vision → SDR using the RPU's own trims

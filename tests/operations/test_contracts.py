@@ -276,6 +276,86 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn(".env_clear()", command)
         self.assertIn('.env("LC_ALL", "C")', command)
 
+    def test_live_tv_browser_fixture_traverses_master_and_recovers_exact_request(self):
+        import ast
+        from types import SimpleNamespace
+        from urllib.parse import urlsplit
+
+        tree = ast.parse(read("scripts/live-tv-browser"))
+        intercept = next(node for node in ast.walk(tree)
+                         if isinstance(node, ast.FunctionDef) and node.name == "intercept")
+        with tempfile.TemporaryDirectory() as temporary:
+            media = Path(temporary)
+            (media / "0.ts").write_bytes(b"synthetic transport stream")
+            sessions = {"fixture-1": {"opened": 0, "closed": False}}
+            violations = []
+            namespace = {"re": re, "urlsplit": urlsplit, "media": media,
+                         "time": SimpleNamespace(monotonic=lambda: 0),
+                         "sessions": sessions, "violations": violations,
+                         "host": SimpleNamespace(token="fixture-token"),
+                         "channels": [{"id": "one"}], "events": [],
+                         "mode": {"next": "normal"}, "starts_by_id": {},
+                         "start_requests": [], "resumes": [], "retirements": []}
+            namespace["active"] = lambda: [key for key, value in sessions.items() if not value["closed"]]
+            exec(compile(ast.Module(body=[intercept], type_ignores=[]),
+                         "scripts/live-tv-browser", "exec"), namespace)
+
+            def request(path, method="GET", headers=None, body=None):
+                response = {}
+                incoming = SimpleNamespace(
+                    url="http://fixture.invalid/api/v1/live-tv/" + path,
+                    method=method, headers=headers or {}, post_data_json=body)
+                namespace["intercept"](SimpleNamespace(
+                    request=incoming, fulfill=lambda **value: response.update(value)))
+                return response
+
+            def get(suffix, headers=None):
+                return request("sessions/fixture-1/" + suffix, headers=headers)
+
+            master = get("master.m3u8")
+            self.assertEqual(master["content_type"], "application/vnd.apple.mpegurl")
+            variants = [line for line in master["body"].splitlines()
+                        if line and not line.startswith("#")]
+            self.assertEqual(variants, ["index.m3u8"])
+            self.assertIn("#EXT-X-STREAM-INF:", master["body"])
+            playlist = get(variants[0])
+            segments = [line for line in playlist["body"].splitlines()
+                        if line and not line.startswith("#")]
+            self.assertEqual(segments[0], "0.ts")
+            self.assertEqual(get(segments[0])["body"], b"synthetic transport stream")
+            self.assertEqual(violations, [])
+            with self.assertRaises(AssertionError):
+                get("unexpected.m3u8")
+            get("master.m3u8", {"authorization": "Bearer fixture-only"})
+            self.assertEqual(len(violations), 1, "capability reads still flag account credentials")
+            sessions["fixture-1"]["closed"] = True
+            self.assertEqual(get("master.m3u8")["status"], 410)
+
+            auth = {"authorization": "Bearer fixture-token"}
+            request_id = "a" * 32
+            path = "starts/" + request_id
+            activation = request("channels/one/sessions", "POST", auth,
+                                 {"request_id": request_id})["json"]
+            self.assertEqual(namespace["starts_by_id"][request_id], activation["session_id"])
+            self.assertEqual(request("channels/one/sessions", "POST", auth,
+                                     {"request_id": request_id})["json"], activation)
+            self.assertEqual(len(sessions), 2, "replay must not allocate another capability")
+            self.assertEqual(request(path + "/resume", "POST")["status"], 401)
+            self.assertEqual(request(path, "DELETE")["status"], 401)
+            self.assertFalse(sessions[activation["session_id"]]["closed"])
+            self.assertEqual(request("starts/" + "b" * 32 + "/resume", "POST", auth)["status"], 404)
+            resumed = request(path + "/resume", "POST", auth)["json"]
+            self.assertEqual(resumed, {"outcome": "live", "session": activation})
+            self.assertEqual(namespace["resumes"], [request_id])
+            self.assertEqual(len(sessions), 2, "resume must not tune")
+            self.assertEqual(request(path, "DELETE", auth)["json"], {"outcome": "retired"})
+            self.assertEqual(request(path + "/resume", "POST", auth)["json"], {"outcome": "ended"})
+            self.assertEqual(request(path, "DELETE", auth)["json"], {"outcome": "retired"})
+            self.assertEqual(namespace["events"], ["start:fixture-2", "release:fixture-2"])
+            self.assertEqual(request("channels/one/sessions", "POST", auth,
+                                     {"request_id": ""})["status"], 400)
+            self.assertEqual(len(sessions), 2)
+
     def test_private_origin_fetches_use_only_step_scoped_credentials(self):
         checked = 0
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
@@ -305,6 +385,35 @@ class OperationsContractCase(unittest.TestCase):
                 script = read(path)
                 self.assertIn('"--mute-audio"', script)
                 self.assertIn("HardwareMediaKeyHandling", script)
+
+    def test_ui_baseline_waits_for_current_boot_caption_probe_and_registered_children(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        harness = runpy.run_path(str(ROOT / "scripts/ui-baseline"), run_name="caption_fixture_contract")
+        wait = harness["SelfHost"].wait_for_caption_probe
+        source = read("scripts/ui-baseline")
+        self.assertIn("probe_log_offset = self.log.stat().st_size\n        self.spawn()\n        self.wait_for_caption_probe(probe_log_offset)", source)
+        self.assertIn("self.require_jellyfin_listener()", source)
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "daemon.log"
+            old = b"caption graph probe complete\n"
+            log.write_bytes(old + b"new boot\n")
+            fixture = SimpleNamespace(log=log, proc=SimpleNamespace(poll=lambda: None),
+                                      base_url="http://fixture.invalid", token="fixture-only")
+            def observe(read_processes, read_boot_log, alive, **clock):
+                self.assertEqual(read_boot_log(), "new boot\n")
+                self.assertTrue(alive())
+                self.assertEqual(read_processes(3), [{"pid": 123}])
+                self.assertIn("now", clock)
+                self.assertIn("sleep", clock)
+            with patch.dict(wait.__globals__, {"wait_for_fixture_idle": observe,
+                    "api": lambda *args, **kwargs: {"processes": [{"pid": 123}]}}):
+                wait(fixture, len(old))
+            with patch.dict(wait.__globals__, {"wait_for_fixture_idle": observe,
+                    "api": lambda *args, **kwargs: {}}):
+                with self.assertRaises(harness["Fail"]):
+                    wait(fixture, len(old))
 
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
@@ -1636,9 +1745,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("/Applications/Xcode.app/Contents/Developer", workflow)
         self.assertNotIn("/Applications/Xcode_27.app/Contents/Developer", workflow)
         self.assertNotIn("brew install xcodegen", workflow)
-        self.assertIn('grep -Fxq "Xcode 27.0"', workflow)
-        self.assertIn('grep -Fxq "Build version 27A266a"', workflow)
-        self.assertIn('test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.0"', workflow)
+        self.assertIn('grep -Fxq "Xcode 27.1"', workflow)
+        self.assertIn('grep -Fxq "Build version 27A9275"', workflow)
+        self.assertIn('test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.1"', workflow)
         self.assertIn('test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"', workflow)
         self.assertIn('= "Version: 2.46.0"', workflow)
         self.assertIn('iOS 26.5 (26.5 - 23F77)', workflow)
@@ -1685,10 +1794,10 @@ assert.equal(context.ACT_TIMER, null);
             apple_target.index("test-without-building"),
         )
         self.assertEqual(apple_target.count('-derivedDataPath "$(APPLE_DERIVED_DATA)"'), 5)
-        # The DerivedData cache in ci.yml must point at the same directory the
-        # Makefile builds into, or it silently caches nothing.
+        # DerivedData is reused by build/test destinations within this job only;
+        # whole build state must not transfer between checkout roots.
         self.assertIn("APPLE_DERIVED_DATA := build/DerivedData", makefile)
-        self.assertIn("path: clients/apple/build/DerivedData", workflow)
+        self.assertNotIn("path: clients/apple/build/DerivedData", workflow)
 
     def test_validation_workflows_do_not_compile_or_gate_windows(self):
         from validation.qualification import REQUIRED_JOBS
@@ -1739,7 +1848,10 @@ assert.equal(context.ACT_TIMER, null);
             "\n  cluster_store_legacy:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
-        self.assertIn("timeout-minutes: 20", fast_rust)
+        # Full run 5274 exhausted twenty minutes during all-target checking;
+        # the compiler lanes share the effort's bounded thirty-minute allowance.
+        self.assertIn("timeout-minutes: 30", fast_rust)
+        metadata_jobs = workflow_job_blocks(".github/workflows/ci.yml")
         for compiler_job in (
             metadata_jobs["rust_compile"],
             metadata_jobs["cluster_wal"],
@@ -1915,8 +2027,6 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertNotIn("../badges-ci/ci.svg", readme)
         self.assertNotIn("../badges-lint/lint.svg", readme)
-        self.assertIn("Coverage refreshes automatically on pushes to `main`", readme)
-        self.assertIn("measurement date (UTC)", readme)
         self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
             readme,
@@ -2168,7 +2278,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('RUST_TEST_THREADS: "2"', coverage)
         steps = workflow_step_blocks(coverage)
         install = steps["Install coverage prerequisites"]
-        for package in ("git", "jq", "nodejs", "python3", "build-essential", "clang"):
+        for package in (
+            "git", "jq", "nodejs", "python3", "build-essential", "clang",
+            "libssl-dev", "libgtk-4-dev", "libdbus-1-dev",
+        ):
             self.assertRegex(install, rf"\b{package}\b")
         self.assertLess(
             coverage.index("Install coverage prerequisites"),
@@ -2183,6 +2296,32 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("if: always()", cleanup)
         self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', cleanup)
 
+    def test_manual_qualification_dispatch_inputs_have_explicit_string_types(self):
+        dispatch = read(".github/workflows/ci.yml").split(
+            "  workflow_dispatch:\n", 1
+        )[1].split("\nenv:", 1)[0]
+        self.assertTrue(dispatch.startswith("    inputs:\n"))
+        starts = list(re.finditer(r"(?m)^      ([a-z_][a-z0-9_]*):\n", dispatch))
+        descriptions = {
+            "retained_units_sha256": "Authenticated digest-addressed retained unit proof; no suite replay",
+            "retained_units_attachment_id": "Private promotion PR evidence attachment ID",
+            "retained_units_attachment_uuid": "Private promotion PR evidence attachment UUID",
+            "promotion_pr": "Optional open same-repo effort/integration promotion PR to main",
+            "promotion_head_sha": "Immutable promotion head SHA; dispatch on that head branch",
+            "promotion_base_sha": "Immutable current main SHA already merged into the promotion head",
+        }
+        self.assertEqual([entry.group(1) for entry in starts], list(descriptions))
+        for index, entry in enumerate(starts):
+            with self.subTest(input=entry.group(1)):
+                end = starts[index + 1].start() if index + 1 < len(starts) else len(dispatch)
+                fields = re.findall(r"(?m)^        ([a-z_]+): (.+)$", dispatch[entry.end():end])
+                self.assertEqual(len(fields), 4, "dispatch inputs require exactly one explicit renderer type")
+                self.assertEqual(dict(fields), {
+                    "type": "string",
+                    "description": '"' + descriptions[entry.group(1)] + '"',
+                    "required": "false",
+                    "default": '""',
+                })
     def test_effort_compile_only_policy_preserves_required_checks_and_claims_no_units(self):
         workflow = read(".github/workflows/effort-ci.yml")
         inputs = workflow.split("    inputs:\n", 1)[1].split("\nenv:\n", 1)[0]
@@ -2209,11 +2348,13 @@ assert.equal(context.ACT_TIMER, null);
             self.assertNotIn("compile_only", read(path), "main qualification has no task-unit bypass")
 
     def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
-        def enabled(expression, *, apple, desktop, retained):
+        def enabled(expression, *, apple, desktop, retained, tv_adopted=False):
             values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained}
             expression = re.sub(
+                r"(steps\.native_receipts\.outputs\.tv_navigation != 'true')|"
                 r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple) (==|!=) 'true'",
-                lambda match: str(values[match[1]] if match[2] == "==" else not values[match[1]]),
+                lambda match: str(not tv_adopted) if match[1] else
+                str(values[match[2]] if match[3] == "==" else not values[match[2]]),
                 expression)
             expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
             self.assertRegex(expression, r"^[ ()TrueFalsandor]+$")
@@ -2233,7 +2374,8 @@ assert.equal(context.ACT_TIMER, null);
                 desktop_name = ("Compile native macOS server tray" if "effort-ci" in path
                                 else "Build and test native macOS server tray")
                 desktop = steps[desktop_name]
-                # Even retained mobile units must never suppress a selected tray check.
+                # Retained mobile evidence never suppresses the independent tray step.
+                # Only its own authenticated native proof can adopt tray operations.
                 self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True))
                 self.assertTrue(enabled(workflow_step_scalar(desktop, "if"),
                                         apple=False, desktop=True, retained=True))
@@ -2241,21 +2383,67 @@ assert.equal(context.ACT_TIMER, null);
                 self.assertTrue(enabled(condition, apple=True, desktop=False, retained=False))
                 self.assertFalse(enabled(workflow_step_scalar(desktop, "if"),
                                          apple=True, desktop=False, retained=False))
+                if path.endswith("main-fast-lane.yml"):
+                    receipts = steps["Authenticate compatible original native test receipts"]
+                    self.assertNotIn("if:", receipts)
+                    self.assertIn("run: python3 -m validation.native_receipts", receipts)
+                    adoption = steps["Preserve native adoption provenance"]
+                    self.assertEqual(workflow_step_scalar(adoption, "if"), "always()")
+                    self.assertIn("path: .main-preflight-receipts/native/receipt.json", adoption)
+                    self.assertIn("name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}", adoption)
+                    tv_step = steps["Require native TV navigation journeys"]
+                    tv_guard = workflow_step_scalar(tv_step, "if")
+                    self.assertTrue(enabled(tv_guard, apple=True, desktop=False, retained=False,
+                                            tv_adopted=False))
+                    self.assertFalse(enabled(tv_guard, apple=True, desktop=False, retained=False,
+                                             tv_adopted=True))
+                    tv_artifact = steps["Preserve TV navigation evidence including failures"]
+                    tv_artifact_guard = workflow_step_scalar(tv_artifact, "if")
+                    self.assertTrue(enabled(tv_artifact_guard, apple=True, desktop=False, retained=False,
+                                            tv_adopted=False))
+                    self.assertFalse(enabled(tv_artifact_guard, apple=True, desktop=False, retained=False,
+                                             tv_adopted=True))
                 self.assertNotIn("xcodegen", steps["Verify the pinned Apple toolchain"])
                 for name, step in steps.items():
+                    if path.endswith("main-fast-lane.yml") and name in {
+                        "Authenticate compatible original native test receipts",
+                        "Preserve native adoption provenance",
+                    }:
+                        continue
+                    if path.endswith("main-fast-lane.yml") and name in {
+                        "Compile iOS and tvOS without running simulator tests",
+                        "Require native TV navigation journeys",
+                        "Preserve TV navigation evidence including failures",
+                    }:
+                        guard = workflow_step_scalar(step, "if")
+                        for tv_adopted in (False, True):
+                            self.assertFalse(enabled(guard, apple=False, desktop=True, retained=True,
+                                                     tv_adopted=tv_adopted), name)
+                        self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False,
+                                                tv_adopted=False), name)
+                        self.assertFalse(enabled(guard, apple=True, desktop=False, retained=False,
+                                                 tv_adopted=True), name)
+                        continue
                     if name == "Preserve native macOS server tray check output":
                         self.assertTrue(enabled(workflow_step_scalar(step, "if"),
                                                 apple=False, desktop=True, retained=True))
                         self.assertFalse(enabled(workflow_step_scalar(step, "if"),
                                                  apple=True, desktop=False, retained=False))
                         continue
-                    if name in {"Verify the pinned Apple toolchain", desktop_name}:
+                    if name == "Verify the pinned Apple toolchain":
+                        self.assertNotIn("if:", step)
+                        self.assertIn('grep -Fxq "Build version 27A9275"', step)
+                        continue
+                    if name == desktop_name:
                         continue
                     # Existing mobile work and its always-run artifacts/cleanup are
                     # conditional, so a tray-only selection creates no simulators.
                     guard = workflow_step_scalar(step, "if")
                     self.assertFalse(enabled(guard, apple=False, desktop=True, retained=True), name)
                     self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False), name)
+                    if path.endswith("main-fast-lane.yml"):
+                        self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False,
+                                                tv_adopted=True), name)
                     if path.endswith("/ci.yml"):
                         self.assertFalse(enabled(guard, apple=True, desktop=True, retained=True), name)
 
@@ -2265,26 +2453,51 @@ assert.equal(context.ACT_TIMER, null);
                            (".github/workflows/ci.yml", "apple")):
             step = workflow_step_blocks(workflow_job_blocks(path)[name])[
                 "Build and test native macOS server tray"]
-            commands = "\n".join(workflow_step_literal(step, "run"))
-            for status in (0, 7):
-                with self.subTest(path=path, status=status), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    fake_make = root / "make"
-                    fake_make.write_text("#!/bin/sh\nprintf '%s\\n' \"" + case_line +
-                                         "\"\nexit \"$NATIVE_TRAY_FAKE_EXIT\"\n", encoding="utf-8")
-                    fake_make.chmod(0o755)
-                    completed = subprocess.run(
-                        ["/bin/sh", "-eu", "-c", commands], cwd=root,
-                        env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
-                             "NATIVE_TRAY_FAKE_EXIT": str(status)},
-                        capture_output=True, text=True, check=False)
-                    self.assertEqual(completed.returncode, status)
-                    self.assertNotIn("Test Case", completed.stdout + completed.stderr)
-                    self.assertEqual((root / "target/validation/desktop-macos-check.log").read_text().strip(), case_line)
-                    if status == 0:
-                        self.assertIn("checks passed", completed.stdout)
-                    else:
-                        self.assertNotIn("checks passed", completed.stdout)
+            raw_commands = "\n".join(workflow_step_literal(step, "run"))
+            adoption_modes = (False, True) if path.endswith("main-fast-lane.yml") else (False,)
+            for adopted in adoption_modes:
+                commands = raw_commands.replace(
+                    "${{ steps.native_receipts.outputs.desktop_macos }}", str(adopted).lower())
+                for status in (0, 7):
+                    with self.subTest(path=path, adopted=adopted, status=status), tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        fake_make = root / "make"
+                        args_file = root / "make-args"
+                        fake_make.write_text(
+                            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NATIVE_TRAY_ARGS\"\nprintf '%s\\n' \"" +
+                            case_line + "\"\nexit \"$NATIVE_TRAY_FAKE_EXIT\"\n", encoding="utf-8")
+                        fake_make.chmod(0o755)
+                        log = root / "target/validation/desktop-macos-check.log"
+                        log.parent.mkdir(parents=True)
+                        log.write_text("Test Suite 'All tests' passed\nExecuted 61 tests, with 0 failures (0 unexpected)\n")
+                        completed = subprocess.run(
+                            ["/bin/sh", "-eu", "-c", commands], cwd=root,
+                            env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                                 "NATIVE_TRAY_FAKE_EXIT": str(status),
+                                 "NATIVE_TRAY_ARGS": str(args_file)},
+                            capture_output=True, text=True, check=False)
+                        self.assertEqual(completed.returncode, 0 if adopted else status)
+                        self.assertNotIn("Test Case", completed.stdout + completed.stderr)
+                        log = root / "target/validation/desktop-macos-check.log"
+                        if adopted:
+                            self.assertFalse(args_file.exists(), "adopted builds and tests invoke no make target")
+                            self.assertIn("builds and tests adopted", log.read_text())
+                            self.assertIn("native-adoption artifact", log.read_text())
+                            self.assertNotIn("Test Suite", log.read_text())
+                            self.assertNotIn("Test Case", log.read_text())
+                            from validation.native_receipts import verify_desktop
+                            from validation.python_unit_receipts import ReceiptError
+                            with self.assertRaises(ReceiptError):
+                                verify_desktop(log.read_bytes())
+                            self.assertIn("builds and tests adopted", completed.stdout)
+                        else:
+                            self.assertEqual(args_file.read_text().strip(), "desktop-macos-check")
+                            self.assertEqual(log.read_text().strip(), case_line)
+                        if not adopted and status == 0:
+                            self.assertIn("checks passed", completed.stdout)
+                        elif not adopted:
+                            self.assertNotIn("tests adopted", completed.stdout)
+                            self.assertNotIn("checks passed", completed.stdout)
 
     def test_effort_native_macos_tray_compiles_without_running_units(self):
         effort = workflow_job_blocks(".github/workflows/effort-ci.yml")["apple_compile"]
@@ -2313,7 +2526,17 @@ assert.equal(context.ACT_TIMER, null);
             steps = workflow_step_blocks(workflow_job_blocks(path)[name])
             desktop = steps["Build and test native macOS server tray"]
             commands = workflow_step_literal(desktop, "run")
-            self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
+            commands = [line.strip() for line in commands if line.strip()]
+            if path.endswith("main-fast-lane.yml"):
+                self.assertIn('if [ "${{ steps.native_receipts.outputs.desktop_macos }}" = "true" ]; then', commands)
+                self.assertFalse(any("make desktop-macos-build" in command for command in commands))
+                self.assertTrue(any("builds and tests adopted" in command and "> target/validation/desktop-macos-check.log" in command for command in commands))
+                self.assertIn("else", commands)
+                self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
+                self.assertTrue(any("tests adopted" in line for line in commands))
+                self.assertTrue(any("checks passed" in line for line in commands))
+            else:
+                self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
             self.assertFalse(any("tee " in command or "cat " in command for command in commands),
                              "desktop XCTest records must not enter the mobile receipt log")
             artifact = steps["Preserve native macOS server tray check output"]
@@ -2326,6 +2549,27 @@ assert.equal(context.ACT_TIMER, null);
         effort = read(".github/workflows/effort-ci.yml")
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
+        # Whole-job budget includes checkout/toolchain/cache setup plus the
+        # unchanged all-target compile and vendored denied-warning Clippy.
+        full_jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for lane, rust_job, minutes in (
+            ("effort", effort_jobs["rust_compile"], 30),
+            ("full compiler", full_jobs["rust_compile"], 30),
+        ):
+            with self.subTest(lane=lane):
+                self.assertRegex(rust_job, rf"(?m)^    timeout-minutes: {minutes}$")
+                rust_env = re.search(r"(?ms)^    env:\n(.*?)(?=^    \S)", rust_job)
+                self.assertIsNotNone(rust_env, "bound Cargo concurrency at job scope")
+                self.assertEqual(
+                    [line.strip() for line in rust_env.group(1).splitlines()
+                     if line.strip() and not line.strip().startswith("#")],
+                    ['CARGO_BUILD_JOBS: "1"'],
+                )
+        full_compile_steps = workflow_step_blocks(full_jobs["rust_compile"])
+        self.assertEqual(workflow_step_scalar(
+            full_compile_steps["Compile every Rust target without executing tests"], "run"
+        ), "make effort-rust-check")
+        self.assertRegex(full_jobs["check"], r"(?m)^    timeout-minutes: 120$")
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
         # Both receipt-producing preflights retain a finite fifteen-minute
         # budget so the full history/contracts can publish their evidence.
@@ -3040,6 +3284,96 @@ assert.equal(context.ACT_TIMER, null);
             makefile,
         )
 
+    def test_full_unit_suite_has_dedicated_bounded_resident_capacity(self):
+        job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
+        header = job.split("    steps:\n", 1)[0]
+        self.assertIn(
+            "    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]\n",
+            header,
+        )
+        self.assertIn(
+            "      options: --cpus 3 --memory 16g --memory-swap 18g --pids-limit 4096\n",
+            header,
+        )
+        self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"\n      RUST_TEST_THREADS: "2"\n', header)
+        self.assertRegex(header, r"(?m)^    timeout-minutes: 120$")
+        self.assertIn(
+            FLEET_REGISTRY_EXPR + "/noirr/plurx-ci@sha256:"
+            "3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855",
+            header,
+        )
+        self.assertEqual(
+            workflow_step_scalar(workflow_step_blocks(job)[
+                "Run format, Clippy, unit, and SQLite contracts"], "run"),
+            "make ci-rust-gate",
+        )
+        self.assertNotIn("codegen-units", job)
+        self.assertNotIn("CARGO_PROFILE_", job)
+        self.assertNotIn("continue-on-error", job)
+        carriers = [
+            (name, labels) for name, labels in rostered_runners()
+            if "unit-memory-16g" in labels
+        ]
+        # Only the existing capacity-one registration owns this resident budget.
+        # A second carrier requires a separately reviewed host admission.
+        self.assertEqual([name for name, _ in carriers], ["gha-media1-general-01"])
+        for name, labels in carriers:
+            self.assertIn("unit-memory-12g", labels, "retain existing consumers")
+            self.assertFalse(
+                {"general", "high-cpu", "ci-store", "ci-topology"} & labels, name
+            )
+
+    def test_web_layout_budget_covers_cold_build_and_all_browser_stages(self):
+        job = workflow_job_blocks(".github/workflows/ci.yml")["web_layout"]
+        self.assertRegex(job, r"(?m)^    timeout-minutes: 45$")
+        steps = workflow_step_blocks(job)
+        required = (
+            ("Check every affected web layout", "make ui-check"),
+            ("Run the playback-control reporter in a real browser", "make control-browser-check"),
+            ("Test Cinema remote browser contracts", "make cinema-remote-browser-check"),
+            ("Test grouped library rows in a real browser", "make library-rows-browser-check"),
+            ("Test subtitle model setup and generated-caption completion in a real browser", "make subtitle-generation-browser-check"),
+        )
+        positions = []
+        for name, command in required:
+            self.assertEqual(workflow_step_scalar(steps[name], "run"), command)
+            positions.append(list(steps).index(name))
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("continue-on-error", job)
+        ui = read("Makefile").split("ui-check:", 1)[1].split(".PHONY:", 1)[0]
+        self.assertIn("scripts/ui-baseline --self-host --check", ui)
+        self.assertIn("python3 scripts/live-tv-browser --self-host --out target/live-tv-browser", ui)
+        capture = read("scripts/ui-baseline")
+        self.assertIn('p.add_argument("--timeout", type=int, default=45000,', capture)
+        self.assertRegex(capture, r"(?m)^                attempts = 2$")
+
+    def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for name, minutes in (("check", 120), ("cluster_store_legacy", 95), ("cluster_wal", 60)):
+            with self.subTest(job=name):
+                self.assertRegex(jobs[name], rf"(?m)^    timeout-minutes: {minutes}$")
+                # The serial Store suite is not a compiler lane; the full unit
+                # and WAL compilers bound Cargo concurrency on their queues.
+                if name == "cluster_store_legacy":
+                    self.assertNotIn("CARGO_BUILD_JOBS", jobs[name])
+        unit = workflow_step_blocks(jobs["check"])
+        self.assertEqual(workflow_step_scalar(
+            unit["Run format, Clippy, unit, and SQLite contracts"], "run"), "make ci-rust-gate")
+        store = workflow_step_blocks(jobs["cluster_store_legacy"])
+        # The unretained branch still runs the complete Store suite; main's
+        # retained-unit continuation branch is pinned by its own contract.
+        self.assertIn(
+            "make cluster-store-check 2>&1 | tee target/validation/cluster-store.log",
+            "\n".join(workflow_step_literal(store["Run replicated Store contracts"], "run")),
+        )
+        wal = workflow_step_blocks(jobs["cluster_wal"])
+        self.assertIn("make cluster-wal-check", "\n".join(workflow_step_literal(
+            wal["Run exact Hiqlite and WAL recovery regressions"], "run")))
+        self.assertIn("execution_mode != 'accelerated'", jobs["cluster_store_legacy"])
+        makefile = read("Makefile")
+        self.assertIn("--test store_contract -- --test-threads=1", makefile)
+        self.assertIn("--features cluster-read-cost-validation,hiqlite-contract-tests", makefile)
+
     def test_store_shards_are_dynamic_disjoint_and_roll_out_behind_one_verdict(self):
         workflow = read(".github/workflows/ci.yml")
         shards = read(".github/workflows/store-shards.yml")
@@ -3535,7 +3869,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 7)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=72", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=76", contract_commands[1])
         self.assertIn("PLURX_EXPECT_TEST_NAMES=", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
@@ -4105,7 +4439,7 @@ assert.equal(context.ACT_TIMER, null);
             "Linux", "X64", "lab", "general", "high-cpu", "ffmpeg-6"
         )
         android = local("Linux", "X64", "lab", "android-kvm")
-        apple = local("macOS", "ARM64", "lab", "apple", "xcode-27")
+        apple = local("macOS", "ARM64", "lab", "apple", "xcode-27.1")
         ci_store = local("Linux", "X64", "lab", "ci-store")
         ci_topology = local("Linux", "X64", "lab", "ci-topology")
         release_general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
@@ -4138,10 +4472,9 @@ assert.equal(context.ACT_TIMER, null);
                     and name == "apple_compile"
                 ):
                     expected = apple
-                elif path == ".github/workflows/ci.yml" and name in {
-                    "check",
-                    "cluster_daemon",
-                }:
+                elif path == ".github/workflows/ci.yml" and name == "check":
+                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
+                elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
                     # The pinned private CI image supplies shipped FFmpeg 8;
                     # host trust labels remain unchanged, without a FFmpeg-6
                     # installation requirement on these image-owned jobs.

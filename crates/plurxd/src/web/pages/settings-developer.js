@@ -226,9 +226,9 @@ function systemAttentionHtml(sys){
   const storage=sys.storage||{}, mounts=(storage.mounts||[]).filter(m=>m.read_bps==null||m.cache_suspect);
   const messages=mounts.map(m=>`<p><b>${esc((m.roots||[]).join(', ')||'Storage location')}</b><br>${esc(m.note||'No current read measurement is available.')} ${storage.measured_at?`<span class="muted">Observed ${fmtAgo(storage.measured_at)}.</span>`:''}</p>`);
   if(!sys.ffmpeg_version)messages.push('<p><b>Media tools unavailable.</b> Scanning and transcoding need the configured FFmpeg executable.</p>');
-  if(sys.tone_map&&!sys.tone_map.ran&&sys.tone_map.verdicts?.some(v=>v.rejected))messages.push(`<p><b>HDR processing has unverified capabilities.</b> ${esc(sys.tone_map.verdicts.find(v=>v.rejected)?.rejected||'See the capability details below.')}</p>`);
+  if(sys.tone_map&&!sys.tone_map.ran&&sys.tone_map.verdicts?.some(v=>v.rejected))messages.push(`<p><b>HDR processing checks have not run.</b> ${esc(sys.tone_map.verdicts.find(v=>v.rejected)?.rejected||'See the capability details below.')}</p>`);
   if(sys.login_proxy_advisory)messages.push('<p><b>Login throttling sees most clients at one proxy address.</b> Configure this node’s <code>server.trusted_proxies</code> only if that proxy overwrites or appends <code>X-Forwarded-For</code> correctly. This is advisory; sign-in remains available.</p>');
-  return messages.length?`<section class="system-attention"><h2>Needs attention on this node</h2>${messages.join('')}<div class="row"><a class="ghost sm" href="#/settings/libraries">Review library locations</a><a class="ghost sm" href="#/settings/cluster">Cluster health</a></div></section>`:'';
+  return messages.length?`<section class="system-attention"><h2>Needs attention · ${messages.length} item${messages.length===1?'':'s'}</h2><details><summary>Storage, media or sign-in warnings</summary>${messages.join('')}<div class="row"><a class="ghost sm" href="#/settings/libraries">Review library locations</a><a class="ghost sm" href="#/settings/cluster">Cluster health</a></div></details></section>`:'';
 }
 
 function toggleMobileSearch(){
@@ -337,7 +337,7 @@ async function saveCinemaRemoteInvitations(button){
 }
 
 function diagnosticDeveloperCard(){return setCard(`${cardHead("Diagnostic ZIP reports","Bounded local evidence for bug and issue attachments.",'<span class="pill">Qualification pending</span>')}<p>Help → Report a problem saves a ZIP with a readable summary and structured evidence. Attach it to an issue using your usual reporting channel. Web download and phone sharing are available. Native TVs offer a temporary local QR download on trusted Wi-Fi; physical-device sampling remains.</p>${devGraduation("archive export, privacy and recovery have applicable client and device receipts, including native TV file transfer.","this advisory card is removed; reporting remains in Help and the player.")}<button type="button" onclick="showDiagnostics()">Open reporting</button>`);}
-function developerPanel(settings,readiness){
+function developerPanel(settings,readiness,httpsCard=""){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
   // lives in its own section; the links below are the way back to them.
@@ -348,12 +348,13 @@ function developerPanel(settings,readiness){
     ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
   return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
-      ${destinations}${diagnosticDeveloperCard()}
+      ${destinations}${httpsCard}${diagnosticDeveloperCard()}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
       <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}
+      <div class="setsection" id="enable-display-target-hdr10"><h2>Display-targeted HDR10-E / SDR</h2><p>Per-shot L1 mapping for the viewer's reported HDR peak or explicit SDR capability. Readiness is advisory; the saved choice always applies to new playback.</p></div>${displayTargetHdr10Card(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
@@ -405,7 +406,7 @@ function subtitleTranscriptionForm(settings,catalog={models:[],workers:[]}){
       <label class="tog"><span>Enable offline subtitle generation</span><input id="st-enabled" type="checkbox"${settings.enabled?" checked":""}></label>
       <p class="hint">Disabled pauses queued work and refuses new requests. A running attempt may finish; Cancel it in Activity. Readiness never changes this saved choice.</p>
       <label for="st-mode">Setup</label><select id="st-mode" onchange="subtitleSetupMode()"><option value="managed"${managed?" selected":""}>Managed installation</option><option value="advanced"${managed?"":" selected"}>Advanced · existing local installation</option></select>
-      <div id="st-managed"${managed?"":" hidden"}><label for="st-model-id">Model for new requests</label><select id="st-model-id" onchange="subtitleSetupModelChanged()">${subtitleModelOptions(catalog.models,settings.model_id)}</select><p class="hint">Models download only when you choose Install. Audio and captions stay on your servers.</p></div>
+      <div id="st-managed"${managed?"":" hidden"}><label for="st-model-id">Model for new requests</label><select id="st-model-id" onchange="subtitleSetupModelChanged()">${subtitleModelOptions(catalog.models,settings.model_id)}</select><p class="hint">Models download only when you choose Download and test. Audio and captions stay on your servers.</p></div>
       <div id="st-advanced"${managed?" hidden":""}><label for="st-command">Existing whisper.cpp executable on the worker</label><input id="st-command" autocomplete="off" value="${esc(advanced.command||"whisper-cli")}"><label for="st-model">Existing local model file on the worker</label><input id="st-model" autocomplete="off" value="${esc(advanced.model_path||"")}"></div>
       <label for="st-language">Default spoken language</label><select id="st-language">${subtitleLanguageOptions((catalog.models||[]).find(model=>model.id===settings.model_id)?.languages||(catalog.models||[]).flatMap(model=>model.languages||[]),settings.language||"en")}</select>
       <label for="st-interval">Check for missing subtitles every (minutes; 0 for manual requests only)</label><input id="st-interval" type="number" min="0" max="10080" step="1" value="${esc(String(settings.interval_mins||0))}">
@@ -415,14 +416,14 @@ function subtitleTranscriptionForm(settings,catalog={models:[],workers:[]}){
       <div id="st-model-evidence">${subtitleModelEvidence(catalog,settings.model_id)}</div><div id="st-operation-status" role="status" aria-live="polite"></div>`;
 }
 function subtitleModelStatus(status){
-  return ({missing:"missing",installed:"installed",verified:"verified",verification_failed:"verification failed",unverified_cache:"Download cached · install to finish setup",unknown:"unknown"})[status]||"unknown";
+  return ({missing:"missing",installed:"installed",verified:"verified",verification_failed:"verification failed",unverified_cache:"Download cached · download and test to finish setup",unknown:"unknown"})[status]||"unknown";
 }
 function subtitleModelEvidence(catalog,modelId){
   const model=(catalog.models||[]).find(row=>row.id===modelId);
-  return `<h3>Install and test a model</h3>${model?`<p>${esc(model.label||model.id)} · ${esc(subtitleModelSize(model.download_bytes))} · ${esc(model.license||"")}</p><details class="setdetails"><summary>Advanced model identity</summary><p class="hint">SHA-256: ${esc(model.sha256||"")} · ${esc(model.source||"")}</p></details>`:`<p class="hint">Select a catalog model to install.</p>`}
+  return `<h3>Download and test a model</h3>${model?`<p>${esc(model.label||model.id)} · ${esc(subtitleModelSize(model.download_bytes))} · ${esc(model.license||"")}</p><details class="setdetails"><summary>Advanced model identity</summary><p class="hint">SHA-256: ${esc(model.sha256||"")} · ${esc(model.source||"")}</p></details>`:`<p class="hint">Select a catalog model to download and test.</p>`}
     <p class="hint">Choose named workers that can run this engine. Installation and testing use background jobs. Installed alone does not mean verified.</p>
     ${(catalog.workers||[]).map(worker=>{const fresh=Number.isFinite(worker.expires_at_ms)&&worker.expires_at_ms>Date.now()&&worker.observed_at_ms<=Date.now()+30000;const entry=(worker.models||[]).find(row=>row.model_id===modelId);const status=fresh?(entry?.status||"missing"):"unknown";return `<div><label class="chk"><input type="checkbox" name="st-worker" value="${esc(worker.node_id)}"${worker.eligible&&fresh&&worker.engine?.status==="available"?" checked":" disabled"}> ${esc(worker.label||worker.node_id)}</label> · ${esc(subtitleModelStatus(status))} · engine ${esc(fresh?worker.engine?.status||"unknown":"unknown")}${entry?.verified_at_ms?` · tested ${esc(new Date(entry.verified_at_ms).toLocaleString())}`:""}${entry?.reason?`<p class="hint">${esc(subtitleReason(entry.reason))}</p>`:""}${!fresh?'<p class="hint">Worker observation is stale; readiness is unknown.</p>':""}</div>`;}).join("")||'<p class="hint">No eligible worker observations are available.</p>'}
-    <button class="sm" onclick="subtitleModelOperation('install',this)">Install selected model</button> <button class="sm" onclick="subtitleModelOperation('verify',this)">Test selected model</button> <button class="ghost sm" onclick="refreshSubtitleModels()">Refresh worker status</button>`;
+    <button class="sm" onclick="subtitleModelOperation('install',this)">Download and test</button> <button class="sm" onclick="subtitleModelOperation('verify',this)">Test selected model</button> <button class="ghost sm" onclick="refreshSubtitleModels()">Refresh worker status</button>`;
 }
 function subtitleSetupEdited(){const panel=subtitleSetupPanel();if(panel?._subtitleSetup)panel._subtitleSetup.edit++;}
 function subtitleSetupMode(){const advanced=subtitleSetupInput("st-mode").value==="advanced";document.getElementById("st-managed").hidden=advanced;document.getElementById("st-advanced").hidden=!advanced;}
@@ -490,8 +491,22 @@ async function subtitleModelOperation(action,button){
 function subtitleModelOutcome(outcome){
   return ({accepted:"queued",existing:"already queued",queue_full:"queue full",conflict:"configuration changed",source_changed:"source changed",no_demand:"no work needed",unsupported_worker:"unsupported worker",unavailable_worker:"worker unavailable",worker_not_current:"worker is no longer current",insufficient_disk:"storage unavailable",model_download_failed:"download failed",model_verification_failed:"verification failed",engine_unavailable:"engine unavailable",missing_model:"model missing",disabled:"disabled",configuration_conflict:"configuration changed"})[outcome]||"not accepted";
 }
+function subtitleModelOperationPhase(job){
+  const phases={queued:"Queued",waiting_for_capacity:"Waiting for server capacity",downloading:"Downloading model",verifying:"Verifying model",decoding:"Decoding test audio",transcribing:"Running speech test",validating:"Validating",publishing:"Publishing",succeeded:"Ready",failed:"Failed",cancelled:"Cancelled",running:"Running",cancelling:"Cancelling"};
+  if(["succeeded","failed","cancelled"].includes(job?.state))return phases[job.state];
+  if(typeof job?.phase==="string"&&Object.hasOwn(phases,job.phase))return phases[job.phase];
+  if(typeof job?.state==="string"&&Object.hasOwn(phases,job.state))return phases[job.state];
+  return "Status unavailable";
+}
+function subtitleModelOperationReason(reason){
+  if(reason==="output_invalid")return "The model test could not prepare or validate captions. Check server storage and logs, then retry Test.";
+  if(reason==="insufficient_disk")return "This worker could not safely reserve model storage. Free space or check its storage support, then retry Download and test.";
+  if(reason==="model_download_failed")return "The model download failed. Check this worker’s network access, then retry Download and test.";
+  if(reason==="model_verification_failed")return "The model failed its integrity or transcription test. Retry Download and test.";
+  return subtitleReason(reason);
+}
 function subtitleModelOperationsHtml(setup){
-  return (setup.operationRows||[]).map(row=>{const job=row.job,label=(setup.catalog.workers||[]).find(worker=>worker.node_id===row.node_id)?.label||row.node_id,reason=job?.reason||row.reason||(!["accepted","existing"].includes(row.outcome)?row.outcome:null);return `<p>${esc(label)}: ${esc(job?.phase||job?.state||subtitleModelOutcome(row.outcome))}${reason?" · "+esc(subtitleReason(reason)):""}. ${subtitleJobLink(row.job_id)}</p>`;}).join("")||"No operation was accepted.";
+  return (setup.operationRows||[]).map(row=>{const job=row.job,label=(setup.catalog.workers||[]).find(worker=>worker.node_id===row.node_id)?.label||row.node_id,reason=job?.reason||row.reason||(!["accepted","existing"].includes(row.outcome)?row.outcome:null);return `<p>${esc(label)}: ${esc(job?subtitleModelOperationPhase(job):(["accepted","existing"].includes(row.outcome)?(row.outcome==="accepted"?"Queued":"Already queued"):subtitleModelOutcome(row.outcome)))}${reason?" · "+esc(subtitleModelOperationReason(reason)):""}. ${subtitleJobLink(row.job_id)}</p>`;}).join("")||"No operation was accepted.";
 }
 function retrySubtitleModelOperations(){
   const setup=subtitleSetupPanel()?._subtitleSetup;if(!setup||!subtitleUiCurrent(setup.capture))return;
@@ -582,8 +597,8 @@ async function saveJellyfinCompatibility(btn){
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }
 function dolbyVisionHdrProcessingCard(settings,readiness){
-  return setCard(`${cardHead("Dolby Vision for HDR output","Use supported Dolby Vision picture information when delivering HDR.","")}
-    ${togRow("dv-hdr-processing","Process Dolby Vision for HDR output","Default off. Applies to new playback when processing is available.",!!settings.dolby_vision_hdr_processing)}
+  return setCard(`${cardHead("Dolby Vision processing","Use supported Dolby Vision picture information when delivering HDR or display-targeted SDR.","")}
+    ${togRow("dv-hdr-processing","Process Dolby Vision for HDR and targeted SDR","Default off. Applies to new playback when processing is available.",!!settings.dolby_vision_hdr_processing)}
     <p class="hint">New playback attempts supported Dolby Vision processing when the worker has the required tools and resources. Unsupported sources or processing failures use compatible playback. Native Dolby Vision and required color conversion are preserved. Readiness never prevents saving. A running movie is unchanged.</p>
     ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_backend_reference","Qualified backend and reference","Validate HDR output against an independent reference.")}
     ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_encoder_matrix","Production encoder matrix","Test processing with the encoders used by playback workers.")}
@@ -608,7 +623,9 @@ function dolbyVisionFelReencodeCard(settings,readiness){
   return setCard(`${cardHead("FEL preservation for Profile 8.1","Use the enhancement layer when making a new Profile 8.1 picture.","")}
     ${togRow("dv-fel-reencode","Preserve FEL when converting to Profile 8.1","Default off. Dolby Vision conversion must also be allowed.",!!settings.dolby_vision_fel_reencode)}
     <p class="hint">This preference never enables conversion by itself. New playback attempts FEL reconstruction for supported Profile 7 sources when the worker has the required tools and resources. Unsupported sources or processing failures keep the existing permitted conversion fallback. Native Dolby Vision is preserved. Readiness never prevents saving. A running movie is unchanged.</p>
-    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_backend_reference","Qualified backend and reference","Independently validate the reconstructed picture and converted output, including HDR10 compatibility.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_backend_reference","Qualified backend and reference","The processing helper on this node, the conversion permission the reconstructed 8.1 replaces, and the composition proof against the helper's FEL master render.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_worker_budget","Worker CPU budget for one live reconstruction","Where this node's renderer decodes, and whether one FEL compose + encode graph fits its software budget.")}
+    ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_live_slot","Live reconstruction slot","One live FEL reconstruction per worker; a play beyond it gets the plain conversion with the reason.")}
     ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_encoder_matrix","Production encoder matrix","Test reconstruction and conversion with the encoders used by playback workers.")}
     ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_bitrate_quality","Quality at delivery bitrates","Compare picture quality at delivery bitrates with the existing conversion.")}
     ${devReq(readiness,"dolby_vision_fel_reencode","dv_fel_physical_playback","Physical playback validation","Test Profile 8.1 output, startup, seeking, fallback and sustained playback on supported Dolby Vision devices.")}
@@ -689,9 +706,129 @@ async function saveSdrMasterCodecs(btn){
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }
 
+// Addressed-node HTTPS controls are independent of replicated /settings.
+function httpsSettingsMount(value,error){
+  return `<div id="settings-https">${httpsSettingsCard(value,error)}</div>`;
+}
+function httpsConnectionUrl(value,href=location.href){
+  const url=new URL(href);
+  if(!value?.active?.enabled) return null;
+  url.protocol="https:";url.port=String(value.active.port);
+  url.username="";url.password="";url.pathname="/";url.search="";url.hash="";
+  return url.href;
+}
+function httpsSettingsCard(value,error){
+  if(!value) return setCard(`${cardHead("HTTPS","Connections to this node; HTTP remains available.","")}
+    <p>${error?`HTTPS settings are unavailable: ${esc(error)}`:"Loading this node’s HTTPS settings…"}</p>
+    <button class="ghost sm" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
+  const desired=value.desired,active=value.active,cert=value.certificate;
+  const fields=new Set(value.overrides||[]),locked=name=>fields.has(name)?" disabled":"";
+  const link=httpsConnectionUrl(value);
+  return setCard(`${cardHead("HTTPS","Connections to this node; HTTP remains available.",`<span class="pill">${active.enabled?"Active":"Inactive"}</span>`)}
+    <p>Addressed node: <code>${esc(value.node_id)}</code> · revision <code>${esc(value.revision)}</code></p>
+    <p>${value.restart_required?"Saved changes require this node to restart.":"The desired configuration matches this process."} Save never restarts the server. For Docker, apply with <code>make docker-up</code> (source) or <code>make docker-image-up</code> (prebuilt) to update published ports; restarting an existing container cannot change its ports.</p>
+    <details><summary>Saved, desired and active configuration</summary><table><thead><tr><th>State</th><th>Enabled / port</th><th>Identity files or generated names</th></tr></thead><tbody>${[["Saved before environment",value.saved],["Desired next boot",desired],["Active process",active]].map(([label,config])=>`<tr><td>${label}</td><td>${config.enabled?"On":"Off"} / ${esc(config.port)}</td><td>${config.cert_file?`${esc(config.cert_file)}<br>${esc(config.key_file)}`:`Self-signed: ${esc(config.sans.join(", "))}`}</td></tr>`).join("")}</tbody></table></details>
+    <label class="chk"><input id="https-enabled" type="checkbox"${desired.enabled?" checked":""}${locked("enabled")}> Enable HTTPS after restart</label>
+    <div class="setrow"><label for="https-port">HTTPS port</label><input id="https-port" type="number" min="1" max="65535" value="${esc(desired.port)}"${locked("port")}></div>
+    <p>Leave both paths empty for a persistent self-signed identity. Supplied paths refer to files on the server or inside its container, never this browser’s computer.</p>
+    <div class="setrow"><label for="https-cert">Certificate chain PEM path</label><input id="https-cert" value="${esc(desired.cert_file)}"${locked("cert_file")}></div>
+    <div class="setrow"><label for="https-key">Private key PEM path</label><input id="https-key" value="${esc(desired.key_file)}"${locked("key_file")}></div>
+    <div class="setrow"><label for="https-sans">Self-signed DNS names and IP addresses (one per line)</label><textarea id="https-sans" rows="4"${locked("sans")}>${esc(desired.sans.join("\n"))}</textarea></div>
+    <p>Generated identities retain their key and certificate across restarts and disable/enable. Changing their names or replacing an expired identity requires explicit file replacement while stopped. Add every hostname or address clients will use before first enable.</p>
+    ${fields.size?`<p>Environment-controlled fields: ${esc([...fields].join(", "))}. Their saved underlying values are preserved.</p>`:""}
+    ${cert?`<p>Active identity: ${esc(cert.mode)} · expires ${esc(new Date(cert.expires_at_seconds*1000).toISOString())}<br>SHA-256 <code>${esc(cert.sha256)}</code><br>Names: ${esc(cert.sans.join(", "))}</p><button class="ghost sm" onclick="downloadHttpsCertificate(this)">Download active public certificate chain</button>`:"<p>No HTTPS identity is active in this process.</p>"}
+    ${link?`<p><a href="${esc(link)}" target="_blank" rel="noopener noreferrer">Open unverified HTTPS address</a> · This uses the browser’s current hostname and active port. Verify this node’s identity and trust first; the new origin needs its own sign-in.</p>`:""}
+    ${value.durability_confirmed===false?'<p class="err" role="alert">The settings were published, but directory sync could not confirm crash durability. This revision is current; reload before another save and check local storage.</p>':""}
+    ${devGraduation("browser and native client trust, streaming, cluster and physical-device qualification are recorded.","the permanent HTTPS controls move to Settings → System.")}
+    <div class="err" id="https-error" role="alert"></div><button onclick="saveHttpsSettings(this)">Save HTTPS settings</button> <button class="ghost" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
+}
+function applyHttpsSettings(value,error){
+  const mount=document.getElementById("settings-https");
+  if(mount) mount.innerHTML=httpsSettingsCard(value,error);
+}
+async function loadHttpsCard(generation){
+  try{
+    const value=await loadSettingsKey("https",generation);
+    if(settingsCurrent(generation,"developer")) applyHttpsSettings(value);
+  }catch(error){
+    if(!error?.staleHttps&&settingsCurrent(generation,"developer")) applyHttpsSettings(null,error.message||"request failed");
+  }
+}
+async function reloadHttpsSettings(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(!settingsCurrent(generation,"developer")) return;
+  if(btn)btn.disabled=true;
+  SETTINGS_HTTPS_EPOCH++;SETTINGS_LOADED.delete("https");
+  await loadHttpsCard(generation);
+}
+async function saveHttpsSettings(btn){
+  const generation=PAGE_RENDER_GENERATION,mount=document.getElementById("settings-https"),snapshot=SETTINGS_DATA.https;
+  if(!snapshot||!settingsCurrent(generation,"developer")||!mount) return;
+  const err=document.getElementById("https-error"),desired={...snapshot.desired};
+  // Env-owned fields are sent unchanged, preserving their masked saved values.
+  const fields=new Set(snapshot.overrides||[]),read=(name,id,parse)=>{
+    if(!fields.has(name)) desired[name]=parse(document.getElementById(id));
+  };
+  read("enabled","https-enabled",node=>node.checked);
+  read("port","https-port",node=>Number(node.value));
+  read("cert_file","https-cert",node=>node.value.trim());read("key_file","https-key",node=>node.value.trim());
+  read("sans","https-sans",node=>node.value.split(/\r?\n/).map(name=>name.trim()).filter(Boolean));
+  const epoch=++SETTINGS_HTTPS_EPOCH;
+  if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const value=await api("/system/https",{method:"PUT",body:{node_id:snapshot.node_id,revision:snapshot.revision,desired}});
+    if(epoch!==SETTINGS_HTTPS_EPOCH||!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
+    SETTINGS_HTTPS_EPOCH++;
+    SETTINGS_DATA.https=value;SETTINGS_LOADED.add("https");applyHttpsSettings(value);
+    toast("HTTPS settings saved; restart this node to apply changes");
+  }catch(error){
+    if(epoch!==SETTINGS_HTTPS_EPOCH||!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
+    if(err)err.textContent=(error.message||"Save failed")+(error.status===409?" Reload this node before editing again.":"");
+    if(btn)btn.disabled=false;
+  }
+}
+async function downloadHttpsCertificate(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(btn)btn.disabled=true;
+  try{
+    const response=await api("/system/https/certificate",{raw:true}),blob=await response.blob();
+    if(!settingsCurrent(generation,"developer")) return;
+    const url=URL.createObjectURL(blob),link=document.createElement("a");
+    link.href=url;link.download="plurx-https-certificate.pem";link.click();URL.revokeObjectURL(url);
+  }catch(error){
+    if(settingsCurrent(generation,"developer")){
+      const err=document.getElementById("https-error");if(err)err.textContent=error.message||"Certificate download failed";
+    }
+  }finally{if(btn&&btn.isConnected)btn.disabled=false;}
+}
+
 function subtitleTranslationCard(){
-  return setCard(`${cardHead("English subtitle translation","Translate foreign speech while the movie keeps playing.",'<span class="pill">Experimental accuracy</span>')}
-    <p>Install a compatible multilingual model, then choose Translate to English in the player. Partial captions may lag or be wrong; original captions and Off remain available.</p>
-    <p class="hint">Supported on local web direct playback with one audio stream. Other delivery routes, multiple audio streams and native clients remain unsupported.</p>
-    <button type="button" class="sm" onclick="openTranslationSettings()">Configure English translation</button><div id="subtitle-translation-form"></div>`,{id:"enable-subtitle-translation"});
+  return setCard(`${cardHead("AI captions and subtitle translation","Generate captions from speech, translate speech to English, or translate an existing text subtitle.",'<span class="pill">Accuracy needs checking</span>')}
+    <p>Download and test the speech model on a worker, then choose Generate or translate speech in the player. A separate text model translates existing text subtitles. Each setup shows download progress, worker readiness and an explicit retry.</p>
+    <p class="hint">Web, iPhone and Apple TV use the selected audio track and the current playback timeline. Shared viewers can read committed AI captions; a Source administrator requests missing coverage. Partial captions may lag or be wrong. Original captions and Off remain available.</p>
+    <button type="button" class="sm" onclick="openTranslationSettings()">Set up speech captions</button><div id="subtitle-translation-form"></div>
+    <button type="button" class="sm" onclick="openTextTranslationSettings()">Set up subtitle text translation</button><div id="text-subtitle-translation-settings"></div>`,{id:"enable-subtitle-translation"});
+}
+
+function displayTargetHdr10Card(settings,readiness){
+  return setCard(`${cardHead("Display-targeted HDR10-E / SDR","Map each shot to a supported display bucket with Dolby display management. Shots carry the colourist's creative trims (CM v4 L8, CM v2.9 L2) when the title has them; Playback info says whether every shot, some shots or none carried them. Displays may still apply their own tone mapping.")}
+    ${togRow("dv-display-target","Display-targeted HDR10-E / SDR","Default off. New HDR10-E sessions use a supported peak; explicit SDR displays use 100-nit BT.709 gamma 2.4. Unknown HDR peaks keep the master grade; ineligible SDR titles keep ordinary tone mapping.",!!settings.dolby_vision_display_target)}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_helper","Helper installed and HDR10-E enabled","Readings describe this node and never disable this switch or its Save.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_peak","Client peak reports","Platform and viewer reports select the same bucket; the source is attribution only.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_scan","Complete-title L1 scan","A whole title must have valid L1; missing facts keep the existing HDR master or ordinary SDR route.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_cache","Bucket storage on this node","Targeted playback renders live. Pre-encodes and retained VOD stay master-only. Private roots retain existing reader and reservation fences.")}
+    ${devGraduation("output metadata, live delivery and named physical HDR and SDR display qualification pass with truthful L1-only reporting.","the permanent targeting switch moves to Playback, preserving the saved choice.")}
+    <div class="err" id="dv-display-target-error" role="alert"></div>${setCardFoot("saveDisplayTargetHdr10")}`,{id:"dv-display-target-card"});
+}
+async function saveDisplayTargetHdr10(btn){
+  const card=document.getElementById("dv-display-target-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const err=document.getElementById("dv-display-target-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{dolby_vision_display_target:(/** @type {HTMLInputElement} */ (document.getElementById("dv-display-target"))).checked}}));
+    if(!card||document.getElementById("dv-display-target-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=displayTargetHdr10Card(saved,DEVELOPER_READINESS);
+    toast("Display targeting saved; applies to new playback");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
 }

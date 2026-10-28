@@ -1058,7 +1058,7 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn production_shared_executor_retains_abandoned_other_peer_terminal_status() {
         use crate::store::state_machine::sqlite::TypeConfigSqlite;
         use crate::transport_status::{
@@ -1174,6 +1174,9 @@ mod tests {
             None,
             InboundSnapshotDisposition::Retrying("snapshot_connection_closed"),
         );
+        // Retention compares the entire observation, including sampled ages
+        // and deadline remaining; only work ownership may change between reads.
+        let sampled_at = time::Instant::now();
         let running_and_terminal = status.snapshot();
         assert_eq!(running_and_terminal.observations.len(), 2);
         let running_status = &running_and_terminal.observations[0];
@@ -1206,6 +1209,11 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(started.lock().await.as_slice(), ["running"]);
+        assert_eq!(
+            time::Instant::now(),
+            sampled_at,
+            "sampling clock stays fixed"
+        );
         let completed = status.snapshot();
         assert_eq!(completed.observations.len(), 2);
         assert_eq!(completed.observations[0].peer_node_id, 1);

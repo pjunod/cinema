@@ -917,7 +917,7 @@ impl TranscodeManager {
                     });
             if let Some(encoding) = &facts.encoding {
                 let height = encoding.options.target_height;
-                let grade = encoding.options.pipeline.output_grade();
+                let grade = encoding.delivered_output_grade();
                 let file = encoded_vod_presentation_file(
                     facts.file,
                     height,
@@ -982,6 +982,7 @@ impl TranscodeManager {
                     // while the source's own record says 7. Passing `false`
                     // here would advertise `dvh1.07.06` for that media.
                     convert_dolby_vision: facts.convert_dolby_vision,
+                    dual_layer_as_copied: false,
                 },
                 probe_json.as_deref(),
             );

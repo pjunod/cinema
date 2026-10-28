@@ -7,6 +7,7 @@ use plurx_core::store::{
         JobSettlement,
     },
     subtitle_translation::{RangeRecipe, SourceRevision, TranslationProfile},
+    subtitle_translation_mutation::{TranslationAction, TranslationMutation},
 };
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -33,7 +34,24 @@ fn demand_wants(d: &Value, core: i64, width: i64) -> bool {
     let ahead = (d["playback_rate"].as_f64().unwrap_or(1.0) as i64 + 1).min(2);
     core >= current && core <= current + ahead
 }
-async fn interested(state: &AppState, source: &JobPayload) -> Result<bool, StoreError> {
+async fn interested(
+    state: &AppState,
+    source: &JobPayload,
+    running_job: Option<&str>,
+) -> Result<bool, StoreError> {
+    if matches!(source, JobPayload::SubtitleTranslationRange { .. }) {
+        if let Some(job_id) = running_job {
+            return Ok(read(
+                state,
+                TranslationQuery::RangeInterest {
+                    job_id: job_id.into(),
+                },
+            )
+            .await?
+            .first()
+            .is_some_and(|row| row["interested"] == true));
+        }
+    }
     let (op, epoch, core) = match source {
         JobPayload::SubtitleTranslationPrepare {
             operation_id,
@@ -81,7 +99,141 @@ async fn bound_this_boot(
         b["operation_id"] == operation_id
             && number(&b["operation_epoch"]) == Some(epoch)
             && b["boot_id"] == state.subtitle_models.boot_id.as_str()
+            && b["preparation_ready"] == true
     }))
+}
+
+/// Existing signed node observations decide availability; no new liveness timer.
+fn incumbent_unavailable(
+    outcome: &crate::http::internal_activity::PeerActivityOutcome,
+    node: &str,
+    now: i64,
+) -> bool {
+    use crate::http::internal_activity::PeerActivityOutcome;
+    match outcome {
+        PeerActivityOutcome::Answered(snapshot) if snapshot.node_id == node => {
+            snapshot.workers.as_ref().is_none_or(|worker| {
+                !worker.accepting_work
+                    || worker.observed_at_ms > now.saturating_add(5_000)
+                    || worker.observed_at_ms < now.saturating_sub(30_000)
+            })
+        }
+        _ => true,
+    }
+}
+
+/// A fresh accepted Create/Demand may recover only its own operation on this
+/// qualified receiver. Root Stop epochs, viewer demands and cached bytes stay intact.
+pub(crate) async fn reconcile_producer(
+    state: &AppState,
+    operation_id: &str,
+    user_id: i64,
+) -> Result<(), StoreError> {
+    let Some(op) = read(
+        state,
+        TranslationQuery::Operation {
+            operation_id: operation_id.into(),
+        },
+    )
+    .await?
+    .pop() else {
+        return Ok(());
+    };
+    if op["cached_complete"] == true
+        || matches!(
+            op["state"].as_str(),
+            Some("stopped" | "failed" | "complete")
+        )
+    {
+        return Ok(());
+    }
+    let Some(epoch) = number(&op["operation_epoch"]) else {
+        return Ok(());
+    };
+    let Some(view) = number(&op["view_revision"]) else {
+        return Ok(());
+    };
+    let Some(target) = op["target_node_id"].as_str() else {
+        return Ok(());
+    };
+    let Some(preparation) = op["preparation_job_id"].as_str() else {
+        return Ok(());
+    };
+    if target != state.node_id {
+        let Ok(outcome) = state.peer_activity.owner_snapshot(target).await else {
+            return Ok(());
+        };
+        if !incumbent_unavailable(&outcome, target, crate::state::clock_ms()) {
+            return Ok(());
+        }
+    } else if op["preparation_state"] == "queued"
+        || op["preparation_state"] == "running"
+            && op["preparation_owner_boot_id"] == state.subtitle_models.boot_id.as_str()
+    {
+        return Ok(());
+    }
+    let Some(file_id) = number(&op["file_id"]) else {
+        return Ok(());
+    };
+    let Some(file) = state.store.get_file(file_id).await? else {
+        return Ok(());
+    };
+    if op["source_size"].as_str() != Some(file.size.to_string().as_str())
+        || op["source_mtime"].as_str() != Some(file.mtime.to_string().as_str())
+    {
+        return Ok(());
+    }
+    let profile: TranslationProfile = serde_json::from_value(op["profile"].clone())
+        .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?;
+    if target == state.node_id
+        && state
+            .subtitle_models
+            .translation
+            .cached(&file)
+            .await
+            .is_some()
+    {
+        if let Some(asset) = op["asset_id"].as_str() {
+            if bound_this_boot(state, asset, operation_id, epoch).await? {
+                return Ok(());
+            }
+        }
+    }
+    if super::eligible_worker(state, &file, &profile)
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+    let now = crate::state::clock_ms();
+    let action = TranslationAction::Retarget {
+        operation_id: operation_id.into(),
+        expected_operation_epoch: epoch,
+        expected_view_revision: view,
+        expected_preparation_job_id: preparation.into(),
+        expected_target_node_id: target.into(),
+        target_node_id: state.node_id.clone(),
+    };
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_digest = plurx_core::store::subtitle_translation::digest(
+        &serde_json::to_value(&action)
+            .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?,
+    )?;
+    let result = state
+        .store
+        .mutate_subtitle_translation(TranslationMutation {
+            user_id,
+            request_id,
+            request_digest,
+            now_ms: now,
+            intent_expires_at_ms: now + 60_000,
+            action,
+        })
+        .await?;
+    if result["outcome"] == "accepted" {
+        state.subtitle_models.translation.wake.notify_one();
+    }
+    Ok(())
 }
 
 /// Enqueue at most one missing core for operations a viewer currently wants.
@@ -138,7 +290,7 @@ async fn schedule(state: &AppState) -> Result<bool, StoreError> {
             .ok_or_else(|| StoreError::Task("translation epoch".into()))?;
         let profile: TranslationProfile = serde_json::from_value(op["profile"].clone())
             .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?;
-        if profile != super::profile::selected_profile() {
+        if !super::profile::registered(&profile) {
             continue;
         }
         let source: SourceRevision = serde_json::from_value(op["source"].clone())
@@ -205,7 +357,8 @@ async fn schedule(state: &AppState) -> Result<bool, StoreError> {
                     source: source.clone(),
                     source_sha256: held.sha256().into(),
                     profile: profile.clone(),
-                    audio_index: 0,
+                    audio_index: number(&op["audio_index"])
+                        .ok_or_else(|| StoreError::Task("translation audio identity".into()))?,
                     spoken_language: op["spoken_language"].as_str().unwrap_or_default().into(),
                     duration_ms: duration,
                     core_index: index,
@@ -224,6 +377,12 @@ async fn schedule(state: &AppState) -> Result<bool, StoreError> {
                         payload: JobPayload::SubtitleTranslationRange {
                             file_id: source.file_id,
                             recipe,
+                            producer_preparation_job_id: op["preparation_job_id"]
+                                .as_str()
+                                .ok_or_else(|| {
+                                    StoreError::Task("translation producer missing".into())
+                                })?
+                                .into(),
                             target_node_id: state.node_id.clone(),
                         },
                         dedupe_key: format!(
@@ -303,7 +462,7 @@ async fn execute(
         }
         _ => return Ok(false),
     };
-    if selected != &profile::selected_profile() {
+    if !profile::registered(selected) {
         return Err(StoreError::Task("translation_profile_unavailable".into()));
     }
     let file = tokio::time::timeout(
@@ -314,7 +473,12 @@ async fn execute(
     .map_err(|_| StoreError::Task("worker_source_unavailable".into()))??
     .filter(|f| f.size == revision.source_size && f.mtime == revision.source_mtime)
     .ok_or_else(|| StoreError::Task("source_changed".into()))?;
-    super::file_capability(state, &file)
+    let audio_index = match source {
+        JobPayload::SubtitleTranslationPrepare { audio_index, .. } => *audio_index,
+        JobPayload::SubtitleTranslationRange { recipe, .. } => recipe.audio_index,
+        _ => unreachable!(),
+    };
+    super::selected_file_capability(state, &file, audio_index)
         .await
         .map_err(|e| StoreError::Task(e.into()))?;
     let held = match state.subtitle_models.translation.cached(&file).await {
@@ -337,7 +501,14 @@ async fn execute(
             verified
         }
     };
-    if !interested(state, source).await? || cancel.is_cancelled() {
+    if !interested(
+        state,
+        source,
+        fence.snapshot().await.as_ref().map(|t| t.job_id.as_str()),
+    )
+    .await?
+        || cancel.is_cancelled()
+    {
         return Err(StoreError::Task("demand_expired".into()));
     }
     match source {
@@ -367,11 +538,11 @@ async fn execute(
             let engine = artifacts::inspect_engine()
                 .await
                 .map_err(StoreError::Task)?;
-            let spec = profile::model_spec();
+            let spec = profile::model_spec_for(selected)?;
             let hash =
                 artifacts::open_model_cancellable(&state.subtitle_models.root, &spec, cancel);
             tokio::pin!(hash);
-            let model = tokio::select! {result=&mut hash=>result.map_err(StoreError::Task)?,()=crate::subtitle_transcription::watch_capacity(&state.transcode,admission)=>{cancel.cancel();let _=hash.await;return Err(StoreError::Task("waiting_for_playback_capacity".into()));}};
+            let model = tokio::select! {result=&mut hash=>result.map_err(StoreError::Task)?,()=crate::subtitle_transcription::watch_speech_capacity(&state.transcode,admission)=>{cancel.cancel();let _=hash.await;return Err(StoreError::Task("waiting_for_playback_capacity".into()));}};
             // The current receipt must match the exact model identity opened
             // AFTER admission; metadata observed before a claim is insufficient.
             if !super::workers_public(state)
@@ -379,9 +550,12 @@ async fn execute(
                 .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
                 .iter()
                 .any(|w| {
-                    w["capabilities"]
-                        .as_array()
-                        .is_some_and(|caps| caps.iter().any(|c| c["status"] == "verified"))
+                    w["capabilities"].as_array().is_some_and(|caps| {
+                        caps.iter().any(|c| {
+                            c["status"] == "verified"
+                                && c["profile_id"].as_str() == selected.id().ok().as_deref()
+                        })
+                    })
                 })
             {
                 return Err(StoreError::Task("translation_unverified".into()));
@@ -453,8 +627,17 @@ async fn automatic_verification(state: &AppState) -> Result<(), StoreError> {
         std::sync::atomic::Ordering::Relaxed,
     );
 
-    let selected = profile::selected_profile();
-    let spec = profile::model_spec();
+    for selected in profile::profiles() {
+        automatic_profile_verification(state, selected).await?;
+    }
+    Ok(())
+}
+
+async fn automatic_profile_verification(
+    state: &AppState,
+    selected: TranslationProfile,
+) -> Result<(), StoreError> {
+    let spec = profile::model_spec_for(&selected)?;
     let profile_id = selected.id()?;
     if state
         .subtitle_models
@@ -498,9 +681,10 @@ async fn automatic_verification(state: &AppState) -> Result<(), StoreError> {
         .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
         .iter()
         .any(|w| {
-            w["capabilities"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(|v| v["status"] == "verified"))
+            w["capabilities"].as_array().is_some_and(|c| {
+                c.iter()
+                    .any(|v| v["status"] == "verified" && v["profile_id"] == profile_id)
+            })
         })
     {
         return Ok(());
@@ -595,6 +779,47 @@ pub(crate) async fn worker_pass(
         .await = candidates.next;
     for candidate in candidates.jobs {
         let source = candidate.supported_payload()?;
+        if let JobPayload::SubtitleTranslationRange {
+            recipe,
+            producer_preparation_job_id,
+            target_node_id,
+            ..
+        } = &source
+        {
+            let current = read(
+                state,
+                TranslationQuery::Operation {
+                    operation_id: recipe.operation_id.clone(),
+                },
+            )
+            .await?;
+            if producer_preparation_job_id.is_empty()
+                || current.first().is_none_or(|op| {
+                    op["preparation_job_id"] != producer_preparation_job_id.as_str()
+                        || op["target_node_id"] != target_node_id.as_str()
+                        || op["cached_complete"] == true
+                        || number(&op["operation_epoch"]) != Some(recipe.operation_epoch)
+                })
+            {
+                state
+                    .store
+                    .cancel_job(plurx_core::store::background_jobs::CancelJob {
+                        job_id: candidate.id.clone(),
+                        now_ms: crate::state::clock_ms(),
+                    })
+                    .await?;
+                continue;
+            }
+        }
+        let selected = match &source {
+            JobPayload::SubtitleModelOperation {
+                translation_profile: Some(profile),
+                ..
+            }
+            | JobPayload::SubtitleTranslationPrepare { profile, .. } => profile.clone(),
+            JobPayload::SubtitleTranslationRange { recipe, .. } => recipe.profile.clone(),
+            _ => profile::selected_profile(),
+        };
         let model = matches!(&source,JobPayload::SubtitleModelOperation{action,..} if action.is_translation());
         if matches!(&source, JobPayload::SubtitleModelOperation { .. }) && !model {
             continue;
@@ -602,7 +827,7 @@ pub(crate) async fn worker_pass(
         if shutdown.is_cancelled() || !authority.may_execute_job(source.kind()).await {
             continue;
         }
-        if !model && !interested(state, &source).await? {
+        if !model && !interested(state, &source, None).await? {
             state
                 .store
                 .cancel_job(plurx_core::store::background_jobs::CancelJob {
@@ -621,7 +846,7 @@ pub(crate) async fn worker_pass(
                 .failures
                 .read()
                 .await
-                .contains_key(&profile::selected_profile().id()?)
+                .contains_key(&selected.id()?)
             {
                 state
                     .store
@@ -632,7 +857,7 @@ pub(crate) async fn worker_pass(
                     .await?;
                 continue;
             }
-            let spec = profile::model_spec();
+            let spec = profile::model_spec_for(&selected)?;
             let Ok(identity) = artifacts::model_identity(&state.subtitle_models.root, &spec).await
             else {
                 continue;
@@ -652,7 +877,7 @@ pub(crate) async fn worker_pass(
             .any(|r| {
                 accepted_capability(
                     &r,
-                    &profile::selected_profile(),
+                    &selected,
                     &spec.sha256,
                     &artifacts::identity_key(identity),
                 )
@@ -670,7 +895,7 @@ pub(crate) async fn worker_pass(
             let key = plurx_core::store::subtitle_translation::digest(&serde_json::json!([
                 state.node_id,
                 state.subtitle_models.boot_id,
-                profile::selected_profile().id()?,
+                selected.id()?,
                 artifacts::identity_key(identity),
                 artifacts::identity_key(engine.identity)
             ]))?;
@@ -696,15 +921,18 @@ pub(crate) async fn worker_pass(
                 .map_err(|_| StoreError::Task("worker_observation_unavailable".into()))?
                 .iter()
                 .any(|w| {
-                    w["capabilities"]
-                        .as_array()
-                        .is_some_and(|c| c.iter().any(|v| v["status"] == "verified"))
+                    w["capabilities"].as_array().is_some_and(|c| {
+                        c.iter().any(|v| {
+                            v["status"] == "verified"
+                                && v["profile_id"].as_str() == selected.id().ok().as_deref()
+                        })
+                    })
                 })
             {
                 continue;
             }
-            match state.transcode.admit_fragment().await {
-                Some(a) if state.transcode.fragment_worker_idle(&a) => Some(a),
+            match state.transcode.admit_speech().await {
+                Some(a) if state.transcode.speech_capacity_available(&a) => Some(a),
                 _ => continue,
             }
         };
@@ -757,7 +985,7 @@ pub(crate) async fn worker_pass(
                 result=&mut operation=>break result,
                 ()=shutdown.cancelled()=>{cancel.cancel();break operation.await;},
                 ()=tokio::time::sleep(Duration::from_millis(250))=>{
-                    match tokio::time::timeout(Duration::from_secs(2),interested(state,&source)).await{Ok(Ok(true))=>{},Ok(Ok(false))|Ok(Err(_))|Err(_)=>{cancel.cancel();let _=operation.await;break Err(StoreError::Task("demand_expired".into()));}}
+                    match tokio::time::timeout(Duration::from_secs(2),interested(state,&source,Some(&job.id))).await{Ok(Ok(true))=>{},Ok(Ok(false))|Ok(Err(_))|Err(_)=>{cancel.cancel();let _=operation.await;break Err(StoreError::Task("demand_expired".into()));}}
                 }
             }
         };
@@ -770,7 +998,7 @@ pub(crate) async fn worker_pass(
                         .failures
                         .write()
                         .await
-                        .remove(&profile::selected_profile().id()?);
+                        .remove(&selected.id()?);
                 }
             }
             Ok(false) => {
@@ -826,7 +1054,7 @@ pub(crate) async fn worker_pass(
                             .failures
                             .write()
                             .await
-                            .insert(profile::selected_profile().id()?, reason.into());
+                            .insert(selected.id()?, reason.into());
                     }
                     let _ = fence
                         .settle(JobSettlement::Fail {
@@ -863,6 +1091,7 @@ fn safe_reason(message: &str) -> &'static str {
         "output_too_large",
         "engine_unavailable",
         "model_verification_failed",
+        "model_self_test_failed",
         "artifact_changed",
     ]
     .into_iter()
@@ -873,6 +1102,17 @@ fn safe_reason(message: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_model_speech_test_retains_trusted_setup_recovery_reason() {
+        assert_eq!(
+            safe_reason("task failed: model_self_test_failed"),
+            "model_self_test_failed"
+        );
+        assert_eq!(
+            safe_reason("untrusted raw recognizer output"),
+            "translation_failed"
+        );
+    }
     #[test]
     fn shared_demand_window_preserves_peer_interest_and_caps_total_cores() {
         let a = serde_json::json!({"position_ms":0,"playback_rate":4.0});
@@ -888,6 +1128,45 @@ mod tests {
 #[cfg(test)]
 mod automatic_tests {
     use super::*;
+    #[test]
+    fn automatic_receipts_cannot_cross_task_or_model_boundaries() {
+        for selected in profile::profiles() {
+            let receipt: super::super::Capability = serde_json::from_value(serde_json::json!({
+                "model":{"node_id":"worker","boot_id":"boot","model_id":selected.model_id,
+                    "model_sha256":selected.model_sha256,"adapter_contract":selected.adapter_contract,
+                    "engine_sha256":"a".repeat(64),"model_file_identity":"model-identity",
+                    "engine_file_identity":"engine-identity","job_id":"job","fence":1,"verified_at_ms":1},
+                "profile":selected,"profile_id":selected.id().expect("profile identity"),
+                "self_test_sha256":profile::SELF_TEST_SHA256
+            })).expect("receipt fixture");
+            for candidate in profile::profiles() {
+                assert_eq!(
+                    accepted_capability(
+                        &receipt,
+                        &candidate,
+                        &candidate.model_sha256,
+                        "model-identity"
+                    ),
+                    candidate == selected
+                );
+            }
+            assert!(!accepted_capability(
+                &receipt,
+                &selected,
+                &selected.model_sha256,
+                "replacement-identity"
+            ));
+            let mut mismatched = receipt.clone();
+            mismatched.model.model_id = "unregistered-model".into();
+            assert!(!accepted_capability(
+                &mismatched,
+                &selected,
+                &selected.model_sha256,
+                "model-identity"
+            ));
+        }
+    }
+
     #[test]
     fn transient_enqueue_rejections_do_not_memoize_automatic_verification() {
         for outcome in [

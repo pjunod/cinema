@@ -2,8 +2,9 @@
 """Build or verify the pinned, relocatable CPU subtitle recognizer.
 
 Build: --output NEW_DIRECTORY [--source-archive PINNED_TARBALL] [--jobs N].
-Verify: --verify PACKAGE_DIRECTORY. The directory carries whisper-cli,
-subtitle-engine.json, licenses and the shared production self-test fixture.
+Verify: --verify PACKAGE_DIRECTORY. Packages carry baseline whisper-cli, an
+optional pinned static x86 AVX2 executable, subtitle-engine.json, licenses and
+the shared production self-test fixture.
 No model is downloaded by this packaging recipe.
 """
 import argparse
@@ -37,20 +38,64 @@ def regular(path):
     return path
 
 
+def validate_runtime_dependencies(dependencies, system):
+    if not isinstance(dependencies, list) or not 1 <= len(dependencies) <= 16:
+        raise ValueError("subtitle engine runtime dependencies must be a bounded list")
+    for dependency in dependencies:
+        if not isinstance(dependency, str) or not dependency or len(dependency) > 512 or any(c in dependency for c in "\n\r\0"):
+            raise ValueError("invalid subtitle engine runtime dependency")
+        if any(token in dependency.lower() for token in ["not found", "libggml", "libwhisper", "libomp", "libgomp", "homebrew", "@rpath"]):
+            raise ValueError("subtitle engine has an unbundled runtime library")
+        if system == "Darwin":
+            qualified = dependency.startswith(("/usr/lib/", "/System/Library/"))
+        else:
+            name = dependency.split()[0]
+            qualified = (name in ["linux-vdso.so.1", "libstdc++.so.6", "libm.so.6", "libgcc_s.so.1", "libc.so.6"]
+                         or name.startswith(("/lib/ld-linux-", "/lib64/ld-linux-")))
+        if not qualified:
+            raise ValueError("subtitle engine depends on an unqualified system runtime library")
+
+
+def verify_executable(package, filename, facts):
+    binary = regular(package / filename)
+    if not os.access(binary, os.X_OK):
+        raise ValueError("subtitle engine is not executable")
+    if type(facts.get("binary_bytes")) is not int or facts["binary_bytes"] <= 0 or binary.stat().st_size != facts["binary_bytes"] or digest(binary) != facts.get("binary_sha256"):
+        raise ValueError("subtitle engine binary digest/length mismatch")
+
+
 def verify(package):
     if package.is_symlink() or not package.is_dir():
         raise ValueError("engine package must be a real directory")
-    if {item.name for item in package.iterdir()} != {"whisper-cli", "subtitle-engine.json", "self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"}:
-        raise ValueError("engine package contains missing or unexpected files")
     manifest = json.loads(regular(package / "subtitle-engine.json").read_text())
     for key in ["version", "adapter_contract", "source_commit", "source_archive_sha256", "build_options"]:
         if manifest.get(key) != PIN[key]:
             raise ValueError(f"unqualified subtitle engine {key}")
-    binary = regular(package / "whisper-cli")
-    if not os.access(binary, os.X_OK):
-        raise ValueError("subtitle engine is not executable")
-    if binary.stat().st_size != manifest.get("binary_bytes") or digest(binary) != manifest.get("binary_sha256"):
-        raise ValueError("subtitle engine binary digest/length mismatch")
+    target = manifest.get("platform")
+    if target not in ["linux-arm64", "linux-aarch64", "linux-x86_64", "macos-arm64", "macos-x86_64", "macos-universal"]:
+        raise ValueError("unqualified subtitle engine platform")
+    system = "Darwin" if target.startswith("macos-") else "Linux"
+    variants = manifest.get("cpu_variants", {})
+    if not isinstance(variants, dict) or not set(variants) <= set(PIN["cpu_variants"]):
+        raise ValueError("unqualified subtitle engine CPU variants")
+    if variants and target not in ["linux-x86_64", "macos-x86_64", "macos-universal"]:
+        raise ValueError("subtitle engine CPU variant requires x86_64")
+    expected = {"whisper-cli", "subtitle-engine.json", "self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"}
+    for name, facts in variants.items():
+        pin = PIN["cpu_variants"][name]
+        if not isinstance(facts, dict) or set(facts) != set(pin) | {"binary_sha256", "binary_bytes", "runtime_dependencies"}:
+            raise ValueError("unqualified subtitle engine CPU variant fields")
+        if any(facts.get(key) != value for key, value in pin.items()):
+            raise ValueError("unqualified subtitle engine CPU variant identity")
+        validate_runtime_dependencies(facts["runtime_dependencies"], system)
+        expected.add(pin["filename"])
+    if {item.name for item in package.iterdir()} != expected:
+        raise ValueError("engine package contains missing or unexpected files")
+    verify_executable(package, "whisper-cli", manifest)
+    if "runtime_dependencies" in manifest:
+        validate_runtime_dependencies(manifest["runtime_dependencies"], system)
+    for name, facts in variants.items():
+        verify_executable(package, PIN["cpu_variants"][name]["filename"], facts)
     for name, fact in manifest.get("companions", {}).items():
         if name not in ["self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"]:
             raise ValueError("unexpected engine companion")
@@ -82,25 +127,34 @@ def run(argv, **kwargs):
 
 
 def loader_dependencies(binary):
-    command = ["/usr/bin/otool", "-L", str(binary)] if platform.system() == "Darwin" else ["ldd", str(binary)]
+    system = platform.system()
+    command = ["/usr/bin/otool", "-L", str(binary)] if system == "Darwin" else ["ldd", str(binary)]
     result = run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    text = result.stdout
-    if any(token in text.lower() for token in ["not found", "libggml", "libwhisper", "libomp", "libgomp", "homebrew", "@rpath"]):
-        raise ValueError("subtitle engine has an unbundled runtime library")
-    if platform.system() == "Darwin":
-        for line in text.splitlines()[1:]:
-            if not line.startswith("\t"):
-                continue  # fat Mach-O architecture headings
-            if not line.strip().startswith(("/usr/lib/", "/System/Library/")):
-                raise ValueError("subtitle engine depends on a non-system macOS library")
-    if platform.system() == "Linux":
-        for line in text.splitlines():
-            name = line.strip().split()[0]
-            if not (name in ["linux-vdso.so.1", "libstdc++.so.6", "libm.so.6", "libgcc_s.so.1", "libc.so.6"]
-                    or name.startswith(("/lib/ld-linux-", "/lib64/ld-linux-"))):
-                raise ValueError("subtitle engine depends on an unqualified Linux runtime library")
-    return [re.sub(r"\s+\(0x[0-9a-f]+\)", "", line).strip() for line in text.splitlines()
-            if line.startswith("\t")]
+    # Inspect every Linux line, including the loader, before keeping its
+    # normalized observation. otool's unindented Mach-O headings are metadata.
+    lines = [line.strip() for line in result.stdout.splitlines()
+             if line.strip() and (system != "Darwin" or line.startswith("\t"))]
+    dependencies = [re.sub(r"\s+\(0x[0-9a-f]+\)", "", line) for line in lines]
+    validate_runtime_dependencies(dependencies, system)
+    return dependencies
+
+
+def build_executable(source, build_root, binary, options, machine, system, jobs, build_env):
+    arguments = [f"-D{key}={value}" for key, value in sorted(options.items())]
+    if system == "Darwin":
+        arguments += [f"-DCMAKE_OSX_ARCHITECTURES={machine}", "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"]
+    run(["cmake", "-S", str(source), "-B", str(build_root), *arguments], env=build_env)
+    cache = (build_root / "CMakeCache.txt").read_text()
+    for key, value in options.items():
+        if not any(line.startswith(key + ":") and line.endswith("=" + value) for line in cache.splitlines()):
+            raise ValueError("CMake did not accept pinned option " + key)
+    compiler = next(line.split("=", 1)[1] for line in cache.splitlines() if line.startswith("CMAKE_CXX_COMPILER:FILEPATH="))
+    run(["cmake", "--build", str(build_root), "--target", "whisper-cli", "--parallel", str(jobs)], env=build_env)
+    shutil.copyfile(build_root / "bin/whisper-cli", binary)
+    binary.chmod(0o755)
+    if system == "Darwin":
+        run(["/usr/bin/codesign", "--force", "--sign", "-", str(binary)])
+    return compiler
 
 
 def build(output, archive=None, jobs=2, architecture=None):
@@ -130,27 +184,22 @@ def build(output, archive=None, jobs=2, architecture=None):
                     if remaining <= 0:
                         raise ValueError("subtitle source exceeds pinned length")
         source = unpack(archive, work)
-        arguments = [f"-D{key}={value}" for key, value in sorted(PIN["build_options"].items())]
-        if system == "Darwin":
-            arguments += [f"-DCMAKE_OSX_ARCHITECTURES={machine}", "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"]
-        # Ambient CFLAGS/CXXFLAGS/LDFLAGS or CMake overrides must not silently
-        # change a build whose manifest advertises only the reviewed options.
+        # Ambient flags must not change either pinned static executable.
         build_env = {key: os.environ[key] for key in ["PATH", "HOME", "TMPDIR", "SOURCE_DATE_EPOCH"] if key in os.environ}
         build_env["LC_ALL"] = "C"
-        run(["cmake", "-S", str(source), "-B", str(work / "build"), *arguments], env=build_env)
-        cache = (work / "build/CMakeCache.txt").read_text()
-        for key, value in PIN["build_options"].items():
-            if not any(line.startswith(key + ":") and line.endswith("=" + value) for line in cache.splitlines()):
-                raise ValueError("CMake did not accept pinned option " + key)
-        compiler = next(line.split("=", 1)[1] for line in cache.splitlines() if line.startswith("CMAKE_CXX_COMPILER:FILEPATH="))
-        run(["cmake", "--build", str(work / "build"), "--target", "whisper-cli", "--parallel", str(jobs)], env=build_env)
         stage = work / "package"
         stage.mkdir()
         binary = stage / "whisper-cli"
-        shutil.copyfile(work / "build/bin/whisper-cli", binary)
-        binary.chmod(0o755)
-        if system == "Darwin":
-            run(["/usr/bin/codesign", "--force", "--sign", "-", str(binary)])
+        compiler = build_executable(source, work / "build", binary, PIN["build_options"], machine, system, jobs, build_env)
+        variants = {}
+        if machine == "x86_64":
+            for name, pin in PIN["cpu_variants"].items():
+                variant = stage / pin["filename"]
+                build_executable(source, work / ("build-" + name), variant, pin["build_options"], machine, system, jobs, build_env)
+                # Never execute this instruction-specific binary on a builder
+                # that may lack AVX2 or be cross-building under Rosetta.
+                variants[name] = dict(pin, binary_sha256=digest(variant), binary_bytes=variant.stat().st_size,
+                                      runtime_dependencies=loader_dependencies(variant))
         # The archive's immutable source identity is authoritative; upstream
         # source-only builds report an unknown git hash in diagnostic output.
         observed = run([str(binary), "--version"], env={"LC_ALL": "C"}, stdout=subprocess.PIPE, text=True).stdout.strip()
@@ -169,6 +218,8 @@ def build(output, archive=None, jobs=2, architecture=None):
                      cmake=run(["cmake", "--version"], stdout=subprocess.PIPE, text=True).stdout.splitlines()[0],
                      companions={name: {"sha256": digest(stage / name), "bytes": (stage / name).stat().st_size}
                                  for name in ["self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"]})
+        if variants:
+            facts["cpu_variants"] = variants
         (stage / "subtitle-engine.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
         verify(stage)
         stage.rename(output)
@@ -190,6 +241,16 @@ def combine(packages, output):
         run(["/usr/bin/lipo", "-create", "-output", str(binary), *[str(package / "whisper-cli") for package in packages]])
         run(["/usr/bin/codesign", "--force", "--sign", "-", str(binary)])
         facts = receipts[0].copy()
+        facts.pop("cpu_variants", None)
+        intel = next(index for index, receipt in enumerate(receipts) if receipt["platform"] == "macos-x86_64")
+        variants = receipts[intel].get("cpu_variants", {})
+        for pin in PIN["cpu_variants"].values():
+            (stage / pin["filename"]).unlink(missing_ok=True)
+        for name, variant in variants.items():
+            shutil.copyfile(packages[intel] / variant["filename"], stage / variant["filename"])
+            (stage / variant["filename"]).chmod(0o755)
+        if variants:
+            facts["cpu_variants"] = variants
         facts.update(platform="macos-universal", binary_bytes=binary.stat().st_size,
                      binary_sha256=digest(binary), slices=receipts,
                      runtime_dependencies=loader_dependencies(binary))

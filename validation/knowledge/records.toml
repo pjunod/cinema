@@ -1,0 +1,1429 @@
+schema_version = 1
+repository = "plurx"
+claims = []
+
+[[anchors]]
+id = "plurx:section:routing.server.capability-profile"
+path = "docs/PLAYBACK.md"
+kind = "section"
+selector = ["Playback — how a file becomes a stream", "Routing inventory — every fork has one owner and one regression pin", "Server — decide the bytes, recipe, and hardware path"]
+digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+excerpt = "| `server.capability-profile` | Reported caps vs named profile | Runtime caps win when any codec/container cap is present; missing fields get conservative browser defaults. Otherwise use the named profile, then `web-h264`. Explicit DV profiles override the legacy all-DV bit, and for a dual-layer source they are the only thing that can approve it. | Rust unit in `http/stream.rs` |"
+
+[[anchors]]
+id = "plurx:section:routing.server.learned-decode-limit"
+path = "docs/PLAYBACK.md"
+kind = "section"
+selector = ["Playback — how a file becomes a stream", "Routing inventory — every fork has one owner and one regression pin", "Server — decide the bytes, recipe, and hardware path"]
+digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+excerpt = "| `server.learned-decode-limit` | Honour a limit the client learned | An entry the client sent in caps v2 whose identity matches this exact media load routes to a **transcode** — the limit is a statement about the decoder, so the same frames in a different envelope change nothing. Matching is on the whole identity and never a codec-and-height prefix. The reason is the browser's own sentence, verbatim, with its `HDR10 → SDR` clause when the demotion is what costs the grade. | Rust unit in `playback/mod.rs` |"
+
+[[anchors]]
+id = "plurx:section:routing.server.learned-decode-limit-expiry"
+path = "docs/PLAYBACK.md"
+kind = "section"
+selector = ["Playback — how a file becomes a stream", "Routing inventory — every fork has one owner and one regression pin", "Server — decide the bytes, recipe, and hardware path"]
+digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+excerpt = "| `server.learned-decode-limit-expiry` | When one still applies | The **client's** policy, reproduced: applied inside the 7-day re-test window, ignored past it, and ignored outright past the 30-day TTL, with no timestamp, or with a timestamp in the future. Standing aside past re-test is not leniency — the browser only consults its own limits when the server answered direct or remux, so a server that answers transcode first is a server that stops the weekly re-measure from ever running. | Age matrix in `playback/mod.rs` |"
+
+[[anchors]]
+id = "plurx:section:routing.server.verdict"
+path = "docs/PLAYBACK.md"
+kind = "section"
+selector = ["Playback — how a file becomes a stream", "Routing inventory — every fork has one owner and one regression pin", "Server — decide the bytes, recipe, and hardware path"]
+digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+excerpt = "| `server.verdict` | Direct vs remux vs transcode | Video codec, height, bitrate, or HDR failure means transcode. Container, audio, or A/V correction alone means remux. No failures means direct. Unknown container is not permission to direct-play it. | Table-driven Rust unit in `playback/mod.rs` |"
+
+[[anchors]]
+id = "plurx:section:routing.server.manual-quality"
+path = "docs/PLAYBACK.md"
+kind = "section"
+selector = ["Playback — how a file becomes a stream", "Routing inventory — every fork has one owner and one regression pin", "Server — decide the bytes, recipe, and hardware path"]
+digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+excerpt = "| `server.manual-quality` | Auto vs Original vs a rung | Auto uses the ordinary verdict. Original never re-encodes video; it may direct or remux and lets the client rescue a rejection. Any numbered rung forces transcode. Unknown force values degrade to Auto. | Force matrix in `playback/mod.rs` |"
+
+[[anchors]]
+id = "plurx:section:routing.server.execution-plan"
+path = "docs/PLAYBACK.md"
+kind = "section"
+selector = ["Playback — how a file becomes a stream", "Routing inventory — every fork has one owner and one regression pin", "Server — decide the bytes, recipe, and hardware path"]
+digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+excerpt = "| `server.execution-plan` | Verdict to API action | Direct owns `/direct`; remux owns `/stream.mp4` plus a copy-session URL and flags; transcode owns the HLS-session URL. A caller's `audio=` selection travels in the plan — applied to the remux URL and repeated as `audio` for the session body — and a selection the container's own default cannot deliver reports remux instead of an unexecutable direct plan. Clients execute this plan instead of rebuilding it from `method`. | Exhaustive `DeliveryPlan` Rust unit plus a follow-the-plan selection regression |"
+
+[[anchors]]
+id = "plurx:section:routing.plan.learned"
+path = "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md"
+kind = "section"
+selector = ["Playback capabilities v2 — highest deliverable grade, negotiated not guessed", "4. Contracts — exact interfaces (re-verify each against the file at build time)", "4.6 Learned limits (M6)"]
+digest = "sha256:bc7a2d0acb9440b9f0709405572435e5de6846a9ce555682f0c93e729996d0e3"
+excerpt = "The server does **not** store\nthem in M6 — it reports them. Storing per device is a later decision."
+
+[[anchors]]
+id = "plurx:section:routing.decision.profile-claims"
+path = "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md"
+kind = "section"
+selector = ["Playback capabilities v2 — highest deliverable grade, negotiated not guessed", "9. Decisions — taken 2026-08-29, and the one still defaulted"]
+digest = "sha256:7f4c0107dcc93c20e40519125b3a0fd61d04971e0a3fcd002c8fcb3851df151f"
+excerpt = "| 5 | Profile 7 claims (§6) | **Allowed from a real decoder enumeration** (Android `DolbyVisionProfileDvheDtb`); never from a display bit. Paul: \"claim profile 7 all you want if you can do it.\" |"
+
+[[anchors]]
+id = "plurx:section:routing.decision.plan-ceiling"
+path = "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md"
+kind = "section"
+selector = ["Playback capabilities v2 — highest deliverable grade, negotiated not guessed", "9. Decisions — taken 2026-08-29, and the one still defaulted"]
+digest = "sha256:7f4c0107dcc93c20e40519125b3a0fd61d04971e0a3fcd002c8fcb3851df151f"
+excerpt = "| 4 | `plan_mismatch` (§4.5) | **Warn, never refuse.** Paul: \"I don't see a reason for it to prevent functionality.\" Server plan is a **ceiling**: an upward claim is clamped, noted in `plan_notes` and counted on `/system`; a downward echo is the client's to make. See §4.5 for why the original both-directions wording was wrong. |"
+
+[[anchors]]
+id = "plurx:section:receipt.rule"
+path = "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md"
+kind = "section"
+selector = ["Python unit receipts — one success per test per PR", "The rule"]
+digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+excerpt = "Anything that cannot be authenticated is simply **not\nadopted**: its tests run again and the lane carries on. History never refuses\nthe lane."
+
+[[anchors]]
+id = "plurx:section:receipt.authentication"
+path = "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md"
+kind = "section"
+selector = ["Python unit receipts — one success per test per PR", "What \"authenticated\" means"]
+digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+excerpt = "The receipt job is unique, terminal (success, failure or cancelled)\n    and attempt 1."
+
+[[anchors]]
+id = "plurx:section:receipt.applicability"
+path = "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md"
+kind = "section"
+selector = ["Python unit receipts — one success per test per PR", "What \"applies\" means"]
+digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+excerpt = "An ID with no reviewed witness row, or whose inputs changed, runs."
+
+[[anchors]]
+id = "plurx:section:receipt.identity"
+path = "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md"
+kind = "section"
+selector = ["Python unit receipts — one success per test per PR", "Identity"]
+digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+excerpt = "Reuse is historical unit evidence, never a claim that the test ran\n  on the current source."
+
+[[anchors]]
+id = "plurx:section:receipt.history-decision"
+path = "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md"
+kind = "section"
+selector = ["Python unit receipts — one success per test per PR", "The rule", "Why the rule changed (2026-10-11)"]
+digest = "sha256:529564a4da73f68d0399fefe9ea9a15d9f697ddf02af42606d9461db1b242ccf"
+excerpt = "The bespoke recoveries\nare gone. One rule covers every case."
+
+# Construction symbol correspondence 2026-10-26: all six functions are unchanged
+# from origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9. Compared with the
+# original knowledge snapshot, decide/decide_forced only revise the existing DV
+# compatibility explanation and comments; verdict/force control flow is retained.
+# The other four governed function bodies are byte-identical to that snapshot.
+# Independent adversarial review and current-source execution remain pending.
+[[anchors]]
+id = "plurx:symbol:reviewed.server.capability-profile"
+path = "crates/plurxd/src/http/stream.rs"
+kind = "symbol"
+selector = "fn profile(&self, now_ms: i64) -> playback::DeviceProfile"
+digest = "sha256:9d7cd39032ef279a8d40162cb319989e495a269218bb9b2b866b8ad7342561ba"
+owner_module = "crates/plurxd/src/http/stream.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.learned-decode-limit"
+path = "crates/plurx-core/src/playback/mod.rs"
+kind = "symbol"
+selector = "fn matching_learned_limit("
+digest = "sha256:c10157371b180b4f4a4cf0d8c580765604f10202e5c87fad821259f338a9db7e"
+owner_module = "crates/plurx-core/src/playback/mod.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.learned-decode-limit-expiry"
+path = "crates/plurx-core/src/playback/caps.rs"
+kind = "symbol"
+selector = "pub fn applies_at("
+digest = "sha256:4f67597c6d25d38ca1b181bc82282eb70f55e76f804deebf1bc55eaa4721475a"
+owner_module = "crates/plurx-core/src/playback/caps.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.verdict"
+path = "crates/plurx-core/src/playback/mod.rs"
+kind = "symbol"
+selector = "pub fn decide("
+digest = "sha256:c10157371b180b4f4a4cf0d8c580765604f10202e5c87fad821259f338a9db7e"
+owner_module = "crates/plurx-core/src/playback/mod.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.manual-quality"
+path = "crates/plurx-core/src/playback/mod.rs"
+kind = "symbol"
+selector = "pub fn decide_forced("
+digest = "sha256:c10157371b180b4f4a4cf0d8c580765604f10202e5c87fad821259f338a9db7e"
+owner_module = "crates/plurx-core/src/playback/mod.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.execution-plan"
+path = "crates/plurxd/src/http/stream.rs"
+kind = "symbol"
+selector = "fn delivery_plan("
+digest = "sha256:9d7cd39032ef279a8d40162cb319989e495a269218bb9b2b866b8ad7342561ba"
+owner_module = "crates/plurxd/src/http/stream.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.receipt.applicability"
+path = "validation/python_unit_receipts.py"
+kind = "symbol"
+selector = "class SourceApplicability:"
+digest = "sha256:b05f1ab3a171e35565208b4c6000ebfe65ae68d4e8a76d19b010f09ecae810da"
+owner_module = "validation/python_unit_receipts.py"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.receipt.adoption"
+path = "validation/main_unit_receipts.py"
+kind = "symbol"
+selector = "def restore("
+digest = "sha256:883e510a5cc025eb2a4acac09bc73d522e6f5583785bd4217ee6b863f5315885"
+owner_module = "validation/main_unit_receipts.py"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.receipt.inputs"
+path = "validation/main_preflight_adoption.py"
+kind = "symbol"
+selector = "def input_digest("
+digest = "sha256:ce7599264b973786d4fbb1d4c0a105d6e3d692f21f528779145a1de7ccb6aeb4"
+owner_module = "validation/main_preflight_adoption.py"
+
+[[records]]
+id = "plurx:contract:routing.server.capability-profile"
+kind = "contract"
+title = "server.capability-profile governing routing rule"
+scope = ["crates/plurxd/src/http/stream.rs"]
+anchors = ["plurx:section:routing.server.capability-profile", "plurx:symbol:reviewed.server.capability-profile"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.capability-profile"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "Runtime caps win when any codec/container cap is present; missing fields get conservative browser defaults. Otherwise use the named profile, then `web-h264`. Explicit DV profiles override the legacy all-DV bit, and for a dual-layer source they are the only thing that can approve it."
+authoritative_section = "plurx:section:routing.server.capability-profile"
+check_ids = ["plurx:check:routing.server.capability-profile"]
+status = "active"
+
+[[records]]
+id = "plurx:obligation:preserve.server.capability-profile"
+kind = "obligation"
+title = "Preserve server.capability-profile when changing its owner"
+scope = ["crates/plurxd/src/http/stream.rs"]
+anchors = ["plurx:section:routing.server.capability-profile", "plurx:symbol:reviewed.server.capability-profile"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.capability-profile"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "For a change to this routing rule, preserve the cited policy and inspect its named regression; amend the governing policy explicitly if intent changes. Runtime caps win when any codec/container cap is present; missing fields get conservative browser defaults. Otherwise use the named profile, then `web-h264`. Explicit DV profiles override the legacy all-DV bit, and for a dual-layer source they are the only thing that can approve it."
+authority = "plurx:section:routing.server.capability-profile"
+disposition = "open"
+responsible_role = "change author and reviewer"
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
+
+[[records]]
+id = "plurx:contract:routing.server.learned-decode-limit"
+kind = "contract"
+title = "server.learned-decode-limit governing routing rule"
+scope = ["crates/plurx-core/src/playback/mod.rs"]
+anchors = ["plurx:section:routing.server.learned-decode-limit", "plurx:symbol:reviewed.server.learned-decode-limit"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "An entry the client sent in caps v2 whose identity matches this exact media load routes to a **transcode** — the limit is a statement about the decoder, so the same frames in a different envelope change nothing. Matching is on the whole identity and never a codec-and-height prefix. The reason is the browser's own sentence, verbatim, with its `HDR10 → SDR` clause when the demotion is what costs the grade."
+authoritative_section = "plurx:section:routing.server.learned-decode-limit"
+check_ids = ["plurx:check:routing.server.learned-decode-limit"]
+status = "active"
+
+[[records]]
+id = "plurx:obligation:preserve.server.learned-decode-limit"
+kind = "obligation"
+title = "Preserve server.learned-decode-limit when changing its owner"
+scope = ["crates/plurx-core/src/playback/mod.rs"]
+anchors = ["plurx:section:routing.server.learned-decode-limit", "plurx:symbol:reviewed.server.learned-decode-limit"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "For a change to this routing rule, preserve the cited policy and inspect its named regression; amend the governing policy explicitly if intent changes. An entry the client sent in caps v2 whose identity matches this exact media load routes to a **transcode** — the limit is a statement about the decoder, so the same frames in a different envelope change nothing. Matching is on the whole identity and never a codec-and-height prefix. The reason is the browser's own sentence, verbatim, with its `HDR10 → SDR` clause when the demotion is what costs the grade."
+authority = "plurx:section:routing.server.learned-decode-limit"
+disposition = "open"
+responsible_role = "change author and reviewer"
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
+
+[[records]]
+id = "plurx:contract:routing.server.learned-decode-limit-expiry"
+kind = "contract"
+title = "server.learned-decode-limit-expiry governing routing rule"
+scope = ["crates/plurx-core/src/playback/caps.rs"]
+anchors = ["plurx:section:routing.server.learned-decode-limit-expiry", "plurx:symbol:reviewed.server.learned-decode-limit-expiry"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit-expiry"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "The **client's** policy, reproduced: applied inside the 7-day re-test window, ignored past it, and ignored outright past the 30-day TTL, with no timestamp, or with a timestamp in the future. Standing aside past re-test is not leniency — the browser only consults its own limits when the server answered direct or remux, so a server that answers transcode first is a server that stops the weekly re-measure from ever running."
+authoritative_section = "plurx:section:routing.server.learned-decode-limit-expiry"
+check_ids = ["plurx:check:routing.server.learned-decode-limit-expiry"]
+status = "active"
+
+[[records]]
+id = "plurx:obligation:preserve.server.learned-decode-limit-expiry"
+kind = "obligation"
+title = "Preserve server.learned-decode-limit-expiry when changing its owner"
+scope = ["crates/plurx-core/src/playback/caps.rs"]
+anchors = ["plurx:section:routing.server.learned-decode-limit-expiry", "plurx:symbol:reviewed.server.learned-decode-limit-expiry"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit-expiry"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "For a change to this routing rule, preserve the cited policy and inspect its named regression; amend the governing policy explicitly if intent changes. The **client's** policy, reproduced: applied inside the 7-day re-test window, ignored past it, and ignored outright past the 30-day TTL, with no timestamp, or with a timestamp in the future. Standing aside past re-test is not leniency — the browser only consults its own limits when the server answered direct or remux, so a server that answers transcode first is a server that stops the weekly re-measure from ever running."
+authority = "plurx:section:routing.server.learned-decode-limit-expiry"
+disposition = "open"
+responsible_role = "change author and reviewer"
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
+
+[[records]]
+id = "plurx:contract:routing.server.verdict"
+kind = "contract"
+title = "server.verdict governing routing rule"
+scope = ["crates/plurx-core/src/playback/mod.rs"]
+anchors = ["plurx:section:routing.server.verdict", "plurx:symbol:reviewed.server.verdict"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.verdict"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "Video codec, height, bitrate, or HDR failure means transcode. Container, audio, or A/V correction alone means remux. No failures means direct. Unknown container is not permission to direct-play it."
+authoritative_section = "plurx:section:routing.server.verdict"
+check_ids = ["plurx:check:routing.server.verdict"]
+status = "active"
+
+[[records]]
+id = "plurx:obligation:preserve.server.verdict"
+kind = "obligation"
+title = "Preserve server.verdict when changing its owner"
+scope = ["crates/plurx-core/src/playback/mod.rs"]
+anchors = ["plurx:section:routing.server.verdict", "plurx:symbol:reviewed.server.verdict"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.verdict"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "For a change to this routing rule, preserve the cited policy and inspect its named regression; amend the governing policy explicitly if intent changes. Video codec, height, bitrate, or HDR failure means transcode. Container, audio, or A/V correction alone means remux. No failures means direct. Unknown container is not permission to direct-play it."
+authority = "plurx:section:routing.server.verdict"
+disposition = "open"
+responsible_role = "change author and reviewer"
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
+
+[[records]]
+id = "plurx:contract:routing.server.manual-quality"
+kind = "contract"
+title = "server.manual-quality governing routing rule"
+scope = ["crates/plurx-core/src/playback/mod.rs"]
+anchors = ["plurx:section:routing.server.manual-quality", "plurx:symbol:reviewed.server.manual-quality"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.manual-quality"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "Auto uses the ordinary verdict. Original never re-encodes video; it may direct or remux and lets the client rescue a rejection. Any numbered rung forces transcode. Unknown force values degrade to Auto."
+authoritative_section = "plurx:section:routing.server.manual-quality"
+check_ids = ["plurx:check:routing.server.manual-quality"]
+status = "active"
+
+[[records]]
+id = "plurx:obligation:preserve.server.manual-quality"
+kind = "obligation"
+title = "Preserve server.manual-quality when changing its owner"
+scope = ["crates/plurx-core/src/playback/mod.rs"]
+anchors = ["plurx:section:routing.server.manual-quality", "plurx:symbol:reviewed.server.manual-quality"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.manual-quality"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "For a change to this routing rule, preserve the cited policy and inspect its named regression; amend the governing policy explicitly if intent changes. Auto uses the ordinary verdict. Original never re-encodes video; it may direct or remux and lets the client rescue a rejection. Any numbered rung forces transcode. Unknown force values degrade to Auto."
+authority = "plurx:section:routing.server.manual-quality"
+disposition = "open"
+responsible_role = "change author and reviewer"
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
+
+[[records]]
+id = "plurx:contract:routing.server.execution-plan"
+kind = "contract"
+title = "server.execution-plan governing routing rule"
+scope = ["crates/plurxd/src/http/stream.rs"]
+anchors = ["plurx:section:routing.server.execution-plan", "plurx:symbol:reviewed.server.execution-plan"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.execution-plan"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "Direct owns `/direct`; remux owns `/stream.mp4` plus a copy-session URL and flags; transcode owns the HLS-session URL. A caller's `audio=` selection travels in the plan — applied to the remux URL and repeated as `audio` for the session body — and a selection the container's own default cannot deliver reports remux instead of an unexecutable direct plan. Clients execute this plan instead of rebuilding it from `method`."
+authoritative_section = "plurx:section:routing.server.execution-plan"
+check_ids = ["plurx:check:routing.server.execution-plan"]
+status = "active"
+
+[[records]]
+id = "plurx:obligation:preserve.server.execution-plan"
+kind = "obligation"
+title = "Preserve server.execution-plan when changing its owner"
+scope = ["crates/plurxd/src/http/stream.rs"]
+anchors = ["plurx:section:routing.server.execution-plan", "plurx:symbol:reviewed.server.execution-plan"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.execution-plan"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "For a change to this routing rule, preserve the cited policy and inspect its named regression; amend the governing policy explicitly if intent changes. Direct owns `/direct`; remux owns `/stream.mp4` plus a copy-session URL and flags; transcode owns the HLS-session URL. A caller's `audio=` selection travels in the plan — applied to the remux URL and repeated as `audio` for the session body — and a selection the container's own default cannot deliver reports remux instead of an unexecutable direct plan. Clients execute this plan instead of rebuilding it from `method`."
+authority = "plurx:section:routing.server.execution-plan"
+disposition = "open"
+responsible_role = "change author and reviewer"
+remaining_evidence = "Standing change obligation, not a defect report. No execution evidence is imported by this pilot; a check definition alone cannot satisfy a concrete change. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the governed function is unchanged from that base; caption source/stable-artifact DTO fields do not alter routing. Final adversarial review and current-source regression execution remain pending; this does not satisfy the standing obligation."
+
+[[records]]
+id = "plurx:decision:routing.profile-claims"
+kind = "decision"
+title = "Decoder enumeration governs Profile 7 claims"
+scope = ["crates/plurxd/src/http/stream.rs"]
+anchors = ["plurx:section:routing.decision.profile-claims"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.decision.profile-claims"
+source_digest = "sha256:7f4c0107dcc93c20e40519125b3a0fd61d04971e0a3fcd002c8fcb3851df151f"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+rationale = "The recorded ruling allows a Profile 7 claim from real decoder enumeration and rejects a display-bit inference. This is a narrow ruling; it does not establish every capability field."
+status = "accepted"
+source_section = "plurx:section:routing.decision.profile-claims"
+
+[[records]]
+id = "plurx:decision:routing.plan-ceiling"
+kind = "decision"
+title = "Plan mismatch warns and preserves functionality"
+scope = ["crates/plurxd/src/http/stream.rs"]
+anchors = ["plurx:section:routing.decision.plan-ceiling"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.decision.plan-ceiling"
+source_digest = "sha256:7f4c0107dcc93c20e40519125b3a0fd61d04971e0a3fcd002c8fcb3851df151f"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+rationale = "The recorded ruling treats the server plan as a ceiling: upward claims clamp with diagnostics and downward echoes remain the client choice; a mismatch warns rather than refusing functionality. Construction correspondence 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: caption sidecar classification and stable artifact identity add delivery metadata; the six selected routing function bodies and plan-clamp behavior remain unchanged from that base. Source inspection is not final adversarial review or execution evidence."
+status = "accepted"
+source_section = "plurx:section:routing.decision.plan-ceiling"
+
+[[records]]
+id = "plurx:contract:receipt.execution-distinction"
+kind = "contract"
+title = "A named check is a definition, not an execution"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+anchors = ["plurx:section:receipt.identity", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "A check definition does not show that it ran; retained successes keep their original run and commit and never claim current-source execution."
+authoritative_section = "plurx:section:receipt.identity"
+check_ids = ["plurx:check:receipt.execution-distinction"]
+status = "active"
+
+[[records]]
+id = "plurx:check:receipt.execution-distinction"
+kind = "check"
+title = "A named check is a definition, not an execution regression definition"
+scope = ["tests/validation/test_python_unit_receipts.py"]
+anchors = ["plurx:section:receipt.identity"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+check_kind = "behavioral"
+governed_ids = ["plurx:contract:receipt.execution-distinction"]
+selector = "python3 -m unittest discover -s tests/validation -p 'test_python_unit_receipts.py'"
+
+[[records]]
+id = "plurx:obligation:preserve.receipt.execution-distinction"
+kind = "obligation"
+title = "Preserve receipt boundary: A named check is a definition, not an execution"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+anchors = ["plurx:section:receipt.identity", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "When changing this boundary, preserve the cited rule; graph metadata cannot authorize adoption, mint authenticated origin or turn a named check into an executed result. A check definition does not show that it ran; retained successes keep their original run and commit and never claim current-source execution."
+authority = "plurx:section:receipt.identity"
+disposition = "open"
+responsible_role = "receipt or graph-adapter change author and reviewer"
+remaining_evidence = "Standing change obligation. Missing pilot execution data means not recorded, not a production failure or a new merge blocker."
+
+[[records]]
+id = "plurx:contract:receipt.origin-applicability"
+kind = "contract"
+title = "Origin and applicability are independent"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+anchors = ["plurx:section:receipt.authentication", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "Adoption requires the existing validator to authenticate run, job, start marker, journal and publication provenance. Source compatibility or an artifact hash alone authenticates nothing."
+authoritative_section = "plurx:section:receipt.authentication"
+check_ids = ["plurx:check:receipt.origin-applicability"]
+status = "active"
+
+[[records]]
+id = "plurx:check:receipt.origin-applicability"
+kind = "check"
+title = "Origin and applicability are independent regression definition"
+scope = ["tests/validation/test_main_unit_receipts.py"]
+anchors = ["plurx:section:receipt.authentication"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+check_kind = "behavioral"
+governed_ids = ["plurx:contract:receipt.origin-applicability"]
+selector = "python3 -m unittest discover -s tests/validation -p 'test_main_unit_receipts.py'"
+
+[[records]]
+id = "plurx:obligation:preserve.receipt.origin-applicability"
+kind = "obligation"
+title = "Preserve receipt boundary: Origin and applicability are independent"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+anchors = ["plurx:section:receipt.authentication", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "When changing this boundary, preserve the cited rule; graph metadata cannot authorize adoption, mint authenticated origin or turn a named check into an executed result. Adoption requires the existing validator to authenticate run, job, start marker, journal and publication provenance. Source compatibility or an artifact hash alone authenticates nothing."
+authority = "plurx:section:receipt.authentication"
+disposition = "open"
+responsible_role = "receipt or graph-adapter change author and reviewer"
+remaining_evidence = "Standing change obligation. Missing pilot execution data means not recorded, not a production failure or a new merge blocker."
+
+[[records]]
+id = "plurx:contract:receipt.input-closure"
+kind = "contract"
+title = "Declared inputs and environment constrain evidence"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+anchors = ["plurx:section:receipt.applicability", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "Method/fixture applicability is not arbitrary product-input proof. Preserve the reviewed production-input witness, membership, source identity and environment; undecidable evidence receives no adoption credit."
+authoritative_section = "plurx:section:receipt.applicability"
+check_ids = ["plurx:check:receipt.input-closure"]
+status = "active"
+
+[[records]]
+id = "plurx:check:receipt.input-closure"
+kind = "check"
+title = "Declared inputs and environment constrain evidence regression definition"
+scope = ["tests/validation/test_main_preflight_adoption.py"]
+anchors = ["plurx:section:receipt.applicability"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+check_kind = "behavioral"
+governed_ids = ["plurx:contract:receipt.input-closure"]
+selector = "python3 -m unittest discover -s tests/validation -p 'test_main_preflight_adoption.py'"
+
+[[records]]
+id = "plurx:obligation:preserve.receipt.input-closure"
+kind = "obligation"
+title = "Preserve receipt boundary: Declared inputs and environment constrain evidence"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+anchors = ["plurx:section:receipt.applicability", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "When changing this boundary, preserve the cited rule; graph metadata cannot authorize adoption, mint authenticated origin or turn a named check into an executed result. Method/fixture applicability is not arbitrary product-input proof. Preserve the reviewed production-input witness, membership, source identity and environment; undecidable evidence receives no adoption credit."
+authority = "plurx:section:receipt.applicability"
+disposition = "open"
+responsible_role = "receipt or graph-adapter change author and reviewer"
+remaining_evidence = "Standing change obligation. Missing pilot execution data means not recorded, not a production failure or a new merge blocker."
+
+[[records]]
+id = "plurx:contract:receipt.history-fallback"
+kind = "contract"
+title = "Unusable history reruns without blocking the lane"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+anchors = ["plurx:section:receipt.rule", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+behavior = "Unauthenticated, missing or unusable historical journals are not adopted and their tests run. Current-run integrity failures remain distinct refusals."
+authoritative_section = "plurx:section:receipt.rule"
+check_ids = ["plurx:check:receipt.history-fallback"]
+status = "active"
+
+[[records]]
+id = "plurx:check:receipt.history-fallback"
+kind = "check"
+title = "Unusable history reruns without blocking the lane regression definition"
+scope = ["tests/validation/test_python_unit_receipts.py"]
+anchors = ["plurx:section:receipt.rule"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+check_kind = "behavioral"
+governed_ids = ["plurx:contract:receipt.history-fallback"]
+selector = "python3 -m unittest discover -s tests/validation -p 'test_python_unit_receipts.py'"
+
+[[records]]
+id = "plurx:obligation:preserve.receipt.history-fallback"
+kind = "obligation"
+title = "Preserve receipt boundary: Unusable history reruns without blocking the lane"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+anchors = ["plurx:section:receipt.rule", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+action = "When changing this boundary, preserve the cited rule; graph metadata cannot authorize adoption, mint authenticated origin or turn a named check into an executed result. Unauthenticated, missing or unusable historical journals are not adopted and their tests run. Current-run integrity failures remain distinct refusals."
+authority = "plurx:section:receipt.rule"
+disposition = "open"
+responsible_role = "receipt or graph-adapter change author and reviewer"
+remaining_evidence = "Standing change obligation. Missing pilot execution data means not recorded, not a production failure or a new merge blocker."
+
+[[records]]
+id = "plurx:decision:receipt.history-fallback"
+kind = "decision"
+title = "Replace bespoke history recoveries with nonblocking rerun"
+scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
+anchors = ["plurx:section:receipt.history-decision"]
+[records.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.history-decision"
+source_digest = "sha256:529564a4da73f68d0399fefe9ea9a15d9f697ddf02af42606d9461db1b242ccf"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+[records.attributes]
+rationale = "The policy records prior force-push/crash/journal shapes wedging later runs and accumulating one-off recoveries. A single nonadoption-and-rerun rule removes the root cause while keeping current-run integrity refusals."
+status = "accepted"
+source_section = "plurx:section:receipt.history-decision"
+
+[[edges]]
+source = "plurx:route:server.capability-profile"
+relation = "implements"
+target = "plurx:contract:routing.server.capability-profile"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.capability-profile"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.capability-profile"
+relation = "specified-by"
+target = "plurx:section:routing.server.capability-profile"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.capability-profile"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.capability-profile"
+relation = "checked-by"
+target = "plurx:check:routing.server.capability-profile"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.capability-profile"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.capability-profile"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.server.capability-profile"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.capability-profile"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:route:server.learned-decode-limit"
+relation = "implements"
+target = "plurx:contract:routing.server.learned-decode-limit"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.learned-decode-limit"
+relation = "specified-by"
+target = "plurx:section:routing.server.learned-decode-limit"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.learned-decode-limit"
+relation = "checked-by"
+target = "plurx:check:routing.server.learned-decode-limit"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.learned-decode-limit"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.server.learned-decode-limit"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.learned-decode-limit"
+relation = "delivered-by"
+target = "plurx:artifact:5a28b931752941376e86"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.plan.learned"
+source_digest = "sha256:bc7a2d0acb9440b9f0709405572435e5de6846a9ce555682f0c93e729996d0e3"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:route:server.learned-decode-limit-expiry"
+relation = "implements"
+target = "plurx:contract:routing.server.learned-decode-limit-expiry"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit-expiry"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.learned-decode-limit-expiry"
+relation = "specified-by"
+target = "plurx:section:routing.server.learned-decode-limit-expiry"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit-expiry"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.learned-decode-limit-expiry"
+relation = "checked-by"
+target = "plurx:check:routing.server.learned-decode-limit-expiry"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit-expiry"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.learned-decode-limit-expiry"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.server.learned-decode-limit-expiry"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.learned-decode-limit-expiry"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.learned-decode-limit-expiry"
+relation = "delivered-by"
+target = "plurx:artifact:5a28b931752941376e86"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.plan.learned"
+source_digest = "sha256:bc7a2d0acb9440b9f0709405572435e5de6846a9ce555682f0c93e729996d0e3"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:route:server.verdict"
+relation = "implements"
+target = "plurx:contract:routing.server.verdict"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.verdict"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.verdict"
+relation = "specified-by"
+target = "plurx:section:routing.server.verdict"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.verdict"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.verdict"
+relation = "checked-by"
+target = "plurx:check:routing.server.verdict"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.verdict"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.verdict"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.server.verdict"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.verdict"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:route:server.manual-quality"
+relation = "implements"
+target = "plurx:contract:routing.server.manual-quality"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.manual-quality"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.manual-quality"
+relation = "specified-by"
+target = "plurx:section:routing.server.manual-quality"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.manual-quality"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.manual-quality"
+relation = "checked-by"
+target = "plurx:check:routing.server.manual-quality"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.manual-quality"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.manual-quality"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.server.manual-quality"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.manual-quality"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:route:server.execution-plan"
+relation = "implements"
+target = "plurx:contract:routing.server.execution-plan"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.execution-plan"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.execution-plan"
+relation = "specified-by"
+target = "plurx:section:routing.server.execution-plan"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.execution-plan"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.execution-plan"
+relation = "checked-by"
+target = "plurx:check:routing.server.execution-plan"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.execution-plan"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.execution-plan"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.server.execution-plan"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.server.execution-plan"
+source_digest = "sha256:a0a2a958e85b16844b102bcd55fe7c40d03029f6ffa695a3ce02d6fd32e4c9e6"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.capability-profile"
+relation = "constrained-by"
+target = "plurx:decision:routing.profile-claims"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.decision.profile-claims"
+source_digest = "sha256:7f4c0107dcc93c20e40519125b3a0fd61d04971e0a3fcd002c8fcb3851df151f"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:decision:routing.profile-claims"
+relation = "specified-by"
+target = "plurx:section:routing.decision.profile-claims"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.decision.profile-claims"
+source_digest = "sha256:7f4c0107dcc93c20e40519125b3a0fd61d04971e0a3fcd002c8fcb3851df151f"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:routing.server.execution-plan"
+relation = "constrained-by"
+target = "plurx:decision:routing.plan-ceiling"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.decision.plan-ceiling"
+source_digest = "sha256:7f4c0107dcc93c20e40519125b3a0fd61d04971e0a3fcd002c8fcb3851df151f"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:decision:routing.plan-ceiling"
+relation = "specified-by"
+target = "plurx:section:routing.decision.plan-ceiling"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:routing.decision.plan-ceiling"
+source_digest = "sha256:7f4c0107dcc93c20e40519125b3a0fd61d04971e0a3fcd002c8fcb3851df151f"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.execution-distinction"
+relation = "checked-by"
+target = "plurx:check:receipt.execution-distinction"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.execution-distinction"
+relation = "specified-by"
+target = "plurx:section:receipt.identity"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:f0a6d64af584ee44f035"
+relation = "implements"
+target = "plurx:contract:receipt.execution-distinction"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:ba7e75ce1f7b861a31a3"
+relation = "implements"
+target = "plurx:contract:receipt.execution-distinction"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:5bc183daec13d22ff7e0"
+relation = "implements"
+target = "plurx:contract:receipt.execution-distinction"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:b4e02385a5470ccd0d43"
+relation = "implements"
+target = "plurx:contract:receipt.execution-distinction"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.execution-distinction"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.receipt.execution-distinction"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.identity"
+source_digest = "sha256:2c0e188cd2c92d3b1cab895dd9c905b6cc96dd55c15f74194133ea946b95a851"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.origin-applicability"
+relation = "checked-by"
+target = "plurx:check:receipt.origin-applicability"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.origin-applicability"
+relation = "specified-by"
+target = "plurx:section:receipt.authentication"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:f0a6d64af584ee44f035"
+relation = "implements"
+target = "plurx:contract:receipt.origin-applicability"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:ba7e75ce1f7b861a31a3"
+relation = "implements"
+target = "plurx:contract:receipt.origin-applicability"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:5bc183daec13d22ff7e0"
+relation = "implements"
+target = "plurx:contract:receipt.origin-applicability"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:b4e02385a5470ccd0d43"
+relation = "implements"
+target = "plurx:contract:receipt.origin-applicability"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.origin-applicability"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.receipt.origin-applicability"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.authentication"
+source_digest = "sha256:d8b258963326180b0097a38ee248eac159ace4e4c36b219f17cb63c4e348ff78"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.input-closure"
+relation = "checked-by"
+target = "plurx:check:receipt.input-closure"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.input-closure"
+relation = "specified-by"
+target = "plurx:section:receipt.applicability"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:f0a6d64af584ee44f035"
+relation = "implements"
+target = "plurx:contract:receipt.input-closure"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:ba7e75ce1f7b861a31a3"
+relation = "implements"
+target = "plurx:contract:receipt.input-closure"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:5bc183daec13d22ff7e0"
+relation = "implements"
+target = "plurx:contract:receipt.input-closure"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:b4e02385a5470ccd0d43"
+relation = "implements"
+target = "plurx:contract:receipt.input-closure"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.input-closure"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.receipt.input-closure"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.applicability"
+source_digest = "sha256:de618babd064d806e6125b5bed32116cf00d9c7c3f28ebd09999822533318454"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.history-fallback"
+relation = "checked-by"
+target = "plurx:check:receipt.history-fallback"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.history-fallback"
+relation = "specified-by"
+target = "plurx:section:receipt.rule"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:f0a6d64af584ee44f035"
+relation = "implements"
+target = "plurx:contract:receipt.history-fallback"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:ba7e75ce1f7b861a31a3"
+relation = "implements"
+target = "plurx:contract:receipt.history-fallback"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:5bc183daec13d22ff7e0"
+relation = "implements"
+target = "plurx:contract:receipt.history-fallback"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:artifact:b4e02385a5470ccd0d43"
+relation = "implements"
+target = "plurx:contract:receipt.history-fallback"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.history-fallback"
+relation = "constrained-by"
+target = "plurx:obligation:preserve.receipt.history-fallback"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.rule"
+source_digest = "sha256:c5795297d1c2e229c4ec8cbfad2df9903f66219bae3b78ad1af4e4e86713e265"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:contract:receipt.history-fallback"
+relation = "constrained-by"
+target = "plurx:decision:receipt.history-fallback"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.history-decision"
+source_digest = "sha256:529564a4da73f68d0399fefe9ea9a15d9f697ddf02af42606d9461db1b242ccf"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
+
+[[edges]]
+source = "plurx:decision:receipt.history-fallback"
+relation = "specified-by"
+target = "plurx:section:receipt.history-decision"
+[edges.provenance]
+method = "reviewed"
+author = "Codex integrator"
+reviewer = "Codex integrator; source review, independent code review pending"
+origin = "plurx:section:receipt.history-decision"
+source_digest = "sha256:529564a4da73f68d0399fefe9ea9a15d9f697ddf02af42606d9461db1b242ccf"
+revision = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"

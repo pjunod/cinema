@@ -69,7 +69,7 @@ struct SearchView: View {
                 remoteNavigation.focusControl(scope: "search", key: resultBookmark.map { "search:item:\($0)" } ?? "search:field")
             }
         }
-        .onChange(of: remoteNavigation.focusRevision) { _, _ in
+        .onRemoteFocusChange(remoteNavigation) {
             guard remoteNavigation.activeScope == "search", let key = remoteNavigation.focusedKey else { return }
             resultsOwnedFocus = key.hasPrefix("search:item:")
             if resultsOwnedFocus { resultBookmark = Int(key.dropFirst(12)) }

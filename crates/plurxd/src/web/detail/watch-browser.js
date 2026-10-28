@@ -39,7 +39,7 @@ function watchMetaLine(page){
 function watchTitleHtml(){
   const page=WATCH.page;
   const next=page.item.kind==="episode"?`<div class="watch-actions"><button type="button" class="ghost watch-play-next" onclick="playNextEpisode()">Play next</button></div>`:"";
-  return `<span class="watch-np-kicker">${WATCH.accepted?"Now playing":"Starting"}</span><h2>${esc(page.item.title)}</h2><p class="watch-meta">${watchMetaLine(page)}</p><div class="vbadges">${WATCH.accepted?playerFactBadges():""}</div><p class="watch-synopsis">${esc(page.meta.overview||"")}</p>${next}`;
+  return `<span class="watch-np-kicker">${WATCH.accepted?"Now playing":"Starting"}</span><h2>${esc(page.item.title)}</h2><p class="watch-meta">${watchMetaLine(page)}</p><div class="vbadges" data-watch-facts>${WATCH.accepted?playerFactBadges():""}</div><p class="watch-synopsis">${esc(page.meta.overview||"")}</p>${next}`;
 }
 // The heading is the item page's breadcrumb. It is re-rendered with the
 // title, because playing another episode from the grid changes the last
@@ -51,6 +51,15 @@ function watchHeadHtml(){
     .concat((page.ancestors||[]).map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title})))
     .concat([{label:page.item.title}]);
   return pageHead(trail);
+}
+// Refresh only the facts. Replacing the title or ledger here would detach
+// focused track controls, subtitle forms or the open title-info dialog.
+function watchRefreshFactBadges(){
+  if(!WATCH?.page)return;
+  const html=WATCH.accepted?playerFactBadges():"";
+  for(const node of document.querySelectorAll("#watch-title [data-watch-facts], #watch-band-title [data-watch-facts], #watch-details [data-watch-facts]")){
+    if(node.innerHTML!==html)node.innerHTML=html;
+  }
 }
 function watchRenderTitle(){
   if(!WATCH?.page)return;
@@ -127,8 +136,8 @@ function watchLedgerHtml(){
   return `<dl class="watch-ledger">
     ${vid?`<dt>Video</dt><dd>${esc(vid)}</dd>`:""}
     <dt>Audio</dt><dd>${auds.length?watchTrackRow("audio",auds,selA,audioLabel,null):"None"}</dd>
-    ${(subs.length||f.video_codec)?`<dt>Subtitles</dt><dd>${translated?watchTrackChip("English · AI translation · partial",true,null):""}${watchTrackRow("subs",subs,selS,subLabel,offChip)}</dd>`:""}
-    ${watchCanGenerateSubtitles(f)||watchTranslationAction(f)?`<dt>Captions</dt><dd>${watchGenerationAction(f)}${watchTranslationAction(f)}</dd>`:""}
+    ${(subs.length||f.video_codec)?`<dt>Subtitles</dt><dd>${translated?watchTrackChip(watchAiCaptionLabel(),true,null):""}${watchTrackRow("subs",subs,selS,subLabel,offChip)}</dd>`:""}
+    ${watchCanGenerateSubtitles(f)||watchTranslationAction(f)?`<dt>Captions</dt><dd>${watchGenerationAction(f)}${watchTranslationAction(f)}${watchTextTranslationAction(f)}</dd>`:""}
     ${delivery?`<dt>Delivery</dt><dd>${delivery}</dd>`:""}
     <dt>File</dt><dd><span class="watch-fn">${esc(f.filename||"")}</span>${file?`<span class="watch-fmeta">${esc(file)}</span>`:""}</dd></dl>`;
 }
@@ -146,11 +155,12 @@ function watchBindLedger(node){
     if(PLAYER&&f&&(want!==watchSelectedSub(f)||(typeof translationSelected==="function"&&translationSelected(PLAYER))))setSub(want);
   }));
   node.querySelectorAll("[data-watch-translate]").forEach(b=>b.addEventListener("click",()=>watchTranslateSubtitles(b)));
+  node.querySelectorAll("[data-watch-text-translate]").forEach(b=>b.addEventListener("click",()=>watchTranslateTextSubtitles(b)));
   node.querySelectorAll("[data-watch-generate]").forEach(b=>b.addEventListener("click",()=>watchGenerateSubtitles(b)));
   node.querySelectorAll("[data-watch-fold]").forEach(b=>b.addEventListener("click",()=>watchToggleFold(b.dataset.watchFold)));
 }
 function watchGenerationAction(file){
-  return watchCanGenerateSubtitles(file)?`<button type="button" class="ghost sm" data-watch-generate="${esc(String(file.id))}">Generate subtitles</button>`:"";
+  return watchCanGenerateSubtitles(file)?`<button type="button" class="ghost sm" data-watch-generate="${esc(String(file.id))}">Generate complete subtitles</button>`:"";
 }
 function watchCanGenerateSubtitles(file){
   return !!(ME?.is_admin&&file?.available&&file.video_codec&&playbackFileContextForFile(file).source_ref.kind==="local");
@@ -184,10 +194,12 @@ function watchRenderLedger(){
   if(!WATCH?.page)return;
   watchRenderSubtitleGeneration();
   if(typeof translationWatchChanged==="function")translationWatchChanged();
+  if(typeof textTranslationWatchChanged==="function")textTranslationWatchChanged();
+  if(typeof sharedCaptionWatchChanged==="function")sharedCaptionWatchChanged();
   const html=watchLedgerHtml();
   // A re-render replaces the control that had focus; put focus back on the
   // same control so a keyboard fold or switch does not drop to <body>.
-  const active=document.activeElement,focusedHost=active&&active.closest&&active.closest(".watch-ledger-host"),keep=focusedHost?["watchAudio","watchSub","watchFold","watchGenerate","watchTranslate"].map(k=>active.dataset[k]!=null?`[data-${k.replace(/[A-Z]/g,m=>"-"+m.toLowerCase())}="${active.dataset[k]}"]`:null).find(Boolean):null;
+  const active=document.activeElement,focusedHost=active&&active.closest&&active.closest(".watch-ledger-host"),keep=focusedHost?["watchAudio","watchSub","watchFold","watchGenerate","watchTranslate","watchTextTranslate"].map(k=>active.dataset[k]!=null?`[data-${k.replace(/[A-Z]/g,m=>"-"+m.toLowerCase())}="${active.dataset[k]}"]`:null).find(Boolean):null;
   for(const id of ["watch-ledger","watch-band-ledger"]){
     const node=document.getElementById(id);if(!node)continue;
     node.innerHTML=html;
@@ -389,17 +401,37 @@ function watchMarkChapter(){
   }
 }
 
-function watchTranslationAction(file){
-  return ME&&file?.available&&file.video_codec&&playbackFileContextForFile(file).source_ref.kind==="local"?`<button type="button" class="ghost sm" data-watch-translate="${esc(String(file.id))}">Translate to English</button>`:"";
+function watchAiCaptionLabel(){
+  const local=typeof SUBTITLE_TRANSLATION!=="undefined"?SUBTITLE_TRANSLATION:null,shared=typeof SHARED_CAPTION_READER!=="undefined"?SHARED_CAPTION_READER:null;
+  const state=local?.player===PLAYER?local:shared?.player===PLAYER?shared:null,task=state?.task||state?.asset?.task,language=state?.outputLanguage||state?.asset?.output_language||"";
+  return `${language} · AI ${task==="transcribe"?"captions":"translation"}`;
 }
-async function watchTranslateSubtitles(button){
-  const file=watchCurrentFile();if(!file||button.dataset.watchTranslate!==String(file.id))return;
+function watchTranslationAction(file){
+  if(!ME||!file?.available||!file.video_codec)return "";
+  const shared=playbackFileContextForFile(file).source_ref.kind!=="local";
+  return `<button type="button" class="ghost sm" data-watch-translate="${esc(String(file.id))}">${shared?"Available AI captions":"Generate or translate speech"}</button>`;
+}
+function watchTextTranslationAction(file){
+  return ME&&file?.available&&file.video_codec&&playbackFileContextForFile(file).source_ref.kind==="local"?`<button type="button" class="ghost sm" data-watch-text-translate="${esc(String(file.id))}">Translate existing subtitles</button>`:"";
+}
+async function watchOpenCaptionPanel(button,kind){
+  const file=watchCurrentFile(),key=kind==="text"?"watchTextTranslate":"watchTranslate";
+  if(!file||button.dataset[key]!==String(file.id))return;
   const owner=WATCH,dialog=button.closest("dialog");if(dialog?.open)dialog.close();
   if(WATCH.mode==="full"){
     if(document.fullscreenElement&&document.exitFullscreen){try{await document.exitFullscreen();}catch(error){return;}}
     else if(isFullscreenAnywhere()){exitFullscreenAnywhere();return;}
     if(WATCH!==owner||watchCurrentFile()!==file)return;watchReturnBrowser();
   }
-  const panel=document.getElementById("watch-subtitle-translation");if(!panel)return;
-  await translationOpen(button);if(panel.isConnected){panel.focus({preventScroll:true});panel.scrollIntoView({block:"nearest"});}
+  const shared=playbackFileContextForFile(file).source_ref.kind!=="local";
+  const id=kind==="text"?"watch-subtitle-text-translation":shared?"watch-shared-captions":"watch-subtitle-translation",panel=document.getElementById(id);if(!panel)return;
+  if(kind==="text")await openTextSubtitleTranslation(button);else if(shared)await openSharedCaptionReader(button);else await translationOpen(button);
+  if(panel.isConnected){panel.focus({preventScroll:true});panel.scrollIntoView({block:"nearest"});}
+}
+function watchTranslateSubtitles(button){return watchOpenCaptionPanel(button,"speech");}
+function watchTranslateTextSubtitles(button){return watchOpenCaptionPanel(button,"text");}
+function openPlayerCaptionControls(kind){
+  closeMenu();const file=watchCurrentFile();if(!file)return;
+  const button={dataset:kind==="text"?{watchTextTranslate:String(file.id)}:{watchTranslate:String(file.id)},closest:()=>null};
+  return watchOpenCaptionPanel(button,kind);
 }

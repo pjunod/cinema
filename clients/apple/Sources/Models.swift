@@ -801,6 +801,9 @@ struct SubtitleTrack: Codable, Identifiable {
     /// Optional application-rendered bitmap protocol. It is deliberately
     /// separate from `native`, which continues to mean an HLS text rendition.
     var overlay: String?
+    /// Stable acquired-caption identity; ordinary menu indices can move after
+    /// another caption is removed or published.
+    var downloadedSubtitleId: String? = nil
 
     /// Formats the server can expose losslessly enough as an HLS WebVTT
     /// rendition. Styled ASS/SSA remains a burn even though it contains text.
@@ -839,7 +842,7 @@ struct QualityCandidate: Codable, Identifiable {
         guard recipeDigest.count == 32, (1...16_384).contains(width), (1...16_384).contains(height),
               (0...16_384).contains(targetHeight), ["original", "remux", "encode"].contains(route),
               ["sdr", "hdr10"].contains(grade),
-              processedHdr10 != true || (route == "encode" && grade == "hdr10" && plannedCodec == "hevc") else { return false }
+              processedHdr10 != true || (route == "encode" && plannedCodec == "hevc") else { return false }
         var bytes = Data("plurx:auto-quality-candidate:v1\0".utf8)
         bytes.append(contentsOf: recipeDigest)
         let expected = SHA256.hash(data: bytes).prefix(16).map { String(format: "%02x", $0) }.joined()
@@ -968,11 +971,15 @@ struct Decision: Codable {
 struct EffectiveProcessingReport: Equatable, Codable {
     var generation: String
     var hdr10Enhanced: Bool
+    var sdrProcessed: Bool = false
+    var mark: String { sdrProcessed ? "SDR-E" : "HDR10-E" }
     var felContributed: Bool
     var appliedOperations: [String]
+    /// Some, but not every, served frame applied creative trims.
+    var creativeTrimsPartial: Bool = false
 
     func matches(generation active: String?, delivered: String?) -> Bool {
-        hdr10Enhanced && delivered == "hdr10" && active == generation
+        ((hdr10Enhanced && !sdrProcessed && delivered == "hdr10") || (!hdr10Enhanced && sdrProcessed && delivered == "sdr" && appliedOperations.contains("Bt709Gamma24Conversion") && appliedOperations.contains("DisplayTargetMapping:100"))) && active == generation
             && UUID(uuidString: generation) != nil
             && !appliedOperations.isEmpty && appliedOperations.count <= 16
             && appliedOperations.allSatisfy { !$0.isEmpty && $0.count <= 64 }
@@ -983,23 +990,42 @@ struct EffectiveProcessingReport: Equatable, Codable {
                      "RpuColorConversion": "RPU color conversion", "TargetMapping": "target mapping",
                      "CreativeTrimApplication": "creative trims"]
         let metadata = appliedOperations.compactMap { names[$0] }.joined(separator: ", ")
-        return "Dolby Vision–enhanced HDR10 · FEL used: \(felContributed ? "yes" : "no")"
+        let trims = appliedOperations.contains("CreativeTrimApplication") ? "creative trims applied" : creativeTrimsPartial ? "creative trims on some shots" : "L1 only"
+        return "\(sdrProcessed ? "Dolby Vision–processed SDR (BT.709 gamma 2.4, \(trims))" : "Dolby Vision–enhanced HDR10") · FEL used: \(felContributed ? "yes" : "no")"
             + (metadata.isEmpty ? "" : " · Applied: \(metadata)")
     }
 
-    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, felContributed, appliedOperations }
+    private struct WireOperation: Decodable {
+        var name: String
+        private enum Keys: String, CodingKey { case target = "DisplayTargetMapping" }
+        private struct Target: Decodable { var nits: Int }
+        init(from decoder: Decoder) throws {
+            if let string = try? decoder.singleValueContainer().decode(String.self) { name = string; return }
+            let values = try decoder.container(keyedBy: Keys.self)
+            let nits = try values.decode(Target.self, forKey: .target).nits
+            guard [100, 400, 600, 1000, 1600, 2000, 4000].contains(nits) else {
+                throw DecodingError.dataCorruptedError(forKey: .target, in: values, debugDescription: "unsupported display target")
+            }
+            name = "DisplayTargetMapping:\(nits)"
+        }
+    }
+    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, sdrProcessed, felContributed, appliedOperations, creativeTrimsPartial }
     init(from decoder: Decoder) throws {
         let values = try? decoder.container(keyedBy: CodingKeys.self)
         generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
         hdr10Enhanced = ((try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == true)
             && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
+        sdrProcessed = ((try? values?.decode(Bool.self, forKey: .sdrProcessed)) == true) && (try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == false && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
         felContributed = (try? values?.decode(Bool.self, forKey: .felContributed)) ?? false
-        appliedOperations = (try? values?.decode([String].self, forKey: .appliedOperations)) ?? []
+        appliedOperations = (try? values?.decode([WireOperation].self, forKey: .appliedOperations).map(\.name)) ?? []
+        creativeTrimsPartial = (try? values?.decode(Bool.self, forKey: .creativeTrimsPartial)) == true
+        if appliedOperations.contains(where: { $0.hasPrefix("DisplayTargetMapping:") && ($0 == "DisplayTargetMapping:100") != sdrProcessed }) { appliedOperations = [] }
     }
 
-    init(generation: String, hdr10Enhanced: Bool, felContributed: Bool, appliedOperations: [String]) {
+    init(generation: String, hdr10Enhanced: Bool, felContributed: Bool, appliedOperations: [String], sdrProcessed: Bool = false) {
         self.generation = generation
         self.hdr10Enhanced = hdr10Enhanced
+        self.sdrProcessed = sdrProcessed
         self.felContributed = felContributed
         self.appliedOperations = appliedOperations
     }

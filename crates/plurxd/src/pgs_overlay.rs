@@ -32,6 +32,10 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 const NEGATIVE_TTL: Duration = Duration::from_secs(120);
 const MAX_NEGATIVE_ENTRIES: usize = 128;
 const MAX_TRACK_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_UNIQUE_OBJECTS: usize = 32_768;
+// SUP, bounded PNG/manifest bytes, and conservative allocation overhead for
+// at most 32K object files (including filesystems allocating 64 KiB blocks).
+const STAGE_RESERVATION_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 // The streaming normalizer can produce many cues that reuse a small PNG set.
 // Bound the in-memory snapshots before cloning them into the manifest.
 const MAX_SNAPSHOT_METADATA_BYTES: u64 = 64 * 1024 * 1024;
@@ -367,6 +371,10 @@ async fn published_generation_is_valid(
 }
 
 pub async fn invalidate_generation(final_dir: &Path) {
+    let _eviction = match crate::playback_cache::begin_eviction(final_dir) {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
     let _ = tokio::fs::remove_dir_all(final_dir).await;
     if let Some(root) = final_dir.parent() {
         let root = root.to_owned();
@@ -412,20 +420,36 @@ async fn prepare_once(
     generation: String,
     stored: crate::subtitle_source::StoreAccess,
 ) -> Result<(), OverlayError> {
+    let _published_pin = crate::playback_cache::pin(&final_dir)
+        .map_err(|error| OverlayError::Unavailable(format!("PGS cache ownership: {error}")))?;
+    let stage = root.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
+    let reservation = crate::playback_cache::reserve(&stage, STAGE_RESERVATION_BYTES)
+        .await
+        .map_err(|error| OverlayError::Unavailable(format!("PGS disk admission: {error}")))?
+        .map(Arc::new);
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|error| OverlayError::Internal(format!("creating PGS cache: {error}")))?;
-    let stage = root.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir(&stage).await.map_err(|error| {
         OverlayError::Internal(format!("creating PGS staging directory: {error}"))
     })?;
     let mut staging = StagingDir::new(stage);
+    staging.reservation = reservation;
 
-    prepare_stage_with(staging.path(), &file, index, &generation, &stored).await?;
+    prepare_stage_with_budget(
+        staging.path(),
+        &file,
+        index,
+        &generation,
+        &stored,
+        staging.reservation.clone(),
+    )
+    .await?;
+    let actual_bytes = directory_size(staging.path()).await;
 
     match tokio::fs::rename(staging.path(), &final_dir).await {
         Ok(()) => {
-            staging.disarm();
+            staging.disarm(actual_bytes);
             let root_for_sync = root.clone();
             tokio::task::spawn_blocking(move || sync_directory(&root_for_sync))
                 .await
@@ -456,6 +480,7 @@ async fn prepare_once(
 struct StagingDir {
     path: PathBuf,
     armed: bool,
+    reservation: Option<Arc<crate::playback_cache::CacheReservation>>,
 }
 
 struct CancellationFlag {
@@ -490,15 +515,22 @@ impl Drop for CancellationFlag {
 
 impl StagingDir {
     fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
+        Self {
+            path,
+            armed: true,
+            reservation: None,
+        }
     }
 
     fn path(&self) -> &Path {
         &self.path
     }
 
-    fn disarm(&mut self) {
+    fn disarm(&mut self, _actual_bytes: u64) {
         self.armed = false;
+        // The complete tree may contain thousands of tiny allocated files.
+        // Last-reservation drop forces a physical inventory before new writes.
+        drop(self.reservation.take());
     }
 }
 
@@ -508,11 +540,14 @@ impl Drop for StagingDir {
             return;
         }
         let path = self.path.clone();
+        let reservation = self.reservation.take();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
+                let _reservation = reservation;
                 let _ = tokio::fs::remove_dir_all(path).await;
             });
         } else {
+            let _reservation = reservation;
             let _ = std::fs::remove_dir_all(path);
         }
     }
@@ -536,12 +571,28 @@ async fn prepare_stage(
     .await
 }
 
+#[cfg(test)]
 async fn prepare_stage_with(
     stage: &Path,
     file: &MediaFile,
     index: i64,
     generation: &str,
     stored: &crate::subtitle_source::StoreAccess,
+) -> Result<(), OverlayError> {
+    let reservation = crate::playback_cache::reserve(stage, STAGE_RESERVATION_BYTES)
+        .await
+        .map_err(|error| OverlayError::Unavailable(format!("PGS disk admission: {error}")))?
+        .map(Arc::new);
+    prepare_stage_with_budget(stage, file, index, generation, stored, reservation).await
+}
+
+async fn prepare_stage_with_budget(
+    stage: &Path,
+    file: &MediaFile,
+    index: i64,
+    generation: &str,
+    stored: &crate::subtitle_source::StoreAccess,
+    reservation: Option<Arc<crate::playback_cache::CacheReservation>>,
 ) -> Result<(), OverlayError> {
     let mut cancellation = CancellationFlag::new();
     source_is_current(file).await?;
@@ -556,6 +607,7 @@ async fn prepare_stage_with(
     let generation_for_worker = generation.to_owned();
     let worker_cancellation = cancellation.worker();
     tokio::task::spawn_blocking(move || {
+        let _write_reservation = reservation;
         compile_generation_streamed(
             &sup_for_worker,
             &stage_for_worker,
@@ -618,7 +670,7 @@ async fn stored_track_into_stage_with_hydration(
     sup: &Path,
     hydrate: impl Future<Output = bool>,
 ) -> bool {
-    use crate::subtitle_source::{copy_verified, lookup, Consumer, Live, Lookup};
+    use crate::subtitle_source::{copy_verified_bounded, lookup, Consumer, Live, Lookup};
     // The switch and the manifest are asked before the media mount is
     // stated; the lookup takes the live `fstat` last.
     let copy_local = || async {
@@ -631,7 +683,7 @@ async fn stored_track_into_stage_with_hydration(
         )
         .await
         {
-            Lookup::Kept(kept) => copy_verified(&kept, sup).await,
+            Lookup::Kept(kept) => copy_verified_bounded(&kept, sup, MAX_TRACK_BYTES).await,
             Lookup::Empty(_) | Lookup::Miss(_) => false,
         }
     };
@@ -655,6 +707,9 @@ async fn demux_track(file: &MediaFile, index: i64, sup: &Path) -> Result<(), Ove
         crate::ffmpeg::windows_source_path(&source.handle).map_err(OverlayError::Unavailable)?;
     let maximum_demux_bytes = MAX_TRACK_BYTES.to_string();
     let mut command = tokio::process::Command::new(ffmpeg_bin());
+    crate::subtitle_ride_along::configure_stage_limits(&mut command).map_err(|error| {
+        OverlayError::Unavailable(format!("bounded PGS output unavailable: {error}"))
+    })?;
     crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
     command
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
@@ -787,6 +842,11 @@ impl<'a> GenerationCompiler<'a> {
             let png = encode_rgba_png(object.width, object.height, &object.rgba)?;
             let hash = hex::encode(Sha256::digest(&png));
             if self.published.insert(hash.clone()) {
+                if self.published.len() > MAX_UNIQUE_OBJECTS {
+                    return Err(OverlayError::Limit(
+                        "overlay has too many unique objects".into(),
+                    ));
+                }
                 self.unique_bytes = self
                     .unique_bytes
                     .checked_add(png.len() as u64)
@@ -872,6 +932,7 @@ impl<'a> GenerationCompiler<'a> {
             generation,
             cancelled,
             snapshots,
+            unique_bytes,
             ..
         } = self;
         check_worker_cancelled(cancelled)?;
@@ -916,6 +977,11 @@ impl<'a> GenerationCompiler<'a> {
         };
         let bytes = serde_json::to_vec_pretty(&manifest)
             .map_err(|error| OverlayError::Internal(format!("encoding PGS manifest: {error}")))?;
+        if unique_bytes.saturating_add(bytes.len() as u64) > MAX_TRACK_BYTES {
+            return Err(OverlayError::Limit(
+                "overlay manifest exceeds its reserved generation bound".into(),
+            ));
+        }
         write_durable(&stage.join("manifest.json"), &bytes)
             .map_err(|error| OverlayError::Internal(format!("writing PGS manifest: {error}")))?;
         let total_bytes = directory_size_sync(stage, cancelled)?;
@@ -1038,10 +1104,13 @@ async fn validate_generation(
     generation: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), OverlayError> {
+    let cache_pin = crate::playback_cache::pin(dir)
+        .map_err(|error| OverlayError::Unavailable(format!("PGS read admission: {error}")))?;
     let dir = dir.to_owned();
     let file = file.clone();
     let generation = generation.to_owned();
     tokio::task::spawn_blocking(move || {
+        let _cache_pin = cache_pin;
         validate_generation_sync(&dir, &file, index, &generation, Some(&cancelled))
     })
     .await
@@ -1173,6 +1242,9 @@ fn push_png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 }
 
 async fn prune(root: &Path) {
+    if crate::playback_cache::lookup(root).is_some() {
+        return;
+    }
     prune_bounded(root, MAX_CACHE_BYTES, MAX_CACHE_TRACKS).await;
 }
 
@@ -1241,6 +1313,104 @@ async fn directory_size(path: &Path) -> u64 {
         }
     }
     total
+}
+
+pub(crate) fn register_playback_cache(
+    budget: &Arc<crate::playback_cache::PlaybackCacheBudget>,
+    subs_root: &Path,
+) {
+    budget.register(Arc::new(OverlayCacheOwner {
+        root: pgs_root(subs_root),
+        directories: Default::default(),
+    }));
+}
+
+struct OverlayCacheOwner {
+    root: PathBuf,
+    directories: std::sync::Mutex<
+        std::collections::HashMap<PathBuf, crate::subtitle_source::PlaybackDirectoryRemoval>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl crate::playback_cache::CacheOwner for OverlayCacheOwner {
+    async fn candidates(&self) -> std::io::Result<Vec<crate::playback_cache::CacheCandidate>> {
+        self.directories.lock().expect("overlay candidates").clear();
+        let parent = match plurx_core::fs_secure::SecureDirectory::open(&self.root).await {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut entries = match tokio::fs::read_dir(&self.root).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut result = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(is_sha256(&name) || name.starts_with(".tmp-")) {
+                continue;
+            }
+            let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if !metadata.is_dir() {
+                continue;
+            }
+            let last_used = tokio::fs::metadata(entry.path().join(".access"))
+                .await
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(metadata.modified().unwrap_or(std::time::UNIX_EPOCH));
+            let binding = match crate::subtitle_source::PlaybackDirectoryRemoval::bind(
+                &parent, &name,
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            self.directories
+                .lock()
+                .expect("overlay candidates")
+                .insert(entry.path(), binding);
+            result.push(crate::playback_cache::CacheCandidate {
+                path: entry.path(),
+                last_used,
+            });
+        }
+        Ok(result)
+    }
+    async fn evict(
+        &self,
+        candidate: &crate::playback_cache::CacheCandidate,
+    ) -> std::io::Result<bool> {
+        if candidate.path.parent() != Some(self.root.as_path())
+            || active().lock().await.contains(&candidate.path)
+        {
+            return Ok(false);
+        }
+        let binding = self
+            .directories
+            .lock()
+            .expect("overlay candidates")
+            .remove(&candidate.path);
+        let Some(binding) = binding else {
+            return Ok(false);
+        };
+        binding.remove().await
+    }
+}
+
+/// HTTP consumers load bounded bytes while retaining the generation's disk
+/// lease. Once this returns the file is closed and the response owns memory.
+pub(crate) async fn read_cached_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    let _pin = crate::playback_cache::pin(path)?;
+    plurx_core::fs_secure::read_bounded_regular(path, MAX_TRACK_BYTES).await
 }
 
 #[cfg(test)]
@@ -1400,7 +1570,7 @@ mod tests {
             .map_err(|error| {
                 OverlayError::Internal(format!("publishing test generation: {error}"))
             })?;
-        staging.disarm();
+        staging.disarm(0);
         Ok(())
     }
 
@@ -1952,6 +2122,120 @@ mod tests {
         prune_bounded(root.path(), u64::MAX, 1).await;
         assert!(tokio::fs::metadata(&older).await.is_err());
         assert!(tokio::fs::metadata(&newer).await.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn overlay_eviction_cannot_follow_a_replaced_parent_into_private_files() {
+        use crate::playback_cache::CacheOwner;
+        let base = crate::test_tempdir().expect("overlay");
+        let root = base.path().join("subs/pgs");
+        let generation = "c".repeat(64);
+        let original = root.join(&generation);
+        std::fs::create_dir_all(original.join("objects")).expect("generation");
+        std::fs::write(original.join("objects/old.png"), b"disposable").expect("object");
+        let owner = OverlayCacheOwner {
+            root: root.clone(),
+            directories: Default::default(),
+        };
+        let candidate = owner
+            .candidates()
+            .await
+            .expect("inspect")
+            .pop()
+            .expect("generation candidate");
+        let outside = base.path().join("private");
+        std::fs::create_dir_all(outside.join(&generation)).expect("private directory");
+        let private = outside.join(&generation).join("secret");
+        std::fs::write(&private, b"private bytes").expect("private file");
+        let parked = base.path().join("subs/parked-pgs");
+        std::fs::rename(&root, &parked).expect("park parent");
+        std::os::unix::fs::symlink(&outside, &root).expect("outside symlink");
+        owner
+            .evict(&candidate)
+            .await
+            .expect("remove inspected generation");
+        assert_eq!(
+            std::fs::read(private).expect("private bytes retained"),
+            b"private bytes"
+        );
+        assert!(!parked.join(generation).exists());
+    }
+
+    #[tokio::test]
+    async fn shared_budget_denies_overlay_before_creating_any_stage() {
+        let base = crate::test_tempdir().expect("cache");
+        let subs = base.path().join("subs");
+        let catalog = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let budget =
+            crate::playback_cache::PlaybackCacheBudget::new(catalog, vec![base.path().to_owned()]);
+        budget.configure_for_test(128 * 1024 * 1024);
+        register_playback_cache(&budget, &subs);
+        let file = file(base.path().join("not-opened.mkv"));
+        let generation = generation(&file, 0);
+        let root = pgs_root(&subs);
+        let error = prepare_once(
+            root.clone(),
+            root.join(&generation),
+            file,
+            0,
+            generation,
+            crate::subtitle_source::StoreAccess::off(),
+        )
+        .await
+        .expect_err("disk admission fails");
+        assert!(
+            matches!(error, OverlayError::Unavailable(message) if message.contains("disk admission"))
+        );
+        assert!(
+            !root.exists(),
+            "a refused overlay neither creates a stage nor starts demux"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_budget_keeps_an_overlay_generation_while_an_object_reader_owns_it() {
+        let base = crate::test_tempdir().expect("cache");
+        let subs = base.path().join("subs");
+        let root = pgs_root(&subs);
+        let live = root.join("a".repeat(64));
+        let idle = root.join("b".repeat(64));
+        for generation in [&live, &idle] {
+            std::fs::create_dir_all(generation.join("objects")).expect("generation");
+            std::fs::write(generation.join("objects/object.png"), [1_u8; 64 * 1024])
+                .expect("image");
+        }
+        let catalog = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let budget =
+            crate::playback_cache::PlaybackCacheBudget::new(catalog, vec![base.path().to_owned()]);
+        budget.configure_for_test(u64::MAX);
+        register_playback_cache(&budget, &subs);
+        let reader =
+            crate::playback_cache::pin(&live.join("objects/object.png")).expect("reader lease");
+        let used = budget.used_bytes().await.expect("inventory");
+        budget.configure_for_test(used - 32 * 1024);
+        budget.sweep().await.expect("shared eviction");
+        assert!(live.exists());
+        assert!(
+            !idle.exists(),
+            "the reader pins the whole generation against eviction"
+        );
+        drop(reader);
+    }
+
+    #[test]
+    fn oversized_overlay_manifest_is_refused_before_it_reaches_disk() {
+        let base = crate::test_tempdir().expect("cache");
+        let file = file(base.path().join("source.mkv"));
+        let generation = generation(&file, 0);
+        let mut compiler =
+            GenerationCompiler::new(base.path(), &generation, None).expect("compiler");
+        compiler.unique_bytes = MAX_TRACK_BYTES;
+        assert!(matches!(
+            compiler.finish(&file, 0),
+            Err(OverlayError::Limit(_))
+        ));
+        assert!(!base.path().join("manifest.json").exists());
     }
 
     #[tokio::test]

@@ -59,6 +59,9 @@ static AVStream *nut_stream;
 static int64_t output_pts, output_duration, nut_tick_scale;
 static int64_t last_pts = AV_NOPTS_VALUE;
 static AVRational source_time_base;
+static struct rational source_origin;
+static int64_t source_origin_ticks;
+static const char *source_origin_provenance;
 struct coded_input {
   int64_t pts, duration;
   char packet_sha[65], rpu_sha[65];
@@ -120,6 +123,41 @@ static struct rational rational(const char *text) {
   need(!errno && end != den && *end == 0 && d > 0 && d <= INT_MAX,
        "bounded window denominator");
   return (struct rational){n, (int)d};
+}
+// Convert the frozen held-probe epoch exactly; never round it onto a different
+// source clock or infer it from mutable partial-demux AVStream timestamps.
+static int origin_in_source_ticks(struct rational origin, AVRational clock,
+                                 int64_t *ticks) {
+  if (origin.num < 0 || origin.den <= 0 || clock.num <= 0 || clock.den <= 0)
+    return 0;
+  __int128 numerator = (__int128)origin.num * clock.den;
+  __int128 denominator = (__int128)origin.den * clock.num;
+  if (numerator % denominator || numerator / denominator > INT64_MAX)
+    return 0;
+  *ticks = (int64_t)(numerator / denominator);
+  return 1;
+}
+static int bind_source_origin(bool held, struct rational supplied,
+                              const AVStream *stream, struct rational *origin,
+                              int64_t *ticks) {
+  if (!held) {
+    // Private legacy zero-origin controls carry no held-probe authority. Only
+    // their actually observed zero is meaningful; unknown/nonzero still refuse.
+    if (stream->start_time != 0)
+      return 0;
+    supplied = (struct rational){0, 1};
+  }
+  if (!origin_in_source_ticks(supplied, stream->time_base, ticks))
+    return 0;
+  *origin = supplied;
+  return 1;
+}
+static int declared_video_endpoint(int64_t origin, int64_t duration,
+                                   int64_t *endpoint) {
+  if (origin < 0 || duration <= 0 || origin > INT64_MAX - duration)
+    return 0;
+  *endpoint = origin + duration;
+  return 1;
 }
 static int compare_window(int64_t pts, struct rational value) {
   return av_compare_ts(pts, source_time_base, value.num,
@@ -316,9 +354,10 @@ static void open_nut(const char *path) {
   p->width = EXPORT_WIDTH;
   p->height = EXPORT_HEIGHT;
   p->bits_per_coded_sample = EXPORT_YUV10 ? 15 : 48;
-  p->color_primaries = AVCOL_PRI_BT2020;
-  p->color_trc = AVCOL_TRC_SMPTE2084;
-  p->color_space = EXPORT_YUV10 ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_RGB;
+  p->color_primaries = dv_target.sdr ? AVCOL_PRI_BT709 : AVCOL_PRI_BT2020;
+  // H.273 has no pure gamma-2.4 identifier; conventional SDR is BT.709.
+  p->color_trc = dv_target.sdr ? AVCOL_TRC_BT709 : AVCOL_TRC_SMPTE2084;
+  p->color_space = EXPORT_YUV10 ? (dv_target.sdr ? AVCOL_SPC_BT709 : AVCOL_SPC_BT2020_NCL) : AVCOL_SPC_RGB;
   p->color_range = EXPORT_YUV10 ? AVCOL_RANGE_MPEG : AVCOL_RANGE_JPEG;
   if (EXPORT_YUV10)
     p->chroma_location = AVCHROMA_LOC_LEFT;
@@ -508,15 +547,16 @@ static void render_pairs(void) {
          "fresh decoder-attached RPU required; cached metadata insufficient");
     uint8_t nalu[4098] = {0x7c, 0x01};
     memcpy(nalu + 2, raw->data, raw->size);
-    struct base_mapping base_mapped;
+    struct base_mapping base_mapped = {0};
     if (base_only)
       base_metadata(bl, nalu, raw->size + 2, source_profile, &base_mapped);
+    struct pl_dovi_metadata fel_mapped = {0};
+    if (!base_only)
+      map_fel_rpu(bl, nalu, raw->size + 2, &fel_mapped,
+                  !window_mode || compare_window(bl->pts, window_start) >= 0,
+                  bl->width, bl->height);
     if (window_mode) {
       if (compare_window(bl->pts, window_start) < 0) {
-        struct pl_dovi_metadata guarded;
-        if (!base_only)
-          map_parsed_rpu(nalu, raw->size + 2, &guarded, false,
-                         bl->width, bl->height);
         last_pts = bl->pts;
         need(++preroll <= preroll_cap, "bounded preroll exhausted");
         drop_pair();
@@ -588,9 +628,9 @@ static void render_pairs(void) {
     if (base_only)
       base_gpu_render(bl, &base_mapped, emitted, pts, duration, write_rgb, diagnostic_hashes);
     else
-      gpu_render(native, mapped ? hardware : NULL, nalu, raw->size + 2, emitted, pts, duration,
+      gpu_render_mapped(native, mapped ? hardware : NULL, nalu, raw->size + 2, emitted, pts, duration,
                  chroma(bl->chroma_location), chroma(el->chroma_location),
-                 write_rgb, NULL, debug_frames);
+                 write_rgb, NULL, debug_frames, &fel_mapped);
     if (EXPORT_YUV10 && dv_yuv10_context.frame_buf)
       hold_rendered_pair();
     char rpu_path[64];
@@ -757,16 +797,24 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
   av_packet_free(&out);
 }
 int main(int argc, char **argv) {
+  bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
+  struct rational supplied_origin = {0, 1};
+  if (held_origin) {
+    supplied_origin = rational(argv[argc - 1]);
+    argc -= 2;
+  }
   need(argc == 11 || argc == 12 || argc == 15 ||
            (argc == 16 && !strcmp(argv[15], "base-rpu")) ||
-           (argc == 19 && (!strcmp(argv[15], "base-rpu") ||
+           ((argc == 19 || argc == 21) && (!strcmp(argv[15], "base-rpu") ||
                            !strcmp(argv[15], "fel"))),
        "usage: segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX "
        "MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START "
-       "END MAX_PREROLL [base-rpu|fel [EXPORT_W EXPORT_H EXPORT_POLICY]]]]");
+       "END MAX_PREROLL [base-rpu|fel [EXPORT_W EXPORT_H EXPORT_POLICY "
+       "[TITLE_MIN_1E4 TITLE_PEAK]]]]] [--held-source-origin N/D]");
   bool streaming = argc >= 12;
   base_only = argc >= 16 && !strcmp(argv[15], "base-rpu");
   window_mode = argc >= 15;
+  need(!held_origin || window_mode, "held source origin requires a bounded window");
   if (window_mode) {
     window_start = rational(argv[12]);
     window_end = rational(argv[13]);
@@ -788,7 +836,7 @@ int main(int argc, char **argv) {
   expected_h[1] = number(argv[8], 0, 2160);
   EXPORT_WIDTH = expected_w[0];
   EXPORT_HEIGHT = expected_h[0];
-  if (argc == 19) {
+  if (argc >= 19) {
     EXPORT_WIDTH = number(argv[16], 32, 4096);
     EXPORT_HEIGHT = number(argv[17], 32, 2160);
     EXPORT_YUV10 = !strcmp(argv[18], "pq-bilinear-yuv420p10-v1");
@@ -808,10 +856,10 @@ int main(int argc, char **argv) {
   need(!base_only || (expected_w[1] == 0 && expected_h[1] == 0),
        "base-only mode has no declared EL");
   debug_frames = number(argv[9], 0, 1) != 0;
-  // argv[10] reserves an explicit output policy; never interpreted as a display
-  // target.
-  need(strcmp(argv[10], "bt2020-pq-master-clip") == 0,
-       "unsupported output policy");
+  // Explicit control API only. Session/caps selection is a later PR.
+  need(argc == 21 ? dv_target_policy(argv[10], argv[19], argv[20]) :
+                       strcmp(argv[10], "bt2020-pq-master-clip") == 0,
+        "unsupported output policy");
   need(
       expected_w[0] % 2 == 0 && expected_h[0] % 2 == 0 &&
           expected_w[1] % 2 == 0 && expected_h[1] % 2 == 0 &&
@@ -909,8 +957,14 @@ int main(int argc, char **argv) {
   need(source_time_base.num > 0 && source_time_base.den > 0,
        "positive source time base");
   if (window_mode) {
-    need(stream->start_time == 0,
-         "initial window requires observed zero source origin");
+    need(bind_source_origin(held_origin, supplied_origin, stream,
+                            &source_origin, &source_origin_ticks),
+         "window requires an exact held source origin or observed legacy zero");
+    source_origin_provenance = held_origin
+        ? "observed_held_format_and_selected_video_probe"
+        : "observed_stream_start_time";
+    need(compare_window(source_origin_ticks, window_start) <= 0,
+         "window starts before frozen source origin");
     int64_t target =
         av_rescale_q_rnd(window_start.num, (AVRational){1, window_start.den},
                          source_time_base, AV_ROUND_DOWN);
@@ -983,9 +1037,9 @@ int main(int argc, char **argv) {
          "source EOF before requested window end");
     need(last_emitted_end < INT64_MAX, "EOF extent overflow");
     if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0) {
-      need(stream->start_time <= INT64_MAX - stream->duration &&
-               last_emitted_end + 1 >= stream->start_time + stream->duration &&
-               last_emitted_end - 1 <= stream->start_time + stream->duration,
+      int64_t endpoint;
+      need(declared_video_endpoint(source_origin_ticks, stream->duration, &endpoint) &&
+               last_emitted_end + 1 >= endpoint && last_emitted_end - 1 <= endpoint,
            "source EOF disagrees with declared video extent");
     } else if (av_dict_get(stream->metadata, "DURATION", NULL, 0)) {
       const AVDictionaryEntry *declared = av_dict_get(stream->metadata, "DURATION", NULL, 0);
@@ -1051,8 +1105,8 @@ int main(int argc, char **argv) {
   }
   if (window_mode) {
     printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"
-           "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"0/"
-           "1\",\"origin_provenance\":\"observed_stream_start_time\","
+           "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"%lld/"
+           "%d\",\"origin_provenance\":\"%s\","
            "\"frames\":%d,\"preroll_pairs\":%u,\"paired_pictures\":%u,"
            "\"boundary_pts_ticks\":%lld,\"boundary_observed\":%s,\"source_eof_"
            "observed\":%s,\"first_emitted_pts_ticks\":%lld,\"last_emitted_end_"
@@ -1061,7 +1115,9 @@ int main(int argc, char **argv) {
            "observed\",\"membership\":\"frame_pts_in_half_open_window_"
            "durations_unclipped\",\"production_qualified\":false}\n",
            (long long)window_start.num, window_start.den,
-           (long long)window_end.num, window_end.den, emitted, preroll, paired,
+           (long long)window_end.num, window_end.den,
+           (long long)source_origin.num, source_origin.den, source_origin_provenance,
+           emitted, preroll, paired,
            (long long)boundary_pts, window_done ? "true" : "false",
            source_eof ? "true" : "false", (long long)first_emitted_pts,
            (long long)last_emitted_end, source_time_base.num,
@@ -1070,13 +1126,13 @@ int main(int argc, char **argv) {
   printf("{\"kind\":\"decoder\",\"mode\":\"%s\",\"reason\":\"%s\"}\n",
          decoder_mode, decoder_reason);
   printf("{\"kind\":\"segment_complete\",\"frames\":%d,\"pair_window_bound\":"
-         "16,\"gpu_contexts\":1,\"output_policy\":\"bt2020-pq-master-clip\","
+         "16,\"gpu_contexts\":1,\"output_policy\":\"%s\","
          "\"production_qualified\":false}\n",
-         emitted);
+         emitted, dv_target_policy_name());
   if (base_only)
     printf("{\"kind\":\"base_processing_complete\",\"profile\":%d,"
            "\"frames\":%d,\"decoded_layers\":1,\"el_bound\":false,"
-           "\"fel_contributed\":false,\"creative_trims_applied\":false,"
+           "\"fel_contributed\":false,"
            "\"production_qualified\":false}\n", source_profile, emitted);
   need(fflush(stdout) == 0, "observations flush");
   return 0;

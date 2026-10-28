@@ -503,6 +503,77 @@ docker inspect -f '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}}{{"
 
 Nothing mapping to `/var/lib/plurx` means the next rebuild loses everything.
 
+## Optional native HTTPS
+
+HTTPS is an additional listener, off by default. Settings → Developer → HTTPS
+edits the addressed node and applies changes at its next restart; HTTP remains
+available. The same public API, web app and playback handlers run on both
+listeners. Discovery still advertises HTTP, so select HTTPS explicitly by URL.
+Trust installation and physical browser/native playback qualification remain
+open in [the build ledger](../docs/server/HTTPS-BUILD.md).
+
+For Docker/Compose, save the desired enabled state and port in the HTTPS card,
+then apply it from the checkout with `make docker-up` (source build) or
+`make docker-image-up` (prebuilt image). These commands generate a temporary
+port mapping **only while HTTPS is enabled**, using the same TOML → node-local
+`https-settings.json` → container environment precedence as the daemon. They
+recreate the container when its publications change; a tray restart or
+`docker restart` cannot change Docker port mappings. Disable HTTPS and run the
+same command to remove the generated publication.
+
+The host port defaults to the configured HTTPS port (32443 initially). Set
+`PLURX_HTTPS_HOST_PORT` in `deploy/.env` to choose a different host port.
+Existing explicit TCP publications for the configured container port retain
+their operator-chosen host address and port. Remove an old manual HTTPS
+publication from your override if you want disabling HTTPS to remove it too.
+The automatic path requires readable bind-mounted settings/configuration or
+Compose file configs and a local Docker engine; it refuses opaque mounts or
+remote-engine paths rather than guessing the state. For a remote engine, run
+the rollout command on its host.
+Direct `docker compose up` does not generate this overlay; use the Make targets
+for conditional publication. Dockerfile `EXPOSE` metadata is not needed for
+explicit port publication. With host networking, no mapping is added: the
+listener binds directly to the host.
+
+Leaving both certificate paths empty generates and retains a self-signed
+identity under the existing data bind mount. Keep that data through container
+replacement and back up its private bundle as a secret. For supplied material,
+mount a directory read-only and use **container-side** paths in the HTTPS card:
+
+```yaml
+services:
+  plurxd:
+    volumes:
+      - /srv/plurx/tls:/etc/plurx/tls:ro
+```
+
+Set certificate path `/etc/plurx/tls/fullchain.pem` and key path
+`/etc/plurx/tls/privkey.pem`. The configured service uid must be able to read
+both files. Unix certificate-manager symlinks are supported when their targets
+are visible inside the container; mount the necessary directory tree, rather
+than an individual renewing file. Windows supplied identities require regular
+local disk files without reparse points, device, pipe or UNC namespaces.
+Startup loads renewals only after restart.
+
+For systemd, the existing writable data directory admits generated identity
+without expanding `ReadWritePaths`. Place supplied files in a directory the
+`plurx` service user can read, such as `/etc/plurx/tls`; the unit's
+`ProtectHome=true` hides home directories. Adding `ReadOnlyPaths` cannot make a
+hidden home path visible. Keep supplied private keys readable only by their
+intended service identities and apply certificate renewals with a planned
+restart. While the current process is running, its existing HTTP endpoint can
+save corrected desired settings. Enabled invalid TLS at the next restart
+refuses daemon startup, so HTTP is unavailable then: stop the service, disable
+HTTPS through local configuration or `PLURX_HTTPS_ENABLED=false`, and restart
+before repairing the desired configuration. See the recovery instructions below.
+
+Download the active **public** certificate chain from the card, verify its
+fingerprint and establish trust in each client explicitly. Generated SANs must
+cover the actual hostname/IP used. An unverified address link is only a link;
+it does not install trust, probe reachability or carry a sign-in credential.
+See [the HTTPS operations guide](../docs/OPERATIONS.md#optional-https-and-persistent-identity)
+for precedence, node-local revision guards, identity replacement and recovery.
+
 ## Bare metal
 
 ```sh
@@ -926,6 +997,7 @@ conversion Off until a real pod proves the filesystem contract above.
 | Port | Proto | Purpose |
 |---|---|---|
 | 32400 | TCP | HTTP API + web app (and the Plex-compat façade) |
+| 32443 | TCP + TLS | Optional native HTTPS; off by default, published conditionally by the Docker rollout targets; HTTP remains available |
 | 8096 | TCP | Jellyfin compatibility at the server root, Jellyfin's standard port, so a Jellyfin client given only a host connects; answers only while Settings → Developer enables it (host port movable via `PLURX_JELLYFIN_HOST_PORT`) |
 | 32414 | UDP | GDM discovery so Plex/Kodi clients find the server on the LAN (host port movable via `PLURX_GDM_PORT`, but discovery only works on 32414) |
 | 5353 | UDP multicast | Bonjour `_plurx._tcp` discovery for native clients; the Compose companion owns this on the host network |

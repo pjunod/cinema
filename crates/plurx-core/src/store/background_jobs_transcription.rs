@@ -13,7 +13,9 @@ pub fn artifact_key(payload: &JobPayload) -> Result<String, StoreError> {
     payload.validate()?;
     if !matches!(
         payload,
-        JobPayload::SubtitleTranscribe { .. } | JobPayload::SubtitleTranscribeManaged { .. }
+        JobPayload::SubtitleTranscribe { .. }
+            | JobPayload::SubtitleTranscribeManaged { .. }
+            | JobPayload::SubtitleTextTranslate { .. }
     ) {
         return Err(StoreError::Task("not a transcription payload".into()));
     }
@@ -55,6 +57,9 @@ pub(super) async fn publish<T: QueueSql>(
     store: &T,
     input: PublishTranscription,
 ) -> Result<JobPublishOutcome, StoreError> {
+    if matches!(&input.source, JobPayload::SubtitleTextTranslate { .. }) {
+        return publish_text(store, input).await;
+    }
     input.token.validate()?;
     let key = artifact_key(&input.source)?;
     let (JobPayload::SubtitleTranscribe {
@@ -145,6 +150,72 @@ pub(super) async fn publish<T: QueueSql>(
     )
 }
 
+/// Existing text captions publish through the same durable queue transaction,
+/// with their own provenance and explicit administrator interest.
+async fn publish_text<T: QueueSql>(
+    store: &T,
+    input: PublishTranscription,
+) -> Result<JobPublishOutcome, StoreError> {
+    input.token.validate()?;
+    let key = artifact_key(&input.source)?;
+    let JobPayload::SubtitleTextTranslate {
+        source_size,
+        source_mtime,
+        subtitle_index,
+        input_sha256,
+        source_language,
+        target_language,
+        model_id,
+        model_sha256,
+        adapter_contract,
+        engine_sha256,
+        ..
+    } = &input.source
+    else {
+        unreachable!()
+    };
+    let origin = input
+        .caption
+        .text_translation
+        .as_ref()
+        .ok_or_else(|| StoreError::Task("missing text translation provenance".into()))?;
+    if input.now_ms < 0
+        || input.caption.transcription.is_some()
+        || input.caption.source_size != *source_size
+        || input.caption.source_mtime != *source_mtime
+        || origin.artifact_key != key
+        || origin.subtitle_index != *subtitle_index
+        || origin.input_sha256 != *input_sha256
+        || origin.source_language != *source_language
+        || origin.target_language != *target_language
+        || origin.model_id != *model_id
+        || origin.model_sha256 != *model_sha256
+        || origin.adapter_contract != *adapter_contract
+        || origin.engine_sha256 != *engine_sha256
+        || input.caption.language != *target_language
+    {
+        return Err(StoreError::Task(
+            "caption does not match text translation input".into(),
+        ));
+    }
+    super::downloaded_subtitles::encode(&input.caption)?;
+    let body = encode(&input)?;
+    let owns = format!("{SUBTITLE_OWNS} AND job.kind='subtitle_text_translate' AND job.payload_json=json(json_extract($1,'$.source')) AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND is_admin=1) AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.text_translation.config.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.enabled')=1 ELSE 0 END)");
+    let current = "file.id=json_extract($1,'$.source.file_id') AND file.size=json_extract($1,'$.source.source_size') AND file.mtime=json_extract($1,'$.source.source_mtime') AND file.probe_json IS NOT NULL";
+    let exists = "EXISTS(SELECT 1 FROM json_each(file.downloaded_subtitles) caption WHERE json_extract(caption.value,'$.text_translation.artifact_key')=json_extract($1,'$.caption.text_translation.artifact_key') AND json_extract(caption.value,'$.source_size')=file.size AND json_extract(caption.value,'$.source_mtime')=file.mtime)";
+    store.queue_transaction(vec![
+        (format!("UPDATE files AS file SET downloaded_subtitles=json_insert(CASE WHEN json_extract(downloaded_subtitles,'$[0].source_size')=size AND json_extract(downloaded_subtitles,'$[0].source_mtime')=mtime THEN downloaded_subtitles ELSE '[]' END,'$[#]',json(json_extract($1,'$.caption'))) WHERE {current} AND NOT {exists} AND (json_extract(downloaded_subtitles,'$[0].source_size') IS NOT size OR json_extract(downloaded_subtitles,'$[0].source_mtime') IS NOT mtime OR json_array_length(downloaded_subtitles)<8) AND EXISTS(SELECT 1 FROM background_jobs job WHERE {owns})"), body.clone()),
+        (format!("UPDATE background_jobs AS job SET state='succeeded',result_ref=json_extract($1,'$.caption.text_translation.artifact_key'),owner_node_id=NULL,owner_boot_id=NULL,claim_id=NULL,lease_expires_ms=NULL,revision=revision+1,updated_at_ms=json_extract($1,'$.now_ms') WHERE {owns} AND EXISTS(SELECT 1 FROM files file WHERE {current} AND {exists})"),body.clone()),
+        ("UPDATE background_job_waiters SET state='succeeded',result_ref=json_extract($1,'$.caption.text_translation.artifact_key'),updated_at_ms=json_extract($1,'$.now_ms') WHERE job_id=json_extract($1,'$.token.job_id') AND state='pending' AND EXISTS(SELECT 1 FROM background_jobs job WHERE job.id=background_job_waiters.job_id AND job.state='succeeded' AND job.result_ref=json_extract($1,'$.caption.text_translation.artifact_key'))".into(),body.clone()),
+        ("DELETE FROM subtitle_text_translation_cues WHERE recipe_digest=json_extract($1,'$.caption.text_translation.artifact_key') AND EXISTS(SELECT 1 FROM background_jobs WHERE id=json_extract($1,'$.token.job_id') AND state='succeeded' AND result_ref=json_extract($1,'$.caption.text_translation.artifact_key'))".into(),body.clone())
+    ]).await?;
+    let rows=store.queue_sql("SELECT CASE WHEN EXISTS(SELECT 1 FROM background_jobs job JOIN background_job_attempts attempt ON attempt.job_id=job.id AND attempt.fence=job.fence WHERE job.id=json_extract($1,'$.token.job_id') AND job.state='succeeded' AND job.result_ref=json_extract($1,'$.caption.text_translation.artifact_key') AND attempt.claim_id=json_extract($1,'$.token.claim_id') AND attempt.owner_node_id=json_extract($1,'$.token.node_id') AND attempt.owner_boot_id=json_extract($1,'$.token.boot_id')) THEN json_object('outcome','already_published','job_id',json_extract($1,'$.token.job_id'),'result_ref',json_extract($1,'$.caption.text_translation.artifact_key')) ELSE json_object('outcome','lost_ownership') END AS result_json".into(),body,false,true).await?;
+    rows.first()
+        .map(|row| decode(row))
+        .transpose()?
+        .ok_or_else(|| StoreError::Task("missing text publication verdict".into()))
+}
+
 /// One adapter contract across qualified platform builds; local paths never enter it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -195,9 +266,11 @@ impl ModelAction {
 pub enum SubtitlePhase {
     CheckingSource,
     Downloading,
+    WaitingForCapacity,
     Verifying,
     Decoding,
     Transcribing,
+    Translating,
     Validating,
     Publishing,
 }
@@ -207,6 +280,10 @@ pub enum SubtitlePhase {
 pub struct ObserveSubtitleJob {
     pub token: JobToken,
     pub phase: SubtitlePhase,
+    #[serde(default)]
+    pub completed_cues: Option<u32>,
+    #[serde(default)]
+    pub total_cues: Option<u32>,
     pub now_ms: i64,
 }
 
@@ -246,7 +323,7 @@ pub struct PublishSubtitleModel {
 
 // Observations must not increment the job revision: the owned renewal token
 // remains exact. A stale claim/renewal cannot write into its successor.
-const SUBTITLE_OWNS: &str = r#"
+pub(super) const SUBTITLE_OWNS: &str = r#"
  job.id=json_extract($1,'$.token.job_id') AND job.payload_version=1 AND job.state='running'
  AND job.owner_node_id=json_extract($1,'$.token.node_id')
  AND job.owner_boot_id=json_extract($1,'$.token.boot_id') AND job.claim_id=json_extract($1,'$.token.claim_id')
@@ -266,7 +343,12 @@ pub(super) async fn observe<T: QueueSql>(
     input: ObserveSubtitleJob,
 ) -> Result<bool, StoreError> {
     input.token.validate()?;
-    if input.now_ms < 0 {
+    if input.now_ms < 0
+        || input
+            .completed_cues
+            .zip(input.total_cues)
+            .is_some_and(|(done, total)| done > total || total > 20000)
+    {
         return Err(StoreError::Task(
             "invalid subtitle observation clock".into(),
         ));
@@ -274,7 +356,7 @@ pub(super) async fn observe<T: QueueSql>(
     let body = encode(
         &serde_json::to_value(&input).map_err(|error| StoreError::Task(error.to_string()))?,
     )?;
-    let sql=format!("UPDATE background_jobs AS job SET checkpoint_json=json_object('phase',json_extract($1,'$.phase'),'phase_at_ms',json_extract($1,'$.now_ms'),'fence',fence) WHERE {SUBTITLE_OWNS} AND kind IN ('subtitle_transcribe','subtitle_transcribe_managed','subtitle_model_operation','subtitle_translation_prepare','subtitle_translation_range') RETURNING 'true' AS result_json");
+    let sql=format!("UPDATE background_jobs AS job SET checkpoint_json=json_object('phase',json_extract($1,'$.phase'),'phase_at_ms',json_extract($1,'$.now_ms'),'fence',fence,'completed_cues',json_extract($1,'$.completed_cues'),'total_cues',json_extract($1,'$.total_cues')) WHERE {SUBTITLE_OWNS} AND kind IN ('subtitle_transcribe','subtitle_transcribe_managed','subtitle_model_operation','subtitle_translation_prepare','subtitle_translation_range','subtitle_text_translate','subtitle_text_model_operation') RETURNING 'true' AS result_json");
     Ok(!store.queue_sql(sql, body, true, true).await?.is_empty())
 }
 
@@ -284,24 +366,41 @@ pub(super) async fn publish_model<T: QueueSql>(
 ) -> Result<bool, StoreError> {
     input.token.validate()?;
     input.source.validate()?;
-    let JobPayload::SubtitleModelOperation {
-        model_id,
-        model_sha256,
-        adapter_contract,
-        target_node_id,
-        ..
-    } = &input.source
-    else {
-        return Err(StoreError::Task("not a model operation".into()));
-    };
-    let JobPayload::SubtitleModelOperation {
-        action,
-        translation_profile,
-        ..
-    } = &input.source
-    else {
-        unreachable!()
-    };
+    let (model_id, model_sha256, adapter_contract, target_node_id, action, translation_profile) =
+        match &input.source {
+            JobPayload::SubtitleModelOperation {
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                action,
+                translation_profile,
+                ..
+            } => (
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                action,
+                translation_profile.as_ref(),
+            ),
+            JobPayload::SubtitleTextModelOperation {
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                action,
+                ..
+            } => (
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                action,
+                None,
+            ),
+            _ => return Err(StoreError::Task("not a model operation".into())),
+        };
     match (
         action.is_translation(),
         translation_profile,
@@ -351,7 +450,7 @@ pub(super) async fn publish_model<T: QueueSql>(
         value["translation"]["profile_id"] = qualification.profile.id()?.into();
     }
     let body = encode(&value)?;
-    let owns=format!("{SUBTITLE_OWNS} AND job.kind='subtitle_model_operation' AND job.payload_json=json(json_extract($1,'$.source'))");
+    let owns=format!("{SUBTITLE_OWNS} AND job.kind IN ('subtitle_model_operation','subtitle_text_model_operation') AND job.payload_json=json(json_extract($1,'$.source')) AND (job.kind!='subtitle_text_model_operation' OR EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND is_admin=1))");
     store.queue_transaction(vec![
       (format!("INSERT INTO subtitle_translation_capabilities(node_id,model_id,profile_id,receipt_json) SELECT json_extract($1,'$.receipt.node_id'),json_extract($1,'$.receipt.model_id'),json_extract($1,'$.translation.profile_id'),json_object('model',json(json_extract($1,'$.receipt')),'profile',json(json_extract($1,'$.translation.profile')),'profile_id',json_extract($1,'$.translation.profile_id'),'self_test_sha256',json_extract($1,'$.translation.self_test_sha256')) WHERE json_type($1,'$.translation')='object' AND EXISTS(SELECT 1 FROM background_jobs job WHERE {owns}) ON CONFLICT(node_id,model_id,profile_id) DO UPDATE SET receipt_json=excluded.receipt_json"),body.clone()),
       (format!("INSERT INTO subtitle_model_receipts(node_id,model_id,receipt_json) SELECT json_extract($1,'$.receipt.node_id'),json_extract($1,'$.receipt.model_id'),json(json_extract($1,'$.receipt')) WHERE json_type($1,'$.translation')='null' AND EXISTS(SELECT 1 FROM background_jobs job WHERE {owns}) ON CONFLICT(node_id,model_id) DO UPDATE SET receipt_json=excluded.receipt_json"),body.clone()),

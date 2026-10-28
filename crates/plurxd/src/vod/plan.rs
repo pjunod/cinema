@@ -360,6 +360,7 @@ pub(super) async fn open_ready(
     etag_stem: &str,
     delivery: &Arc<crate::meter::Meter>,
 ) -> io::Result<SegmentReady> {
+    let cache_pin = crate::playback_cache::pin(path)?;
     let file = tokio::fs::File::open(path).await?;
     let len = file.metadata().await?.len();
     Ok(SegmentReady {
@@ -369,6 +370,7 @@ pub(super) async fn open_ready(
         etag: format!("{etag_stem}-{len}"),
         delivery: Arc::clone(delivery),
         retained_lease: None,
+        cache_pin,
     })
 }
 

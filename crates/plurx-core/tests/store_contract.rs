@@ -21,6 +21,10 @@ use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/dv_title_jobs.rs"]
+mod dv_title_jobs;
+#[path = "store_contract/formal_publication.rs"]
+mod formal_publication;
 #[path = "store_contract/invitations.rs"]
 mod invitations;
 #[path = "store_contract/jellyfin_catalog.rs"]
@@ -31,6 +35,8 @@ mod jellyfin_identity;
 mod jellyfin_login;
 #[path = "store_contract/jellyfin_play.rs"]
 mod jellyfin_play;
+#[path = "store_contract/playback_handoffs.rs"]
+mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
 mod remote;
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -61,6 +67,9 @@ mod sharing_source_sessions;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/source_contract.rs"]
 mod source_contract;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/subtitle_translation_upgrade.rs"]
+mod subtitle_translation_upgrade;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
@@ -583,6 +592,20 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    // Both-backend title publication/cancellation/reprobe and priority
+    // contracts in store_contract/dv_title_jobs.rs exercise these five.
+    // The source-fenced FEL verdict/requalification contract exercises these
+    // three methods on every backend in store_contract/dv_title_jobs.rs.
+    "put_dv_fel_verdict",
+    "request_dv_fel_requalification",
+    "dv_fel_verdict_counts",
+    "dv_fel_stale_titles",
+    "dv_title_readiness",
+    "dv_title_demands",
+    "bind_dv_title_demand",
+    "publish_dv_title_job",
+    "publish_dv_title_from_analysis",
+    "probe_can_preempt_title",
     // Progressive translation's actual source-bind/publication/Stop/read-lease
     // contract below exercises these on every backend, including three voters.
     "maintain_translation_cache",
@@ -12542,6 +12565,85 @@ async fn drop_baseline_sharing_schema(client: &Client) {
         source_objects[0].value, 0,
         "Source activation cannot be rewound"
     );
+    // Ordinary Local migration does not install optional Sharing lineage.
+    // Derive the complete owned object set from the published schemas before
+    // querying any of their tables; a missing first table is not proof of absence.
+    let witness = rusqlite::Connection::open_in_memory().expect("sharing fixture shape witness");
+    witness
+        .execute_batch(include_str!("../src/store/sharing_schema.sql"))
+        .expect("published Sharing shape");
+    witness
+        .execute_batch(include_str!(
+            "../src/store/sharing_ingress_custody_schema.sql"
+        ))
+        .expect("published Sharing custody shape");
+    witness
+        .execute_batch(hiqlite::Error::SOURCE_LAYOUT_GUARD_DDL)
+        .expect("published Local dispatch assertion shape");
+    let expected = witness
+        .prepare(
+            "SELECT name,json_array(type,name,tbl_name,sql) FROM sqlite_master \
+         WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY type,name",
+        )
+        .expect("published Sharing object inventory")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("published Sharing objects")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete published Sharing inventory");
+    assert!(
+        !expected.is_empty(),
+        "published Sharing object set must be closed"
+    );
+    let names = serde_json::to_string(&expected.iter().map(|(name, _)| name).collect::<Vec<_>>())
+        .expect("encode canonical Sharing object names");
+    let actual: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT json_array(type,name,tbl_name,sql) AS value FROM sqlite_master \
+         WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' \
+           AND (name GLOB 'sharing_*' OR tbl_name GLOB 'sharing_*' \
+                OR name IN (SELECT value FROM json_each($1)) \
+                OR tbl_name IN (SELECT value FROM json_each($1))) ORDER BY type,name",
+            hiqlite::params!(names),
+        )
+        .await
+        .expect("read complete Sharing fixture namespace");
+    // The additive dispatch assertion belongs to ordinary Local compatibility,
+    // not installed Sharing lineage. Retain its exact published empty shape;
+    // never drop or exempt an object merely because its name matches.
+    let guard_only = expected
+        .iter()
+        .filter(|(name, _)| name == "sharing_source_dispatch_guard")
+        .map(|(_, shape)| shape.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        guard_only.len(),
+        1,
+        "published Local dispatch assertion is one exact table"
+    );
+    let actual = actual.into_iter().map(|row| row.value).collect::<Vec<_>>();
+    let sharing_absent = actual == guard_only;
+    let complete = expected
+        .into_iter()
+        .map(|(_, shape)| shape)
+        .collect::<Vec<_>>();
+    assert!(sharing_absent || actual == complete,
+        "only the complete published Sharing layout or its exact Local-only guard may be rewound; partial or unknown layouts remain untouched");
+    let guard_rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM sharing_source_dispatch_guard",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read the validated Local dispatch assertion");
+    assert!(
+        matches!(guard_rows.as_slice(), [row] if row.value == 0),
+        "Local dispatch assertion must retain no successful or malformed row"
+    );
+    if sharing_absent {
+        return;
+    }
     let tables = [
         include_str!("../src/store/sharing_schema.sql"),
         include_str!("../src/store/sharing_ingress_custody_schema.sql"),
@@ -12564,6 +12666,11 @@ async fn drop_baseline_sharing_schema(client: &Client) {
             )
             .await
             .expect("read disposable sharing fixture rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "sharing fixture COUNT must return one row for {table}"
+        );
         assert_eq!(
             rows[0].value, 0,
             "populated sharing table {table} cannot be rewound"
@@ -12742,6 +12849,51 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_unactivated_contract_baseline(client).await;
+    // These independently recognized current extensions must be validated
+    // before the queue teardown. Their drops join the one transaction below.
+    async fn extension_shape(client: &Client, sql: &str) -> Vec<(String, String)> {
+        client
+            .query_consistent(sql.to_owned(), hiqlite::params!())
+            .await
+            .expect("extension shape inventory")
+            .iter_mut()
+            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+            .collect()
+    }
+    let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
+    let title_marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("current title fixture marker");
+    assert_eq!(title_marker.len(), 1);
+    let title_data: Vec<I64Value> = client.query_consistent_map(
+        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL) AS value", hiqlite::params!(),
+    ).await.expect("complete title fixture data inventory");
+    assert_eq!(title_data.len(), 1);
+    let title_drops = queue_fixture::validated_empty_title_rewind(
+        &title_shape,
+        title_marker[0].value,
+        title_data[0].value,
+    );
+    let annotations_shape =
+        extension_shape(client, queue_fixture::ANNOTATIONS_FIXTURE_SHAPE_SQL).await;
+    let mut annotations_counts = Vec::new();
+    for table in queue_fixture::ANNOTATIONS_FIXTURE_DATA_TABLES {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                format!("SELECT count(*) AS value FROM {table}"),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("annotation fixture data inventory");
+        assert_eq!(rows.len(), 1);
+        annotations_counts.push((table.to_owned(), rows[0].value));
+    }
+    let annotations_drops =
+        queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
         "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=1) AS value",
         hiqlite::params!(),
@@ -12815,8 +12967,10 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
                 .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
         })
         .expect("published predecessor resource view");
-    let mut statements: Vec<_> = translation_drops
+    let mut statements: Vec<_> = title_drops
         .into_iter()
+        .chain(annotations_drops)
+        .chain(translation_drops)
         .map(|sql| (sql, hiqlite::params!()))
         .collect();
     statements.extend(
@@ -13001,6 +13155,27 @@ async fn downgrade_current_schema_after_producer_recovery(
     client: &Client,
 ) -> Vec<(String, String)> {
     let triggers = drop_post_v39_extension_schema(client).await;
+    // Reconstruct a genuine v31 session declaration. Removing only the latest
+    // column from today's inline declaration fabricates a hybrid no historical
+    // migration produced, which the exact ownership-layout guard must refuse.
+    let sessions: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM media_sessions",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("count disposable historical sessions");
+    assert_eq!(
+        sessions[0].value, 0,
+        "only rebuild an empty historical session fixture"
+    );
+    let mut session_objects = client.query_consistent(
+        "SELECT sql FROM sqlite_master WHERE tbl_name='media_sessions' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name", hiqlite::params!(),
+    ).await.expect("retain exact session indexes and triggers");
+    let session_objects = session_objects
+        .iter_mut()
+        .map(|row| row.get::<String>("sql"))
+        .collect::<Vec<_>>();
     let mut statements = post_v39_downgrade_statements();
     statements.extend([
         (
@@ -13031,11 +13206,30 @@ async fn downgrade_current_schema_after_producer_recovery(
             "ALTER TABLE offline_packages DROP COLUMN claim_generation",
             hiqlite::params!(),
         ),
+        ("DROP TABLE media_sessions", hiqlite::params!()),
+        (MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA, hiqlite::params!()),
         (
-            "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
+            "ALTER TABLE media_sessions ADD COLUMN terminal_reason TEXT
+        CHECK (terminal_reason IN
+          ('deleted', 'superseded', 'admin_stop', 'revoked', 'replaced'))",
             hiqlite::params!(),
         ),
+        (
+            "ALTER TABLE media_sessions ADD COLUMN publication_ready_at_ms INTEGER NOT NULL DEFAULT 0
+        CHECK (publication_ready_at_ms >= 0)",
+            hiqlite::params!(),
+        ),
+        ("ALTER TABLE media_sessions ADD COLUMN drain_deadline_ms INTEGER", hiqlite::params!()),
     ]);
+    let mut statements = statements
+        .into_iter()
+        .map(|(sql, params)| (sql.to_owned(), params))
+        .collect::<Vec<_>>();
+    statements.extend(
+        session_objects
+            .into_iter()
+            .map(|sql| (sql, hiqlite::params!())),
+    );
     let results = client
         .txn(statements)
         .await
@@ -16696,6 +16890,214 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
+mod managed_bootstrap_regressions {
+    use super::*;
+    use plurx_core::store::background_jobs::{
+        BackgroundJobStore, EnqueueJob, EnqueueOutcome, JobPayload, JobRequest,
+    };
+    use plurx_core::store::background_jobs_transcription::{ModelAction, SubtitleModelReceipt};
+
+    async fn populated_fixture() -> (ContractCluster, Client, HiqliteAuthStore) {
+        let cluster = ContractCluster::start().await;
+        let store = open_contract_hiqlite_store(&cluster).await;
+        let client = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("managed bootstrap client");
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let outcome = store
+            .enqueue_job(EnqueueJob {
+                id: job_id.clone(),
+                payload: JobPayload::SubtitleModelOperation {
+                    translation_profile: None,
+                    action: ModelAction::Verify,
+                    model_id: "bootstrap-model".into(),
+                    catalog_revision: "catalog-v1".into(),
+                    model_sha256: "a".repeat(64),
+                    adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+                    target_node_id: "node-a".into(),
+                },
+                dedupe_key: job_id.clone(),
+                priority: 0,
+                not_before_ms: 1000,
+                now_ms: 1000,
+                request: JobRequest {
+                    scope: "subtitle-model".into(),
+                    request_id: job_id.clone(),
+                    request_digest: "c".repeat(64),
+                    consumer_kind: "subtitle_model".into(),
+                    consumer_ref: job_id.clone(),
+                    target_node_id: Some("node-a".into()),
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("seed populated managed queue");
+        assert!(matches!(outcome, EnqueueOutcome::Accepted { .. }));
+        let receipt = SubtitleModelReceipt {
+            node_id: "node-a".into(),
+            boot_id: "boot-a".into(),
+            model_id: "bootstrap-model".into(),
+            model_sha256: "a".repeat(64),
+            adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+            engine_sha256: "b".repeat(64),
+            model_file_identity: "model:identity".into(),
+            engine_file_identity: "engine:identity".into(),
+            job_id,
+            fence: 1,
+            verified_at_ms: 1000,
+        };
+        client.execute("INSERT INTO subtitle_model_receipts(node_id,model_id,receipt_json) VALUES($1,$2,$3)",
+            hiqlite::params!(receipt.node_id.clone(),receipt.model_id.clone(),serde_json::to_string(&receipt).expect("receipt JSON")))
+            .await.expect("seed retained model receipt");
+        let receipts = store
+            .subtitle_model_receipts("node-a")
+            .await
+            .expect("read seeded model receipt");
+        assert_eq!(receipts.len(), 1);
+        let resources: Vec<I64Value> = client.query_consistent_map(
+            "SELECT count(*) AS value FROM background_job_required_resources WHERE resource_key='subtitle_model:node-a'",hiqlite::params!())
+            .await.expect("managed resource contract");
+        assert_eq!(
+            resources[0].value, 1,
+            "populated fixture exercises the managed view"
+        );
+        (cluster, client, store)
+    }
+
+    async fn snapshot(client: &Client) -> Vec<String> {
+        let mut snapshot = client.query_consistent_map::<SchemaText,_>(
+            "SELECT value FROM (
+             SELECT json_object('kind','schema','name',name,'sql',sql) AS value FROM sqlite_master
+               WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources')
+             UNION ALL SELECT json_object('kind','receipt','node',node_id,'model',model_id,'receipt',receipt_json) FROM subtitle_model_receipts
+             UNION ALL SELECT json_object('kind','job','id',id,'payload',payload_json,'state',state,'revision',revision,'created_at_ms',created_at_ms) FROM background_jobs
+             UNION ALL SELECT json_object('kind','marker','version',version) FROM subtitle_managed_schema
+             ) ORDER BY value",hiqlite::params!()).await.expect("snapshot populated managed extension")
+            .into_iter().map(|row|row.value).collect::<Vec<_>>();
+        let views: Vec<I64Value> = client.query_consistent_map(
+            "SELECT count(*) AS value FROM sqlite_master WHERE type='view' AND name='background_job_required_resources'", hiqlite::params!(),
+        ).await.expect("observe optional resource view in partial fixture");
+        if views[0].value == 1 {
+            snapshot.extend(client.query_consistent_map::<SchemaText,_>(
+                "SELECT json_object('kind','resource','job',job_id,'resource',resource_key) AS value FROM background_job_required_resources", hiqlite::params!(),
+            ).await.expect("snapshot existing resource view").into_iter().map(|row|row.value));
+        }
+        snapshot.sort();
+        snapshot
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_bootstrap_preserves_populated_managed_receipts_queue_and_view() {
+        let _case = HIQLITE_CASE.lock().await;
+        let (cluster, client, store) = populated_fixture().await;
+        let before = snapshot(&client).await;
+        let marker = replicated_schema_marker(&client).await;
+        drop(store);
+        HiqliteAuthStore::bootstrap(
+            client.clone(),
+            CONTRACT_INSTANCE_ID,
+            &cluster._root.path().join("managed-repeat.db"),
+        )
+        .await
+        .expect("repeat populated bootstrap");
+        assert_eq!(snapshot(&client).await, before);
+        assert_eq!(replicated_schema_marker(&client).await, marker);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_bootstrap_refuses_partial_managed_extension_without_repair() {
+        let _case = HIQLITE_CASE.lock().await;
+        let (cluster, client, store) = populated_fixture().await;
+        drop(store);
+        let mut declarations = client.query_consistent_map::<SchemaText,_>(
+            "SELECT sql AS value FROM sqlite_master WHERE name IN ('background_job_required_resources','subtitle_managed_source_changed') ORDER BY name", hiqlite::params!(),
+        ).await.expect("retain exact declarations for independent partial cases");
+        assert_eq!(declarations.len(), 2);
+        let view = declarations.remove(0).value;
+        let trigger = declarations.remove(0).value;
+        for (ordinal, (damage, restore, expected_error)) in [
+            (
+                "DROP TRIGGER subtitle_managed_source_changed",
+                trigger,
+                "partial or incompatible",
+            ),
+            (
+                "DROP VIEW background_job_required_resources",
+                view,
+                "partial or incompatible",
+            ),
+            (
+                "DELETE FROM subtitle_managed_schema",
+                "INSERT INTO subtitle_managed_schema VALUES(1,1)".into(),
+                "marker missing",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            client
+                .execute(damage, hiqlite::params!())
+                .await
+                .expect("manufacture independent partial managed extension");
+            let partial = snapshot(&client).await;
+            let result = HiqliteAuthStore::bootstrap(
+                client.clone(),
+                CONTRACT_INSTANCE_ID,
+                &cluster
+                    ._root
+                    .path()
+                    .join(format!("managed-partial-{ordinal}.db")),
+            )
+            .await;
+            let error = match result {
+                Ok(_) => panic!("partial managed extension must refuse bootstrap"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(expected_error),
+                "{damage}: {error}"
+            );
+            assert_eq!(
+                snapshot(&client).await,
+                partial,
+                "refusal must not repair or discard {damage}"
+            );
+            // Restore the exact retained fixture declaration only to isolate the
+            // next corruption; production bootstrap itself must never repair it.
+            client
+                .execute(restore, hiqlite::params!())
+                .await
+                .expect("restore independent test fixture");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_repeated_bootstraps_preserve_populated_managed_extension() {
+        let _case = HIQLITE_CASE.lock().await;
+        let (cluster, client, store) = populated_fixture().await;
+        let before = snapshot(&client).await;
+        drop(store);
+        let first_path = cluster._root.path().join("managed-repeat-a.db");
+        let second_path = cluster._root.path().join("managed-repeat-b.db");
+        let (first, second) = tokio::join!(
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &first_path),
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &second_path)
+        );
+        first.expect("first concurrent current-layout repeat");
+        second.expect("second concurrent current-layout repeat");
+        assert_eq!(snapshot(&client).await, before);
+    }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idempotent() {
     let _case = HIQLITE_CASE.lock().await;
@@ -17290,10 +17692,13 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             .any(|(table, rows)| *table == "background_jobs" && !rows.is_empty()),
         "forced handoff has an actual common job"
     );
-    assert!(store
+    // The successful handoff consumed this running claim. A retained receipt
+    // cannot authorize it again after the request became submitted and its
+    // owner was cleared, even though the immutable worker result remains ready.
+    assert!(!store
         .submit_fragment_index_analysis(&force_claim, &forced_job, 41)
         .await
-        .expect("return the previously accepted forced handoff receipt"));
+        .expect("reject the consumed forced analysis claim before receipt reuse"));
     assert_eq!(
         receipt_snapshot().await,
         before_replay,
@@ -18319,6 +18724,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
     // v102–v103).
     // Plus the item ratings and per-person lists (SQLite v113).
+    // Plus the playback handoff codes and tokens (SQLite v115).
     let mut imported_tables = report
         .tables
         .iter()
@@ -18392,6 +18798,8 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "media_sessions",
             "offline_package_leases",
             "offline_packages",
+            "playback_handoffs",
+            "playback_handoffs_tokens",
             "pretranscode_jobs",
             "quality_cancellation_receipts",
             "quality_preparation_owners",
@@ -18578,10 +18986,11 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
 
     let source = tempfile::tempdir().expect("current SQLite import fixture directory");
     let source_path = populated_current_import_fixture(source.path());
-    // This shared fixture seeds the old domain rows with SQL. Run the actual
-    // v71 upgrade before calling it a current backup, so live work has the
-    // same sealed mapping and common queue rows a real upgraded daemon has.
-    let connection = rusqlite::Connection::open(&source_path).expect("open upgrade fixture");
+    // This current-schema fixture seeds legacy domain rows with SQL after
+    // startup sealed an empty queue inbox. Run the real capture payload again
+    // against that empty inbox; this prepares current import data, not evidence
+    // of a historical schema upgrade. Keep all later domain rows and lineage.
+    let connection = rusqlite::Connection::open(&source_path).expect("open current fixture");
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row
@@ -20425,7 +20834,10 @@ fn contract_inventory_matches_every_store_method() {
     // (set, flags, a page of a list, membership of a batch). All six are named
     // in `ANNOTATION_METHODS` and covered on both backends by
     // `annotation_contract_runs_through_dyn_store`.
-    assert_eq!(declared.len(), 503, "review the Store method count");
+    // +5: source-revision title demand/readiness, binding, fenced publication
+    // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
+    // +3: source-fenced FEL verdict write, requalification and verdict counts.
+    assert_eq!(declared.len(), 511, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -24089,7 +24501,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("busy-engine"),
                     11,
                     1011,
-                    true
+                    true,
+                    false
                 )
                 .await
                 .expect("busy claim")
@@ -24136,7 +24549,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("other-engine"),
                     13,
                     1013,
-                    true
+                    true,
+                    false
                 )
                 .await
                 .expect("wrong engine")
@@ -24144,7 +24558,14 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
             "{backend}"
         );
         let claimed = store
-            .claim_analysis_request_for_capacity("busy-node", Some("busy-engine"), 14, 1014, true)
+            .claim_analysis_request_for_capacity(
+                "busy-node",
+                Some("busy-engine"),
+                14,
+                1014,
+                true,
+                false,
+            )
             .await
             .expect("viewer claim")
             .expect("viewer source read admitted");
@@ -24169,7 +24590,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("busy-engine"),
                     120013,
                     121013,
-                    true
+                    true,
+                    false
                 )
                 .await
                 .expect("expired viewer claim")
@@ -24183,6 +24605,7 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("busy-engine"),
                     120014,
                     121014,
+                    false,
                     false
                 )
                 .await
@@ -24192,6 +24615,224 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
         );
     })
     .await;
+}
+
+/// Lab3 (2026-10-26): 104 active requests targeted a node removed from the
+/// cluster. Nothing but a request's target claims it, so they stayed active,
+/// counted against the queue's ceiling, for good. Removal retires them; a
+/// learner's targeted-only claim never takes untargeted work.
+#[tokio::test]
+async fn removing_a_node_retires_only_its_active_analysis_requests() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "removed-node-analysis").await;
+        let request = |id: &str, target: &str, generation: &str| NewAnalysisRequest {
+            request_id: id.into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "removal-engine".into(),
+            video_identity: String::new(),
+            requested_generation: generation.into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: target.into(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        for (id, target, generation) in [
+            ("gone-a", "gone-node", "removal-a"),
+            ("gone-b", "gone-node", "removal-b"),
+            ("kept", "kept-node", "removal-c"),
+        ] {
+            store
+                .enqueue_analysis_request(&request(id, target, generation))
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {id}: {error}"));
+        }
+        let running = store
+            .claim_analysis_request_for_capacity(
+                "gone-node",
+                Some("removal-engine"),
+                11,
+                1011,
+                false,
+                true,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the removed node held a claim"));
+        assert_eq!(
+            store
+                .retire_analysis_requests_for_node("gone-node", 20)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: retire: {error}")),
+            2,
+            "{backend}: its queued and its running request"
+        );
+        for id in ["gone-a", "gone-b"] {
+            let row = store
+                .analysis_request(id)
+                .await
+                .expect("read")
+                .expect("row");
+            assert_eq!(row.state, "cancelled", "{backend}: {id}");
+            assert_eq!(row.last_error_code, "node_removed", "{backend}: {id}");
+        }
+        let attempts = store
+            .analysis_attempts(&running.request_id, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: attempts: {error}"));
+        assert_eq!(attempts[0].phase, "canceled", "{backend}");
+        assert_eq!(
+            store
+                .analysis_request("kept")
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "queued",
+            "{backend}: another node's request is untouched"
+        );
+        assert_eq!(
+            store
+                .retire_analysis_requests_for_node("gone-node", 21)
+                .await
+                .expect("again"),
+            0,
+            "{backend}"
+        );
+
+        // The retired claim keeps its lease-bound source reservation, as any
+        // cancelled reader does, so the claims below come after its lease.
+        let (_, other_file) = seed_file(&store, "untargeted-analysis").await;
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "untargeted".into(),
+                file_id: other_file,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "skip_markers".to_owned(),
+                pipeline_version: "chapter-classifier-v1".to_owned(),
+                video_identity: String::new(),
+                requested_generation: "untargeted-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "admin".to_owned(),
+                force_rebuild: false,
+                target_node_id: String::new(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: untargeted: {error}"));
+        assert!(
+            store
+                .claim_analysis_request_for_capacity("lonely-node", None, 2_000, 3_000, false, true)
+                .await
+                .expect("targeted-only claim")
+                .is_none(),
+            "{backend}: a targeted-only claim leaves untargeted work"
+        );
+        assert_eq!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "lonely-node",
+                    None,
+                    2_001,
+                    3_001,
+                    false,
+                    false
+                )
+                .await
+                .expect("claim")
+                .expect("untargeted work")
+                .request_id,
+            "untargeted",
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+/// Review of #1299: the voters' settle pass retires the active requests of a
+/// node membership has already removed -- the rows a removal predating the
+/// retirement left behind (104 on lab3).
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn hiqlite_settle_retires_requests_of_a_node_membership_removed() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let raw = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect raw replicated client");
+    raw.execute(
+        "CREATE TABLE IF NOT EXISTS cluster_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER)",
+        hiqlite::params!(),
+    )
+    .await
+    .expect("the membership table");
+    raw.execute(
+        "INSERT INTO cluster_nodes (node_id, removed_at) VALUES ($1, $2)",
+        hiqlite::params!("removed-node", 5_i64),
+    )
+    .await
+    .expect("a removed node");
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (_, file_id) = seed_file(&store, "settle-removed").await;
+    for (id, target, generation) in [
+        ("settle-removed", "removed-node", "settle-removed-a"),
+        ("settle-kept", "kept-node", "settle-removed-b"),
+    ] {
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: id.into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "settle-engine".into(),
+                video_identity: String::new(),
+                requested_generation: generation.into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: target.into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("enqueue");
+    }
+    store.settle_analysis_requests(20).await.expect("settle");
+    let removed = store
+        .analysis_request("settle-removed")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(removed.state, "cancelled");
+    assert_eq!(removed.last_error_code, "node_removed");
+    assert_eq!(
+        store
+            .analysis_request("settle-kept")
+            .await
+            .expect("read")
+            .expect("row")
+            .state,
+        "queued"
+    );
 }
 
 #[tokio::test]
@@ -29312,6 +29953,84 @@ async fn scan_identity_repair_contract() {
             (show, season, episode, file)
         }
 
+        // No list membership is also a real first repair, not a replay.
+        // The optional set-copy affects zero rows while every fence still applies.
+        let empty_first = tree(
+            store.as_ref(),
+            library.id,
+            "Empty-list original",
+            "No List Show",
+            "",
+        )
+        .await;
+        let empty_second = tree(
+            store.as_ref(),
+            library.id,
+            "Empty-list duplicate",
+            "No List Show",
+            ".2160p",
+        )
+        .await;
+        let empty_snapshot = store
+            .identity_repair_snapshot(library.id, &[empty_first.0, empty_second.0])
+            .await
+            .expect("empty-list repair snapshot");
+        let empty_plan = plurx_core::store::plan_identity_repair(empty_snapshot.clone())
+            .expect("empty-list repair plan");
+        assert!(
+            empty_plan.ready(),
+            "{backend}: empty-list plan {:?}",
+            empty_plan.blockers
+        );
+        let empty_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let empty_lease = acquired(
+            store
+                .acquire_lease(
+                    &format!("scan:library:{}", library.id),
+                    "empty-list-owner",
+                    empty_now,
+                    empty_now + 90_000,
+                )
+                .await
+                .expect("empty-list repair lease"),
+            backend,
+        );
+        let empty_successor = publication_successor(&empty_lease);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(
+                    &empty_snapshot,
+                    &empty_plan,
+                    &empty_lease,
+                    &empty_successor
+                )
+                .await
+                .expect("first empty-list repair"),
+            IdentityRepairOutcome::Applied,
+            "{backend}: zero-row annotation copy is a first application"
+        );
+        let empty_retry = publication_successor(&empty_successor);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(
+                    &empty_snapshot,
+                    &empty_plan,
+                    &empty_successor,
+                    &empty_retry
+                )
+                .await
+                .expect("empty-list repair replay"),
+            IdentityRepairOutcome::AlreadyApplied
+        );
+        assert!(store
+            .release_lease(&empty_retry, empty_now)
+            .await
+            .expect("release empty-list repair lease"));
+
         let first = tree(
             store.as_ref(),
             library.id,
@@ -29397,7 +30116,8 @@ async fn scan_identity_repair_contract() {
                 .apply_identity_repair_fenced(&snapshot, &plan, &lease, &replacement)
                 .await
                 .expect("apply repair"),
-            IdentityRepairOutcome::Applied
+            IdentityRepairOutcome::Applied,
+            "{backend}: the first fenced repair must apply"
         );
         assert_eq!(
             store
@@ -32579,6 +33299,7 @@ async fn downloaded_subtitles_survive_rescan_and_reject_stale_or_duplicate_write
             .expect("subtitle contract fixture")
             .expect("subtitle contract fixture");
         let track = plurx_core::domain::DownloadedSubtitle {
+            text_translation: None,
             source_size: original.size,
             source_mtime: original.mtime,
             provider_file_id: 123,
@@ -33987,6 +34708,7 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     // Marker 65 replays every step to the head, and the 67→68 step adds
     // `dv_conversions.requested_manually` unconditionally: rewind that shape
     // too, or the replay fails before it reaches the audio step (69→70).
+    drop_baseline_sharing_schema(&client).await;
     downgrade_dv_request_provenance(&client).await;
     client
         .txn([
@@ -34024,6 +34746,7 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     // The second rewind leaves `audio_recipe` in place: the audio step must
     // tolerate its own column on replay. Provenance is rewound again because
     // its step is not replay-tolerant and is not what this test is about.
+    drop_baseline_sharing_schema(&client).await;
     downgrade_dv_request_provenance(&client).await;
     client
         .txn([(
@@ -36697,6 +37420,20 @@ fn watch_fence_reader(store: &Arc<HiqliteAuthStore>, applied_index: u64) -> Cata
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
+async fn counted_watch_read<T>(
+    operation: impl Future<Output = Result<T, plurx_core::error::StoreError>>,
+) -> Result<T, plurx_core::error::StoreError> {
+    let request = plurx_core::store::HttpStoreOperationCounts::default();
+    let result = plurx_core::store::scope_http_store_operations(request.clone(), operation).await;
+    assert_eq!(
+        request.watch_reads(),
+        1,
+        "exactly one watch-state statement"
+    );
+    result
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
 fn assert_watch_read_path(store: &HiqliteAuthStore, local: bool, label: &str) {
     let counts = store.validation_operation_counts();
     assert_eq!(
@@ -36778,10 +37515,13 @@ async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_wri
     // header: Authority. Its record cannot prove the user wrote nothing
     // through a peer since.
     writer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&writer, commit + 1_000)
-        .watch_map(fixture.user, &ids, None)
-        .await
-        .expect("writer without header");
+    let actual = counted_watch_read(watch_fence_reader(&writer, commit + 1_000).watch_map(
+        fixture.user,
+        &ids,
+        None,
+    ))
+    .await
+    .expect("writer without header");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&writer, false, "writer without X-Plurx-Read-After");
 
@@ -36790,20 +37530,26 @@ async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_wri
     // the bounded lag proof and the client's floor alone would allow a local
     // read.
     writer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&writer, commit - 1)
-        .watch_map(fixture.user, &ids, Some(progress_index))
-        .await
-        .expect("writer below its fence");
+    let actual = counted_watch_read(watch_fence_reader(&writer, commit - 1).watch_map(
+        fixture.user,
+        &ids,
+        Some(progress_index),
+    ))
+    .await
+    .expect("writer below its fence");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&writer, false, "writer below its own write");
 
     // Node A once it has applied the write, for the client that echoed it:
     // local, and it sees the write.
     writer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&writer, commit)
-        .watch_map(fixture.user, &ids, Some(commit))
-        .await
-        .expect("writer at its fence");
+    let actual = counted_watch_read(watch_fence_reader(&writer, commit).watch_map(
+        fixture.user,
+        &ids,
+        Some(commit),
+    ))
+    .await
+    .expect("writer at its fence");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&writer, true, "writer at its own write");
 
@@ -36812,55 +37558,77 @@ async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_wri
     // however far ahead it is.
     let peer = Arc::new(open_contract_hiqlite_store(&cluster).await);
     peer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&peer, commit + 1_000)
-        .watch_map(fixture.user, &ids, None)
-        .await
-        .expect("peer without header");
+    let actual = counted_watch_read(watch_fence_reader(&peer, commit + 1_000).watch_map(
+        fixture.user,
+        &ids,
+        None,
+    ))
+    .await
+    .expect("peer without header");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&peer, false, "peer without X-Plurx-Read-After");
 
     // With the writer's index echoed and applied past it: local.
     peer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&peer, commit)
-        .watch_map(fixture.user, &ids, Some(commit))
-        .await
-        .expect("peer with header, applied");
+    let actual = counted_watch_read(watch_fence_reader(&peer, commit).watch_map(
+        fixture.user,
+        &ids,
+        Some(commit),
+    ))
+    .await
+    .expect("peer with header, applied");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&peer, true, "peer applied past X-Plurx-Read-After");
 
     // With the header but not yet applied: Authority.
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit - 1)
-        .watch_map(fixture.user, &ids, Some(commit))
-        .await
-        .expect("peer with header, behind");
+    counted_watch_read(watch_fence_reader(&peer, commit - 1).watch_map(
+        fixture.user,
+        &ids,
+        Some(commit),
+    ))
+    .await
+    .expect("peer with header, behind");
     assert_watch_read_path(&peer, false, "peer behind X-Plurx-Read-After");
 
     // Every reader method takes the same fence, not only the watch map.
     let containers = vec![fixture.show, fixture.season];
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit + 1_000)
-        .watch_summary(fixture.user, &ids, &containers, None)
-        .await
-        .expect("peer summary without header");
+    counted_watch_read(watch_fence_reader(&peer, commit + 1_000).watch_summary(
+        fixture.user,
+        &ids,
+        &containers,
+        None,
+    ))
+    .await
+    .expect("peer summary without header");
     assert_watch_read_path(&peer, false, "summary without header");
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit + 1_000)
-        .progress_rails(fixture.user, 20, None)
-        .await
-        .expect("peer rails without header");
+    counted_watch_read(watch_fence_reader(&peer, commit + 1_000).progress_rails(
+        fixture.user,
+        20,
+        None,
+    ))
+    .await
+    .expect("peer rails without header");
     assert_watch_read_path(&peer, false, "rails without header");
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit + 1_000)
-        .watch_rollup(fixture.user, fixture.show, None)
-        .await
-        .expect("peer rollup without header");
+    counted_watch_read(watch_fence_reader(&peer, commit + 1_000).watch_rollup(
+        fixture.user,
+        fixture.show,
+        None,
+    ))
+    .await
+    .expect("peer rollup without header");
     assert_watch_read_path(&peer, false, "rollup without header");
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit)
-        .watch_rollup(fixture.user, fixture.show, Some(commit))
-        .await
-        .expect("peer rollup with header");
+    counted_watch_read(watch_fence_reader(&peer, commit).watch_rollup(
+        fixture.user,
+        fixture.show,
+        Some(commit),
+    ))
+    .await
+    .expect("peer rollup with header");
     assert_watch_read_path(&peer, true, "rollup with header");
 }
 
@@ -36933,47 +37701,62 @@ async fn watch_fence_a_peers_older_record_does_not_prove_a_write_through_another
     let applied = phone_index - 1;
     assert!(applied >= tv_index, "B has applied its own write");
     node_b.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&node_b, applied)
-        .watch_map(fixture.user, &ids, None)
-        .await
-        .expect("B without header");
+    let actual = counted_watch_read(watch_fence_reader(&node_b, applied).watch_map(
+        fixture.user,
+        &ids,
+        None,
+    ))
+    .await
+    .expect("B without header");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&node_b, false, "B's own older record, no header");
     let containers = vec![fixture.show, fixture.season];
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, applied)
-        .watch_summary(fixture.user, &ids, &containers, None)
-        .await
-        .expect("B summary without header");
+    counted_watch_read(watch_fence_reader(&node_b, applied).watch_summary(
+        fixture.user,
+        &ids,
+        &containers,
+        None,
+    ))
+    .await
+    .expect("B summary without header");
     assert_watch_read_path(&node_b, false, "B summary, no header");
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, applied)
-        .progress_rails(fixture.user, 20, None)
+    counted_watch_read(watch_fence_reader(&node_b, applied).progress_rails(fixture.user, 20, None))
         .await
         .expect("B rails without header");
     assert_watch_read_path(&node_b, false, "B rails, no header");
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, applied)
-        .watch_rollup(fixture.user, fixture.show, None)
-        .await
-        .expect("B rollup without header");
+    counted_watch_read(watch_fence_reader(&node_b, applied).watch_rollup(
+        fixture.user,
+        fixture.show,
+        None,
+    ))
+    .await
+    .expect("B rollup without header");
     assert_watch_read_path(&node_b, false, "B rollup, no header");
 
     // A client floor older than B's own write is raised by B's record.
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, tv_index - 1)
-        .watch_map(fixture.user, &ids, Some(1))
-        .await
-        .expect("B below its own write");
+    counted_watch_read(watch_fence_reader(&node_b, tv_index - 1).watch_map(
+        fixture.user,
+        &ids,
+        Some(1),
+    ))
+    .await
+    .expect("B below its own write");
     assert_watch_read_path(&node_b, false, "B below its own record");
 
     // The phone's index, echoed and applied on B: local, and it shows the
     // episode watched.
     node_b.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&node_b, phone_index)
-        .watch_map(fixture.user, &ids, Some(phone_index))
-        .await
-        .expect("B with the phone's index");
+    let actual = counted_watch_read(watch_fence_reader(&node_b, phone_index).watch_map(
+        fixture.user,
+        &ids,
+        Some(phone_index),
+    ))
+    .await
+    .expect("B with the phone's index");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&node_b, true, "B applied past the echoed write");
 }
@@ -37105,10 +37888,14 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
     assert_eq!(request.watch_reads(), 1, "rails: one counted watch read");
 
     store.validation_reset_operation_counts();
-    let summary = watch_fence_reader(&store, commit)
-        .watch_summary(fixture.user, &item_ids, &container_ids, Some(commit))
-        .await
-        .expect("local summary");
+    let summary = counted_watch_read(watch_fence_reader(&store, commit).watch_summary(
+        fixture.user,
+        &item_ids,
+        &container_ids,
+        Some(commit),
+    ))
+    .await
+    .expect("local summary");
     check_summary(summary, "local");
     assert_watch_read_path(
         &store,
@@ -37117,10 +37904,13 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
     );
 
     store.validation_reset_operation_counts();
-    let rails = watch_fence_reader(&store, commit)
-        .progress_rails(fixture.user, 20, Some(commit))
-        .await
-        .expect("local rails");
+    let rails = counted_watch_read(watch_fence_reader(&store, commit).progress_rails(
+        fixture.user,
+        20,
+        Some(commit),
+    ))
+    .await
+    .expect("local rails");
     assert_eq!(
         serde_json::to_value(rails).expect("serialize rails"),
         expected_rails,

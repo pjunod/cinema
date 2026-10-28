@@ -229,6 +229,10 @@ pub(crate) async fn sweep_orphaned_sidecars(
     let mut removed = 0;
     for file_id in examined.iter().filter(|file_id| !alive.contains(file_id)) {
         for path in &by_file[file_id] {
+            let _eviction = match crate::playback_cache::begin_eviction(path) {
+                Ok(guard) => guard,
+                Err(_) => continue,
+            };
             match tokio::fs::remove_file(path).await {
                 Ok(()) => removed += 1,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1032,7 +1036,9 @@ async fn cluster_vtt_into(
         )
         .await
         {
-            Lookup::Kept(kept) => crate::subtitle_source::copy_verified(&kept, tmp).await,
+            Lookup::Kept(kept) => {
+                crate::subtitle_source::copy_verified_bounded(&kept, tmp, MAX_SIDECAR_BYTES).await
+            }
             Lookup::Empty(_) => tokio::fs::write(tmp, b"WEBVTT\n\n").await.is_ok(),
             Lookup::Miss(_) => false,
         }
@@ -1239,6 +1245,9 @@ async fn try_store_vtt(
     if valid_sidecar(&cached, MAX_SIDECAR_BYTES).await {
         return Ok(Some(cached));
     }
+    let reservation = crate::playback_cache::reserve(&cached, MAX_SIDECAR_BYTES.saturating_mul(2))
+        .await
+        .map_err(|error| format!("subtitle disk admission: {error}"))?;
     use crate::subtitle_source::{Consumer, Live, Lookup};
     match crate::subtitle_source::lookup(stored, Consumer::Vtt, file, index, Live::Path(&file.path))
         .await
@@ -1249,12 +1258,24 @@ async fn try_store_vtt(
                     .await
                     .map_err(|error| format!("creating subtitle cache: {error}"))?;
                 let tmp = dir.join(format!(".tmp-{}.vtt", uuid::Uuid::new_v4()));
-                if crate::subtitle_source::copy_verified(&kept, &tmp).await {
+                let _temporary_pin = crate::playback_cache::pin(&tmp)
+                    .map_err(|error| format!("subtitle temporary-file admission: {error}"))?;
+                if crate::subtitle_source::copy_verified_bounded(&kept, &tmp, MAX_SIDECAR_BYTES)
+                    .await
+                {
                     let valid = tokio::fs::metadata(&tmp)
                         .await
                         .is_ok_and(|metadata| metadata.len() <= MAX_SIDECAR_BYTES);
                     if valid && tokio::fs::rename(&tmp, &cached).await.is_ok() {
                         forget_failure(&cached).await;
+                        if let Some(reservation) = reservation {
+                            reservation.commit(
+                                tokio::fs::metadata(&cached)
+                                    .await
+                                    .map(|m| m.len())
+                                    .unwrap_or(0),
+                            );
+                        }
                         return Ok(Some(cached));
                     }
                     let _ = tokio::fs::remove_file(&tmp).await;
@@ -1267,11 +1288,16 @@ async fn try_store_vtt(
                     .await
                     .map_err(|error| format!("creating subtitle cache: {error}"))?;
                 let tmp = dir.join(format!(".tmp-{}.vtt", uuid::Uuid::new_v4()));
+                let _temporary_pin = crate::playback_cache::pin(&tmp)
+                    .map_err(|error| format!("subtitle temporary-file admission: {error}"))?;
                 if tokio::fs::write(&tmp, b"WEBVTT\n\n").await.is_ok()
                     && tokio::fs::rename(&tmp, &cached).await.is_ok()
                 {
                     crate::subtitle_source::record_access(&store_dir).await;
                     forget_failure(&cached).await;
+                    if let Some(reservation) = reservation {
+                        reservation.commit(8);
+                    }
                     return Ok(Some(cached));
                 }
                 let _ = tokio::fs::remove_file(&tmp).await;
@@ -1505,8 +1531,15 @@ pub(crate) async fn read_cached_revision(
 }
 
 async fn read_vtt_path(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, String> {
+    let _cache_pin = crate::playback_cache::pin(path)
+        .map_err(|error| format!("subtitle read admission: {error}"))?;
     match plurx_core::fs_secure::read_bounded_regular(path, max_bytes).await {
-        Ok(bytes) if !bytes.is_empty() => Ok(Some(bytes)),
+        Ok(bytes) if !bytes.is_empty() => {
+            if let Ok(file) = std::fs::File::open(path) {
+                let _ = file.set_modified(std::time::SystemTime::now());
+            }
+            Ok(Some(bytes))
+        }
         Ok(_) => Ok(None),
         Err(error)
             if matches!(
@@ -1763,7 +1796,12 @@ async fn ensure_burn_source_with(
                 };
                 if let Some(kept) = stored_track {
                     if kept.format() == crate::subtitle_source::RepresentationFormat::Matroska {
-                        if crate::subtitle_source::copy_verified(&kept, &tmp).await
+                        if crate::subtitle_source::copy_verified_bounded(
+                            &kept,
+                            &tmp,
+                            MAX_BURN_BYTES,
+                        )
+                        .await
                             && source.unchanged()
                         {
                             #[cfg(test)]
@@ -3113,6 +3151,17 @@ where
             return WindowExtractionOutcome::Complete(Err($why))
         };
     }
+    let reservation =
+        match crate::playback_cache::reserve(cached, limits.max_sidecar_bytes.saturating_mul(2))
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(error) => bail!(format!("subtitle disk admission: {error}")),
+        };
+    let _temporary_pin = match crate::playback_cache::pin(tmp) {
+        Ok(pin) => pin,
+        Err(error) => bail!(format!("subtitle temporary-file admission: {error}")),
+    };
     let Some(cached_name) = cached.file_name().and_then(|name| name.to_str()) else {
         bail!("subtitle cache path has no safe filename".to_owned())
     };
@@ -3206,6 +3255,9 @@ where
         bail!(format!("publishing subtitle cache: {error}"));
     }
     let _ = directory.unlink_child(tmp_name).await;
+    if let Some(reservation) = reservation {
+        reservation.commit(size);
+    }
     if let Some(dir) = cached.parent() {
         if !is_window_name(cached_name) {
             prune_matching_windows(directory, dir, cached_name).await;
@@ -3218,6 +3270,11 @@ where
 /// Drop the oldest cached subtitles once the cache outgrows its cap, and any
 /// abandoned temp file a crashed extraction left behind.
 async fn prune(dir: &Path) {
+    // Production has one byte budget. The legacy entry-count policy remains
+    // only for isolated callers without an installed playback coordinator.
+    if crate::playback_cache::lookup(dir).is_some() {
+        return;
+    }
     let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
         return;
     };
@@ -3225,6 +3282,9 @@ async fn prune(dir: &Path) {
     let mut windows: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     while let Ok(Some(entry)) = rd.next_entry().await {
         let path = entry.path();
+        if crate::playback_cache::is_pinned(&path) {
+            continue;
+        }
         let Ok(meta) = entry.metadata().await else {
             continue;
         };
@@ -3266,6 +3326,24 @@ async fn prune(dir: &Path) {
     let doomed = entries.len() - TRIM_TO;
     for (_, path) in entries.into_iter().take(doomed) {
         let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+/// Delete one idle sidecar chosen by the shared playback LRU. The budget owns
+/// the eviction exclusion; the extraction map adds protection for legacy
+/// callers that have not reached their publication reservation yet.
+pub(crate) async fn evict_playback_sidecar(
+    path: &Path,
+    parent: &plurx_core::fs_secure::SecureDirectory,
+    name: &str,
+) -> std::io::Result<bool> {
+    if extractions().lock().await.contains_key(path) {
+        return Ok(false);
+    }
+    match parent.unlink_child(name).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
     }
 }
 
@@ -3312,6 +3390,10 @@ async fn prune_matching_windows(
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with(&prefix) && is_window_name(&name) {
+            let _eviction = match crate::playback_cache::begin_eviction(&entry.path()) {
+                Ok(guard) => guard,
+                Err(_) => continue,
+            };
             let _ = directory.unlink_child(&name).await;
         }
     }

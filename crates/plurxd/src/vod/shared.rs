@@ -6,6 +6,70 @@ use super::*;
 const LOCAL_INDEX_DEMAND_CAP: usize = 64;
 
 impl Shared {
+    /// Why a start has no local fragment index for `identity`, as the code
+    /// and words of its VOD refusal.
+    ///
+    /// The recorded outcome decides, so the refusal says what the indexer
+    /// found rather than "pending" for a title it will never index:
+    /// terminal is `vod_index_unavailable` with the stored reason; a wait
+    /// says when the next attempt is due; due, or never tried, asks the
+    /// local pass to examine the file next (`demand_local_index`).
+    pub(super) async fn local_index_refusal(
+        &self,
+        file_id: i64,
+        identity: &plurx_core::segplan::SourceIdentity,
+        untried: String,
+    ) -> (&'static str, String) {
+        use plurx_core::segplan::IndexOutcomeState;
+        let now = crate::state::clock_ms();
+        let outcome = match self.store.fragment_index_outcome(file_id, identity).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::debug!(file_id, %error, "reading the local index outcome");
+                None
+            }
+        };
+        let Some(outcome) = outcome else {
+            self.demand_local_index(file_id);
+            return ("vod_index_pending", untried);
+        };
+        let found = crate::http::index_refusal_summary(std::slice::from_ref(&outcome), now)
+            .map_or_else(|| outcome.reason.clone(), |(_, detail)| detail);
+        // The indexer's own words (`found`) can carry source paths and
+        // ffmpeg's stderr. A pending refusal's message reaches the client, so
+        // it names the failure code; the terminal one is replaced with a
+        // generic message at the HTTP edge and logged there in full.
+        let failure = outcome.typed_code.map_or_else(
+            || outcome.refusal.code().to_owned(),
+            |code| code.as_str().to_owned(),
+        );
+        match outcome.state(now) {
+            IndexOutcomeState::Terminal => (
+                "vod_index_unavailable",
+                format!("this node cannot index this title: {found}"),
+            ),
+            IndexOutcomeState::WaitUntil(at) => {
+                self.demand_local_index(file_id);
+                (
+                    "vod_index_pending",
+                    format!(
+                        "the last index attempt failed ({failure}); the next is due in {} s",
+                        (at.saturating_sub(now).max(0) + 999) / 1_000
+                    ),
+                )
+            }
+            IndexOutcomeState::Due => {
+                self.demand_local_index(file_id);
+                (
+                    "vod_index_pending",
+                    format!(
+                        "{untried}; the last index attempt failed ({failure}) and is due again"
+                    ),
+                )
+            }
+        }
+    }
+
     /// A start for `file_id` was refused for want of a local fragment index:
     /// ask the node-local pass to examine it before its backlog.
     pub(super) fn demand_local_index(&self, file_id: i64) {
@@ -1054,6 +1118,9 @@ impl Shared {
     /// the same per-key gate through session attach, while maintenance skips
     /// a key whose build/attach is active; different keys never wait for it.
     pub(super) async fn purge_if_dormant(self: &Arc<Shared>, key: &str, ttl: Duration) {
+        if crate::playback_cache::is_pinned(&self.base.join(key)) {
+            return;
+        }
         let Ok(build_guard) = self.rendition_build_gate(key).try_lock_owned() else {
             return;
         };

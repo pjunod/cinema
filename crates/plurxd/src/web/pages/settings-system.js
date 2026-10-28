@@ -253,11 +253,13 @@ function storageHtml(st){
 // as long as a sleeping array takes to answer. Re-rendering immediately with
 // the previous numbers would look like it worked and be wrong.
 async function remeasureStorage(btn){
-  const was=btn.textContent; btn.disabled=true; btn.textContent="Measuring…";
+  const was=btn.textContent, node_id=SETTINGS_DATA?.sys?.node_id; btn.disabled=true; btn.textContent="Measuring…";
   try{
     const st=await api("/system/storage",{method:"POST"});
-    if(SETTINGS_DATA&&SETTINGS_DATA.sys) SETTINGS_DATA.sys.storage=st;
-    renderSettings();
+    if(node_id&&SETTINGS_DATA?.sys?.node_id===node_id){
+      SETTINGS_DATA.sys.storage=st;
+      replaceSystemCard("system-storage-card",systemStorageCard(SETTINGS_DATA.sys));
+    }
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=was; }
 }
 // Watch-state durability in operator language. SQLite is deliberately not
@@ -319,11 +321,9 @@ function ffmpegSupportWarning(sys){
   if(!support)return "";
   const missing=(support.rows||[]).filter(row=>row.required&&!row.included), failed=(support.rows||[]).filter(row=>row.required&&row.included&&["failed","unavailable"].includes(row.runtime)), problems=support.package_problems||[];
   if(!missing.length&&!problems.length&&!failed.length)return "";
-  return `<section class="media-runtime-warning" role="alert"><h2>${missing.length?"FFmpeg lacks required support":problems.length?"FFmpeg package is not verified":"Required media hardware check failed"}</h2>
-    <p>${missing.length?`This node is missing ${esc(missing.map(row=>row.label).join(", "))}.`:problems.length?"This node is not using the verified media runtime expected by Plurx.":`Execution failed for ${esc(failed.map(row=>row.label).join(", "))}.`}</p>
-    ${problems.length?`<p>${esc(problems.join(" · "))}</p>`:""}
-    <p>Using <code>${esc(support.executable)}</code></p>
-    <p>${missing.length||problems.length?"Install the complete Plurx Jellyfin FFmpeg package and restart this node.":"Check the failed probe details and GPU driver or device access, then restart this node."} See the media support matrix below.</p></section>`;
+  const title=missing.length?"FFmpeg lacks required support":problems.length?"FFmpeg package is not verified":"Required media hardware check failed";
+  const message=missing.length?`Missing ${missing.map(row=>row.label).join(", ")}.`:problems.length?"Install the required Jellyfin FFmpeg package and restart Cinema.":`Execution failed for ${failed.map(row=>row.label).join(", ")}.`;
+  return `<section class="system-notice" role="alert"><strong>${esc(title)}</strong><p>${esc(message)}</p><details><summary>Package and probe details</summary><div class="system-detail">${problems.length?`<p>${esc(problems.join(" · "))}</p>`:""}<p>Using <code>${esc(support.executable)}</code></p><p>${missing.length?"Install the complete Jellyfin FFmpeg package and restart Cinema.":failed.length?"Check the failed probe and GPU driver or device access, then restart Cinema.":""}</p></div></details></section>`;
 }
 function ffmpegSupportCard(sys){
   const support=sys.ffmpeg_support;
@@ -331,7 +331,7 @@ function ffmpegSupportCard(sys){
   const states={passed:"Passed",failed:"Failed",blocked:"Blocked",unavailable:"Unavailable",not_tested:"Not tested",not_applicable:"Not applicable"};
   const rows=support.rows||[], active=rows.filter(row=>row.applicable), others=rows.filter(row=>!row.applicable);
   const render=row=>`<tr><th scope="row">${esc(row.label)}${row.missing?.length&&row.applicable?`<small>${esc(row.missing.join(" · "))}</small>`:""}</th><td>${esc(row.required_for)}${row.required?"":" · optional"}</td><td class="${row.included?'media-support-good':row.required?'media-support-bad':''}">${row.included?"✓ Included":"✕ Missing"}</td><td class="${row.runtime==='passed'?'media-support-good':row.runtime==='failed'?'media-support-bad':''}">${esc(states[row.runtime]||"Not tested")}${row.runtime_detail?`<small>${esc(row.runtime_detail)}</small>`:""}</td></tr>`;
-  return `<section class="card media-support" id="ffmpeg-support-card"><div class="media-support-heading"><h2 class="section">Media runtime</h2><span class="${support.package_verified?'media-support-good':'muted'}">${support.package_verified?"✓ Verified Plurx Jellyfin package":"Package identity not verified"}</span></div>
+  return `<section class="card media-support" id="ffmpeg-support-card"><div class="media-support-heading"><h2 class="section">Media runtime</h2><span class="${support.package_verified?'media-support-good':'muted'}">${support.package_verified?"✓ Required build verified":"Package identity not verified"}</span></div>
     <dl class="kvgrid"><dt>Using</dt><dd><code>${esc(support.executable)}</code></dd>${support.expected_executable?`<dt>Expected</dt><dd><code>${esc(support.expected_executable)}</code></dd>`:""}</dl>
     <h3>Support for this node</h3><p class="muted">Requirements follow this node’s hardware. Build support and execution results are separate.</p>
     <div class="media-support-table"><table><thead><tr><th scope="col">Capability</th><th scope="col">Required for</th><th scope="col">In build</th><th scope="col">Execution probe</th></tr></thead><tbody>${active.map(render).join("")}</tbody></table></div>
@@ -339,34 +339,113 @@ function ffmpegSupportCard(sys){
     ${others.length?`<details><summary>Other hardware · not required on this node</summary><ul>${others.map(row=>`<li>${esc(row.label)} — not required</li>`).join("")}</ul></details>`:""}
     <p class="muted">Checked ${esc(new Date(support.checked_at*1000).toLocaleString())}. Checks run at startup; reading this page does not launch new tests.</p></section>`;
 }
+// System presents configured capabilities. A playback session may choose a
+// different path for its codec; live activity belongs on the Activity page.
+function systemCapabilityHtml(fact,extra=""){
+  const enabled=fact.enabled===true;
+  const detail=String(fact.detail||"").split("\n").map(esc).join("<br>");
+  return `<details class="system-capability" data-capability="${esc(fact.id)}"><summary><span>${esc(fact.label)}</span><span class="system-state ${enabled?'system-good':'muted'}">${enabled?"Enabled":"Disabled"}</span></summary><div class="system-detail">${detail}${extra}</div></details>`;
+}
+function systemVersionsCard(sys){
+  const support=sys.ffmpeg_support||{}, version=support.executable_version||sys.ffmpeg_version||"Not found";
+  const required=support.required_package, expected=support.expected_version;
+  const verified=support.package_verified===true;
+  const identity=verified?"✓ Required build verified":support.package_verification==="unsupported_platform"?"Package identity not verified on this platform":"Package identity not verified";
+  const kv=(label,value)=>value?`<span>${esc(label)}</span><code>${esc(value)}</code>`:"";
+  return `<section class="card system-card" id="system-versions"><h2>Versions</h2>
+    <div class="system-version"><div class="system-versionline"><strong>Cinema</strong><span>${esc(sys.version||"Unknown")}</span><span class="system-state muted">Running</span></div>
+      <details class="system-package"><summary>Build &amp; location</summary><div class="system-detail system-kv">${kv("Build",sys.build&&sys.build!=="unknown"?sys.build:`Unstamped · ${sourceDateLabel(sys.built_at)}`)}${kv("Executable",sys.application_executable)}${kv("Runtime directory",sys.runtime_location)}${kv("Data directory",sys.data_dir)}</div></details></div>
+    <div class="system-version"><div class="system-versionline"><strong>Jellyfin FFmpeg</strong><span>${esc(version)}</span><span class="system-state ${verified?'system-good':'muted'}">${esc(identity)}</span></div>
+      <details class="system-package"><summary>Required package &amp; location</summary><div class="system-detail"><div class="system-kv">${kv("Required package",required?`Jellyfin FFmpeg ${required}`:null)}${kv("Expected FFmpeg version",expected)}${kv("Required source revision",support.source_revision)}${kv("Executable",support.executable||sys.ffmpeg)}${support.expected_executable?kv("Expected executable",support.expected_executable):""}<span>Integrity checks</span><span>${verified?"Pinned source, Cinema patches and companion files verified":esc((support.package_problems||[]).join(" · ")||"Package identity has not been verified.")}</span></div><details class="system-probes"><summary>Build support &amp; execution checks</summary>${ffmpegSupportCard(sys)}</details></div></details></div>
+    </section>`;
+}
+function systemGraphicsHtml(sys){
+  const devices=sys.graphics_devices||[];
+  if(!devices.length)return "";
+  const vendors=Array.from(new Set(devices.map(device=>device.vendor).filter(Boolean))).join(" + ");
+  const rows=devices.map(device=>`<span>${esc(device.vendor||"Graphics device")}</span><span>${esc(device.model||device.device_id||device.id)}${device.render_node?` · <code>${esc(device.render_node)}</code>`:""}</span>`).join("");
+  const bindings=(sys.encoder_device_bindings||[]).map(binding=>`<p>${esc(binding.detail||binding.backend)}</p>`).join("");
+  return `<details class="system-capability"><summary><span>Graphics devices</span><span class="system-state muted">${esc(vendors||`${devices.length} detected`)}</span></summary><div class="system-detail"><div class="system-kv">${rows}</div>${bindings}</div></details>`;
+}
 function transcoderCard(sys){
   if(!sys.node_id)return "";
   const enc=sys.encoders||{}, active=sys.hwaccel_pref||"auto", requested=sys.hwaccel_requested||active;
-  const optimization=sys.transcoder_optimization||{}, report=optimization.report;
-  const results=report&&Array.isArray(report.results)?report.results:[];
-  const measured=results.filter(row=>Number.isFinite(row.fps)&&row.fps>0&&Number.isFinite(row.relative_to_cpu)&&row.relative_to_cpu>0);
-  const names={software:"CPU",nvenc:"NVIDIA NVENC",qsv:"Intel Quick Sync",vaapi:"VA-API",videotoolbox:"Apple VideoToolbox"};
-  const fastest=measured.slice().sort((a,b)=>b.fps-a.fps)[0];
-  const score=row=>`${row.fps.toFixed(0)} fps · ${row.relative_to_cpu.toFixed(2)}× CPU`;
-  const choices=[["auto",fastest?`Auto — ${names[fastest.backend]||fastest.backend} · ${score(fastest)}`:"Auto — benchmark on startup"]];
-  for(const [value,label] of Object.entries(names)){
-    const row=measured.find(row=>row.backend===value);
-    if(report?!row:value!=="software"&&!enc[value])continue;
-    choices.push([value,`${label} — ${row?score(row):"not measured"}`]);
-  }
+  const names={nvenc:"NVIDIA · NVENC",qsv:"Intel · Quick Sync",vaapi:"VA-API",videotoolbox:"Apple VideoToolbox",software:"CPU (software)"};
+  const choices=[["auto",sys.encoder_selected?`Auto (${sys.encoder_selected})`:"Auto"]];
+  for(const [value,label] of Object.entries(names))if(value==="software"||enc[value])choices.push([value,label]);
   const available=choices.some(([value])=>value===requested);
-  const pending=sys.hwaccel_restart_required||requested!==active||optimization.restart_required;
-  return `<div class="card" id="transcoder-card"><h2 class="section" style="margin-top:0">Transcoding backend</h2>
-    <p class="muted">Benchmarked automatically at startup. Auto uses the fastest supported backend in the SDR encoding test; an explicit choice stays selected. CPU can win this short test even when hardware acceleration works. Hardware support is checked separately in the matrix above.</p>
-    <label for="node-hwaccel">Preferred backend</label>
-    <select id="node-hwaccel" data-node-id="${esc(sys.node_id)}">${choices.map(([value,label])=>`<option value="${value}"${value===(available?requested:"auto")?" selected":""}>${esc(label)}</option>`).join("")}</select>
-    ${available?"":`<p class="muted">The saved backend is unavailable. Choose and save an available option.</p>`}
-    <p>Active: <b>${esc(sys.encoder_selected||active)}</b> · HDR: ${toneMapHtml(sys.tone_map, sys.macos_video_processing)}</p>
-    <p class="muted" id="node-hwaccel-status">${pending?"Saved choice or new benchmark is waiting for this node to restart.":"Changes apply after restarting this node, when its HDR capabilities are tested again."}</p>
-    <p class="muted">720p H.264 encoding, 4 Mb/s, 240 frames; median of three runs after warm-up. CPU is 1.00×. Results include encoder startup and frame upload; HDR and source decoding can change real playback speeds.${report?` Last measured: ${esc(new Date(report.measured_at*1000).toLocaleString())}.`:""}</p>
-    <p class="muted" role="status" aria-live="polite">${optimization.running?"Checking capabilities and benchmarking… Playback will stop the benchmark.":optimization.error?esc(optimization.error):"Optimize reruns support checks, benchmarks each backend and checks HDR pipelines. Run while the node is idle."}</p>
-    <button onclick="saveNodeHwaccel(this)">Save</button>
-    <button class="ghost" onclick="optimizeNodeTranscoder(this)"${optimization.running?" disabled":""}>${optimization.running?"Optimizing…":"Optimize"}</button></div>`;
+  const pending=sys.hwaccel_restart_required||requested!==active||sys.transcoder_optimization?.restart_required;
+  const labels={hardware_decoding:"Hardware decoding",hardware_encoding:"Hardware encoding",tone_mapping:"HDR → SDR tone mapping",hardware_scaling:"Hardware scaling",subtitle_burn_in:"Subtitle burn-in",deinterlacing:"Deinterlacing"};
+  const facts=sys.transcoding_facts||[];
+  const rows=Object.entries(labels).map(([id,label])=>{
+    const fact=facts.find(row=>row.id===id)||{id,label,enabled:false,detail:"Capability information has not been reported by this server."};
+    const extra=id==="tone_mapping"?systemToneMapDetails(sys.tone_map):"";
+    return systemCapabilityHtml(fact,extra);
+  }).join("");
+  return `<section class="card system-card" id="transcoder-card"><h2>Transcoding</h2>
+    <div class="system-preference"><label for="node-hwaccel">Encoding preference<select id="node-hwaccel" data-node-id="${esc(sys.node_id)}" onchange="nodeHwaccelChanged()">${choices.map(([value,label])=>`<option value="${value}"${value===(available?requested:"auto")?" selected":""}>${esc(label)}</option>`).join("")}</select></label><button onclick="saveNodeHwaccel(this)">Save</button></div>
+    <p class="system-pref-status muted" id="node-hwaccel-status" aria-live="polite">${!available?"The saved backend is unavailable. Choose and save an available option. ":""}${pending?"Saved choice is waiting for this node to restart.":"Changes take effect after restarting Cinema."}</p>
+    ${systemGraphicsHtml(sys)}${rows}</section>`;
+}
+function systemToneMapDetails(tm){
+  if(!tm)return "";
+  const verdicts=(tm.verdicts||[]).filter(row=>row.pipeline!=="cpu");
+  const probes=verdicts.length?`<details class="system-probes"><summary>Processing checks</summary><div class="system-detail">${verdicts.map(row=>`<p>${esc(row.label||row.pipeline)} · ${row.passed?"Passed":row.unavailable?"Unavailable":"Not passed"}${row.rejected?` · ${esc(row.rejected)}`:""}</p>`).join("")}</div></details>`:"";
+  return `${probes}${tm.census?`<details class="system-probes"><summary>Picture comparison census</summary>${censusMount(tm.census)}</details>`:""}`;
+}
+function systemAdditionalSupportCard(sys){
+  const facts=sys.additional_media_support||[];
+  const labels={ac4:"AC-4 audio",dolby_vision:"Dolby Vision",vulkan:"Vulkan / libplacebo",opencl:"OpenCL tone mapping"};
+  const rows=Object.entries(labels).map(([id,label])=>{
+    const fact=facts.find(row=>row.id===id)||{support_available:false,detail:"Support information has not been reported by this server."};
+    return `<details class="system-capability"><summary><span>${esc(fact.label||label)}</span><span class="system-state ${fact.support_available?'system-good':'muted'}">${fact.support_available?"Available":"Unavailable"}</span></summary><div class="system-detail">${String(fact.detail||"").split("\n").map(esc).join("<br>")}</div></details>`;
+  }).join("");
+  return `<section class="card system-card"><h2>Additional media support</h2>${rows}</section>`;
+}
+function systemPerformanceCard(sys){
+  const optimization=sys.transcoder_optimization||{}, comparison=optimization.comparison||optimization.report?.comparison;
+  const defaults=[{id:"1080p-h264-sdr",label:"1080p H.264 SDR → 720p SDR"},{id:"4k-hevc-sdr",label:"4K HEVC SDR → 1080p SDR"},{id:"4k-hevc-hdr10",label:"4K HEVC HDR10 → 1080p SDR"}];
+  const cases=comparison?.cases?.length?comparison.cases:defaults;
+  const results=comparison?.results||[];
+  const names={software:"CPU",nvenc:"NVIDIA NVENC",qsv:"Intel Quick Sync",vaapi:"VA-API",videotoolbox:"VideoToolbox"};
+  const backends=["software",...Object.keys(names).filter(backend=>backend!=="software"&&(sys.encoders?.[backend]||results.some(row=>row.backend===backend)))];
+  const complete=row=>row&&row.completion==="complete"&&!row.fallback&&Number.isFinite(row.median_seconds)&&row.median_seconds>0;
+  const value=(item,backend)=>{
+    if(comparison?.status==="stale")return '<span class="muted">Out of date</span>';
+    const rows=results.filter(row=>row.case_id===item.id&&row.backend===backend);
+    const row=rows.length===1?rows[0]:null;
+    if(complete(row))return `${row.median_seconds.toFixed(2)}`;
+    return row?`<span class="muted">${esc(row.fallback?"Fallback":row.completion||"Not measured")}</span>`:rows.length?'<span class="muted">See test details</span>':"—";
+  };
+  const path=row=>{
+    const decoders={software:"CPU",videotoolbox:"VideoToolbox",cuda:"NVDEC",qsv:"Quick Sync",vaapi:"VA-API"};
+    const processing={cpu:"CPU processing",vt_scale_sdr:"VideoToolbox scaling",vt_scale_hdr10:"VideoToolbox scaling",vt_tonemap_metal:"Metal tone mapping",tonemap_cuda:"CUDA tone mapping",vpp_qsv:"Quick Sync processing",tonemap_vaapi:"VA-API tone mapping",libplacebo:"Vulkan / libplacebo",libplacebo_software:"Vulkan / CPU frame transfer",libplacebo_vaapi:"Vulkan / VA-API",tonemap_opencl:"OpenCL tone mapping"};
+    return [row.decoder?`${decoders[row.decoder]||row.decoder} decode`:"",row.pipeline?processing[row.pipeline]||row.pipeline:""].filter(Boolean).map(esc).join(" · ");
+  };
+  const details=results.map(row=>`<p><strong>${esc(cases.find(item=>item.id===row.case_id)?.label||row.case_id)} · ${esc(names[row.backend]||row.backend)}</strong><br>${path(row)}${row.decoder||row.pipeline?"<br>":""}${complete(row)?`${row.median_seconds.toFixed(2)} s${Number.isFinite(row.realtime_ratio)?` · ${row.realtime_ratio.toFixed(2)}× realtime`:""}${Number.isFinite(row.relative_to_cpu)?` · ${row.relative_to_cpu.toFixed(2)}× CPU baseline`:""}${Number.isFinite(row.cpu_percent)?` · FFmpeg process CPU ${row.cpu_percent.toFixed(0)}%`:""}`:esc(row.error||row.completion||"Not measured")}${row.device_id?` · ${esc(row.device_id)}`:""}${Number.isFinite(row.median_pipeline_seconds)?`<br>FFmpeg interval ${row.median_pipeline_seconds.toFixed(2)} s`:""}${Number.isFinite(row.median_startup_seconds)?` · Process overhead estimate ${row.median_startup_seconds.toFixed(2)} s`:""}</p>${row.command?.length?`<details class="system-probes"><summary>Command</summary><pre>${esc(row.command.map(arg=>JSON.stringify(arg)).join(" "))}</pre></details>`:""}`).join("");
+  const definition=cases[0]||{}, frames=definition.frame_count||240, fps=(definition.fps_num||24)/(definition.fps_den||1), seconds=frames/fps;
+  const codec=String(definition.output_codec||"h264").toUpperCase().replace("H264","H.264"), bitrate=(definition.bitrate_kbps||4000)/1000;
+  const source=comparison?.fixture_source;
+  const link=(url,label)=>typeof url==="string"&&/^https:\/\//.test(url)?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`:esc(label);
+  const attribution=source?`<span>Source</span><span>${link(source.source_url,source.title)} · ${esc(source.attribution)} · ${link(source.license_url,source.license)} · Adapted excerpt</span>`:"";
+
+  const status=optimization.running?"Comparison running · playback stops the test.":optimization.error||comparison?.error||"";
+  return `<section class="card system-card system-performance" id="system-performance"><div class="system-heading"><h2>Playback performance</h2><span class="muted system-small">${optimization.running?"Running…":comparison?.status==="complete"?"Real-media tests complete":comparison?"Comparison incomplete":"Real-media tests not run"}</span></div>
+    <div class="system-comparison-scroll"><table aria-label="Representative media comparison"><thead><tr><th>Source → output</th>${backends.map(backend=>`<th>${esc(names[backend])} (s)</th>`).join("")}</tr></thead><tbody>${cases.map(item=>`<tr><td>${esc(item.label)}</td>${backends.map(backend=>`<td>${value(item,backend)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
+    <details class="system-probes"><summary>Test details</summary><div class="system-detail"><div class="system-kv"><span>Workload</span><span>${frames} frames @ ${Number.isInteger(fps)?fps:fps.toFixed(2)} fps (${Number.isInteger(seconds)?seconds:seconds.toFixed(2)} seconds)</span><span>Output</span><span>${esc(codec)} · ${bitrate} Mb/s</span><span>Pipeline</span><span>Decode → process → encode</span><span>Timing</span><span>Warm-up + median of 3 runs</span><span>Comparison</span><span>Elapsed time, FFmpeg process CPU and software fallback</span>${attribution}</div>${details}<p>FFmpeg process CPU: 100% = one CPU core; excludes GPU driver and operating-system services.</p></div></details>
+    <div class="system-runline"><span class="system-small muted">Compare the same work on CPU and hardware pipelines.</span><button onclick="optimizeNodeTranscoder(this)"${optimization.running?" disabled":""}>${optimization.running?"Running comparison…":"Run comparison"}</button></div><p class="system-small ${optimization.error?'system-warn':'muted'}" id="system-comparison-status" role="status" aria-live="polite"${status?"":" hidden"}>${esc(status)}</p></section>`;
+}
+function nodeHwaccelChanged(){
+  const status=document.getElementById("node-hwaccel-status");
+  if(status)status.textContent="Unsaved preference · applies after restarting Cinema.";
+}
+function replaceSystemCard(id,html){
+  const card=document.getElementById(id);
+  if(!card)return;
+  const open=Array.from(card.querySelectorAll("details")).map((node,index)=>node.open?index:-1).filter(index=>index>=0);
+  card.outerHTML=html;
+  const next=document.getElementById(id);
+  if(next)Array.from(next.querySelectorAll("details")).forEach((node,index)=>{node.open=open.includes(index);});
 }
 async function optimizeNodeTranscoder(button){
   const field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")), node_id=field.dataset.nodeId;
@@ -375,11 +454,9 @@ async function optimizeNodeTranscoder(button){
     await api("/system/transcoder",{method:"POST",body:{node_id}});
     if(SETTINGS_DATA.sys&&SETTINGS_DATA.sys.node_id===node_id){
       SETTINGS_DATA.sys.transcoder_optimization={...(SETTINGS_DATA.sys.transcoder_optimization||{}),running:true,error:null};
-      const card=document.getElementById("transcoder-card");
-      if(card){const draft=field.value;card.outerHTML=transcoderCard(SETTINGS_DATA.sys);/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel")).value=draft;}
+      replaceSystemCard("system-performance",systemPerformanceCard(SETTINGS_DATA.sys));
     }
-
-  }catch(error){toast(error.message||"Could not start optimization");button.disabled=false;}
+  }catch(error){toast(error.message||"Could not start comparison");button.disabled=false;}
 }
 async function pollTranscoderOptimization(node_id,generation){
   if(!settingsCurrent(generation,"system"))return;
@@ -387,14 +464,17 @@ async function pollTranscoderOptimization(node_id,generation){
     const sys=await api("/system");
     if(!settingsCurrent(generation,"system")||!SETTINGS_DATA.sys||SETTINGS_DATA.sys.node_id!==node_id||sys.node_id!==node_id)return;
     SETTINGS_DATA.sys=sys;
-    const card=document.getElementById("transcoder-card"), field=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel"));
-    if(card&&field&&field.dataset.nodeId===node_id){
-      const draft=field.value;
-      card.outerHTML=transcoderCard(sys);
-      const next=/** @type {HTMLSelectElement} */(document.getElementById("node-hwaccel"));
-      if(Array.from(next.options).some(option=>option.value===draft))next.value=draft;
+    const field=/** @type {HTMLSelectElement|null} */(document.getElementById("node-hwaccel"));
+    const draft=field?.value, focused=field&&document.activeElement===field;
+    replaceSystemCard("system-versions",systemVersionsCard(sys));
+    replaceSystemCard("transcoder-card",transcoderCard(sys));
+    const next=/** @type {HTMLSelectElement|null} */(document.getElementById("node-hwaccel"));
+    if(next&&draft&&Array.from(next.options).some(option=>option.value===draft)){
+      next.value=draft;
+      if(draft!==(sys.hwaccel_requested||sys.hwaccel_pref||"auto"))nodeHwaccelChanged();
+      if(focused)next.focus();
     }
-
+    replaceSystemCard("system-performance",systemPerformanceCard(sys));
   }catch(error){
     if(error&&error.status===401)throw error;
     // The Settings timer retries transient reads; retain the running state.
@@ -406,34 +486,25 @@ async function saveNodeHwaccel(button){
   try{
     const result=await api("/system/transcoder",{method:"PUT",body:{node_id,preference}});
     if(SETTINGS_DATA.sys&&SETTINGS_DATA.sys.node_id===node_id){SETTINGS_DATA.sys.hwaccel_requested=preference;SETTINGS_DATA.sys.hwaccel_restart_required=result.restart_required;}
-    document.getElementById("node-hwaccel-status").textContent=result.restart_required?"Saved. Restart this node to apply the backend and test its HDR capabilities.":"Saved. This backend preference is already active.";
+    const status=document.getElementById("node-hwaccel-status");
+    if(status)status.textContent=result.restart_required?"Saved. Restart this node to apply the encoding preference.":"Saved. This encoding preference is already in effect.";
     toast("Transcoding preference saved");
-  }catch(error){toast(error.message||"Could not save transcoding preference");}
+  }catch(error){toast(error.message||"Could not save encoding preference");}
   finally{button.disabled=false;}
 }
-function systemPanel(sys,playbackEvents){
-  const enc=sys.encoders||{};
-  const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
-    .filter(([,ok])=>ok).map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
-  return `${setHead("System",`${esc(sys.display_name||sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}${ffmpegSupportWarning(sys)}${systemAttentionHtml(sys)}${ffmpegSupportCard(sys)}${transcoderCard(sys)}<div class="card"><h2 class="section" style="margin-top:0">This node</h2>
-      <dl class="kvgrid system-grid">
-        ${sys.hostname?`<dt>Host</dt><dd>${esc(sys.hostname)}</dd>`:""}
-        <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
-        <dt>ffmpeg</dt><dd>${sys.ffmpeg_version?esc(sys.ffmpeg_version):`<span style="color:var(--bad)">not found at \`${esc(sys.ffmpeg)}\` — scanning and transcoding will fail</span>`}</dd>
-        <dt>Transcoder</dt><dd>${esc(sys.encoder_selected)} <span class="muted">(preference: ${esc(sys.hwaccel_pref)})</span></dd>
-        <dt>HDR tone-map</dt><dd>${toneMapHtml(sys.tone_map, sys.macos_video_processing)}</dd>
-        <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
-        <dt>On this node</dt><dd><div class="system-now">
-          <div class="system-now-counts">${sys.active_transcodes} managed transcode/remux session${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>
-        </div></dd>
-        <dt>Waiting fetches</dt><dd>${blockedGetsHtml(sys.blocked_gets)}</dd>
-      </dl></div>
-    <div id="settings-playback-events">${SETTINGS_LOADED.has("playbackEvents")?playbackSummaryCard(playbackEvents):`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Loading playback history…</span></div>`}</div>
-    <div class="card"><h2 class="section" style="margin-top:0">Logs</h2>
-      <div class="row"><select id="loglvl" style="max-width:120px" onchange="refreshLogs()">
-          <option value="info" selected>Info+</option><option value="warn">Warnings+</option>
-          <option value="error">Errors</option><option value="debug">Debug+</option></select>
-        <label class="row" style="margin:0;font-size:13px;color:var(--muted)"><input type="checkbox" id="logauto" checked style="width:auto"> auto-refresh</label>
-        <button class="ghost sm" onclick="refreshLogs()">Refresh</button></div>
-      <div class="logbox" id="logbox">Loading…</div></div>`;
+function systemStorageCard(sys){
+  const storage=sys.storage||{}, mounts=storage.mounts||[];
+  const missing=mounts.filter(mount=>mount.read_bps==null).length, suspect=mounts.some(mount=>mount.cache_suspect);
+  const summary=missing?`${missing} location${missing===1?"":"s"} not measured`:suspect?"Read measurement needs attention":"Details";
+  return `<section class="card system-card system-compact" id="system-storage-card"><details id="system-storage"><summary><span>Storage</span><span class="system-small ${missing||suspect?'system-warn':'muted'}">${esc(summary)}</span></summary><div class="system-detail">${storageHtml(storage)}</div></details></section>`;
+}
+function systemLogsCard(){
+  return `<section class="card system-card system-compact"><details id="system-logs" ontoggle="systemLogsToggled(this)"><summary><span>Logs</span><span class="system-small muted">Diagnostics</span></summary><div class="system-detail"><div class="row"><select id="loglvl" aria-label="Log severity" style="max-width:120px" onchange="refreshLogs()"><option value="info" selected>Info+</option><option value="warn">Warnings+</option><option value="error">Errors</option><option value="debug">Debug+</option></select><label class="row" style="margin:0;font-size:13px;color:var(--muted)"><input type="checkbox" id="logauto" checked style="width:auto"> auto-refresh</label><button class="ghost sm" onclick="refreshLogs()">Refresh</button></div><div class="logbox" id="logbox">Expand to load logs.</div></div></details></section>`;
+}
+function systemLogsToggled(details){
+  if(details.open)refreshLogs();
+}
+function systemPanel(sys){
+  const platform=sys.platform==="macos"?"macOS":sys.platform==="linux"?"Linux":sys.platform||"";
+  return `<div class="system-settings"><div class="system-title"><h1>System</h1><span class="muted system-small">${esc(platform)}</span></div>${ffmpegSupportWarning(sys)}${systemAttentionHtml(sys)}${systemVersionsCard(sys)}${transcoderCard(sys)}${systemAdditionalSupportCard(sys)}${systemPerformanceCard(sys)}${systemStorageCard(sys)}${systemLogsCard()}</div>`;
 }

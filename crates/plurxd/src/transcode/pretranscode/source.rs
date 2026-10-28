@@ -642,7 +642,18 @@ pub struct PretranscodeFence {
 
 pub(crate) struct FragmentAdmission {
     pub(super) threads: usize,
+    /// A second bundle the same background job admitted for a heavier step
+    /// (the FEL qualification's GPU graph inside a title scan). It is the
+    /// job's own capacity, so the idle check counts it as the job's.
+    pub(super) extension: std::sync::Mutex<Option<FragmentExtension>>,
+    // Release resources before handing the shared gate to the next waiter.
+    pub(super) _permit: crate::admission::TranscodePermit,
     pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
+}
+
+pub(crate) struct FragmentExtension {
+    pub(super) hardware: usize,
+    pub(super) threads: usize,
     pub(super) _permit: crate::admission::TranscodePermit,
 }
 
@@ -651,13 +662,64 @@ impl FragmentAdmission {
     pub(crate) fn probe_parallelism(&self) -> usize {
         self.threads.clamp(1, 2)
     }
+
+    /// The hardware slots and CPU threads this job holds, its extension
+    /// included.
+    pub(crate) fn claimed(&self) -> (usize, usize) {
+        let extension = self
+            .extension
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        extension.as_ref().map_or((0, self.threads), |extension| {
+            (extension.hardware, self.threads + extension.threads)
+        })
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn has_extension(&self) -> bool {
+        self.extension
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn install_extension(&self, permit: crate::admission::TranscodePermit) -> bool {
+        let resources = permit.retained_resources();
+        let extension = FragmentExtension {
+            hardware: usize::from(resources.hardware.is_some()),
+            threads: resources
+                .software
+                .map_or(0, crate::admission::SwPermit::threads),
+            _permit: permit,
+        };
+        let mut slot = self
+            .extension
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(extension);
+        true
+    }
+
+    /// Release the extension's capacity (the job's heavier step is over).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn release_extension(&self) {
+        self.extension
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
 }
 
 pub(crate) struct PretranscodeAdmission {
     pub(super) encoder: Encoder,
-    pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
     pub(super) threads: usize,
+    // A queued worker must see the released resources when it gets the gate.
     pub(super) _permit: crate::admission::TranscodePermit,
+    pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl PretranscodeFence {

@@ -1,4 +1,14 @@
 //! Admitted leaf workers never mutate catalogue identity or scan completion.
+#[cfg(target_os = "linux")]
+mod dv_title;
+#[cfg(target_os = "linux")]
+pub(crate) mod fel_qualification;
+#[cfg(target_os = "linux")]
+mod title_work;
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use dv_title::{publish_title_for_control, publish_title_with_tools_for_control};
+
 use crate::state::AppState;
 use plurx_core::store::background_jobs_probe::{ProbeOutput, MAX_PROBE_RESULT_BYTES};
 use plurx_core::{
@@ -37,17 +47,74 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
     let mut idle = crate::background_jobs::IdlePoll::new();
+    #[cfg(target_os = "linux")]
+    let mut title: Option<title_work::TitleTask> = None;
+    #[cfg(target_os = "linux")]
+    let mut title_after = 0;
     loop {
         if shutdown.is_cancelled() {
+            #[cfg(target_os = "linux")]
+            if let Some(work) = title.take() {
+                work.stop().await;
+            }
             return;
         }
-        let published = match pass(&state, &boot, &mut cursor, &shutdown).await {
-            Ok(published) => published,
-            Err(error) => {
-                tracing::warn!(%error, "leaf probe pass failed");
-                false
+        #[cfg(target_os = "linux")]
+        let mut yielded = false;
+        #[cfg(target_os = "linux")]
+        if let Some(work) = title.as_mut() {
+            match work.should_yield(&state).await {
+                Ok(true) => {
+                    if let Some(work) = title.take() {
+                        work.stop().await;
+                    }
+                    // Revisit ordinary priority order after the child is reaped.
+                    cursor = None;
+                    yielded = true;
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error,"title priority observation unavailable"),
             }
+        }
+        #[cfg(target_os = "linux")]
+        let ordinary_idle = title.is_none();
+        #[cfg(not(target_os = "linux"))]
+        let ordinary_idle = true;
+        let published = if ordinary_idle {
+            let published = match pass(&state, &boot, &mut cursor, &shutdown).await {
+                Ok(published) => published,
+                Err(error) => {
+                    tracing::warn!(%error, "leaf probe pass failed");
+                    false
+                }
+            };
+            published
+        } else {
+            false
         };
+        #[cfg(target_os = "linux")]
+        if title.is_none() && cursor.is_none() && !yielded && !published && !shutdown.is_cancelled()
+        {
+            match title_work::TitleTask::start(&state, &boot, &mut title_after).await {
+                Ok(work) => title = work,
+                Err(error) => tracing::warn!(%error,"title demand unavailable"),
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let title_poll = async {
+                match title.as_mut() {
+                    Some(work) => work.work.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                () = shutdown.cancelled() => {},
+                _ = title_poll => { title = None; },
+                () = tokio::time::sleep(idle.after_completion(published)) => {},
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
         tokio::select! {
             () = shutdown.cancelled() => return,
             () = tokio::time::sleep(idle.after_completion(published)) => {}
@@ -304,18 +371,16 @@ async fn execute(
 
 /// Cancellation is observed while awaiting the child, never by dropping its
 /// collector. bounded::cancellable returns only after the process is reaped.
-async fn run_admitted_probe<F>(
+async fn run_admitted_probe<F, T, E>(
     transcode: &crate::transcode::TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
     cancel: &CancellationToken,
     shutdown: &CancellationToken,
     progress: Option<&crate::state::AnalysisProgressGuard>,
     work: F,
-) -> Result<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError>
+) -> Result<T, E>
 where
-    F: std::future::Future<
-        Output = Result<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError>,
-    >,
+    F: std::future::Future<Output = Result<T, E>>,
 {
     if shutdown.is_cancelled() || !transcode.fragment_worker_idle(admission) {
         cancel.cancel();
@@ -556,7 +621,9 @@ mod tests {
                     )
                     .await
                     .map_err(|error| plurx_core::error::ProbeError::Spawn(error.to_string()))?;
-                    Ok(Default::default())
+                    Ok::<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError>(
+                        Default::default(),
+                    )
                 };
                 run_admitted_probe(
                     &manager,

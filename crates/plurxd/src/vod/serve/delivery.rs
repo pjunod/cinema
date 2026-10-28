@@ -120,6 +120,8 @@ impl VodServe {
                     let rendition = Arc::clone(session.live_rendition()?);
                     let snapshot = session.last_control_snapshot.as_ref();
                     let observation = VodActivityObservation {
+                        display_target: display_target_activity(&rendition),
+                        processing: processing_activity(&rendition),
                         control_demand: snapshot.map(|s| {
                             match s.demand {
                                 crate::playback_control::PlaybackDemand::Active => "active",
@@ -1895,6 +1897,159 @@ fn playlist_with_start_tag(playlist: &[u8], start_ms: i64) -> Vec<u8> {
     output
 }
 
+/// The processing a rendition's graph is doing, named for Activity. Read from
+/// the frozen runtime and the selected plan, never from the request.
+fn processing_activity(rendition: &Rendition) -> Option<crate::vodserve::ProcessingActivity> {
+    #[cfg(target_os = "linux")]
+    {
+        use plurx_core::transcode::dv_processing::{DvProcessingMode, DvSelection};
+        let encoding = rendition.recipe.encoding.as_ref()?;
+        let runtime = encoding.dv_runtime.as_ref()?;
+        let DvSelection::Selected(plan) = &encoding.dv_processing else {
+            return None;
+        };
+        Some(processing_activity_text(
+            plan.destination(),
+            runtime.mode == DvProcessingMode::Fel && plan.reconstructs_fel(),
+            runtime.decode == crate::dv_segment::RendererDecode::Gpu,
+            &encoding.delivered_output_encoder(),
+            rendition.ephemeral_processing,
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = rendition;
+        None
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn processing_activity_text(
+    destination: plurx_core::transcode::dv_processing::DvDestination,
+    fel_composed: bool,
+    gpu_decode: bool,
+    encoder: &str,
+    live_rendering: bool,
+) -> crate::vodserve::ProcessingActivity {
+    use plurx_core::transcode::dv_processing::DvDestination;
+    let decode = if gpu_decode {
+        "VA-API decode"
+    } else {
+        "software decode"
+    };
+    let picture = if fel_composed {
+        "base and full enhancement layers composed on the GPU"
+    } else {
+        "base layer reshaped by the RPU on the GPU"
+    };
+    let (delivered, reason) = match destination {
+        DvDestination::Profile81 => (
+            "Reconstructed Dolby Vision Profile 8.1",
+            "Dolby Vision client playing a Profile 7 FEL title; FEL re-encode is on in \
+             Settings → Developer",
+        ),
+        DvDestination::Hdr10 => (
+            "Processed HDR10 (HDR10-E)",
+            "HDR client playing a Dolby Vision title; Dolby Vision processing is on in \
+             Settings → Developer",
+        ),
+        DvDestination::Sdr => (
+            "Processed SDR",
+            "SDR display playing a Dolby Vision title; display targeting is on in \
+             Settings → Developer",
+        ),
+    };
+    let tail = if destination == DvDestination::Profile81 {
+        ", a rewritten 8.1 RPU per frame"
+    } else {
+        ""
+    };
+    crate::vodserve::ProcessingActivity {
+        delivered: delivered.to_owned(),
+        work: format!("{decode}, {picture}, {encoder} Main10 encode{tail}"),
+        reason: reason.to_owned(),
+        fel_composed,
+        live_rendering,
+    }
+}
+
+fn display_target_activity(rendition: &Rendition) -> Option<DisplayTargetActivity> {
+    #[cfg(target_os = "linux")]
+    {
+        let runtime = rendition.recipe.encoding.as_ref()?.dv_runtime.as_ref()?;
+        if runtime.destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
+            return None;
+        }
+        if runtime.display_target_note.is_none() && runtime.display.is_none() {
+            return None;
+        }
+        let note = runtime.display_target_note.clone().unwrap_or_else(|| {
+            "Display targeting is off for this session; the master grade is sent.".into()
+        });
+        Some(DisplayTargetActivity {
+            reported_peak_nits: runtime
+                .display
+                .as_ref()
+                .and_then(|display| display.max_nits),
+            peak_source: runtime
+                .display
+                .as_ref()
+                .and_then(|display| display.peak_source),
+            bucket_nits: runtime.display_target.map(|target| target.nits()),
+            live_rendering: rendition.ephemeral_processing,
+            note,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = rendition;
+        None
+    }
+}
+
+impl VodServe {
+    /// Observation only. Processed roots never enter retained storage; active
+    /// readers and preparation reservations retain their existing ownership.
+    pub(crate) async fn display_target_usage(
+        &self,
+    ) -> (usize, std::collections::BTreeMap<u32, Option<u64>>) {
+        let renditions = {
+            let sessions = self.shared.sessions.lock().await;
+            let mut seen = std::collections::HashSet::new();
+            sessions
+                .values()
+                .filter_map(|session| session.live_rendition())
+                .filter(|rendition| seen.insert(rendition.key.clone()))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut reports = 0;
+        let mut buckets = std::collections::BTreeMap::new();
+        for rendition in renditions {
+            if let Some(activity) = display_target_activity(&rendition) {
+                if activity
+                    .reported_peak_nits
+                    .is_some_and(|nits| nits > 0 && nits < 5000)
+                {
+                    reports += 1;
+                }
+                if let Some(bucket) = activity.bucket_nits {
+                    let bytes = rendition
+                        .manifest
+                        .try_lock()
+                        .ok()
+                        .map(|manifest| manifest.materialized_bytes());
+                    let total = buckets.entry(bucket).or_insert(Some(0u64));
+                    *total = total
+                        .zip(bytes)
+                        .map(|(total, bytes)| total.saturating_add(bytes));
+                }
+            }
+        }
+        (reports, buckets)
+    }
+}
+
 #[cfg(test)]
 mod cached_recovery_tests {
     #[tokio::test]
@@ -1952,5 +2107,58 @@ mod cached_recovery_tests {
             .cached_prepared_reader_owner(id, incarnation, &output)
             .await
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod processing_activity_tests {
+    use plurx_core::transcode::dv_processing::DvDestination;
+
+    /// The Activity row of a live reconstruction names the delivered picture,
+    /// the GPU work (compose + encode) and the reason it was chosen.
+    #[test]
+    fn reconstructed_profile81_activity_names_the_gpu_work_and_the_reason() {
+        let row = super::processing_activity_text(
+            DvDestination::Profile81,
+            true,
+            true,
+            "hevc_vaapi",
+            true,
+        );
+        assert_eq!(row.delivered, "Reconstructed Dolby Vision Profile 8.1");
+        for part in [
+            "VA-API decode",
+            "base and full enhancement layers composed on the GPU",
+            "hevc_vaapi Main10 encode",
+            "rewritten 8.1 RPU",
+        ] {
+            assert!(row.work.contains(part), "{}", row.work);
+        }
+        assert!(row.reason.contains("Profile 7 FEL") && row.reason.contains("FEL re-encode is on"));
+        assert!(row.fel_composed && row.live_rendering && row.bounded());
+        let observation = crate::vodserve::VodActivityObservation {
+            processing: Some(row.clone()),
+            ..Default::default()
+        };
+        assert!(observation.bounded());
+        // Peers carry it; an old peer's snapshot without it still decodes.
+        let wire = serde_json::to_value(&observation).expect("observation wire");
+        assert_eq!(wire["processing"]["fel_composed"], true);
+        let old: crate::vodserve::VodActivityObservation =
+            serde_json::from_value(serde_json::json!({"control_demand":"active"}))
+                .expect("observation without processing");
+        assert!(old.processing.is_none());
+        let mut long = row;
+        long.reason = "x".repeat(crate::vodserve::ProcessingActivity::MAX_TEXT + 1);
+        assert!(!crate::vodserve::VodActivityObservation {
+            processing: Some(long),
+            ..Default::default()
+        }
+        .bounded());
+        // Base-layer HDR10-E is not described as an FEL composition.
+        let base =
+            super::processing_activity_text(DvDestination::Hdr10, false, false, "libx265", true);
+        assert!(!base.fel_composed && base.work.contains("software decode"));
+        assert!(base.work.contains("base layer reshaped"), "{}", base.work);
     }
 }

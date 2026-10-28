@@ -1617,6 +1617,10 @@ impl RetainedArtifactRegistry {
         mut reservation: AssemblyReservation,
         preparation: Option<Arc<super::copy_preparation::CopyPreparation>>,
     ) -> bool {
+        let _source_pin = match crate::playback_cache::pin(rendition.dir.path()) {
+            Ok(pin) => pin,
+            Err(_) => return false,
+        };
         let mut completion = PreparationAssemblyOutcome {
             preparation: preparation.clone(),
             completed: false,
@@ -1946,11 +1950,21 @@ impl RetainedArtifactRegistry {
             let seal = manifest
                 .seal()
                 .map_err(|error| trace_io("manifest_seal", error))?;
+            let bytes = serde_json::to_vec(&manifest)
+                .map_err(io::Error::other)?
+                .len() as u64;
+            let reservation = crate::playback_cache::reserve(&artifact.directory, bytes).await?;
             let lease = Arc::clone(artifact);
-            tokio::task::spawn_blocking(move || manifest.commit(&lease.directory))
-                .await
-                .map_err(|error| trace_io("manifest_task", io::Error::other(error)))?
-                .map_err(|error| trace_io("manifest_commit", error))?;
+            tokio::task::spawn_blocking(move || {
+                manifest.commit(&lease.directory)?;
+                if let Some(reservation) = reservation {
+                    reservation.commit(bytes);
+                }
+                Ok::<_, io::Error>(())
+            })
+            .await
+            .map_err(|error| trace_io("manifest_task", io::Error::other(error)))?
+            .map_err(|error| trace_io("manifest_commit", error))?;
             artifact
                 .sealed_identity
                 .set(seal)
@@ -2032,10 +2046,19 @@ async fn retained_hard_link(
     source: PathBuf,
     destination: PathBuf,
 ) -> io::Result<()> {
+    // Links add names, not a second copy of the payload. Both paths stay
+    // pinned through the blocking operation; inventory deduplicates inodes.
+    let source_pin = crate::playback_cache::pin(&source)?;
+    let reservation = crate::playback_cache::reserve(&destination, 0).await?;
     let lease = Arc::clone(artifact);
     tokio::task::spawn_blocking(move || {
         let _lease = lease;
-        std::fs::hard_link(source, destination)
+        let _source_pin = source_pin;
+        std::fs::hard_link(source, destination)?;
+        if let Some(reservation) = reservation {
+            reservation.commit(0);
+        }
+        Ok(())
     })
     .await
     .map_err(io::Error::other)?
@@ -2049,6 +2072,9 @@ pub(super) const RETAINED_GC_TICK_BUDGET: Duration = Duration::from_millis(250);
 /// [`remove_artifact_batch`] repeated until the directory is gone or the
 /// deadline passes. `Ok(true)` only when the directory no longer exists.
 pub(super) async fn remove_artifact_within(path: &Path, deadline: Instant) -> io::Result<bool> {
+    if crate::playback_cache::is_pinned(path) {
+        return Ok(false);
+    }
     loop {
         if remove_artifact_batch(path).await? {
             return Ok(true);
@@ -2090,6 +2116,101 @@ async fn remove_artifact_batch(path: &Path) -> io::Result<bool> {
         tokio::fs::remove_file(entry.path()).await?;
     }
     Ok(false)
+}
+
+impl RetainedArtifactRegistry {
+    pub(super) async fn pressure_candidates(
+        &self,
+        base: &Path,
+    ) -> Vec<crate::playback_cache::CacheCandidate> {
+        if self.own_namespace(base).await {
+            self.collect_orphans().await;
+        }
+        let state = self.state.lock().expect("retained registry lock");
+        let mut candidates = state
+            .entries
+            .values()
+            .filter(|entry| Arc::strong_count(&entry.artifact) == 1)
+            .map(|entry| crate::playback_cache::CacheCandidate {
+                path: entry.artifact.directory.clone(),
+                last_used: SystemTime::now()
+                    .checked_sub(entry.used.elapsed())
+                    .unwrap_or(UNIX_EPOCH),
+            })
+            .collect::<Vec<_>>();
+        candidates.extend(
+            state
+                .retired
+                .iter()
+                .filter(|artifact| Arc::strong_count(artifact) == 1)
+                .map(|artifact| crate::playback_cache::CacheCandidate {
+                    path: artifact.directory.clone(),
+                    last_used: UNIX_EPOCH,
+                }),
+        );
+        candidates.extend(
+            state
+                .rolling
+                .values()
+                .filter(|entry| Arc::strong_count(&entry.artifact) == 1)
+                .map(|entry| crate::playback_cache::CacheCandidate {
+                    path: entry.artifact.directory.clone(),
+                    last_used: UNIX_EPOCH,
+                }),
+        );
+        candidates.extend(
+            state
+                .rolling_retired
+                .iter()
+                .filter(|artifact| Arc::strong_count(artifact) == 1)
+                .map(|artifact| crate::playback_cache::CacheCandidate {
+                    path: artifact.directory.clone(),
+                    last_used: UNIX_EPOCH,
+                }),
+        );
+        candidates
+    }
+
+    pub(super) async fn pressure_evict(&self, path: &Path) -> io::Result<bool> {
+        let Ok(_collector) = self.collector.try_lock() else {
+            return Ok(false);
+        };
+        let artifact = {
+            let mut state = self.state.lock().expect("retained registry lock");
+            let identity = state.entries.iter().find_map(|(identity, entry)| {
+                (entry.artifact.directory == path && Arc::strong_count(&entry.artifact) == 1)
+                    .then_some(*identity)
+            });
+            if let Some(identity) = identity {
+                let entry = state
+                    .entries
+                    .remove(&identity)
+                    .expect("selected cache entry");
+                state.retired.push_back(entry.artifact);
+            }
+            state
+                .retired
+                .iter()
+                .find(|artifact| artifact.directory == path && Arc::strong_count(artifact) == 1)
+                .cloned()
+        };
+        let Some(artifact) = artifact else {
+            return self.pressure_evict_rolling(path).await;
+        };
+        if !remove_artifact_within(path, Instant::now() + RETAINED_GC_TICK_BUDGET).await? {
+            return Ok(false);
+        }
+        let mut state = self.state.lock().expect("retained registry lock");
+        if let Some(index) = state
+            .retired
+            .iter()
+            .position(|entry| Arc::ptr_eq(entry, &artifact))
+        {
+            state.retired.remove(index);
+            state.bytes = state.bytes.saturating_sub(artifact.charge);
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -2163,6 +2284,7 @@ mod tests {
                 aac: false,
                 preserve_dolby_vision: false,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             start_seconds: 0.0,
             audio_index: None,
@@ -2179,7 +2301,7 @@ mod tests {
             use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
             let digest = [42; 32];
             let candidate = QualityCandidate {
-                processed_hdr10: false,
+                processed_dv: false,
                 id: CandidateId::for_recipe_digest(digest),
                 recipe_digest: digest,
                 route: CandidateRoute::Encode,
@@ -2552,6 +2674,7 @@ mod tests {
                     aac: false,
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                 },
                 |request| request.kind,
             ),
@@ -2743,6 +2866,41 @@ mod tests {
                 "actual detach retires every frontier and waiter"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pressure_preserves_retained_reader_lease_then_releases_idle_names() {
+        let (_temp, serve, rendition, facts) = durable_fixture().await;
+        let artifact = serve
+            .shared
+            .retained_artifacts
+            .acquire_expected(&facts, &rendition)
+            .expect("artifact");
+        let path = artifact.directory.clone();
+        assert!(!serve
+            .shared
+            .retained_artifacts
+            .pressure_evict(&path)
+            .await
+            .expect("reader protected"));
+        assert!(path.join(INIT_NAME).exists());
+        drop(artifact);
+        assert!(serve
+            .shared
+            .retained_artifacts
+            .pressure_evict(&path)
+            .await
+            .expect("idle eviction"));
+        assert!(!path.exists());
+        assert!(
+            rendition.dir.path().join(INIT_NAME).exists(),
+            "the source hardlink remains owned by its rendition"
+        );
+        assert!(serve
+            .shared
+            .retained_artifacts
+            .acquire_expected(&facts, &rendition)
+            .is_none());
     }
 
     #[tokio::test]
@@ -3420,6 +3578,7 @@ mod tests {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         let owned = Arc::get_mut(&mut rendition).expect("unshared");
         owned.source = Some(source);
@@ -3455,7 +3614,7 @@ mod tests {
             .expect("init");
         serve.shared.retained_artifacts.collect(temp.path()).await;
         let candidate = QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: candidate_id,
             recipe_digest: digest,
             route: CandidateRoute::Remux,
@@ -3557,6 +3716,7 @@ mod tests {
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         assert!(serve
             .measured_candidate_cost(&candidate, &altered, source)

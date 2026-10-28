@@ -48,6 +48,16 @@ fn representation(kind: Kind) -> Option<Representation> {
         Kind::ChapterThumbnail { .. } => ("image/jpeg", MAX_IMAGE_BYTES, |bytes| {
             bytes.starts_with(b"\xff\xd8\xff")
         }),
+        Kind::Captions | Kind::CaptionManifest => (
+            "application/json",
+            crate::http::shared_captions::PAGE_BYTES,
+            |bytes| bytes.first() == Some(&b'{'),
+        ),
+        Kind::CaptionSegment => (
+            "application/json",
+            crate::http::shared_captions::SEGMENT_BYTES,
+            |bytes| bytes.first() == Some(&b'{'),
+        ),
         Kind::Decision | Kind::Start | Kind::Direct | Kind::Progressive => return None,
     };
     Some(Representation {

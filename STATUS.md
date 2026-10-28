@@ -1,9 +1,22 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-20 · Newest effort first; each entry links to its current ledger.
-
+**Updated:** 2026-10-28 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
-
+- **2026-10-28 · Dolby Vision title scan without decoding:** [how it runs](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md); [PR #1301](http://forge.lan:3000/noirr/plurx/pulls/1301). Owner Codex (resumed Claude session 01BCWL9z). `scan_title` parses RPUs without decoding pictures, and title demand is keyed by the scanner alone so renderer changes do not re-queue every title. During content analysis the scanner runs beside the index pass on a duplicate of the same held source; measured storage reads total one file copy. Adversarial review addressed; parity, mutation checks and final landing are tracked on the PR. Not deployed: Paul deploys plurxd, rebuilding the DV bundle; avoid mixed-version nodes during rollout.
+- **2026-10-27 · VOD index recovery:** Owner Claude (Linux Dolby Vision session); [#1299](http://forge.lan:3000/noirr/plurx/pulls/1299). Large remuxes never got a VOD index, so every play fell back to live HLS: the index read's time budget ignored file size and a timed-out build was never retried yet reported "pending" forever (77 files on lab5), the local pass quit whenever a DV title scan held the background lane, and in the cluster a learner never resolved requests aimed at it while viewer requests were refused at the 4096-row queue cap. Fixed with a size- and rate-based budget, due/waiting/terminal outcomes with a distinct `vod_index_unavailable` reason, a queued local pass, and learner/viewer/removed-node queue handling; adversarial review's 12 findings fixed. Known limit: copy/VOD viewers without an admission do not preempt an index read. Not deployed.
+- **2026-10-26 · Subtitle completion:** [live status](docs/features/SUBTITLE-COMPLETION-STATUS.md). Owner Codex /root; [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292) batches all caption operations and native delivery. Review and moving-runtime qualification pass; useful captions at 13.3/14.6s on two CPUs. Final gate and landing are tracked on the PR. Paul deploys.
+- **2026-10-26 · Linux player (Dolby Vision through plurx):** [plan and milestones](docs/clients/LINUX-PLAYER-PLAN.md). Owner Claude (Linux Dolby Vision session). M1–M5 (#1285, #1288, #1290, #1291) merged to `main` by [#1295](http://forge.lan:3000/noirr/plurx/pulls/1295); not deployed. Package 0.3.0 verified in a fresh container and rebuilds byte-identical; on the ROG (CI runners paused) both the RTX and the Arc iGPU play 4K CM v4.0, CM v2.9 and FEL clips without dropped frames. Paul's first real playback (Avatar, from the web app) found four faults, fixed in 0.3.1 ([#1297](http://forge.lan:3000/noirr/plurx/pulls/1297)): no display from the portal, the NVIDIA driver's colour surface closing the window, control capabilities missing (400/409), and copies narrowing Profile 7 to HDR10 for a client that names it (server). Deployed 2026-10-27; Avatar and Twilight now play in Dolby Vision from the web app. 0.3.2 ([#1298](http://forge.lan:3000/noirr/plurx/pulls/1298)) adds the Profile 7 enhancement layer over HLS (mpv's lavf demuxer path never split it), the whole film on the seek bar of a live session (mpv patch 0005), and a package build that survives snapshot.ubuntu.com outages. Next: M6 acceptance on the ROG.
+- **2026-10-26 · CM29 analytic gamut reconstruction:** [current rendering ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner Codex chat 01a17554. Standard IPT D65, the published colorfulness equation, analytic gamut interpolation and separate stock SDR/output blacks replace fitted gains; method v5 invalidates older targeted renditions. Selected-frame comparisons improve across all four titles, including Smile’s dark band. Adversarial review approved; native parity passed. [PR #1289](http://forge.lan:3000/noirr/plurx/pulls/1289) records final fast-lane qualification and landing. Private raw evidence is retained. No deployment: Paul deploys.
+- **2026-10-25 · Progressive subtitle setup repair:** [live status](docs/features/SUBTITLE-SETUP-REPAIR-STATUS.md). Owner Codex /root; [#1283](http://forge.lan:3000/noirr/plurx/pulls/1283) batches `codex/subtitle-setup-repair` to `main`. Install response and setup UX fixes are built locally; FIFO model-test admission is built locally. Adversarial review found no actionable issues; qualification and landing are tracked on the PR.
+- **2026-10-25 · Display-targeted DV creative trims (Phase E finish):** [build plan, phase 2](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). PR #1276 serves the CM v4 L8 and CM v2.9 L2 trims (L2 interpolated linearly in target PQ, measured on the reference), accepted by pixel comparison on eight real titles: CM v4 mean ΔE_ITP ≤ 0.011, CM v2.9 0.14–0.46 (untrimmed was 4.9–14). Playback reports `creative_trims_applied` per session; Apple 275, Android 181. Owner Claude; merged as 072d0f65 after two review rounds and one green fast lane. Not deployed: Paul deploys #1275 and #1276 together, then a GPT physical-display check.
+- **2026-10-25 · Display-targeted DV Phase E (closed-form Dolby display management):** [build plan, phase 2](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). PR #1275 replaces the Annex B.2 curve with our own CM v4 / CM v2.9 equations, checked privately against the licensed reference (CM v4 real P8 title mean ≤ 0.007 at 100 nits, ≤ 0.001 at 300–1600). Merged as 489e86e4 with served trims off; the trims PR #1276 turns them on. Paul deploys.
+- **2026-10-23 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner direct GPT/root; #1216 and batched#1269 merged into the effort, latest3cc264068; main unchanged. Compile-only gate5889 all8 PASS, Rust382/C384/trim393 compile passes; earlier behavior/media/client evidence retains source attribution. Final integrated adoption, completed-candidate review and qualification remain. Root delivery decision covers HDR/SDR with E explicitly unfinished and truthful L1-only reporting; no full A–F completion. Promotion-test policy awaits user reconciliation; physical acceptance and the excluded full-app FEL EOF lane remain separate.
+- **2026-10-22 · Rust admission refinement:** [live ledger](docs/cluster/RUST-ADMISSION-REFINEMENT-STATUS.md); production controller and exact-body harnesses built; Fable final review delivered, amendments implemented and five affected runtime schedules passed. Qualification and landing are tracked in the PR. Owner: Codex coordinator; [PR #1260](http://forge.lan:3000/noirr/plurx/pulls/1260).
+- **2026-10-21 · Playback cache disk safety:** [shared budget contract](docs/streaming/PLAYBACK-CACHE-BUDGET.md); aggregate accounting, owner eviction and write admission built. Astra review addressed; focused qualification in progress; deployment acceptance remains open. Owner: Codex.
+- **2026-10-21 · Worker refinement:** [live ledger](docs/cluster/WORKER-REFINEMENT-STATUS.md); seven Rust schedules pass; two complete workers, reviewed correspondence and observation projection built. Qualification and landing receipt: [PR #1251](http://forge.lan:3000/noirr/plurx/pulls/1251). Owner: Codex coordinator.
+- **2026-10-21 · Avatar Dolby Vision:** [live diagnosis and evidence](docs/clients/AVATAR-WEB-PLAYBACK-STATUS.md); Intel repair #1250 deployed and Apple TV confirmed. Follow-up corrects shared capability/timeline contracts; Astra approved, Rust regression and 38 web tests passed; injected Safari reports FEL/RPU/DYN and 3,010 frames / zero drops. [Automatic frame-drop capture](docs/clients/FRAME-DROP-RECORDER.md) is built; production acceptance, slow startup and original display-drop trigger remain open. Paul owns deployment.
+- **2026-10-21 · Operation progress:** [live ledger](docs/cluster/OPERATION-PROGRESS-STATUS.md); wait map/model/checker built and qualified; Fable approved; live promotion and landing are in PR #1249. Owner: Codex coordinator.
+- **2026-10-20 · System settings:** [approved layout and comparison ledger](docs/clients/SYSTEM-SETTINGS-STATUS.md); built and independently rendered; native macOS comparison passes, Linux hardware acceptance open.
 - **2026-10-20 · Safari resume:** [reviewed fix and 108 passing tests](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md); physical Safari/HEVC acceptance pending.
 
 ## Processed VOD successor root reuse
@@ -19,21 +32,13 @@ B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; sim
   deployment paths. Focused fixture validation is recorded in its PR; real
   desktop/engine acceptance and custom Pi ownership migration remain open.
 
-
 ## macOS source installation and the missing tray
 
 **Source correction built; PR review pending.** The first tray promotion packaged the companion for release archives but left `make install-macos` on the daemon-only path. Source installation now stages a complete native runtime and companion before migration; the explicit server-only path retains legacy prefix installs. [Desktop controls](docs/server/DESKTOP-CONTROL.md) explains installation, opening the app and separate login preferences. The focused controller/migration and installer regressions pass; independent PR review remains pending.
 
-
 ## Native server tray, startup policy and release upgrades
 
 **Source built and reviewed on `effort/desktop-tray`; [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213) records main promotion; not deployed.** The [implementation ledger](docs/features/DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra completed the PR #1220 review; root addresses all eight findings and owns passing unit tests and merge gates. Controller, daemon, native UI and packaging source is built in cohort PR #1220. The [qualification ledger](docs/features/DESKTOP-TRAY-QUALIFICATION.md) distinguishes passing review regressions, repository merge evidence and remaining native distribution acceptance.
-
-## Agent efficiency: smaller searches, a docs router, paperwork first
-
-**Merged to `main` as #1147 (`9de49f37`) and #1151 (`3103d0d9`), 2026-10-17; tooling and docs only, nothing to deploy.** Sessions that push should run `make hooks` once per clone — it installs the paperwork hook and Ripwire.
-
-Round two (#1151): Ripwire is the default navigator; the ten largest docs open with `## At a glance`; docs over 40 KB sit on a shrink-only allowlist (`tests/operations/doc-size-allowlist.txt`); agent-tooling-only diffs skip the cargo gate. Giant-file split: inline test modules moved into their own files — step one (#1157) for `playback_control.rs`, `media_sessions.rs` and `cluster/migration.rs`, step two (#1158) for the other 38 crate files over 150 KB (65 modules); `PlayerController.swift` split into the controller, `PlayerControllerSupport.swift` and `SharedPlayerController.swift` (Apple build 254). No code change; the commits are in `.git-blame-ignore-revs`. `docs/README.md` is a 10 KB router to one index per subject folder (was 131 KB); this page keeps five efforts and moved the rest to folder histories. A root `.ignore` keeps evidence, archives, vendored and minified files out of searches; `.gitattributes` keeps large JSON out of diffs. `scripts/paperwork` checks the bookkeeping rules in about ten seconds with the fix printed under each failure. It runs from `make paperwork`, the pre-push hook, and as the first job of every pull request (drafts included), and no other job starts until it passes ([PAPERWORK.md](docs/ci/PAPERWORK.md)). `scripts/outline`, `scripts/quiet` and `scripts/ci-failures` keep file reads, build output and CI logs small; AGENTS.md opens with how to work efficiently.
 
 ## Playback startup path: the per-read stall and the web scrim
 
@@ -41,8 +46,7 @@ Round two (#1151): Ripwire is the default navigator; the ten largest docs open w
 
 ## Startup and tone-map: fewer create-path reads, a tone-map census, lab arms
 
-**Branch `effort/startup-tone-map`.** Executes
-[STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](docs/streaming/STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)
+**Branch `effort/startup-tone-map`.** Executes [STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](docs/streaming/STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)
 rev 6.
 
 - **Part B is built.** The create read-budget line had its authority and local labels swapped; that is corrected, and the line now carries `store_ms` and a per-phase split. Seven read reductions follow, none of which moves a read across a fence or changes its consistency.
@@ -78,36 +82,14 @@ unchanged. Use still goes through Mac video processing in Developer. Plan
 identity gains the curve terms, so CUDA HDR and Mac Metal renditions (HLG
 included) are made once more under new keys.
 
-## Live TV station logos on Apple TV, iOS and Android
-
-**Branch `fix/live-tv-station-logos-native`, issue
-[#815](http://forge.lan:3000/noirr/plurx/issues/815).** Paul reported
-2026-10-04 that the Apple TV Live TV guide has no station logos while the web
-guide does. Cause: #755 put the rule that picks a channel's logo in the web
-page (`pages/live-tv.js`) instead of the shared guide reducer and
-`tests/playback/live-tv-guide-cases.json` — the one contract all three guides
-reproduce — so the native clients, which already decode `image_url`, were
-never asked to draw it and no suite could see the gap. The rule is now
-`station_logo` in that fixture (lineup-id match, cold guide, 38 address
-cases; a textual `https://` + plain-host rule so three languages agree),
-answered by `PlurxLiveTv.stationLogoUrl`, Apple's and Android's
-`LiveTvGuideReducer`. Apple (build 209) and Android (versionCode 146) draw it
-in list rows, grid headers, programme details, the picture badge and the
-fullscreen identity, with the callsign until the image decodes. Native
-artwork loads on its own connection with no bearer, cookies or HTTPS→HTTP
-redirects (Android's app-wide Coil loader adds the bearer to every host).
-Adversarial review: no blockers; its five should-fix findings are
-addressed (scheme respelled for Coil, Android failure backoff, Apple lock
-kept off suspension points, grid headers keep their width without artwork,
-wiring pinned by source tests). Not yet on hardware.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28,
-2026-10-04, 2026-10-17 and 2026-10-19 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19 and 2026-10-26 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-10-04 | Live TV station logos on Apple TV, iOS and Android | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
+| 2026-10-17 | Agent efficiency: smaller searches, a docs router, paperwork first | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-10-04 | A leader restart no longer ends progressive or Live TV playback | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-05 | Main-merge defects D1–D7 and the red gates: one batched PR | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-10-04 | The architecture effort is on `main`; the close-out is a draft PR | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |

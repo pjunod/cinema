@@ -132,6 +132,12 @@ final class PictureInPictureController: NSObject, ObservableObject,
         #endif
     }
 
+    func allowAutomaticStart(_ allowed: Bool) {
+        #if os(iOS)
+        controller?.canStartPictureInPictureAutomaticallyFromInline = allowed
+        #endif
+    }
+
     func toggle() {
         clearErrorMessage()
         let state = controlState
@@ -257,6 +263,8 @@ struct PlayerSurface: UIViewRepresentable {
     var surfaceChanged: ((PlayerSurfaceView, Bool) -> Void)? = nil
     let pictureInPicture: PictureInPictureController
     let pgsOverlay: PGSOverlayWindow?
+    var captionWindow: CaptionRenderWindow? = nil
+    var allowsAutomaticPictureInPicture = true
     let allowsPictureInPicture: Bool
     var presentationTargetChanged: ((Int?, Int?) -> Void)? = nil
 
@@ -280,8 +288,10 @@ struct PlayerSurface: UIViewRepresentable {
         context.coordinator.surfaceChanged = surfaceChanged
         surfaceChanged?(view, true)
         view.applyPGSOverlay(pgsOverlay, to: player.currentItem)
+        view.applyCaptionWindow(captionWindow, to: player.currentItem)
         if allowsPictureInPicture {
             context.coordinator.pictureInPicture.attach(to: view.playerLayer)
+            pictureInPicture.allowAutomaticStart(allowsAutomaticPictureInPicture)
         }
         return view
     }
@@ -296,8 +306,10 @@ struct PlayerSurface: UIViewRepresentable {
         context.coordinator.surfaceChanged = surfaceChanged
         surfaceChanged?(view, true)
         view.applyPGSOverlay(pgsOverlay, to: player.currentItem)
+        view.applyCaptionWindow(captionWindow, to: player.currentItem)
         if allowsPictureInPicture {
             context.coordinator.pictureInPicture.attach(to: view.playerLayer)
+            pictureInPicture.allowAutomaticStart(allowsAutomaticPictureInPicture)
         } else {
             context.coordinator.pictureInPicture.detach()
         }
@@ -311,6 +323,7 @@ struct PlayerSurface: UIViewRepresentable {
         // normal detach at the start of its next attachment.
         coordinator.pictureInPicture.detach(resetPublishedState: false)
         view.applyPGSOverlay(nil, to: nil)
+        view.applyCaptionWindow(nil, to: nil)
         view.playerLayer.player = nil
         view.stage(nil)
         coordinator.surfaceChanged?(view, false)
@@ -435,6 +448,10 @@ final class PlayerSurfaceView: UIView {
         let canvasHeight: Int
     }
 
+    private var captionLayer: AVSynchronizedLayer?
+    private var captionNodes: [CATextLayer] = []
+    private var captionWindow: CaptionRenderWindow?
+    private weak var captionItem: AVPlayerItem?
     private var synchronizedLayer: AVSynchronizedLayer?
     private var overlayNodes: [OverlayNode] = []
     private var overlayRevision: Int?
@@ -469,6 +486,13 @@ final class PlayerSurfaceView: UIView {
         reportPresentationTarget()
         let videoRect = playerLayer.videoRect
         synchronizedLayer?.frame = videoRect
+        captionLayer?.frame = videoRect
+        for node in captionNodes {
+            let font = max(18, min(44, videoRect.width / 32))
+            node.fontSize = font
+            node.frame = CGRect(x: videoRect.width * 0.06, y: max(0, videoRect.height - font * 4.5),
+                                width: videoRect.width * 0.88, height: font * 4)
+        }
         let destination = CGRect(origin: .zero, size: videoRect.size)
         for node in overlayNodes {
             node.layer.frame = PGSOverlayPolicy.objectFrame(
@@ -480,6 +504,43 @@ final class PlayerSurfaceView: UIView {
         }
         CATransaction.commit()
     }
+
+    /// Literal text scheduled on AVPlayerItem time, including paused seeks.
+    /// Positive subtitle offset delays captions; it never changes source/demand clocks.
+    func applyCaptionWindow(_ window: CaptionRenderWindow?, to item: AVPlayerItem?) {
+        guard let window, let item else {
+            captionLayer?.removeFromSuperlayer(); captionLayer = nil
+            captionNodes = []; captionWindow = nil; captionItem = nil
+            return
+        }
+        guard captionWindow != window || captionItem !== item else { return }
+        captionLayer?.removeFromSuperlayer(); captionNodes = []
+        captionWindow = window; captionItem = item
+        let synchronized = AVSynchronizedLayer(playerItem: item)
+        captionLayer = synchronized; layer.addSublayer(synchronized)
+        for cue in window.cues {
+            guard let interval = CaptionRenderWindow.itemInterval(cue, baseMs: window.baseMs, offsetMs: window.offsetMs) else { continue }
+            let text = CATextLayer()
+            text.string = cue.text
+            text.font = UIFont.boldSystemFont(ofSize: 24)
+            text.alignmentMode = .center; text.isWrapped = true
+            text.foregroundColor = UIColor.white.cgColor
+            text.backgroundColor = UIColor.black.withAlphaComponent(0.7).cgColor
+            text.contentsScale = windowScale
+            text.opacity = 0
+            text.actions = ["bounds": NSNull(), "position": NSNull(), "opacity": NSNull()]
+            let visibility = CABasicAnimation(keyPath: "opacity")
+            visibility.fromValue = 1; visibility.toValue = 1
+            visibility.beginTime = AVCoreAnimationBeginTimeAtZero + Double(interval.lowerBound) / 1000
+            visibility.duration = Double(interval.count) / 1000
+            visibility.fillMode = .removed; visibility.isRemovedOnCompletion = true
+            text.add(visibility, forKey: "caption-visibility")
+            synchronized.addSublayer(text); captionNodes.append(text)
+        }
+        setNeedsLayout()
+    }
+
+    private var windowScale: CGFloat { window?.screen.scale ?? 2 }
 
     func applyPGSOverlay(_ window: PGSOverlayWindow?, to item: AVPlayerItem?) {
         guard let window, let item else {

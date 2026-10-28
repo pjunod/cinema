@@ -350,6 +350,7 @@ struct SharedPlaybackPlan {
             && presentation.deliveredDynamicRange != "dolby_vision"
             && presentation.preserveDolbyVision != true && presentation.delivery?.preserveDolbyVision != true
             && (presentation.audioOffsetMs ?? 0) == 0 && defaultAudio
+            && (presentation.audio?.count ?? 0) <= 1
     }
 
     /// The one place a shared Start request is composed from a decision: the
@@ -375,7 +376,7 @@ struct SharedPlaybackPlan {
             request.presentation = "direct"
         } else {
             request = CreateSessionRequest(playbackId: playbackId, requestId: requestId,
-                height: quality.rungHeight, qualityAuto: quality == .auto, start: start, audio: audioIndex,
+                height: quality.rungHeight, qualityAuto: quality == .auto, start: start, audio: audioIndex ?? decision.presentation.delivery?.audio ?? decision.presentation.audio?.first(where: { $0.default })?.index,
                 subtitleBurn: burn, nativeSubtitles: subtitle == nil ? nil : true, subtitle: subtitle,
                 copy: burn == nil && decision.method != "transcode", aac: decision.presentation.transcodeAudio,
                 hdr10: decision.method == "transcode" && decision.presentation.deliveredDynamicRange == "hdr10" ? true : nil, caps: caps)

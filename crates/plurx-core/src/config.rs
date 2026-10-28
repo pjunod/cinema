@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::ConfigError;
+pub mod https;
+pub use https::HttpsConfig;
 
 /// Default HTTP port. Deliberately near — but never colliding with — the
 /// 32400-era ports ex-Plex users already have muscle memory for.
@@ -76,6 +78,9 @@ const DEFAULT_CONFIG_PATHS: &[&str] = &["plurx.toml", "/etc/plurx/plurx.toml"];
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
+    /// Boot-only source metadata for node-local HTTPS administration.
+    #[serde(skip)]
+    pub https_local: Option<https::HttpsLocalConfig>,
     pub storage: StorageConfig,
     pub sharing: SharingNetworkConfig,
     pub support: SupportConfig,
@@ -210,6 +215,7 @@ pub struct ServerConfig {
     /// host name reaches it. `0` turns this listener off. Whether the facade
     /// answers at all is still the Settings -> Developer switch.
     pub jellyfin_port: u16,
+    pub https: HttpsConfig,
 }
 
 impl Default for ServerConfig {
@@ -219,6 +225,7 @@ impl Default for ServerConfig {
             bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
             trusted_proxies: Vec::new(),
             jellyfin_port: DEFAULT_JELLYFIN_PORT,
+            https: HttpsConfig::default(),
         }
     }
 }
@@ -378,6 +385,22 @@ impl Config {
             },
         };
         config.apply_env()?;
+        let mut env_error = None;
+        let overrides = https::HttpsOverrides::capture(|name| match std::env::var(name) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => {
+                env_error = Some(name.to_owned());
+                None
+            }
+        });
+        if let Some(var) = env_error {
+            return Err(ConfigError::Env {
+                var,
+                message: "must be UTF-8".into(),
+            });
+        }
+        config.resolve_https(overrides)?;
         config.support.validate()?;
         if config.storage.scan_prune_percent > 100 {
             return Err(ConfigError::Value {
@@ -483,6 +506,17 @@ impl Config {
             path: path.to_owned(),
             source: Box::new(source),
         })
+    }
+
+    /// Resolve HTTPS after the ordinary environment selects the final data_dir.
+    pub fn resolve_https(&mut self, overrides: https::HttpsOverrides) -> Result<(), ConfigError> {
+        let mut saved =
+            https::HttpsSettings::read(&self.storage.data_dir, self.server.https.clone())?;
+        saved.settings = saved.settings.normalize_saved(self.server.bind.ip());
+        self.server.https = overrides.apply(saved.settings.clone(), self.server.bind.ip())?;
+        self.server.https.validate_ports(self)?;
+        self.https_local = Some(https::HttpsLocalConfig { saved, overrides });
+        Ok(())
     }
 
     fn apply_env(&mut self) -> Result<(), ConfigError> {

@@ -24,9 +24,20 @@ struct PlayerRemoteAdapter: ViewModifier {
             content
                 .onExitCommand { dispatch(.back) }
                 .onPlayPauseCommand { dispatch(.playPause) }
-        case .surface, .timeline:
+        case .surface:
             content
                 .onTapGesture { dispatch(.select) }
+                .onMoveCommand { direction in
+                    guard let input = Self.input(for: direction) else { return }
+                    dispatch(input)
+                }
+        case .timeline:
+            // A focusable drawing with a tap gesture can receive directions
+            // while dropping Siri Remote Select. Use native button activation
+            // and keep the label-only style so the thin bar gains no bezel.
+            Button { dispatch(.select) } label: { content }
+                .buttonStyle(PlaybackRevealButtonStyle())
+                .focusEffectDisabled()
                 .onMoveCommand { direction in
                     guard let input = Self.input(for: direction) else { return }
                     dispatch(input)

@@ -239,6 +239,33 @@ pub(crate) fn held_source_clock(
     plurx_core::transcode::VodSourceClock::from_probe_start_time(start).map_err(str::to_owned)
 }
 
+/// Exact selected-video origin from this held probe, bound to the FORMAT
+/// clock already frozen for soundtrack production. Never infer it from the
+/// first picture returned by a window seek.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn held_dv_source_origin(
+    stream: &serde_json::Value,
+    tick: (u32, u32),
+    format: plurx_core::transcode::VodSourceClock,
+) -> Result<plurx_core::transcode::dv_processing::DvSourceOrigin, String> {
+    use plurx_core::transcode::dv_processing::{DvSourceOrigin, DvTimestamp};
+    if tick.0 == 0 || tick.1 == 0 {
+        return Err("DV held source has invalid time base".into());
+    }
+    let ticks = stream
+        .get("start_pts")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or("DV selected-video source origin is unobserved")?;
+    let origin = DvTimestamp::new(
+        ticks
+            .checked_mul(i64::from(tick.0))
+            .ok_or("DV source origin overflow")?,
+        tick.1,
+    )
+    .map_err(|e| e.to_string())?;
+    DvSourceOrigin::observed_common(origin, format).map_err(|e| e.to_string())
+}
+
 pub(crate) struct SourceHeldProbeEvidence {
     assignment: SourceDispatchAssignment,
     object_version: String,
@@ -803,5 +830,48 @@ mod source_clock_tests {
         ] {
             assert!(held_source_clock(malformed).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod dv_source_origin_tests {
+    use super::{held_dv_source_origin, held_source_clock};
+    use plurx_core::transcode::dv_processing::DvTimestamp;
+
+    #[test]
+    fn dv_origin_requires_matching_observed_held_format_and_selected_video() {
+        for (start, micros) in [(0, 0), (125, 125_000)] {
+            let document = serde_json::json!({"format":{"start_time":format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000)},
+                "streams":[{"start_pts": start}, {"start_pts":start + 10}]});
+            let format = held_source_clock(&document.to_string()).expect("held FORMAT clock");
+            let origin = held_dv_source_origin(&document["streams"][0], (1, 1000), format)
+                .expect("common origin");
+            assert_eq!(
+                origin.timestamp(),
+                DvTimestamp::new(start, 1000).expect("valid held source timestamp")
+            );
+            assert!(
+                held_dv_source_origin(&document["streams"][1], (1, 1000), format).is_err(),
+                "a later audio/other-stream start cannot replace the common clock"
+            );
+        }
+        let default = held_source_clock(r#"{"format":{}}"#).expect("default held FORMAT clock");
+        assert!(
+            held_dv_source_origin(&serde_json::json!({"start_pts":0}), (1, 1000), default).is_err()
+        );
+        let observed = held_source_clock(r#"{"format":{"start_time":"0.000000"}}"#)
+            .expect("observed held FORMAT clock");
+        for stream in [
+            serde_json::json!({}),
+            serde_json::json!({"start_pts":"N/A"}),
+            serde_json::json!({"start_pts":-1}),
+            serde_json::json!({"start_pts":i64::MAX}),
+        ] {
+            assert!(held_dv_source_origin(&stream, (2, 1000), observed).is_err());
+        }
+        assert!(
+            held_dv_source_origin(&serde_json::json!({"start_pts":0}), (0, 1000), observed)
+                .is_err()
+        );
     }
 }

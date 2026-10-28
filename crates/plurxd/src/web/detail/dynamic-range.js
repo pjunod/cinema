@@ -102,19 +102,24 @@ function dynamicRangeBadge(f, delivered, displayHdr, deliveredDvProfile){
 // silently degrades the chip to the state it had before that argument existed,
 // which is a correct-looking badge for the wrong delivery.
 function effectiveHdrProcessing(report,generation,delivered){
-  if(!report||report.hdr10_enhanced!==true||typeof report.fel_contributed!=='boolean'
-    ||delivered!=='hdr10'||typeof generation!=='string'||report.generation!==generation
+  const sdr=delivered==='sdr'&&report?.sdr_processed===true&&report?.hdr10_enhanced===false;
+  if(!report||(!sdr&&(report.hdr10_enhanced!==true||report.sdr_processed===true||delivered!=='hdr10'))||typeof report.fel_contributed!=='boolean'
+    ||!['hdr10','sdr'].includes(delivered)||typeof generation!=='string'||report.generation!==generation
     ||!/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(generation)
     ||!Array.isArray(report.applied_operations)||!report.applied_operations.length
     ||report.applied_operations.length>16
-    ||!report.applied_operations.every(op=>typeof op==='string'&&op.length>0&&op.length<=64)) return null;
+    ||!report.applied_operations.every(op=>typeof op==='string'?op.length>0&&op.length<=64
+      :op&&typeof op==='object'&&Object.keys(op).length===1
+        &&op.DisplayTargetMapping&&Object.keys(op.DisplayTargetMapping).length===1
+        &&(sdr?[100]:[400,600,1000,1600,2000,4000]).includes(op.DisplayTargetMapping.nits))
+    ||sdr&&(!report.applied_operations.includes('Bt709Gamma24Conversion')||!report.applied_operations.some(op=>op?.DisplayTargetMapping?.nits===100))) return null;
   return report;
 }
 function effectiveProcessingDetail(report){
   const names={PolynomialReshape:'RPU polynomial mapping',MmrReshape:'RPU MMR mapping',
     RpuColorConversion:'RPU color conversion',TargetMapping:'target mapping',CreativeTrimApplication:'creative trims'};
   const metadata=report.applied_operations.map(op=>names[op]).filter(Boolean).join(', ');
-  return `Dolby Vision–enhanced HDR10 · FEL used: ${report.fel_contributed?'yes':'no'}${metadata?` · Applied: ${metadata}`:''}`;
+  return `${report.sdr_processed?`Dolby Vision–processed SDR (BT.709 gamma 2.4, ${report.applied_operations.includes('CreativeTrimApplication')?'creative trims applied':report.creative_trims_partial===true?'creative trims on some shots':'L1 only'})`:'Dolby Vision–enhanced HDR10'} · FEL used: ${report.fel_contributed?'yes':'no'}${metadata?` · Applied: ${metadata}`:''}`;
 }
 function clearEffectiveProcessing(p){
   if(!p) return;
@@ -147,17 +152,38 @@ function playerEffectiveProcessing(p){
   return effectiveHdrProcessing(p.effectiveProcessing,p.controlReporter?.bootstrap?.generation,
     stream?.dynamic_range||p.deliveredRange);
 }
-// What the player may show now. A processed-HDR10 delivery's FEL/RPU claim is
+// What the player may show now. A processed delivery's FEL/RPU/DYN claim is
 // only true while the report proving it is current: a seek, fallback or
 // replacement clears the report, and with it every pill and the details row.
 function playerEnhancement(p){
   const enhancement=p&&p.enhancement;
   if(!enhancement) return null;
-  if(enhancement.requires_effective_processing&&!playerEffectiveProcessing(p)) return null;
-  return enhancement;
+  if(!enhancement.requires_effective_processing) return enhancement;
+  const report=playerEffectiveProcessing(p);
+  if(!report) return null;
+  // Session creation can precede the first processed window. For these
+  // routes the current execution report supersedes that provisional snapshot;
+  // carried Dolby Vision routes keep the server-authored enhancement above.
+  const operations=report.applied_operations;
+  const rpuNames={PolynomialReshape:'polynomial reshaping',MmrReshape:'MMR reshaping',RpuColorConversion:'RPU color conversion'};
+  const rpu=operations.filter(op=>typeof op==='string'&&Object.hasOwn(rpuNames,op)).map(op=>rpuNames[op]);
+  const target=operations.find(op=>op?.DisplayTargetMapping)?.DisplayTargetMapping.nits;
+  const trims=operations.includes('CreativeTrimApplication')?"with the colourist's creative trims"
+    :report.creative_trims_partial===true?"with the colourist's creative trims on some shots":"L1 only; creative trims are not applied";
+  const current=[
+    {badge:'FEL',active:report.fel_contributed,text:report.fel_contributed
+      ?`FEL: full enhancement layer reconstructed into the ${report.sdr_processed?'SDR ':''}picture`
+      :'FEL: no enhancement-layer detail in this window'},
+    {badge:'RPU',active:rpu.length>0,text:rpu.length?`RPU: ${rpu.join(', ')} applied by the server`:'RPU: no reshaping or colour conversion applied in this window'},
+    {badge:'DYN',active:!!target,text:target?`DYN: per-shot Dolby display mapping for a ${target}-nit display by the server (${trims})`
+      :'DYN: no per-shot Dolby display mapping applied in this window'}
+  ];
+  const details=current.filter(d=>d.badge!=='FEL'||d.active||enhancement.details.some(old=>old.badge==='FEL'))
+    .concat(enhancement.details.filter(d=>!['FEL','RPU','DYN'].includes(d.badge)));
+  return {...enhancement,active:current.filter(d=>d.active).map(d=>d.badge),details};
 }
 // The Playback info row: the active badges, then one neutral line per
-// enhancement — active or not — exactly as the server wrote it.
+// enhancement — active or not — from the server or current execution report.
 function playerEnhancementRow(p){
   const enhancement=playerEnhancement(p);
   if(!enhancement) return null;
@@ -179,11 +205,12 @@ function playerRangeBadge(f){
   const generation=PLAYER.controlReporter?.bootstrap?.generation;
   const report=effectiveHdrProcessing(PLAYER.effectiveProcessing,generation,delivered);
   if(!report) return badge;
-  const source=sourceDynamicRange(f),same=source==='hdr10';
+  const mark=report.sdr_processed?'SDR-E':'HDR10-E';
+  const source=sourceDynamicRange(f),same=source===(report.sdr_processed?'sdr':'hdr10');
   const detail=effectiveProcessingDetail(report);
-  const base=same?'HDR10-E':badge?.base||'HDR10-E';
+  const base=same?mark:badge?.base||mark;
   return {...(badge||{cls:'hdr',source,rendered:null,off:false}),base,
-    text:same||!badge?'HDR10-E':`${base} → HDR10-E`,arrow:same||!badge?null:'HDR10-E',
+    text:same||!badge?mark:`${base} → ${mark}`,arrow:same||!badge?null:mark,
     full:`${detail} · display output unverified`,aria:detail,panel:detail};
 }
 function premiumAudio(f){ const cs=(f.audio_streams||[]).map(a=>(a.codec||'').toLowerCase());

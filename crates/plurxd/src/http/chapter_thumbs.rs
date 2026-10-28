@@ -13,9 +13,9 @@
 //! stops new extractions; nothing here outlives the request that started it
 //! by more than the extraction timeout. A failed extraction leaves a marker so the next page
 //! view of a broken file does not run ffmpeg again for an hour. The cache has
-//! no cap: it holds one small JPEG per chapter ever viewed on this node, and
-//! removing the `chapter-thumbs` directory under the runtime cache reclaims
-//! it.
+//! shares the playback disk budget: idle thumbnails and failed attempts evict
+//! with other playback caches, while active extraction and response bodies
+//! retain their namespace pins.
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,6 +91,61 @@ pub(crate) fn snapshot() -> Snapshot {
 
 pub(crate) fn cache_root(runtime_cache: &FsPath) -> PathBuf {
     runtime_cache.join(CACHE_DIR)
+}
+
+pub(crate) fn register_playback_cache(
+    budget: &std::sync::Arc<crate::playback_cache::PlaybackCacheBudget>,
+    runtime_root: &FsPath,
+) {
+    budget.register(std::sync::Arc::new(ThumbnailCache {
+        root: cache_root(runtime_root),
+    }));
+}
+
+struct ThumbnailCache {
+    root: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl crate::playback_cache::CacheOwner for ThumbnailCache {
+    async fn candidates(&self) -> std::io::Result<Vec<crate::playback_cache::CacheCandidate>> {
+        let mut titles = match tokio::fs::read_dir(&self.root).await {
+            Ok(titles) => titles,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut candidates = Vec::new();
+        while let Some(title) = titles.next_entry().await? {
+            if !tokio::fs::symlink_metadata(title.path()).await?.is_dir() {
+                continue;
+            }
+            let mut entries = tokio::fs::read_dir(title.path()).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+                if !metadata.is_file() {
+                    continue;
+                }
+                candidates.push(crate::playback_cache::CacheCandidate {
+                    path: entry.path(),
+                    last_used: metadata.accessed().or_else(|_| metadata.modified())?,
+                });
+            }
+        }
+        Ok(candidates)
+    }
+    async fn evict(
+        &self,
+        candidate: &crate::playback_cache::CacheCandidate,
+    ) -> std::io::Result<bool> {
+        if candidate.path.parent().and_then(FsPath::parent) != Some(self.root.as_path()) {
+            return Ok(false);
+        }
+        match tokio::fs::remove_file(&candidate.path).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// What the cache holds on disk right now: thumbnail count and bytes. Bounded
@@ -213,9 +268,12 @@ async fn thumb_for_file(
 
     let dir = title_dir(&state.runtime_cache_dir, file_id, file.size, file.mtime);
     let path = dir.join(format!("{index}.jpg"));
+    let read_pin = crate::playback_cache::pin(&path).map_err(|error| {
+        ApiError::ServiceUnavailable(format!("chapter thumbnail cache is busy: {error}"))
+    })?;
     if let Ok(bytes) = tokio::fs::read(&path).await {
         SERVED_CACHED.fetch_add(1, Ordering::Relaxed);
-        return Ok(jpeg_response(bytes, &etag));
+        return Ok(jpeg_response(bytes, &etag, read_pin));
     }
     let marker = dir.join(format!("{index}.fail"));
     if recent_failure(&marker).await {
@@ -237,7 +295,7 @@ async fn thumb_for_file(
     if let Ok(bytes) = tokio::fs::read(&path).await {
         drop(permit);
         SERVED_CACHED.fetch_add(1, Ordering::Relaxed);
-        return Ok(jpeg_response(bytes, &etag));
+        return Ok(jpeg_response(bytes, &etag, read_pin));
     }
     let result = extract(
         &crate::ffmpeg::ffmpeg_bin(),
@@ -252,7 +310,7 @@ async fn thumb_for_file(
     match result {
         Ok(bytes) => {
             GENERATED.fetch_add(1, Ordering::Relaxed);
-            Ok(jpeg_response(bytes, &etag))
+            Ok(jpeg_response(bytes, &etag, read_pin))
         }
         Err(reason) => {
             FAILED.fetch_add(1, Ordering::Relaxed);
@@ -263,7 +321,17 @@ async fn thumb_for_file(
                 reason,
                 "chapter thumbnail extraction failed"
             );
-            let _ = tokio::fs::write(&marker, reason.as_bytes()).await;
+            let reason = reason.as_bytes();
+            let reason = &reason[..reason.len().min(4096)];
+            if let Ok(reservation) =
+                crate::playback_cache::reserve(&marker, reason.len() as u64).await
+            {
+                if tokio::fs::write(&marker, reason).await.is_ok() {
+                    if let Some(reservation) = reservation {
+                        reservation.commit(reason.len() as u64);
+                    }
+                }
+            }
             Err(ApiError::NotFound("chapter thumbnail could not be made"))
         }
     }
@@ -311,6 +379,9 @@ async fn extract(
     target: &FsPath,
     runtime_cache: &FsPath,
 ) -> Result<Vec<u8>, String> {
+    let reservation = crate::playback_cache::reserve(dir, MAX_THUMB_BYTES)
+        .await
+        .map_err(|error| format!("chapter thumbnail disk budget: {error}"))?;
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
@@ -363,6 +434,9 @@ async fn extract(
         .map_err(|error| error.to_string())?;
     // The temporary is now the thumbnail; the guard must not remove it.
     drop(in_flight);
+    if let Some(reservation) = reservation {
+        reservation.commit(bytes.len() as u64);
+    }
     Ok(bytes)
 }
 
@@ -403,8 +477,34 @@ fn extract_command(
     command
 }
 
-fn jpeg_response(bytes: Vec<u8>, etag: &str) -> Response {
-    let mut response = (StatusCode::OK, bytes).into_response();
+struct PinnedThumbnail {
+    bytes: Option<Vec<u8>>,
+    _pin: Option<crate::playback_cache::CachePin>,
+}
+impl futures_util::Stream for PinnedThumbnail {
+    type Item = Result<bytes::Bytes, std::convert::Infallible>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(self.bytes.take().map(|bytes| Ok(bytes::Bytes::from(bytes))))
+    }
+}
+
+fn jpeg_response(
+    bytes: Vec<u8>,
+    etag: &str,
+    pin: Option<crate::playback_cache::CachePin>,
+) -> Response {
+    let length = bytes.len();
+    let mut response = axum::body::Body::from_stream(PinnedThumbnail {
+        bytes: Some(bytes),
+        _pin: pin,
+    })
+    .into_response();
+    if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
+        response.headers_mut().insert(header::CONTENT_LENGTH, value);
+    }
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
     headers.insert(
@@ -441,6 +541,54 @@ mod tests {
             start_ms,
             end_ms,
         }
+    }
+
+    #[tokio::test]
+    async fn shared_budget_refuses_thumbnail_before_starting_child_or_writing() {
+        let temporary = tempfile::tempdir().expect("temporary");
+        let runtime = std::fs::canonicalize(temporary.path()).expect("canonical runtime");
+        let store =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(store, vec![runtime.clone()]);
+        budget.configure_for_test(0);
+        let directory = title_dir(&runtime, 1, 2, 3);
+        let error = extract(
+            "/does-not-exist",
+            FsPath::new("/missing-media"),
+            0,
+            &directory,
+            &directory.join("0.jpg"),
+            &runtime,
+        )
+        .await
+        .expect_err("closed disk budget");
+        assert!(error.contains("disk budget"), "{error}");
+        assert!(
+            !directory.exists(),
+            "refusal precedes any output directory or child"
+        );
+    }
+
+    #[tokio::test]
+    async fn thumbnail_response_keeps_cache_pinned_until_body_is_dropped() {
+        let temporary = tempfile::tempdir().expect("temporary");
+        let runtime = std::fs::canonicalize(temporary.path()).expect("canonical runtime");
+        let directory = title_dir(&runtime, 1, 2, 3);
+        std::fs::create_dir_all(&directory).expect("directory");
+        let path = directory.join("0.jpg");
+        std::fs::write(&path, vec![0x5a; 8192]).expect("thumbnail");
+        let store =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(store, vec![runtime.clone()]);
+        register_playback_cache(&budget, &runtime);
+        budget.configure_for_test(0);
+        let pin = crate::playback_cache::pin(&path).expect("reader pin");
+        let response = jpeg_response(vec![0x5a; 8192], "thumbnail", pin);
+        assert_eq!(budget.sweep().await.expect("active sweep").protected, 1);
+        assert!(path.exists());
+        drop(response);
+        assert_eq!(budget.sweep().await.expect("idle sweep").evicted, 1);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -484,7 +632,9 @@ mod tests {
                 ))
             })
             .collect();
-        assert!(env.contains(&("XDG_CACHE_HOME".to_owned(), "/cache".to_owned())));
+        assert!(env.contains(&("XDG_CACHE_HOME".to_owned(), "/cache/gpu-cache".to_owned())));
+        assert!(env.contains(&("CUDA_CACHE_DISABLE".to_owned(), "1".to_owned())));
+        assert!(env.contains(&("MESA_SHADER_CACHE_DISABLE".to_owned(), "true".to_owned())));
     }
 
     #[test]

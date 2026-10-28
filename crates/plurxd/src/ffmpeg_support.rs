@@ -11,6 +11,8 @@ const CONTRACT: &str = include_str!("../../../scripts/ffmpeg-support-matrix.json
 
 #[derive(Deserialize)]
 struct Contract {
+    required_package: String,
+    expected_version: String,
     source_commit: String,
     source_sha256: String,
     macos_patches: BTreeMap<String, String>,
@@ -49,14 +51,374 @@ pub struct SupportRow {
     pipeline: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct SupportReport {
+    pub required_package: String,
+    pub expected_version: String,
+    pub executable_version: Option<String>,
+    pub source_revision: String,
+    pub package_verification: String,
+    #[serde(skip)]
+    pub additional_media_support: Vec<MediaSupport>,
+    #[serde(skip)]
+    pub hwaccels: BTreeSet<String>,
+    #[serde(skip)]
+    pub filters: BTreeSet<String>,
     pub executable: String,
     pub expected_executable: Option<String>,
     pub package_verified: bool,
     pub package_problems: Vec<String>,
     pub rows: Vec<SupportRow>,
     pub checked_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MediaSupport {
+    pub id: String,
+    pub label: String,
+    pub support_available: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TranscodingFact {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    pub hardware: bool,
+    pub backend: String,
+    pub device_ids: Vec<String>,
+    pub detail: String,
+}
+
+fn package_verification_status(platform: &str, verified: bool) -> &'static str {
+    if platform != "macos" {
+        "unsupported_platform"
+    } else if verified {
+        "verified"
+    } else {
+        "unverified"
+    }
+}
+
+fn executable_version(text: &str) -> Option<String> {
+    text.lines()
+        .next()?
+        .strip_prefix("ffmpeg version ")?
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+}
+
+fn media_support(inventory: &Inventory) -> Vec<MediaSupport> {
+    let has = |group: &str, name: &str| {
+        inventory
+            .groups
+            .get(group)
+            .is_some_and(|items| items.contains(name))
+    };
+    [
+        (
+            "ac4",
+            "AC-4 audio",
+            has("decoders", "ac4"),
+            "Audio decoder; used when the source requires it",
+        ),
+        (
+            "dolby_vision",
+            "Dolby Vision",
+            has("decoders", "hevc") && has("filters", "tonemapx") && has("bsfs", "dovi_rpu"),
+            "Dolby Vision metadata and rendering support; profile-dependent",
+        ),
+        (
+            "vulkan",
+            "Vulkan / libplacebo",
+            has("filters", "libplacebo") && has("hwaccels", "vulkan"),
+            "Alternative GPU processing; device support depends on the installed driver",
+        ),
+        (
+            "opencl",
+            "OpenCL tone mapping",
+            has("filters", "tonemap_opencl") && has("hwaccels", "opencl"),
+            "Alternative GPU tone mapping; device support depends on the installed OpenCL runtime",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, label, available, detail)| MediaSupport {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        support_available: available,
+        detail: detail.to_owned(),
+    })
+    .collect()
+}
+
+/// Project configured policy and detected facilities without turning external
+/// acceptance evidence into a feature switch. Per-source eligibility remains
+/// the resolver's responsibility.
+pub fn transcoding_facts(
+    system: &crate::state::SystemInfo,
+    support: &SupportReport,
+    encoder: Encoder,
+    mac_enabled: bool,
+    hardware_sessions_enabled: bool,
+) -> Vec<TranscodingFact> {
+    let mut facts = transcoding_facts_for_platform(
+        system,
+        support,
+        encoder,
+        mac_enabled,
+        std::env::consts::OS,
+        hardware_sessions_enabled,
+    );
+    apply_decode_compatibility(&mut facts, std::env::var("PLURX_HWDECODE").ok().as_deref());
+    facts
+}
+
+fn apply_decode_compatibility(facts: &mut [TranscodingFact], compatibility: Option<&str>) {
+    use plurx_core::transcode::{DecodePlanPolicy, DecodePolicySnapshot};
+    if DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility).force_software_decode() {
+        if let Some(fact) = facts.iter_mut().find(|fact| fact.id == "hardware_decoding") {
+            fact.enabled = false;
+            fact.hardware = false;
+            fact.backend = "software".to_owned();
+            fact.device_ids.clear();
+            fact.detail = "CPU decoding · Compatibility preference".to_owned();
+        }
+    }
+}
+
+fn transcoding_facts_for_platform(
+    system: &crate::state::SystemInfo,
+    support: &SupportReport,
+    encoder: Encoder,
+    mac_enabled: bool,
+    platform: &str,
+    hardware_sessions_enabled: bool,
+) -> Vec<TranscodingFact> {
+    let hardware_encoder = hardware_sessions_enabled
+        && encoder != Encoder::Software
+        && system.encoders.available(encoder);
+    let backend = encoder.family_name();
+    let binding = system
+        .encoders
+        .device_bindings
+        .iter()
+        .find(|binding| binding.backend == backend);
+    let device_ids = binding
+        .map(|binding| binding.device_ids.clone())
+        .unwrap_or_default();
+    let device = device_ids
+        .iter()
+        .filter_map(|id| {
+            system
+                .encoders
+                .graphics_devices
+                .iter()
+                .find(|device| &device.id == id)
+        })
+        .map(|device| {
+            format!(
+                "{} ({})",
+                device.model.as_deref().unwrap_or(&device.vendor),
+                device.id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let device = if !device.is_empty() {
+        device
+    } else {
+        match encoder {
+            Encoder::VideoToolbox => "Apple video hardware",
+            Encoder::Nvenc => "NVIDIA video hardware (driver default)",
+            Encoder::Qsv => "Intel video hardware (driver default)",
+            Encoder::Vaapi => "Render node; physical device unresolved",
+            Encoder::Software => "CPU",
+        }
+        .to_owned()
+    };
+    let decode_backend = match encoder {
+        Encoder::Nvenc => "cuda",
+        Encoder::Qsv => "qsv",
+        Encoder::Vaapi => "vaapi",
+        Encoder::VideoToolbox => "videotoolbox",
+        Encoder::Software => "none",
+    };
+    let decode = hardware_encoder && support.hwaccels.contains(decode_backend);
+    let native_mac =
+        platform == "macos" && hardware_encoder && encoder == Encoder::VideoToolbox && mac_enabled;
+    let native_scale = native_mac && support.filters.contains("scale_vt");
+    let native_tone = native_scale && support.filters.contains("tonemap_videotoolbox");
+    let measured_pipeline = system.tone_map.selected();
+    let pipeline = match measured_pipeline {
+        Pipeline::VtToneMapMetal if !native_tone => Pipeline::Cpu,
+        Pipeline::VtScaleSdr | Pipeline::VtScaleHdr10 if !native_scale => Pipeline::Cpu,
+        pipeline if !pipeline.pairs_with(encoder) => Pipeline::Cpu,
+        pipeline => pipeline,
+    };
+    let hardware_tone = hardware_sessions_enabled && (native_tone || pipeline.on_gpu());
+    let hardware_scale = hardware_sessions_enabled
+        && (native_scale
+            || matches!(
+                pipeline,
+                Pipeline::TonemapCuda
+                    | Pipeline::VppQsv
+                    | Pipeline::TonemapVaapi
+                    | Pipeline::Libplacebo
+                    | Pipeline::LibplaceboVaapi
+                    | Pipeline::LibplaceboSoftware
+                    | Pipeline::VtScaleSdr
+                    | Pipeline::VtScaleHdr10
+                    | Pipeline::VtToneMapMetal
+            ));
+    let subtitles = support.filters.contains("subtitles") || support.filters.contains("ass");
+    let deinterlace = support.filters.contains("bwdif");
+    let native_subtitles = native_scale
+        && support.filters.contains("subtitles_vt_images")
+        && support.filters.contains("overlay_videotoolbox");
+    let native_deinterlace = native_scale && support.filters.contains("bwdif_videotoolbox");
+    let processing_backend = if !hardware_sessions_enabled {
+        "CPU"
+    } else if native_tone {
+        "Metal"
+    } else {
+        match pipeline {
+            Pipeline::TonemapCuda => "CUDA",
+            Pipeline::VppQsv => "Quick Sync",
+            Pipeline::TonemapVaapi => "VA-API",
+            Pipeline::Libplacebo | Pipeline::LibplaceboVaapi | Pipeline::LibplaceboSoftware => {
+                "Vulkan / libplacebo"
+            }
+            Pipeline::TonemapOpencl => "OpenCL",
+            Pipeline::VtToneMapMetal | Pipeline::VtDoviMetal | Pipeline::DoviMetal => "Metal",
+            _ => "CPU",
+        }
+    };
+    let encoder_label = match encoder {
+        Encoder::VideoToolbox => "VideoToolbox",
+        Encoder::Nvenc => "NVENC",
+        Encoder::Qsv => "Quick Sync",
+        Encoder::Vaapi => "VA-API",
+        Encoder::Software => "CPU",
+    };
+    let decoder_label = if encoder == Encoder::Nvenc {
+        "NVDEC"
+    } else {
+        encoder_label
+    };
+    let fact =
+        |id: &str, label: &str, enabled, hardware, backend: &str, detail: String| TranscodingFact {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            enabled,
+            hardware,
+            backend: backend.to_owned(),
+            // A processing adapter is not proved by its paired encoder's binding.
+            device_ids: if hardware && matches!(id, "hardware_decoding" | "hardware_encoding") {
+                device_ids.clone()
+            } else {
+                Vec::new()
+            },
+            detail,
+        };
+    vec![
+        fact(
+            "hardware_decoding",
+            "Hardware decoding",
+            decode,
+            decode,
+            decode_backend,
+            if decode {
+                format!(
+                    "{decoder_label} · {device}\nSupported codecs use hardware; others use the CPU"
+                )
+            } else {
+                "CPU decoding is selected".to_owned()
+            },
+        ),
+        fact(
+            "hardware_encoding",
+            "Hardware encoding",
+            hardware_encoder,
+            hardware_encoder,
+            backend,
+            if hardware_sessions_enabled {
+                format!("{encoder_label} · {device}")
+            } else {
+                "Hardware session limit is zero".to_owned()
+            },
+        ),
+        fact(
+            "tone_mapping",
+            "HDR → SDR tone mapping",
+            (support.filters.contains("tonemap") && support.filters.contains("zscale"))
+                || hardware_tone,
+            hardware_tone,
+            processing_backend,
+            if hardware_tone {
+                format!("{processing_backend} · GPU acceleration")
+            } else {
+                "CPU processing".to_owned()
+            },
+        ),
+        fact(
+            "hardware_scaling",
+            "Hardware scaling",
+            hardware_scale,
+            hardware_scale,
+            if native_scale {
+                "VideoToolbox"
+            } else {
+                processing_backend
+            },
+            if native_scale {
+                "VideoToolbox · Hardware-accelerated resizing".to_owned()
+            } else if hardware_scale {
+                format!("{processing_backend} · Hardware-accelerated resizing\nSelected for compatible streams")
+            } else {
+                "CPU resizing is selected".to_owned()
+            },
+        ),
+        fact(
+            "subtitle_burn_in",
+            "Subtitle burn-in",
+            subtitles || native_subtitles,
+            native_subtitles,
+            if native_subtitles {
+                "VideoToolbox / Metal"
+            } else {
+                "CPU"
+            },
+            if native_subtitles {
+                "Mac GPU processing · Text and bitmap subtitles"
+            } else {
+                "CPU rendering · May require GPU frame transfers"
+            }
+            .to_owned(),
+        ),
+        fact(
+            "deinterlacing",
+            if native_deinterlace {
+                "Hardware deinterlacing"
+            } else {
+                "Deinterlacing"
+            },
+            deinterlace || native_deinterlace,
+            native_deinterlace,
+            if native_deinterlace {
+                "VideoToolbox"
+            } else {
+                "CPU"
+            },
+            if native_deinterlace {
+                "VideoToolbox · Interlaced SDR video"
+            } else {
+                "CPU processing · Interlaced video"
+            }
+            .to_owned(),
+        ),
+    ]
 }
 
 #[derive(Default)]
@@ -362,6 +724,14 @@ async fn processing_smoke(ffmpeg: &str, pipeline: Pipeline) -> Result<(), String
 
 async fn inspect(ffmpeg: &str, ffprobe: &str, caps: &EncoderCaps) -> SupportReport {
     let mut report = SupportReport {
+        required_package: String::new(),
+        expected_version: String::new(),
+        executable_version: None,
+        source_revision: String::new(),
+        package_verification: package_verification_status(std::env::consts::OS, false).to_owned(),
+        additional_media_support: Vec::new(),
+        hwaccels: BTreeSet::new(),
+        filters: BTreeSet::new(),
         executable: ffmpeg.to_owned(),
         expected_executable: None,
         package_verified: false,
@@ -381,16 +751,28 @@ async fn inspect(ffmpeg: &str, ffprobe: &str, caps: &EncoderCaps) -> SupportRepo
             return report;
         }
     };
+    if !cfg!(target_os = "macos") {
+        // Resolving the selected object supplies its actual location; it is
+        // deliberately not a source-package integrity attestation on Linux.
+        match crate::ffmpeg::EncodedExecutable::capture_program(ffmpeg).await {
+            Ok(selected) => report.executable = selected.path.display().to_string(),
+            Err(error) => report.package_problems.push(error),
+        }
+    }
+    report.required_package = contract.required_package.clone();
+    report.expected_version = contract.expected_version.clone();
+    report.source_revision = contract.source_commit.clone();
     let mut inventory = Inventory::default();
     match probe(ffmpeg, &["-version"]).await {
-        Ok(text)
-            if text
-                .lines()
-                .next()
-                .is_some_and(|line| line.to_ascii_lowercase().contains("jellyfin")) => {}
-        Ok(_) => report
-            .package_problems
-            .push("Selected FFmpeg is not a Jellyfin build".to_owned()),
+        Ok(text) => {
+            report.executable_version = executable_version(&text);
+            if report.executable_version.as_deref() != Some(&contract.expected_version) {
+                report.package_problems.push(format!(
+                    "Selected FFmpeg version does not match required {}",
+                    contract.expected_version
+                ));
+            }
+        }
         Err(error) => report.package_problems.push(error),
     }
     for group in ["filters", "encoders", "decoders", "hwaccels", "bsfs"] {
@@ -506,6 +888,15 @@ async fn inspect(ffmpeg: &str, ffprobe: &str, caps: &EncoderCaps) -> SupportRepo
             }
         }
     }
+    report.package_verification =
+        package_verification_status(std::env::consts::OS, report.package_verified).to_owned();
+    report.additional_media_support = media_support(&inventory);
+    report.hwaccels = inventory
+        .groups
+        .get("hwaccels")
+        .cloned()
+        .unwrap_or_default();
+    report.filters = inventory.groups.get("filters").cloned().unwrap_or_default();
     report.rows = rows(
         contract,
         &hardware_profiles(std::env::consts::OS, &vendors, caps),
@@ -593,6 +984,368 @@ pub async fn report(system: &crate::state::SystemInfo) -> SupportReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_contract_separates_package_and_executable_versions() {
+        let contract: Contract = serde_json::from_str(CONTRACT).expect("contract");
+        assert_eq!(contract.required_package, "8.1.3-1");
+        assert_eq!(contract.expected_version, "8.1.3-Jellyfin");
+        assert_eq!(
+            package_verification_status("linux", true),
+            "unsupported_platform"
+        );
+        assert_eq!(
+            package_verification_status("linux", false),
+            "unsupported_platform"
+        );
+        assert_eq!(package_verification_status("macos", false), "unverified");
+        assert_eq!(package_verification_status("macos", true), "verified");
+        assert_eq!(
+            executable_version("ffmpeg version 8.1.3-Jellyfin Copyright 2026\nconfiguration: ...")
+                .as_deref(),
+            Some(contract.expected_version.as_str())
+        );
+        assert!(executable_version("failed to run ffmpeg").is_none());
+    }
+
+    #[test]
+    fn additional_support_distinguishes_build_facilities_from_runtime_qualification() {
+        let mut inventory = Inventory::default();
+        inventory.groups.insert(
+            "decoders".to_owned(),
+            BTreeSet::from(["ac4".to_owned(), "hevc".to_owned()]),
+        );
+        inventory.groups.insert(
+            "filters".to_owned(),
+            BTreeSet::from([
+                "tonemapx".to_owned(),
+                "libplacebo".to_owned(),
+                "tonemap_opencl".to_owned(),
+            ]),
+        );
+        inventory
+            .groups
+            .insert("bsfs".to_owned(), BTreeSet::from(["dovi_rpu".to_owned()]));
+        let facts = media_support(&inventory);
+        assert!(
+            facts
+                .iter()
+                .find(|fact| fact.id == "ac4")
+                .expect("AC4")
+                .support_available
+        );
+        assert!(
+            facts
+                .iter()
+                .find(|fact| fact.id == "dolby_vision")
+                .expect("DV")
+                .support_available
+        );
+        assert!(
+            !facts
+                .iter()
+                .find(|fact| fact.id == "vulkan")
+                .expect("Vulkan")
+                .support_available
+        );
+        inventory.groups.insert(
+            "hwaccels".to_owned(),
+            BTreeSet::from(["vulkan".to_owned(), "opencl".to_owned()]),
+        );
+        assert!(media_support(&inventory)
+            .iter()
+            .all(|fact| fact.support_available));
+    }
+
+    #[test]
+    fn six_facts_separate_cpu_fallback_from_saved_mac_enablement_and_acceptance() {
+        let mut system = crate::state::SystemInfo::default();
+        system.encoders.videotoolbox = true;
+        let mut support = SupportReport {
+            hwaccels: BTreeSet::from(["videotoolbox".to_owned()]),
+            filters: [
+                "subtitles",
+                "bwdif",
+                "tonemap",
+                "zscale",
+                "scale_vt",
+                "tonemap_videotoolbox",
+                "subtitles_vt_images",
+                "overlay_videotoolbox",
+                "bwdif_videotoolbox",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            ..SupportReport::default()
+        };
+        // No external acceptance or successful graph report is present. The
+        // configured switch remains enabled, while stream compatibility is
+        // still decided separately by the production resolver.
+        let enabled = transcoding_facts_for_platform(
+            &system,
+            &support,
+            Encoder::VideoToolbox,
+            true,
+            "macos",
+            true,
+        );
+        assert_eq!(enabled.len(), 6);
+        assert!(enabled.iter().all(|fact| fact.enabled));
+        println!(
+            "System facts example: {}",
+            serde_json::to_string(&enabled).expect("wire facts")
+        );
+        let disabled = transcoding_facts_for_platform(
+            &system,
+            &support,
+            Encoder::VideoToolbox,
+            false,
+            "macos",
+            true,
+        );
+        assert!(
+            !disabled
+                .iter()
+                .find(|fact| fact.id == "hardware_scaling")
+                .expect("scale")
+                .enabled
+        );
+        for id in ["tone_mapping", "subtitle_burn_in", "deinterlacing"] {
+            let fact = disabled
+                .iter()
+                .find(|fact| fact.id == id)
+                .expect("CPU fallback");
+            assert!(fact.enabled);
+            assert!(!fact.hardware);
+        }
+        let software = transcoding_facts_for_platform(
+            &system,
+            &support,
+            Encoder::Software,
+            true,
+            "macos",
+            true,
+        );
+        assert!(!software.iter().any(|fact| fact.hardware));
+        system.tone_map.selected = Pipeline::VtToneMapMetal.name().to_owned();
+        let saved_off = transcoding_facts_for_platform(
+            &system,
+            &support,
+            Encoder::VideoToolbox,
+            false,
+            "macos",
+            true,
+        );
+        assert!(!saved_off
+            .iter()
+            .filter(|fact| fact.id == "tone_mapping" || fact.id == "hardware_scaling")
+            .any(|fact| fact.hardware));
+        system.tone_map.selected = Pipeline::LibplaceboSoftware.name().to_owned();
+        support.filters.insert("libplacebo".to_owned());
+        support.hwaccels.insert("vulkan".to_owned());
+        let software_gpu = transcoding_facts_for_platform(
+            &system,
+            &support,
+            Encoder::Software,
+            false,
+            "linux",
+            true,
+        );
+        assert!(
+            software_gpu
+                .iter()
+                .find(|fact| fact.id == "tone_mapping")
+                .expect("software-frame Vulkan route")
+                .hardware
+        );
+        let mut forced_cpu_decode = enabled.clone();
+        apply_decode_compatibility(&mut forced_cpu_decode, Some("off"));
+        assert!(
+            !forced_cpu_decode
+                .iter()
+                .find(|fact| fact.id == "hardware_decoding")
+                .expect("forced CPU decode")
+                .enabled
+        );
+        assert!(
+            forced_cpu_decode
+                .iter()
+                .find(|fact| fact.id == "hardware_encoding")
+                .expect("independent encoder")
+                .enabled
+        );
+
+        let no_slots = transcoding_facts_for_platform(
+            &system,
+            &support,
+            Encoder::VideoToolbox,
+            true,
+            "macos",
+            false,
+        );
+        assert!(!no_slots.iter().any(|fact| fact.hardware));
+        for id in ["tone_mapping", "subtitle_burn_in", "deinterlacing"] {
+            assert!(
+                no_slots
+                    .iter()
+                    .find(|fact| fact.id == id)
+                    .expect("CPU fallback with no hardware slots")
+                    .enabled
+            );
+        }
+    }
+
+    #[test]
+    fn saved_mac_preference_requires_build_facilities_and_processing_never_borrows_encoder_binding()
+    {
+        let mut system = crate::state::SystemInfo::default();
+        system.encoders.videotoolbox = true;
+        system
+            .encoders
+            .device_bindings
+            .push(plurx_core::transcode::EncoderDeviceBinding {
+                backend: "videotoolbox".to_owned(),
+                device_ids: vec!["encoder-device".to_owned()],
+                binding: "configured".to_owned(),
+                detail: "Encoder device".to_owned(),
+            });
+        let mut support = SupportReport {
+            filters: [
+                "tonemap",
+                "subtitles_vt_images",
+                "overlay_videotoolbox",
+                "bwdif_videotoolbox",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            ..SupportReport::default()
+        };
+        let absent = transcoding_facts_for_platform(
+            &system,
+            &support,
+            Encoder::VideoToolbox,
+            true,
+            "macos",
+            true,
+        );
+        assert!(
+            !absent
+                .iter()
+                .find(|fact| fact.id == "tone_mapping")
+                .expect("tone map")
+                .hardware
+        );
+        assert!(
+            !absent
+                .iter()
+                .find(|fact| fact.id == "hardware_scaling")
+                .expect("scale")
+                .enabled
+        );
+        assert!(!absent
+            .iter()
+            .filter(|fact| !matches!(fact.id.as_str(), "hardware_encoding" | "hardware_decoding"))
+            .any(|fact| fact.hardware));
+        support
+            .filters
+            .extend(["scale_vt".to_owned(), "tonemap_videotoolbox".to_owned()]);
+        let present = transcoding_facts_for_platform(
+            &system,
+            &support,
+            Encoder::VideoToolbox,
+            true,
+            "macos",
+            true,
+        );
+        let tone = present
+            .iter()
+            .find(|fact| fact.id == "tone_mapping")
+            .expect("tone map");
+        assert!(tone.hardware);
+        assert!(tone.detail.contains("Metal · GPU acceleration"));
+        for fact in present
+            .iter()
+            .filter(|fact| fact.id != "hardware_encoding" && fact.id != "hardware_decoding")
+        {
+            assert!(fact.device_ids.is_empty());
+        }
+    }
+
+    #[test]
+    fn system_fact_examples_share_production_projection() {
+        let mut mac = crate::state::SystemInfo::default();
+        mac.encoders.videotoolbox = true;
+        let mac_support = SupportReport {
+            hwaccels: BTreeSet::from(["videotoolbox".to_owned()]),
+            filters: [
+                "subtitles",
+                "bwdif",
+                "tonemap",
+                "zscale",
+                "scale_vt",
+                "tonemap_videotoolbox",
+                "subtitles_vt_images",
+                "overlay_videotoolbox",
+                "bwdif_videotoolbox",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            ..SupportReport::default()
+        };
+        let mut linux = crate::state::SystemInfo::default();
+        linux.encoders.nvenc = true;
+        linux.tone_map.selected = Pipeline::TonemapCuda.name().to_owned();
+        let linux_support = SupportReport {
+            hwaccels: BTreeSet::from(["cuda".to_owned()]),
+            filters: [
+                "subtitles",
+                "bwdif",
+                "tonemap",
+                "zscale",
+                "tonemap_cuda",
+                "scale_cuda",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            ..SupportReport::default()
+        };
+        let empty = crate::state::SystemInfo::default();
+        let empty_support = SupportReport::default();
+        for (name, platform, system, support, encoder) in [
+            ("macos", "macos", &mac, &mac_support, Encoder::VideoToolbox),
+            ("linux", "linux", &linux, &linux_support, Encoder::Nvenc),
+            (
+                "unavailable",
+                "linux",
+                &empty,
+                &empty_support,
+                Encoder::Software,
+            ),
+        ] {
+            let facts =
+                transcoding_facts_for_platform(system, support, encoder, true, platform, true);
+            assert_eq!(facts.len(), 6);
+            if name == "unavailable" {
+                assert!(!facts.iter().any(|fact| fact.enabled));
+            } else {
+                assert!(facts.iter().all(|fact| fact.enabled));
+            }
+            let value = serde_json::json!({"platform": platform, "transcoding_facts": facts});
+            if let Ok(directory) = std::env::var("PLURX_SYSTEM_FACTS_EXAMPLES_DIR") {
+                let directory = std::path::Path::new(&directory);
+                std::fs::create_dir_all(directory).expect("example output directory");
+                std::fs::write(
+                    directory.join(format!("system-facts-{name}.json")),
+                    serde_json::to_vec_pretty(&value).expect("example JSON"),
+                )
+                .expect("write exact wire example");
+            }
+        }
+    }
 
     fn missing(platform: &str, vendors: &[&str], caps: EncoderCaps) -> Vec<String> {
         let contract = serde_json::from_str(CONTRACT).expect("checked-in support contract");

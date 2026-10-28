@@ -690,11 +690,18 @@ pub(crate) fn record_outcome(
         IndexRefusal::Truncated { rows } => i64::from(rows),
         IndexRefusal::Unsupported => 0,
     };
+    // An untyped record replaces whatever typed disposition the row held: a
+    // typed code, retry window or policy revision left behind would go on
+    // describing a refusal this record superseded (an old budget failure
+    // retried into `Unsupported` read as due forever). `record_typed_outcome`
+    // writes its own typed columns over these in the same transaction.
     conn.execute(
         "INSERT INTO fragment_index_outcomes (
              file_id, argv_fingerprint, source_size, source_mtime, outcome,
-             reason, rows_built, attempts, next_attempt_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             reason, rows_built, attempts, next_attempt_at_ms, updated_at_ms,
+             typed_code, typed_retryable, retry_deadline_ms, policy_revision,
+             terminal_reason, diagnostic_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '', NULL, 0, ?11, '', '')
          ON CONFLICT(file_id, argv_fingerprint) DO UPDATE SET
              source_size = excluded.source_size,
              source_mtime = excluded.source_mtime,
@@ -703,7 +710,13 @@ pub(crate) fn record_outcome(
              rows_built = excluded.rows_built,
              attempts = excluded.attempts,
              next_attempt_at_ms = excluded.next_attempt_at_ms,
-             updated_at_ms = excluded.updated_at_ms",
+             updated_at_ms = excluded.updated_at_ms,
+             typed_code = '',
+             typed_retryable = NULL,
+             retry_deadline_ms = 0,
+             policy_revision = excluded.policy_revision,
+             terminal_reason = '',
+             diagnostic_json = ''",
         params![
             file_id,
             source.argv_fingerprint,
@@ -715,6 +728,7 @@ pub(crate) fn record_outcome(
             i64::from(attempts),
             next_attempt_at_ms,
             now_ms,
+            i64::from(crate::content_analysis::INDEX_FAILURE_POLICY_REVISION),
         ],
     )?;
     Ok(FragmentIndexOutcome {
@@ -727,7 +741,7 @@ pub(crate) fn record_outcome(
         typed_code: None,
         typed_retryable: None,
         retry_deadline_ms: 0,
-        policy_revision: 0,
+        policy_revision: crate::content_analysis::INDEX_FAILURE_POLICY_REVISION,
         terminal_reason: None,
         diagnostic: None,
     })
@@ -747,15 +761,20 @@ pub(crate) fn record_typed_outcome(
     max_attempts: u32,
 ) -> Result<FragmentIndexOutcome, StoreError> {
     let transaction = conn.unchecked_transaction()?;
+    // A row recorded under an older failure policy starts a fresh retry
+    // window: that policy's window is what left it stranded.
     let existing_deadline = transaction
         .query_row(
-            "SELECT retry_deadline_ms FROM fragment_index_outcomes
+            "SELECT retry_deadline_ms, policy_revision FROM fragment_index_outcomes
               WHERE file_id = ?1 AND argv_fingerprint = ?2",
             params![file_id, source.argv_fingerprint],
-            |row| row.get::<_, i64>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?
-        .unwrap_or(0);
+        .filter(|(_, revision)| {
+            *revision >= i64::from(crate::content_analysis::INDEX_FAILURE_POLICY_REVISION)
+        })
+        .map_or(0, |(deadline, _)| deadline);
     let refusal = if code == crate::content_analysis::IndexFailureCode::Unsupported {
         IndexRefusal::Unsupported
     } else {
@@ -1558,6 +1577,55 @@ mod tests {
             "the sweep window counts files, not pipelines: a Dolby Vision \
              library must not halve the number of files each tick examines"
         );
+    }
+
+    /// Review of #1299: an untyped record (an `Unsupported` refusal) left the
+    /// row's typed code and old policy revision behind, so a retried
+    /// old-policy budget failure that ended `Unsupported` read as due on every
+    /// pass.
+    #[test]
+    fn an_untyped_record_replaces_the_typed_disposition() {
+        use crate::content_analysis::{IndexFailureCode, INDEX_FAILURE_POLICY_REVISION};
+        let conn = typed_conn();
+        let source = SourceIdentity::new(4_096, 1_700_000_000_000, "old-budget");
+        record_typed_outcome(
+            &conn,
+            79,
+            &source,
+            IndexFailureCode::IndexBudgetExceeded,
+            false,
+            "budget exhausted",
+            10,
+            &crate::content_analysis::IndexDiagnostic::default(),
+            1_700_000_000_000,
+            5,
+        )
+        .expect("budget failure");
+        conn.execute(
+            "UPDATE fragment_index_outcomes SET policy_revision = 1 WHERE file_id = 79",
+            [],
+        )
+        .expect("recorded under the old policy");
+        let old = outcome(&conn, 79, &source).expect("read").expect("row");
+        assert!(
+            old.is_due(1_700_000_000_001),
+            "due once under the new policy"
+        );
+        record_outcome(
+            &conn,
+            79,
+            &source,
+            IndexRefusal::Unsupported,
+            "no keyframes",
+            1_700_000_000_002,
+        )
+        .expect("untyped record");
+        let now = outcome(&conn, 79, &source).expect("read").expect("row");
+        assert_eq!(now.typed_code, None);
+        assert_eq!(now.typed_retryable, None);
+        assert_eq!(now.policy_revision, INDEX_FAILURE_POLICY_REVISION);
+        assert!(!now.is_due(i64::MAX - 1), "{now:?}");
+        assert!(now.is_terminal(i64::MAX - 1));
     }
 
     #[test]

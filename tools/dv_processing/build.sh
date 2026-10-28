@@ -16,6 +16,9 @@ mkdir -p "$output_dir"
 # fast/reciprocal math overrides are unsupported for this pixel contract.
 ffmpeg_flags=$(PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --static --cflags --libs libavformat libavcodec libavutil)
 placebo_flags=$(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplacebo)
+"$CC" $CFLAGS -std=c11 -Wall -Wextra -Werror -I"$dovi_prefix/include" \
+    "$source_dir/scan_title.c" "$dovi_prefix/lib/libdovi.a" \
+    -o "$output_dir/scan_title" $ffmpeg_flags -lm -lpthread -ldl
 "$CC" $CFLAGS -frounding-math -std=c11 -Wall -Wextra -Werror -I"$dovi_prefix/include" \
     "$source_dir/segment_decode_render.c" "$dovi_prefix/lib/libdovi.a" \
     -o "$output_dir/segment_decode_render" $ffmpeg_flags $placebo_flags -lm -lpthread -ldl

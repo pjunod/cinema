@@ -341,7 +341,7 @@ class LinuxSourceRuntimeTests(unittest.TestCase):
                 "import json,os,pathlib,sys\n" +
                 "args=sys.argv; fmt=args[args.index('--packager')+1]; out=pathlib.Path(args[args.index('--target')+1]); desktop='desktop-nfpm' in args[args.index('--config')+1]\n" +
                 "name='plurx-desktop' if desktop else 'plurxd'; filename=(name+'_0.7.0-1_amd64.deb') if fmt=='deb' else (name+'-0.7.0-1.x86_64.rpm'); (out/filename).write_bytes(b'package')\n" +
-                "with open(os.environ['CAPTURE'],'a') as f: f.write(json.dumps({'format':fmt,'desktop':desktop,'hook':pathlib.Path('postinstall').read_text()})+'\\n')\n")
+                "with open(os.environ['CAPTURE'],'a') as f: f.write(json.dumps({'format':fmt,'desktop':desktop,'hook':pathlib.Path('postinstall').read_text(),'notice':pathlib.Path('subtitle-translation-notice.txt').read_text(),'license':pathlib.Path('CC-BY-4.0.txt').read_text()})+'\\n')\n")
             (bins / "nfpm").chmod(0o755)
             result = subprocess.run([
                 str(ROOT / "scripts/package-linux"), "--arch", "amd64", "--version", "0.7.0",
@@ -355,5 +355,11 @@ class LinuxSourceRuntimeTests(unittest.TestCase):
             anchor = "# Source installer restores the observed service policy.\nexit 0\n"
             self.assertIn(anchor, hook)
             self.assertLess(hook.index(anchor), hook.index('if [ "$arriving" = 1 ]'))
+            self.assertIn("Google FLEURS", calls[0]["notice"])
+            self.assertIn("sentence 1586", calls[0]["notice"])
+            self.assertIn("Conneau, Ma, Khanuja", calls[0]["notice"])
+            self.assertIn("creativecommons.org/licenses/by/4.0/", calls[0]["notice"])
+            self.assertTrue(calls[0]["license"].startswith("Attribution 4.0 International\n"))
+            self.assertEqual(calls[0]["license"], (ROOT / "licenses/CC-BY-4.0.txt").read_text())
             self.assertEqual(len(list((directory / "packages").glob("*.deb"))), 2)
             self.assertFalse(list((directory / "packages").glob("*.rpm")))

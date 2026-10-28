@@ -22,7 +22,7 @@
 # neither was visible to any check.
 #
 # So: **adding a label to a workflow means adding it to a runner first.** Change
-# the ansible inventory, apply it, then add the runner here in the change that
+# the applicable provisioning authority, apply it, then add the runner here in the change that
 # teaches a workflow to ask for the label. A `runs-on` no rostered runner can
 # satisfy now fails `make operations-check` at preflight — in seconds, on the
 # pull request that introduced it — instead of at 3am in a queue nobody is
@@ -34,6 +34,11 @@
 # and each runner's own operating-system and architecture labels, which never
 # appear in the ansible inventory, so they are derived from `os` and `arch`
 # rather than repeated by hand.
+#
+# Exception: the existing dedicated Forgejo media1 registration is managed by
+# its persistent runner configuration, as documented in RUNNER-DISK.md. Its
+# labels/child bounds must not be provisioned through the older GitHub Ansible
+# registration. The roster records placement; it does not activate a daemon.
 #
 # Runner names carry their host: `gha-<host>-<role>-<NN>`. Host names here
 # are the fleet's neutral names (`lab1`…`lab6`, `media1`, `maca`, `macb`); the
@@ -210,7 +215,11 @@ name = "gha-media1-general-01"
 host = "media1"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+# Dedicated full unit capacity: one 16 GiB resident / 18 GiB combined job.
+# Retain the former 12g capability for existing consumers.
+# Keep the sole selector available after qualification; general jobs use the
+# other registrations. This grants no heavy replicated-cluster eligibility.
+labels = ["lab", "unit-memory-12g", "unit-memory-16g", "baremetal", "ubuntu-26.04"]
 
 [[runners]]
 name = "gha-media1-general-02"
@@ -251,7 +260,7 @@ name = "gha-macb-apple-01"
 host = "macb"
 os = "macOS"
 arch = "ARM64"
-labels = ["lab", "apple", "xcode-27", "backup"]
+labels = ["lab", "apple", "xcode-27", "backup", "xcode-27.1"]
 
 # This VM also runs a Forgejo runner carrying `release-arm64`: the release
 # image's arm64 leg builds there natively instead of under QEMU on X64.

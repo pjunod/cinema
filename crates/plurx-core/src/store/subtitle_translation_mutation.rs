@@ -31,6 +31,8 @@ pub enum TranslationAction {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
     Demand {
         operation_id: String,
@@ -41,6 +43,8 @@ pub enum TranslationAction {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
     Release {
         operation_id: String,
@@ -62,6 +66,17 @@ pub enum TranslationAction {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
+    },
+    /// Internal reconciliation of an already-authorized live demand; never changes its root epoch.
+    Retarget {
+        operation_id: String,
+        expected_operation_epoch: i64,
+        expected_view_revision: i64,
+        expected_preparation_job_id: String,
+        expected_target_node_id: String,
+        target_node_id: String,
     },
     RetryRange {
         operation_id: String,
@@ -72,6 +87,8 @@ pub enum TranslationAction {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
 }
 impl TranslationMutation {
@@ -84,6 +101,16 @@ impl TranslationMutation {
             || self.now_ms.checked_add(604800000).is_none()
             || self.intent_expires_at_ms < 0
         {
+            return Err(bad());
+        }
+        let continuity = match &self.action {
+            TranslationAction::Create { continuity_id, .. }
+            | TranslationAction::Demand { continuity_id, .. }
+            | TranslationAction::RetryOperation { continuity_id, .. }
+            | TranslationAction::RetryRange { continuity_id, .. } => continuity_id.as_deref(),
+            _ => None,
+        };
+        if continuity.is_some_and(|id| id.len() != 36 || uuid::Uuid::parse_str(id).is_err()) {
             return Err(bad());
         }
         let window = |position: &i64, rate: &f64, playback: &str| {
@@ -109,9 +136,9 @@ impl TranslationMutation {
             } => {
                 source.validate()?;
                 profile.validate()?;
-                if *audio_index != 0
+                if !(0..=255).contains(audio_index)
                     || !super::background_jobs_transcription::whisper_language(spoken_language)
-                    || spoken_language == "en"
+                    || (profile.task.is_translation() && spoken_language == "en")
                     || !(1..=14400000).contains(duration_ms)
                     || target_node_id.is_empty()
                     || target_node_id.len() > 128
@@ -182,6 +209,25 @@ impl TranslationMutation {
                     return Err(bad());
                 }
             }
+            TranslationAction::Retarget {
+                operation_id,
+                expected_operation_epoch,
+                expected_view_revision,
+                expected_preparation_job_id,
+                expected_target_node_id,
+                target_node_id,
+            } => {
+                if uuid::Uuid::parse_str(operation_id).is_err()
+                    || *expected_operation_epoch <= 0
+                    || *expected_view_revision <= 0
+                    || uuid::Uuid::parse_str(expected_preparation_job_id).is_err()
+                    || [expected_target_node_id, target_node_id]
+                        .iter()
+                        .any(|node| node.is_empty() || node.len() > 128)
+                {
+                    return Err(bad());
+                }
+            }
             TranslationAction::RetryRange {
                 operation_id,
                 expected_operation_epoch,
@@ -218,7 +264,7 @@ const MUTATE: &str = r#"WITH input AS MATERIALIZED(SELECT json($1) body), prior 
  OR (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests)+2048>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release') THEN 8388608 ELSE 8323072 END
  OR (SELECT COALESCE(sum(length(CAST(outcome_json AS BLOB))),0) FROM subtitle_translation_requests WHERE user_id=json_extract(body,'$.user_id'))+2048>=CASE WHEN json_extract(body,'$.action.action') IN ('stop','release') THEN 524288 ELSE 507904 END THEN 'receipt_quota'
  WHEN json_extract(body,'$.action.action') NOT IN ('stop','release') AND (SELECT count(*) FROM subtitle_translation_requests WHERE user_id=json_extract(body,'$.user_id') AND created_at_ms>json_extract(body,'$.now_ms')-60000)>=60 THEN 'rate_limited'
- WHEN json_extract(body,'$.action.action') IN ('create','retry_operation','retry_range') AND NOT EXISTS(SELECT 1 FROM settings WHERE key='subtitles.translation.config.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.version')=1 AND json_type(value,'$.enabled')='true' ELSE 0 END) THEN 'disabled'
+ WHEN json_extract(body,'$.action.action') IN ('create','retry_operation','retry_range','retarget') AND NOT EXISTS(SELECT 1 FROM settings WHERE key='subtitles.translation.config.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.version')=1 AND json_type(value,'$.enabled')='true' ELSE 0 END) THEN 'disabled'
  WHEN json_extract(body,'$.action.action')='create' AND NOT EXISTS(SELECT 1 FROM files WHERE id=json_extract(body,'$.action.source.file_id') AND size=json_extract(body,'$.action.source.source_size') AND mtime=json_extract(body,'$.action.source.source_mtime') AND probe_json IS NOT NULL) THEN 'source_changed'
  WHEN json_extract(body,'$.action.action') IN ('create','retry_operation','retry_range') AND NOT EXISTS(SELECT 1 FROM subtitle_translation_demands WHERE operation_id=op_id AND operation_epoch=(SELECT operation_epoch FROM subtitle_translation_operations WHERE id=op_id) AND user_id=json_extract(body,'$.user_id') AND playback_id=json_extract(body,'$.action.playback_id') AND released=0 AND expires_at_ms>json_extract(body,'$.now_ms')) AND (
  (SELECT count(*) FROM subtitle_translation_demands WHERE released=0 AND expires_at_ms>json_extract(body,'$.now_ms'))>=16 OR
@@ -231,6 +277,7 @@ const MUTATE: &str = r#"WITH input AS MATERIALIZED(SELECT json($1) body), prior 
  WHEN json_extract(body,'$.action.action')='stop' AND EXISTS(SELECT 1 FROM subtitle_translation_operations WHERE id=op_id AND stopped=1) THEN 'already_stopped'
  WHEN json_extract(body,'$.action.action') IN ('create','demand') AND EXISTS(SELECT 1 FROM subtitle_translation_operations WHERE id=op_id AND (stopped=1 OR state='failed')) THEN 'stopped'
  WHEN json_extract(body,'$.action.action') IN ('demand','release') AND NOT EXISTS(SELECT 1 FROM subtitle_translation_demands WHERE id=json_extract(body,'$.action.demand_id') AND operation_id=op_id AND operation_epoch=json_extract(body,'$.action.expected_operation_epoch') AND generation=json_extract(body,'$.action.expected_generation') AND generation<9223372036854775807 AND user_id=json_extract(body,'$.user_id') AND playback_id=json_extract(body,'$.action.playback_id') AND released=0) THEN 'demand_conflict'
+ WHEN json_extract(body,'$.action.action')='retarget' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id WHERE op.id=op_id AND op.operation_epoch=json_extract(body,'$.action.expected_operation_epoch') AND op.view_revision=json_extract(body,'$.action.expected_view_revision') AND op.preparation_job_id=json_extract(body,'$.action.expected_preparation_job_id') AND op.target_node_id=json_extract(body,'$.action.expected_target_node_id') AND op.stopped=0 AND op.state NOT IN ('failed','stopped','complete') AND f.size=json_extract(op.source_json,'$.source_size') AND f.mtime=json_extract(op.source_json,'$.source_mtime') AND f.probe_json IS NOT NULL AND EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch AND d.user_id=json_extract(body,'$.user_id') AND d.released=0 AND d.expires_at_ms>json_extract(body,'$.now_ms') AND u.is_admin=1) AND NOT __READABLE_OPERATION__) THEN 'state_conflict'
  WHEN json_extract(body,'$.action.action')='retry_operation' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations WHERE id=op_id AND view_revision=json_extract(body,'$.action.expected_view_revision') AND state=json_extract(body,'$.action.expected_state') AND (stopped=1 OR (state='failed' AND retryable=1))) THEN 'state_conflict'
  WHEN json_extract(body,'$.action.action')='retry_range' AND NOT EXISTS(SELECT 1 FROM subtitle_translation_operations op JOIN subtitle_translation_ranges r ON r.operation_id=op.id AND r.operation_epoch=op.operation_epoch WHERE op.id=op_id AND op.state='partial' AND op.stopped=0 AND r.core_index=json_extract(body,'$.action.core_index') AND r.range_revision=json_extract(body,'$.action.expected_range_revision') AND r.state='failed' AND r.retryable=1 AND r.attempts<3 AND r.range_revision<9223372036854775807) THEN 'range_conflict'
  ELSE 'accepted' END outcome FROM selected)
@@ -263,7 +310,13 @@ pub(super) async fn mutate<T: QueueSql>(
     // Stop tombstones are independent and never removed by receipt retirement.
     statements.push(("DELETE FROM subtitle_translation_requests WHERE rowid IN (SELECT rowid FROM subtitle_translation_requests WHERE expires_at_ms<json_extract($1,'$.now_ms') ORDER BY expires_at_ms LIMIT 128)".into(),encode(&body)?));
     statements.push(("DELETE FROM subtitle_translation_commands WHERE id IN (SELECT id FROM subtitle_translation_commands WHERE json_extract(request_json,'$.now_ms')<json_extract($1,'$.now_ms')-300000 LIMIT 128)".into(),encode(&body)?));
-    statements.push((MUTATE.into(), encode(&body)?));
+    statements.push((
+        MUTATE.replace(
+            "__READABLE_OPERATION__",
+            super::subtitle_translation_read::READABLE_OPERATION,
+        ),
+        encode(&body)?,
+    ));
     let preparation = match &input.action {
         TranslationAction::Create {
             source,
@@ -281,11 +334,19 @@ pub(super) async fn mutate<T: QueueSql>(
             duration_ms: *duration_ms,
             target_node_id: target_node_id.clone(),
         }),
-        TranslationAction::RetryOperation { operation_id, .. } => {
+        TranslationAction::RetryOperation { operation_id, .. }
+        | TranslationAction::Retarget { operation_id, .. } => {
             let rows=store.queue_sql("SELECT json_object('source',json(source_json),'profile',json(profile_json),'audio_index',audio_index,'spoken_language',spoken_language,'duration_ms',duration_ms,'target_node_id',target_node_id) AS result_json FROM subtitle_translation_operations WHERE id=json_extract($1,'$.operation_id') AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.user_id') AND is_admin=1)".into(),encode(&json!({"operation_id":operation_id,"user_id":input.user_id}))?,false,true).await?;
-            rows.first()
+            let mut facts = rows
+                .first()
                 .map(|r| decode::<PreparationFacts>(r))
-                .transpose()?
+                .transpose()?;
+            if let (Some(facts), TranslationAction::Retarget { target_node_id, .. }) =
+                (&mut facts, &input.action)
+            {
+                facts.target_node_id = target_node_id.clone();
+            }
+            facts
         }
         _ => None,
     };
@@ -366,9 +427,17 @@ pub(super) async fn mutate<T: QueueSql>(
         ..
     } = &input.action
     {
-        let rows=store.queue_sql("SELECT json_object('asset_id',a.id,'operation_id',op.id,'operation_epoch',op.operation_epoch,'source',json(op.source_json),'source_sha256',a.source_sha256,'profile',json(op.profile_json),'audio_index',op.audio_index,'spoken_language',op.spoken_language,'duration_ms',op.duration_ms,'core_index',json_extract($1,'$.core_index')) AS result_json FROM subtitle_translation_operations op JOIN subtitle_translation_assets a ON a.id=op.asset_id WHERE op.id=json_extract($1,'$.operation_id') AND op.operation_epoch=json_extract($1,'$.epoch')".into(),encode(&json!({"operation_id":operation_id,"epoch":expected_operation_epoch,"core_index":core_index}))?,false,true).await?;
+        let rows=store.queue_sql("SELECT json_object('producer_preparation_job_id',op.preparation_job_id,'asset_id',a.id,'operation_id',op.id,'operation_epoch',op.operation_epoch,'source',json(op.source_json),'source_sha256',a.source_sha256,'profile',json(op.profile_json),'audio_index',op.audio_index,'spoken_language',op.spoken_language,'duration_ms',op.duration_ms,'core_index',json_extract($1,'$.core_index')) AS result_json FROM subtitle_translation_operations op JOIN subtitle_translation_assets a ON a.id=op.asset_id WHERE op.id=json_extract($1,'$.operation_id') AND op.operation_epoch=json_extract($1,'$.epoch')".into(),encode(&json!({"operation_id":operation_id,"epoch":expected_operation_epoch,"core_index":core_index}))?,false,true).await?;
         if let Some(row) = rows.first() {
-            let recipe: super::subtitle_translation::RangeRecipe = decode(row)?;
+            let mut recipe_row: Value = decode(row)?;
+            let producer_preparation_job_id = recipe_row
+                .as_object_mut()
+                .and_then(|row| row.remove("producer_preparation_job_id"))
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .ok_or_else(|| StoreError::Task("translation producer missing".into()))?;
+            let recipe: super::subtitle_translation::RangeRecipe =
+                serde_json::from_value(recipe_row)
+                    .map_err(|error| StoreError::Task(error.to_string()))?;
             recipe.validate()?;
             let target_rows=store.queue_sql("SELECT json_quote(target_node_id) AS result_json FROM subtitle_translation_operations WHERE id=json_extract($1,'$.operation_id')".into(),encode(&json!({"operation_id":operation_id}))?,false,true).await?;
             let node: String = decode(
@@ -384,6 +453,7 @@ pub(super) async fn mutate<T: QueueSql>(
                 payload: JobPayload::SubtitleTranslationRange {
                     file_id: recipe.source.file_id,
                     recipe,
+                    producer_preparation_job_id,
                     target_node_id: node.clone(),
                 },
                 dedupe_key: format!("translation-range-{}", input.request_id),

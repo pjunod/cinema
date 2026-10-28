@@ -397,6 +397,10 @@ pub struct AudioTrackDto {
 
 #[derive(Serialize)]
 pub struct SubTrackDto {
+    /// Acquired/generated captions are sidecars and are absent from direct media.
+    pub source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloaded_subtitle_id: Option<String>,
     /// Position among subtitle streams (`s:{index}`).
     pub index: i64,
     pub codec: String,
@@ -972,6 +976,14 @@ fn sub_tracks(file: &MediaFile, overlay_enabled: bool) -> Vec<SubTrackDto> {
         .iter()
         .enumerate()
         .map(|(i, s)| SubTrackDto {
+            source: if file.downloaded_subtitle(i as i64).is_some() {
+                "downloaded"
+            } else {
+                "embedded"
+            },
+            downloaded_subtitle_id: file
+                .downloaded_subtitle(i as i64)
+                .map(|subtitle| subtitle.stable_id()),
             index: i as i64,
             codec: s.codec.clone(),
             language: s.language.clone(),
@@ -2692,7 +2704,7 @@ async fn decision_for_file(
             Some(
                 accepted
                     .into_iter()
-                    .filter(|entry| !entry.candidate.processed_hdr10 || entry.dispatch_supported)
+                    .filter(|entry| !entry.candidate.processed_dv || entry.dispatch_supported)
                     .map(|entry| entry.candidate)
                     .collect::<Vec<_>>(),
             )

@@ -244,15 +244,32 @@ final class MeridianTests: XCTestCase {
         let hosting = UIHostingController(rootView: root)
         let window = try makeWindow()
         window.frame = CGRect(x: 0, y: 0, width: 1024, height: 768)
-        window.rootViewController = hosting
+        // UIKit chooses the initial adaptive sidebar for this device's traits.
+        // Compare Standard with the same native control in the same window.
+        let native = UIHostingController(rootView: TabView(selection: .constant(HomeTab.settings)) {
+            ForEach(HomeTab.viewerTabs, id: \.self) { tab in
+                Tab(tab.title, systemImage: tab.symbol, value: tab) {
+                    Text(tab.title).toolbarVisibility(.visible, for: .tabBar)
+                }
+                .badge(0)
+                .hidden(false)
+            }
+        }.tabViewStyle(.sidebarAdaptable))
+        window.rootViewController = native
         window.makeKeyAndVisible()
         defer { window.isHidden = true }
+        settle(1)
+        let nativeTabs = try XCTUnwrap(findTabs(native))
+        let nativeSidebarHidden = nativeTabs.sidebar.isHidden
+        window.rootViewController = hosting
+        window.makeKeyAndVisible()
         settle(1)
         let tabs = try XCTUnwrap(findTabs(hosting))
         let settings = try XCTUnwrap(tabs.selectedViewController)
         XCTAssertEqual(tabs.mode, .tabSidebar)
         XCTAssertFalse(tabs.isTabBarHidden)
-        XCTAssertTrue(tabs.sidebar.isHidden, "Standard starts with the original floating top tabs")
+        XCTAssertEqual(tabs.sidebar.isHidden, nativeSidebarHidden,
+            "Standard preserves the native adaptive sidebar choice for this device and geometry")
         XCTAssertEqual((tabs.viewControllers ?? []).compactMap { $0.tabBarItem.title }, HomeTab.viewerTabs.map(\.title))
         XCTAssertEqual(tabs.view.frame, try XCTUnwrap(tabs.view.superview).bounds)
         XCTAssertEqual(tabs.view.convert(tabs.view.bounds, to: hosting.view).width, hosting.view.bounds.width,
@@ -263,28 +280,40 @@ final class MeridianTests: XCTestCase {
         attachment.name = "Restored Standard iPad — native adaptive tabs"
         attachment.lifetime = .keepAlways
         add(attachment)
-        tabs.sidebar.isHidden = false
-        settle()
-        model.layout = .meridian
-        settle(until: { tabs.isTabBarHidden && tabs.sidebar.isHidden })
-        XCTAssertTrue(tabs.isTabBarHidden)
-        XCTAssertTrue(tabs.sidebar.isHidden)
-        XCTAssertEqual(model.theme, theme)
-        XCTAssertTrue(tabs.selectedViewController === settings)
-        window.frame.size.width = 390
-        hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
-        settle()
-        XCTAssertTrue(tabs.selectedViewController === settings)
-        model.layout = .standard
-        window.frame.size.width = 1024
-        hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
-        settle(until: { !tabs.isTabBarHidden && !tabs.sidebar.isHidden })
-        XCTAssertTrue(tabs.selectedViewController === settings)
-        XCTAssertTrue(findTabs(hosting) === tabs)
-        XCTAssertEqual(tabs.mode, .tabSidebar)
-        XCTAssertFalse(tabs.isTabBarHidden)
-        XCTAssertFalse(tabs.sidebar.isHidden, "Returning to Standard restores the viewer's native sidebar choice")
-        XCTAssertEqual(model.theme, theme)
+        func settleChrome(until condition: () -> Bool) {
+            let deadline = Date().addingTimeInterval(5)
+            settle(until: condition, timeout: max(0, deadline.timeIntervalSinceNow))
+            // SwiftUI can expose the bar before the chrome coordinator's
+            // queued restoration. Finish that hop before changing the choice.
+            let restored = expectation(description: "Queued native chrome restoration")
+            DispatchQueue.main.async { restored.fulfill() }
+            wait(for: [restored], timeout: max(0, deadline.timeIntervalSinceNow))
+        }
+        for sidebarHidden in [true, false] {
+            tabs.sidebar.isHidden = sidebarHidden
+            settle()
+            model.layout = .meridian
+            settleChrome(until: { tabs.isTabBarHidden && tabs.sidebar.isHidden })
+            XCTAssertTrue(tabs.isTabBarHidden)
+            XCTAssertTrue(tabs.sidebar.isHidden)
+            XCTAssertEqual(model.theme, theme)
+            XCTAssertTrue(tabs.selectedViewController === settings)
+            window.frame.size.width = 390
+            hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
+            settle()
+            XCTAssertTrue(tabs.selectedViewController === settings)
+            model.layout = .standard
+            window.frame.size.width = 1024
+            hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
+            settleChrome(until: { !tabs.isTabBarHidden && tabs.sidebar.isHidden == sidebarHidden })
+            XCTAssertTrue(tabs.selectedViewController === settings)
+            XCTAssertTrue(findTabs(hosting) === tabs)
+            XCTAssertEqual(tabs.mode, .tabSidebar)
+            XCTAssertFalse(tabs.isTabBarHidden)
+            XCTAssertEqual(tabs.sidebar.isHidden, sidebarHidden,
+                "Returning to Standard restores the viewer's native sidebar choice")
+            XCTAssertEqual(model.theme, theme)
+        }
         tabs.sidebar.isHidden = true
         model.features.recordings = false
         settle()

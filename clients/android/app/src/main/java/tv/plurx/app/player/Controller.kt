@@ -22,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -144,6 +145,8 @@ class Controller internal constructor(
     initialAudioOffsetMs: Long = 0,
     retainedAudio: Long? = null,
     retainedSubtitle: SubtitleChoice? = null,
+    progressiveCaptionIntent: ProgressiveCaptionIntent = ProgressiveCaptionIntent(),
+    subtitleTextIntent: SubtitleTextTranslationIntent = SubtitleTextTranslationIntent(),
     private val replan: (Long, String, PlaybackQuality) -> Unit,
 ) {
     internal val diagnosticAuthorizationGeneration = Session.playbackAuthorization().generation
@@ -1030,6 +1033,30 @@ class Controller internal constructor(
      */
     private var audioSelectionArmed = false
 
+    internal val progressiveCaptions = ProgressiveCaptions(
+        api = { vm.api() }, scope = scope, cleanupScope = vm.viewModelScope,
+        fileId = plan.fileId, intent = progressiveCaptionIntent,
+        sourceAudio = { selectedAudio }, sourcePosition = ::realPosition,
+        playerPosition = ::playerTimelinePositionMs, player = { player },
+        authorized = { Session.playbackAuthorization().generation == diagnosticAuthorizationGeneration },
+    )
+
+    internal val subtitleTextTranslation = SubtitleTextTranslation(
+        api = { vm.api() }, scope = scope, fileId = plan.fileId, intent = subtitleTextIntent,
+        captionSelectionRevision = { progressiveCaptionIntent.selectionRevision },
+        authorized = { Session.playbackAuthorization().generation == diagnosticAuthorizationGeneration },
+    )
+    internal fun reloadTranslatedCaption() {
+        progressiveCaptions.off()
+        replan(positionForPlaybackIntent(), "subtitle-text-translation", playbackIntent.desiredQuality)
+    }
+
+    internal fun generateCaptions(selection: ProgressiveCaptionSelection) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        if (!switchSubtitle(null, clearProgressive = false)) return
+        progressiveCaptions.select(selection)
+    }
+
     private val pgsOverlay = AndroidPGSOverlayController(
         api = { vm.api() },
         scope = scope,
@@ -1215,7 +1242,7 @@ class Controller internal constructor(
                     errorCode = error.errorCode,
                     live = player.isCurrentMediaItemLive,
                     seekTargetMs = { playerTimelinePositionMs(filmPositionMs) },
-                    seekTo = { target -> player.seekTo(target) },
+                    seekTo = { target -> progressiveCaptions.ownedMediaMutation { player.seekTo(target) } },
                     prepare = { player.prepare() },
                 )
             ) {
@@ -1388,11 +1415,13 @@ class Controller internal constructor(
         ) {
             // A discontinuity is the viewer's move: it ends a failure backoff.
             pgsOverlay.reconcile(seeked = true)
+            progressiveCaptions.rendererDiscontinuity(reason)
         }
 
         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
             settleAudioPlaybackIntentIfPresented()
             pgsOverlay.reconcile()
+            progressiveCaptions.reconcile()
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -1405,6 +1434,7 @@ class Controller internal constructor(
                 openStallTracker.reset()
             }
             pgsOverlay.reconcile()
+            progressiveCaptions.reconcile()
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -1453,6 +1483,7 @@ class Controller internal constructor(
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             pgsOverlay.itemChanged()
+            progressiveCaptions.reconcile()
         }
     }
 
@@ -1519,6 +1550,7 @@ class Controller internal constructor(
         inPlace: Boolean = false,
     ) {
         if (recipeOwnership.needsMediaReplacement(recipe) || !playbackIntent.isCurrent(sequence)) return
+        progressiveCaptions.executionAttached()
         recipeExecution = RecipeExecution(sequence, recipe, inPlace)
         recipePresentationFrame = null
         firstVideoFrameForSeek = null
@@ -1568,6 +1600,7 @@ class Controller internal constructor(
         player.addListener(listener)
         player.addAnalyticsListener(preparedSwitchAnalytics(player))
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
+        if (progressiveCaptions.selected != null) progressiveCaptions.loadOptions()
         attachSurfaceGeneration()
         targetPresentationWatchdogJob = scope.launch {
             while (isActive) {
@@ -1579,6 +1612,7 @@ class Controller internal constructor(
         stallWatchdogJob = scope.launch {
             while (isActive) {
                 settleAudioPlaybackIntentIfPresented()
+                progressiveCaptions.clockChanged()
                 playbackControlPlayerChanged()
                 val observedAtMs = monotonicNowMs()
                 // Retrospective telemetry still records the final interruption
@@ -1739,6 +1773,7 @@ class Controller internal constructor(
         stallGuard.viewerSeek {
             playbackControl.clearVerdict()
             val pending = begin()
+            progressiveCaptions.viewerSeek()
             sampleTargetPresentationDeadline()
             val publicationEpoch = mediaMutationEpoch
             seekJob?.cancel()
@@ -1804,7 +1839,7 @@ class Controller internal constructor(
         armTrackSelections(recipe)
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
-                player.seekTo(t)
+                progressiveCaptions.ownedMediaMutation { player.seekTo(t) }
                 playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             }
@@ -1827,7 +1862,7 @@ class Controller internal constructor(
             // session churn. A live one can't be range-sought, so it reopens.
             PlaybackMediaTransport.HlsCopy,
             PlaybackMediaTransport.HlsTranscode -> if (sessionIsVod) {
-                player.seekTo(t)
+                progressiveCaptions.ownedMediaMutation { player.seekTo(t) }
                 playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             } else {
@@ -2213,6 +2248,8 @@ class Controller internal constructor(
         planReplacement.release()
         clearStatusPolling()
         pgsOverlay.release()
+        progressiveCaptions.release()
+        subtitleTextTranslation.release()
         stallGuard.invalidateForUserAction()
         // The terminal acknowledgement a live preparation is owed, and then one
         // exchange to carry it — on the view model's scope, because this
@@ -2271,6 +2308,7 @@ class Controller internal constructor(
         val position = positionForPlaybackIntent()
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
+        progressiveCaptions.off()
         selectedAudio = index
         refreshAutoCatalogForViewerRecipe()
         val pending = playbackIntent.beginSeek(position, position)
@@ -2290,7 +2328,7 @@ class Controller internal constructor(
      * burn — so an SRT on a 4K HDR remux paid for a full re-encode to show a
      * track the server can hand over as a WebVTT rendition for free.
      */
-    fun switchSubtitle(index: Long?): Boolean {
+    fun switchSubtitle(index: Long?, clearProgressive: Boolean = true): Boolean {
         if (!playbackControlBootstrapFence.isActive()) return false
         val track = index?.let(::trackFor)
         // An index the decision never listed cannot be routed, and guessing
@@ -2307,6 +2345,7 @@ class Controller internal constructor(
         val route = routeSubtitle(track, subtitleDelivery)
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
+        if (clearProgressive) progressiveCaptions.off()
         selectedSubtitle = index
         subtitleDelivery = route.delivery
         refreshAutoCatalogForViewerRecipe()
@@ -2402,7 +2441,7 @@ class Controller internal constructor(
             PlaybackMediaTransport.Direct -> {
                 leaveSessionPlayback()
                 activeMediaPath = relativeMediaPath(fileContext.translatedDeliveryPath(plan.playUrl))
-                player.setMediaItem(MediaItem.fromUri(fileContext.translatedDeliveryPath(plan.playUrl)), positionMs)
+                player.setMediaItem(directMediaItem(fileContext.translatedDeliveryPath(plan.playUrl)), positionMs)
                 attachRecipe(recipe)
                 executionSequence?.let { sequence ->
                     markIntentExecuted(sequence, recipe)
@@ -2942,6 +2981,14 @@ class Controller internal constructor(
             (body.intent?.selection?.quality as? QualitySelection.AutoCandidate)?.candidateId, body.reopen_reason)
     }
 
+    /** All downloaded tracks attach once, so selecting them stays an in-place renderer change. */
+    private fun directMediaItem(uri: String): MediaItem = MediaItem.Builder().setUri(uri)
+        .setSubtitleConfigurations(plan.subtitles.filter { it.source == "downloaded" && it.text }.map { track ->
+            MediaItem.SubtitleConfiguration.Builder(Uri.parse(Session.url(fileContext.path("subs/${track.index}.vtt"))))
+                .setId(downloadedCaptionId(track.index)).setMimeType(androidx.media3.common.MimeTypes.TEXT_VTT)
+                .setLanguage(track.language).setLabel(track.title).build()
+        }).build()
+
     private fun trackFor(index: Long?): SubTrack? =
         index?.let { i -> plan.subtitles.firstOrNull { it.index == i } }
 
@@ -2984,14 +3031,20 @@ class Controller internal constructor(
                 .build()
             return
         }
-        val ordinal = if (recipe.subtitleDelivery == SubtitleDelivery.NativeSession) {
-            nativeSubtitleOrdinal(index, plan.subtitles)
+        val downloaded = trackFor(index)?.takeIf { it.source == "downloaded" && directTransport }
+        val target = if (downloaded != null) {
+            player.currentTracks.groups.asSequence().filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { group ->
+                (0 until group.length).asSequence().filter { group.getTrackFormat(it).id == downloadedCaptionId(index) }
+                    .map { group.mediaTrackGroup to it }
+            }.singleOrNull()
         } else {
-            embeddedTextTrackIndex(index, plan.subtitles, embeddedTextLanguages())
-        }
-        // Nothing to select yet — the media is still being prepared, or this
-        // source genuinely lacks the track. Stay armed; onTracksChanged retries.
-        val target = ordinal?.let(::textTrackAt) ?: return
+            val ordinal = if (recipe.subtitleDelivery == SubtitleDelivery.NativeSession) {
+                nativeSubtitleOrdinal(index, plan.subtitles)
+            } else {
+                embeddedTextTrackIndex(index, plan.subtitles, embeddedTextLanguages())
+            }
+            ordinal?.let(::textTrackAt)
+        } ?: return
         textSelectionArmed = !player.currentTracks.groups.any {
             it.mediaTrackGroup == target.first && it.isTrackSelected(target.second)
         }
@@ -3222,7 +3275,7 @@ class Controller internal constructor(
         if (progressiveTransport) {
             progressiveMediaOrigin.begin(next, realPosition())
         }
-        player.setMediaItem(MediaItem.fromUri(next), attachPosition)
+        player.setMediaItem(if (directTransport) directMediaItem(next) else MediaItem.fromUri(next), attachPosition)
         rebindMediaSessionTransport()
         attachRecipe(recipe, transport)
         presentationSequence?.let { sequence ->
@@ -3598,7 +3651,7 @@ class Controller internal constructor(
         scope.launch {
             val fresh = try {
                 vm.playbackDecision(plan.fileId, PreplayTracks(selectedAudio, SubtitleChoice(selectedSubtitle)),
-                    PlaybackQuality.Auto, target, selectionKey.third, fileContext = fileContext, linkReceipt = currentLinkReceipt()).decision
+                    PlaybackQuality.Auto, target, selectionKey.third, fileContext = fileContext, linkReceipt = currentLinkReceipt(), retainedPeak = decisionCaps.display).decision
             } catch (_: Exception) { return@launch }
             if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
             if (fresh.display_aware_auto_protocol == "route-v1") {
@@ -6455,6 +6508,12 @@ private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole):
     return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput)
 }
 
+// Keep the pending language choice tied to one of the two supported caption tasks.
+private enum class CaptionMenuTask(val wireValue: String, val label: String) {
+    TRANSCRIBE("transcribe", "Generate captions (spoken language)"),
+    TRANSLATE("translate", "Translate audio to English"),
+}
+
 /**
  * A slide-in panel listing the embedded audio and subtitle tracks ExoPlayer
  * found (populated for direct play; a transcode usually carries the single
@@ -6462,7 +6521,7 @@ private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole):
  */
 @UnstableApi
 @Composable
-fun TrackMenu(
+internal fun TrackMenu(
     player: ExoPlayer,
     serverAudio: List<AudioTrack>,
     serverSubtitles: List<SubTrack>,
@@ -6471,8 +6530,18 @@ fun TrackMenu(
     selectedServerSubtitle: Long?,
     onServerAudio: (Long) -> Unit,
     onServerSubtitle: (Long?) -> Unit,
+    progressiveCaptions: ProgressiveCaptions,
+    onGenerateCaptions: (ProgressiveCaptionSelection) -> Unit,
+    subtitleTextTranslation: SubtitleTextTranslation,
+    onUseTranslatedCaption: (Long) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    LaunchedEffect(progressiveCaptions, subtitleTextTranslation) {
+        progressiveCaptions.loadOptions(); subtitleTextTranslation.loadOptions()
+    }
+    var textSource by remember { mutableStateOf<tv.plurx.app.data.SubtitleTextSource?>(null) }
+    var textSourceLanguage by remember { mutableStateOf("") }
+    var captionLanguageTask by remember { mutableStateOf<CaptionMenuTask?>(null) }
     val tracks = player.currentTracks
     val audio = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
     val text = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
@@ -6526,6 +6595,7 @@ fun TrackMenu(
                             enabled = enabled,
                             modifier = initialFocusModifier(enabled),
                         ) {
+                            progressiveCaptions.off()
                             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                                 .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
                                 .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
@@ -6547,12 +6617,12 @@ fun TrackMenu(
             // as renditions), so it is the only list shown when it exists. The
             // player's own groups remain the fallback for a source the server
             // told us nothing about.
-            if (text.isNotEmpty() || serverSubtitles.isNotEmpty()) {
+            run {
                 Text("Subtitles", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp, bottom = 4.dp))
                 val serverOwnsSubtitles = serverSubtitles.isNotEmpty()
                 TrackRow(
                     label = "Off",
-                    selected = selectedServerSubtitle == null &&
+                    selected = progressiveCaptions.selected == null && selectedServerSubtitle == null &&
                         (serverOwnsSubtitles || !tracks.isTypeSelected(C.TRACK_TYPE_TEXT)),
                     enabled = true,
                     modifier = initialFocusModifier(enabled = true),
@@ -6570,7 +6640,7 @@ fun TrackMenu(
                     serverSubtitles.forEach { track ->
                         TrackRow(
                             label = serverSubtitleLabel(track),
-                            selected = selectedServerSubtitle == track.index,
+                            selected = progressiveCaptions.selected == null && selectedServerSubtitle == track.index,
                             enabled = true,
                             modifier = initialFocusModifier(enabled = true),
                         ) { onServerSubtitle(track.index); onDismiss() }
@@ -6585,6 +6655,7 @@ fun TrackMenu(
                                 enabled = enabled,
                                 modifier = initialFocusModifier(enabled),
                             ) {
+                                progressiveCaptions.off()
                                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                                     .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
                                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
@@ -6596,8 +6667,98 @@ fun TrackMenu(
                 }
             }
 
+            Text("Generate captions", style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 14.dp, bottom = 4.dp))
+            CaptionMenuTask.entries.forEach { task ->
+                val profile = progressiveCaptions.options?.let { options -> runCatching {
+                    captionPreferredProfile(options.models, options.default_profile_id, task.wireValue,
+                        progressiveCaptions.selected?.profileId)
+                }.getOrNull() }
+                TrackRow(task.label, progressiveCaptions.selected?.task == task.wireValue, enabled = profile != null) {
+                    val known = progressiveCaptions.options?.audio_tracks?.singleOrNull { it.audio_ordinal == selectedServerAudio }
+                        ?.normalized_language?.takeIf { it in profile!!.input_languages }
+                    if (known != null) { onGenerateCaptions(ProgressiveCaptionSelection(task.wireValue, known, profile!!.profile_id)); onDismiss() }
+                    else captionLanguageTask = task
+                }
+            }
+            captionLanguageTask?.let { task ->
+                Text("Choose the language spoken in the selected audio track", style = MaterialTheme.typography.bodySmall)
+                val languageProfile = progressiveCaptions.options?.let { options -> runCatching {
+                    captionPreferredProfile(options.models, options.default_profile_id, task.wireValue,
+                        progressiveCaptions.selected?.profileId)
+                }.getOrNull() }
+                languageProfile?.input_languages?.forEach { language ->
+                    TrackRow(languageName(language) ?: language, false, true) {
+                        onGenerateCaptions(ProgressiveCaptionSelection(task.wireValue, language, languageProfile.profile_id)); onDismiss()
+                    }
+                }
+            }
+            Text(progressiveCaptions.status, color = Muted, style = MaterialTheme.typography.bodySmall)
+            if (progressiveCaptions.selected != null) {
+                if (progressiveCaptions.options?.permissions?.stop == true) {
+                    TrackRow("Stop generation for everyone", false, true, onClick = progressiveCaptions::stop)
+                    val op = progressiveCaptions.operation
+                    val target = op?.let { runCatching { captionRetryTarget(it) }.getOrNull() }
+                    if (progressiveCaptions.hasPendingRetry) TrackRow("Resolve previous retry", false, true,
+                        onClick = progressiveCaptions::retry)
+                    else if (target != null) TrackRow("Resume / retry generation", false, true) { progressiveCaptions.retry(target) }
+                    else if (op == null) TrackRow("Retry generation request", false, true, onClick = progressiveCaptions::retry)
+                    if (op?.state == "partial") op.failed_ranges.filter { it.retryable }.forEach { range ->
+                        val rangeTarget = captionRetryTarget(op, range)
+                        TrackRow("Retry failed range ${range.core_index + 1}", false, true) { progressiveCaptions.retry(rangeTarget) }
+                    }
+                    if (op?.failed_ranges_next_cursor != null) TrackRow("More failed ranges", false, true,
+                        onClick = progressiveCaptions::loadMoreFailedRanges)
+                }
+                TrackRow("Caption delay: ${progressiveCaptions.offsetMs} ms (−250 ms)", false, true) {
+                    progressiveCaptions.setOffset(progressiveCaptions.offsetMs - 250)
+                }
+                TrackRow("Caption delay: +250 ms", false, true) {
+                    progressiveCaptions.setOffset(progressiveCaptions.offsetMs + 250)
+                }
+                TrackRow("Reset caption delay", false, true) { progressiveCaptions.setOffset(0) }
+            }
+
+            Text("Translate an existing subtitle to English", style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 14.dp, bottom = 4.dp))
+            subtitleTextTranslation.options?.subtitles?.forEach { source ->
+                TrackRow(source.title ?: source.language ?: "Subtitle ${source.index}", false,
+                    source.text_eligible && subtitleTextTranslation.options?.permissions?.create == true && !subtitleTextTranslation.busy) {
+                    val language = source.language?.takeIf { it.matches(Regex("[a-zA-Z]{2,3}")) }
+                    if (language != null) subtitleTextTranslation.translate(source.index, language)
+                    else { textSource = source; textSourceLanguage = "" }
+                }
+            }
+            textSource?.let { source ->
+                Text("Choose the language of this text subtitle", style = MaterialTheme.typography.bodySmall)
+                val languages = subtitleTextTranslation.options?.input_languages.orEmpty()
+                if (languages.isNotEmpty()) languages.forEach { language ->
+                    TrackRow(languageName(language) ?: language, false, true) {
+                        subtitleTextTranslation.translate(source.index, language); textSource = null
+                    }
+                } else {
+                    androidx.compose.material3.OutlinedTextField(value = textSourceLanguage,
+                        onValueChange = { textSourceLanguage = it.take(3) }, label = { Text("Source language code (2–3 letters)") })
+                    TrackRow("Translate this text subtitle", false, textSourceLanguage.matches(Regex("[a-zA-Z]{2,3}"))) {
+                        subtitleTextTranslation.translate(source.index, textSourceLanguage); textSource = null
+                    }
+                }
+            }
+            Text(subtitleTextTranslation.status, color = Muted, style = MaterialTheme.typography.bodySmall)
+            if (subtitleTextTranslation.options?.subtitles?.any { !it.text_eligible } == true) {
+                Text("Bitmap subtitles cannot use text translation. Generate or translate captions from audio instead.",
+                    color = Muted, style = MaterialTheme.typography.bodySmall)
+            }
+            if (subtitleTextTranslation.busy) TrackRow("Stop subtitle text translation", false, true,
+                onClick = subtitleTextTranslation::stop)
+            if (subtitleTextTranslation.job?.retryable == true) TrackRow("Retry subtitle text translation", false, !subtitleTextTranslation.submitting,
+                onClick = subtitleTextTranslation::retry)
+            if (subtitleTextTranslation.canUse) TrackRow("Use English translated subtitle", false, true) {
+                subtitleTextTranslation.use(onUseTranslatedCaption)
+            }
+
             if (audio.isEmpty() && text.isEmpty() && serverAudio.isEmpty() && serverSubtitles.isEmpty()) {
-                Text("No selectable tracks", color = Muted, style = MaterialTheme.typography.bodyMedium)
+                Text("No embedded tracks", color = Muted, style = MaterialTheme.typography.bodyMedium)
             }
         }
     }
@@ -6781,6 +6942,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
             playbackRate = active.playbackParameters.speed.toDouble(), framePresented = frameEvidence.presented,
         )
         override fun release() {
+            sharedCaptions.release()
             dropSuccessor()
             retained?.let { it.stop(); it.release() }; retained = null
             retired.value?.let { if (it !== active) it.release() }; retired.value = null
@@ -6882,6 +7044,9 @@ internal class SharedPlayerController(private val context: android.content.Conte
     val owner: SharedPlaybackOwner = SharedPlaybackOwner(scope, { tv.plurx.app.data.SharedDecisionClient.create() }, renderer,
         preparedHandoff = vm.preferences.value.preparedReplacement)
 
+    val sharedCaptions = SharedProgressiveCaptions(api = { vm.api() }, scope = scope,
+        currentBinding = { owner.captionReadBinding.value }, player = { active })
+
     private var activeListener = activeListenerFor(active, frameEvidence.generation)
     private fun bindActiveFrameEvidence(alreadyPresented: Boolean = false) {
         active.removeListener(activeListener)
@@ -6897,7 +7062,14 @@ internal class SharedPlayerController(private val context: android.content.Conte
             if (state == androidx.media3.common.Player.STATE_READY && !reachedTimeline) { reachedTimeline = true; owner.timelineReached() }
             if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { if (!stopped && current()) { stop(watched = true); ended.value = true } }
         }
-        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { if (current()) playing.value = playWhenReady }
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (current()) { playing.value = playWhenReady; sharedCaptions.reconcile() }
+        }
+        override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+            if (current()) sharedCaptions.reconcile(seeked = true)
+        }
+        override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) { if (current()) sharedCaptions.reconcile() }
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { if (current()) sharedCaptions.reconcile() }
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
             if (!current()) return
             val status = generateSequence(error.cause) { it.cause }
@@ -6908,6 +7080,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
 
     init {
         active.addListener(activeListener)
+        scope.launch { owner.captionReadBinding.collect { sharedCaptions.bind(it) } }
         // Text renditions exist only when the viewer chose a native subtitle;
         // the Start that carries it is the one being rendered.
         scope.launch {
@@ -6943,9 +7116,21 @@ internal class SharedPlayerController(private val context: android.content.Conte
     fun retireNetworkOperation() { owner.retireNetworkOperation() }
     fun seekBy(deltaMs: Long) { owner.launch { seek(renderer.snapshot().positionMs + deltaMs) } }
     fun togglePlaying() { val next = !active.playWhenReady; owner.launch { setPlaying(next) } }
-    fun change(selection: tv.plurx.app.data.SharedSelection) { owner.launch { change(selection) } }
+    fun change(selection: tv.plurx.app.data.SharedSelection) {
+        val old = owner.selection.value
+        if (old?.audio != selection.audio || old?.subtitle != selection.subtitle || old?.burn != selection.burn) sharedCaptions.off()
+        owner.launch { change(selection) }
+    }
+    fun changeSourceSubtitle(selection: tv.plurx.app.data.SharedSelection) { sharedCaptions.off(); change(selection) }
+    fun chooseSharedCaption(asset: tv.plurx.app.data.SharedCaptionAsset) {
+        sharedCaptions.select(asset)
+        owner.selection.value?.takeIf { it.subtitle != null || it.burn }?.let { current ->
+            owner.launch { change(current.copy(subtitle = null, burn = false)) }
+        }
+    }
     fun beginStop(watched: Boolean = false): kotlinx.coroutines.Job {
         stopped = true
+        sharedCaptions.release()
         authorizationObserver?.let { tv.plurx.app.data.Session.removeAuthorizationObserver(it) }; authorizationObserver = null
         return owner.beginStop(watched)
     }

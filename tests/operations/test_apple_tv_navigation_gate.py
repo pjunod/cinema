@@ -26,11 +26,25 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 self.assertIn("run: make apple-tv-navigation-test", step)
                 self.assertNotIn("continue-on-error", apple_job)
                 # This job also serves the native macOS tray. Mobile TV
-                # journeys remain mandatory whenever the mobile Apple lane
-                # executes; retained mobile evidence is handled separately.
+                # journeys execute unless verified compatible native evidence
+                # is retained. Builds share that proof; promotion still depends
+                # on this current job and its pinned toolchain checks.
                 expected_guard = "needs.scope.outputs.apple == 'true'"
                 if path == ".github/workflows/ci.yml":
                     expected_guard += " && needs.scope.outputs.retain_apple != 'true'"
+                else:
+                    expected_guard += " && steps.native_receipts.outputs.tv_navigation != 'true'"
+                    self.assertIn("run: python3 -m validation.native_receipts", apple_job)
+                    build = apple_job.split("- name: Compile iOS and tvOS without running simulator tests", 1)[1].split("- name:", 1)[0]
+                    self.assertEqual(re.findall(r"^        if: (.+)$", build, re.MULTILINE), [expected_guard])
+                    self.assertIn("run: make apple-build", build)
+                    tools = apple_job.split("- name: Verify the pinned Apple toolchain", 1)[1].split("- name:", 1)[0]
+                    self.assertNotIn("if:", tools)
+                    mobile_tools = apple_job.split("- name: Verify the pinned mobile Apple toolchain", 1)[1].split("- name:", 1)[0]
+                    self.assertEqual(re.findall(r"^        if: (.+)$", mobile_tools, re.MULTILINE), ["needs.scope.outputs.apple == 'true'"])
+                    self.assertIn('test "$(xcodegen --version)" = "Version: 2.46.0"', mobile_tools)
+                    self.assertIn("path: .main-preflight-receipts/native/receipt.json", apple_job)
+                    self.assertIn("name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}", apple_job)
                 self.assertEqual(
                     re.findall(r"^        if: (.+)$", step, re.MULTILINE),
                     [expected_guard],
@@ -49,6 +63,46 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 self.assertIn("if: always()", step)
                 self.assertIn("if-no-files-found: error", step)
                 self.assertIn("path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}", step)
+
+    def test_apple_jobs_keep_derived_data_local_and_preserve_build_contracts(self):
+        for path, apple, command, budget, serialized in (
+            (".github/workflows/main-fast-lane.yml", "apple_compile", "apple-build", 120, True),
+            (".github/workflows/effort-ci.yml", "apple_compile", "apple-build", 45, False),
+            (".github/workflows/ci.yml", "apple", "apple-test", 120, True),
+        ):
+            with self.subTest(path=path):
+                apple_job = job(path, apple)
+                for step in re.split(r"\n      - ", apple_job):
+                    if re.search(r"uses:.*?/cache(?:/(?:restore|save))?@", step):
+                        self.assertNotIn("DerivedData", step, "whole build state must stay in its job root")
+                self.assertNotIn("path: clients/apple/build/DerivedData", apple_job)
+                self.assertIn("run: make " + command, apple_job)
+                self.assertIn('grep -Fxq "Xcode 27.1"', apple_job)
+                self.assertIn('grep -Fxq "Build version 27A9275"', apple_job)
+                self.assertRegex(apple_job, rf"(?m)^    timeout-minutes: {budget}$")
+                self.assertEqual("concurrency:" in apple_job, serialized)
+                if serialized:
+                    self.assertIn("group: plurx-apple-silicon-heavy", apple_job)
+                    self.assertIn("cancel-in-progress: false", apple_job)
+        build = (ROOT / "Makefile").read_text().split("apple-build:", 1)[1].split(".PHONY:", 1)[0]
+        for platform in ("iOS", "tvOS"):
+            self.assertIn('-destination "generic/platform=' + platform + ' Simulator"', build)
+        for override in ("ARCHS=", "EXCLUDED_ARCHS", "ONLY_ACTIVE_ARCH"):
+            self.assertNotIn(override, build)
+
+    def test_full_apple_budget_covers_units_and_required_native_journeys(self):
+        full = job(".github/workflows/ci.yml", "apple")
+        fast = job(".github/workflows/main-fast-lane.yml", "apple_compile")
+        def budget(section):
+            return int(re.search(r"(?m)^    timeout-minutes: ([0-9]+)$", section).group(1))
+        self.assertGreaterEqual(budget(full), budget(fast))
+        self.assertIn("run: make apple-test", full)
+        for section in (full, fast):
+            self.assertIn("run: make apple-tv-navigation-test", section)
+        runner = (ROOT / "scripts/apple-tv-navigation-test").read_text()
+        for flag, seconds in (("-default-test-execution-time-allowance", 180),
+                              ("-maximum-test-execution-time-allowance", 240)):
+            self.assertRegex(runner, re.escape('"' + flag + '"') + r'\s*,\s*"' + str(seconds) + '"')
 
     def test_affected_apple_catalog_requires_native_journeys(self):
         catalog = tomllib.loads((ROOT / "validation/points.toml").read_text())

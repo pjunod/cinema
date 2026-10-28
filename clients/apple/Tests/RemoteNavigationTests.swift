@@ -7,6 +7,72 @@ import XCTest
 
 final class RemoteNavigationTests: XCTestCase {
     @MainActor
+    func testPhysicalFocusKeepsShellQuietAndRetiresStaleSelect() {
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        var selections: [String] = []
+        for key in ["first", "second"] {
+            navigation.register(scope: "home", key: key,
+                entry: .init(id: UUID(), label: key, frame: CGRect(x: 0, y: 0, width: 100, height: 60)) { selections.append(key) })
+        }
+        navigation.physicalFocus(scope: "home", key: "first")
+        let previous = navigation.context
+        var shellUpdates = 0
+        let observation = navigation.objectWillChange.sink { shellUpdates += 1 }
+        defer { observation.cancel() }
+
+        for index in 0..<100 {
+            navigation.physicalInput()
+            navigation.physicalFocus(scope: "home", key: index.isMultiple(of: 2) ? "first" : "second")
+        }
+
+        XCTAssertEqual(shellUpdates, 0, "Native focus must not invalidate every navigation observer and tab root")
+        XCTAssertEqual(navigation.snapshot().focusedLabel, "second")
+        XCTAssertEqual(navigation.dispatch(.select, context: previous), .staleFocus)
+        XCTAssertEqual(navigation.dispatch(.select, context: navigation.context), .applied)
+        XCTAssertEqual(selections, ["second"])
+    }
+
+    @MainActor
+    func testPhysicalFocusObserversSeeSettledStateWithoutRebuildingParent() async {
+        let navigation = RemoteNavigationCoordinator()
+        let updates = RemoteFocusUpdates()
+        let host = UIHostingController(rootView: RemoteFocusUpdateFixture(updates: updates).environmentObject(navigation))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 400))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        host.view.layoutIfNeeded()
+        try? await Task.sleep(for: .milliseconds(150))
+        let previousRenders = updates.renders
+
+        navigation.physicalFocus(scope: "home", key: "first")
+        navigation.physicalInput()
+        navigation.physicalFocus(scope: "home", key: "second")
+        try? await Task.sleep(for: .milliseconds(150))
+
+        XCTAssertEqual(updates.focusedKeys, ["second"], "Observe the settled focus, not intermediate authority retirement")
+        XCTAssertEqual(updates.inputRevisions, [navigation.physicalInputRevision])
+        XCTAssertEqual(updates.renders, previousRenders, "The observer modifier must not rebuild its parent")
+    }
+
+    @MainActor
+    func testNavigationOpenerOnlyPublishesWhenChromeFocusPreferenceChanges() {
+        let navigation = RemoteNavigationCoordinator()
+        let opener = RemoteNavigationCoordinator.viewerNavigationOpener
+        navigation.setOrder(scope: "home", keys: [opener, "movie"], columns: 1)
+        XCTAssertTrue(navigation.focusControl(scope: "home", key: opener))
+        XCTAssertTrue(navigation.viewerNavigationFocusRequested)
+        navigation.physicalFocus(scope: "home", key: opener)
+        navigation.physicalInput()
+        navigation.physicalFocus(scope: "home", key: "movie")
+        XCTAssertFalse(navigation.viewerNavigationFocusRequested)
+        XCTAssertTrue(navigation.focusControl(scope: "home", key: opener))
+        navigation.invalidate()
+        XCTAssertFalse(navigation.viewerNavigationFocusRequested)
+    }
+
+    @MainActor
     func testCoveredParentOrderValidatesLazyReturnWithoutRetainingAuthorization() {
         let navigation = RemoteNavigationCoordinator()
         navigation.presentationBlocked = { false }
@@ -530,5 +596,23 @@ private struct RemoteVersionRegistrationButton: View {
         let version = source.version
         Button("Play") { }.frame(width: 100, height: 60)
             .remoteControl("version-play", label: "Play") { source.played.append(version) }
+    }
+}
+
+@MainActor
+private final class RemoteFocusUpdates {
+    var renders = 0
+    var focusedKeys: [String?] = []
+    var inputRevisions: [UInt64] = []
+}
+
+private struct RemoteFocusUpdateFixture: View {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    let updates: RemoteFocusUpdates
+    var body: some View {
+        updates.renders += 1
+        return Text("Focus observation")
+            .onRemoteFocusChange(navigation) { updates.focusedKeys.append(navigation.focusedKey) }
+            .onRemotePhysicalInput(navigation) { updates.inputRevisions.append($0) }
     }
 }

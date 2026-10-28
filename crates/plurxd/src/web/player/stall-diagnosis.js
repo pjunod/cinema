@@ -586,7 +586,7 @@ async function autoControllerTick(){
   if(stallFree&&now-p.abr.stableSinceMs>=windowMs) rememberAutoRung(currentHeight);
 }
 function candidateQualityContext(p){
-  const caps=currentCapsDocument();
+  const caps=currentCapsDocument(p);
   return JSON.stringify({video:caps.video,display:caps.display,
     audio:selectedAudioIndex(p),subtitle:p.curSub,burn:p.burnedSub,offset:p.aoffset});
 }
@@ -616,7 +616,7 @@ async function refreshQualityCandidates(p){
     p.qualityCandidates=Array.isArray(decision.quality_candidates)
       ?continuousQualityBoundCatalog(decision.quality_candidates,p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null):null;
     p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
-    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
+    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument(p);
     p.abr.candidateContext=key;
     p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
     // Dropping this exact running recipe changes named Auto into unnamed
@@ -748,7 +748,7 @@ async function naturalBoundaryQualityCandidate(p,seekIntent){
       aspect:current?current.width/current.height:null,
       transfer:candidateTransferEvidence(p,now),linkLimitBps:limit});
     p.qualityCandidates=candidates;
-    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
+    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument(p);
     p.abr.candidateContext=candidateQualityContext(p);
     p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
     p.abr.candidateState={...(p.abr.candidateState||{}),switchTimesMs:[],upgradeSinceMs:null,mildSamples:0};

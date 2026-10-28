@@ -14,6 +14,13 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [RUST-ADMISSION-REFINEMENT-STATUS.md](RUST-ADMISSION-REFINEMENT-STATUS.md) | Production admission/start refinement pilot: scope, ownership, verifier feasibility, proof obligations and current delivery state. | built |
+| [WORKER-REFINEMENT-STATUS.md](WORKER-REFINEMENT-STATUS.md) | Built source correspondence and two full workers; PR receipt tracks qualification, ownership and landing. | built |
+| [OPERATION-PROGRESS-IMPLEMENTATION.md](OPERATION-PROGRESS-IMPLEMENTATION.md) | Source wait-map, repeated-operation model, acceptance and delivery plan. | built |
+| [OPERATION-PROGRESS-STATUS.md](OPERATION-PROGRESS-STATUS.md) | Qualified progress scope, evidence, review and live PR delivery link. | built |
+| [FORMAL-VERIFICATION-PILOT-PROPOSAL.md](FORMAL-VERIFICATION-PILOT-PROPOSAL.md) | The bounded TLA+/TLC pilot contract, source anchors, verification limits, milestones and acceptance bar. | done |
+| [FORMAL-VERIFICATION-PILOT-REVIEW.md](FORMAL-VERIFICATION-PILOT-REVIEW.md) | Fable's design and final implementation findings, scope limits, and coordinator dispositions. | done |
+| [FORMAL-VERIFICATION-PILOT-STATUS.md](FORMAL-VERIFICATION-PILOT-STATUS.md) | Qualified finite results, runtime evidence, costs, limits, owner and delivery link. | done |
 | [RAFT-FAULT-TESTING-IMPLEMENTATION.md](RAFT-FAULT-TESTING-IMPLEMENTATION.md) | The bounded proposal and build contract for three repeatable Raft fault scenarios, generated WAL regressions, and replay evidence, preserving the current CI/CD process and adding no product gates. | open |
 | [RAFT-FAULT-TESTING-REVIEW.md](RAFT-FAULT-TESTING-REVIEW.md) | Independent adversarial findings on the fault-testing proposal and the author's amendments for protocol timing, partition evidence, complete data comparison, and child cleanup. | done |
 | [STATUS-HISTORY.md](STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |

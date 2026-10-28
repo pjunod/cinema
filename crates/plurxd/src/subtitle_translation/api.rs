@@ -20,7 +20,9 @@ use plurx_core::{
     domain::MediaFile,
     store::{
         background_jobs::{BackgroundJob, JobPayload, JobState},
-        subtitle_translation::{valid_digest, SourceRevision, TranslationProfile},
+        subtitle_translation::{
+            digest, valid_digest, SourceRevision, SpeechTask, TranslationProfile,
+        },
         subtitle_translation_mutation::{TranslationAction, TranslationMutation},
         subtitle_translation_read::{AcquireTranslationLease, TranslationQuery, TranslationRead},
     },
@@ -109,27 +111,46 @@ fn private_headers(response: &mut Response, now: i64, expiry: Option<i64>) -> Re
     Ok(())
 }
 fn languages() -> Vec<String> {
-    super::profile::model_spec()
+    super::profile::model_spec_for(&super::profile::default_profile())
+        .expect("registered default speech profile")
         .languages
-        .into_iter()
-        .filter(|code| code != "en")
-        .collect()
 }
 fn selected_profile(model: &str, profile_id: &str) -> Result<TranslationProfile, ApiError> {
-    let profile = super::profile::selected_profile();
-    if model != profile.model_id || profile_id != profile.id()? {
-        return Err(invalid());
-    }
-    Ok(profile)
+    super::profile::profiles()
+        .into_iter()
+        .find(|p| model == p.model_id && p.id().is_ok_and(|id| id == profile_id))
+        .ok_or_else(invalid)
 }
-fn profile_summary() -> Result<Value, ApiError> {
-    let profile = super::profile::selected_profile();
+/// Saved preferences choose metadata defaults only; readiness never changes them.
+fn configured_default_profile(saved: &config::Snapshot) -> Option<TranslationProfile> {
+    if let Some(id) = saved.profile_id.as_deref() {
+        return super::profile::profiles().into_iter().find(|profile| {
+            profile.id().is_ok_and(|candidate| candidate == id)
+                && saved
+                    .model_id
+                    .as_deref()
+                    .is_none_or(|model| model == profile.model_id)
+        });
+    }
+    if let Some(model) = saved.model_id.as_deref() {
+        return super::profile::profiles()
+            .into_iter()
+            .find(|profile| profile.model_id == model && profile.task.is_translation());
+    }
+    Some(super::profile::default_profile())
+}
+fn profile_summary(
+    profile: TranslationProfile,
+    preferred_model: Option<&str>,
+) -> Result<Value, ApiError> {
+    let model = super::profile::model_spec_for(&profile)?;
+    let is_default = preferred_model == Some(profile.model_id.as_str());
     Ok(
         json!({"profile_id":profile.id()?,"model_id":profile.model_id,"model_sha256":profile.model_sha256,
-        "task":"translate","output_language":"en","input_languages":languages(),"adapter_contract":profile.adapter_contract,
+        "label":model.label,"default":is_default,"task":profile.task.name(),"output_language":if profile.task.is_translation(){Some("en")}else{None},"input_languages":model.languages.into_iter().filter(|language| !profile.task.is_translation() || language != "en").collect::<Vec<_>>(),"adapter_contract":profile.adapter_contract,
         "pipeline_revision":profile.pipeline_revision,"timeline_contract":profile.timeline_contract,
         "window":{"core_ms":profile.core_ms,"left_context_ms":profile.left_context_ms,"right_context_ms":profile.right_context_ms},
-        "eligibility":{"delivery":["direct"],"max_source_audio_streams":1,"clock_contract":profile.timeline_contract},
+        "eligibility":{"delivery":["direct","remux","transcode"],"max_source_audio_streams":256,"clock_contract":profile.timeline_contract},
         "limits":{"segment_bytes":16384,"segment_cues":128,"page_bytes":65536,"page_entries":64,"coverage_intervals":64,
             "concurrent_fetches":2,"cue_memory_bytes":524288,"cue_count":1024,"cue_window_before_ms":30000,"cue_window_after_ms":90000,
             "poll_min_ms":1000,"poll_max_ms":5000,"retry_max_ms":30000,"heartbeat_interval_ms":5000,"demand_ttl_ms":15000,"max_following_cores":3},
@@ -152,7 +173,6 @@ pub async fn update_settings(
             state.store.as_ref(),
             user.id,
             request,
-            &super::profile::selected_profile(),
             &languages(),
             crate::state::clock_ms(),
         )
@@ -163,11 +183,16 @@ pub async fn models(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Response, ApiError> {
-    let model = super::profile::model_spec();
+    let preferred = configured_default_profile(
+        &config::read(state.store.as_ref(), crate::state::clock_ms()).await?,
+    );
+    let default_profile_id = preferred.as_ref().map(TranslationProfile::id).transpose()?;
+    let preferred_model = preferred.as_ref().map(|profile| profile.model_id.as_str());
+    let models = super::profile::model_specs().into_iter().map(|model| json!({"id":model.id,"label":model.label,"download_bytes":model.download_bytes,"sha256":model.sha256,"source":model.source,"license":model.license})).collect::<Vec<_>>();
     response(
         json!({"version":1,"catalog_revision":"plurx-managed-subtitle-models-v2",
-        "models":[{"id":model.id,"label":model.label,"download_bytes":model.download_bytes,"sha256":model.sha256,"source":model.source,"license":model.license}],
-        "profiles":[profile_summary()?],"workers":worker_rows(super::workers_public(&state).await?)?,"server_now_ms":crate::state::clock_ms()}),
+        "models":models,"default_profile_id":default_profile_id,
+        "profiles":super::profile::profiles().into_iter().map(|profile| profile_summary(profile, preferred_model)).collect::<Result<Vec<_>,_>>()?,"workers":worker_rows(super::workers_public(&state).await?)?,"server_now_ms":crate::state::clock_ms()}),
     )
 }
 fn worker_rows(rows: Vec<Value>) -> Result<Vec<Value>, ApiError> {
@@ -192,9 +217,9 @@ fn worker_rows(rows: Vec<Value>) -> Result<Vec<Value>, ApiError> {
             if !valid_digest(model_sha) || !valid_digest(profile_id) { return Err(observation_error()); }
             let engine_sha = nullable_digest(cap, "engine_sha256")?;
             let verified = if cap["verified_at_ms"].is_null() { Value::Null } else { cap["verified_at_ms"].as_i64().filter(|n| *n>=0).ok_or_else(observation_error)?.into() };
-            Ok(json!({"model_id":field(cap,"model_id")?,"profile_id":profile_id,"status":status,"reason":safe_reason(cap["reason"].as_str()),"verified_at_ms":verified,"model_sha256":model_sha,"engine_sha256":engine_sha}))
+            Ok(json!({"task":cap["task"],"model_id":field(cap,"model_id")?,"profile_id":profile_id,"status":status,"reason":safe_reason(cap["reason"].as_str()),"verified_at_ms":verified,"model_sha256":model_sha,"engine_sha256":engine_sha}))
         }).collect::<Result<Vec<_>,ApiError>>()?;
-        Ok(json!({"node_id":node,"label":label,"current":row["current"].as_bool().ok_or_else(observation_error)?,"eligible":row["eligible"].as_bool().ok_or_else(observation_error)?,"observed_at_ms":row["observed_at_ms"].as_i64().ok_or_else(observation_error)?,"expires_at_ms":row["expires_at_ms"].as_i64().ok_or_else(observation_error)?,"engine":engine,"capabilities":capabilities}))
+        Ok(json!({"node_id":node,"label":label,"current":row["current"].as_bool().ok_or_else(observation_error)?,"eligible":row["eligible"].as_bool().ok_or_else(observation_error)?,"observed_at_ms":row["observed_at_ms"].as_i64().ok_or_else(observation_error)?,"expires_at_ms":row["expires_at_ms"].as_i64().ok_or_else(observation_error)?,"engine":engine,"capacity":row["capacity"],"capabilities":capabilities}))
     }).collect()
 }
 async fn file(state: &AppState, file_id: i64) -> Result<MediaFile, ApiError> {
@@ -267,6 +292,8 @@ struct AssetSummary {
     audio_index: i64,
     spoken_language: String,
     output_language: String,
+    #[serde(default)]
+    task: SpeechTask,
     timeline_contract: String,
     manifest_revision: String,
     duration_ms: i64,
@@ -278,8 +305,8 @@ fn asset_summary(value: Value) -> Result<AssetSummary, ApiError> {
     if !valid_digest(&row.asset_id)
         || !valid_digest(&row.content_revision)
         || !valid_digest(&row.profile_id)
-        || row.output_language != "en"
-        || row.audio_index != 0
+        || row.output_language != row.task.output_language(&row.spoken_language)
+        || !(0..=255).contains(&row.audio_index)
     {
         return Err(observation_error());
     }
@@ -305,15 +332,33 @@ pub async fn options(
     State(state): State<AppState>,
     ApiPath(file_id): ApiPath<i64>,
 ) -> Result<Response, ApiError> {
+    let preferred = configured_default_profile(
+        &config::read(state.store.as_ref(), crate::state::clock_ms()).await?,
+    );
+    let default_profile_id = preferred.as_ref().map(TranslationProfile::id).transpose()?;
+    let preferred_model = preferred.as_ref().map(|profile| profile.model_id.as_str());
     let file = file(&state, file_id).await?;
-    let capability = super::file_capability(&state, &file).await;
     let (assets, next) = asset_page(&state, user.id, file.id, None).await?;
-    let audio=file.audio_streams.iter().map(|track|json!({"index":track.index,"language":track.language,"normalized_language":normalized_language(track.language.as_deref()),"title":track.title,"default":track.default})).collect::<Vec<_>>();
+    let mut audio = Vec::new();
+    let mut any_supported = false;
+    let mut source_origin_ms = None;
+    let mut capability_reason = "direct_audio_selection_unverified";
+    for track in &file.audio_streams {
+        let clock = super::selected_file_capability(&state, &file, track.index).await;
+        if let Ok(clock) = clock {
+            any_supported = true;
+            source_origin_ms = Some(clock.origin_samples.div_euclid(16));
+        }
+        if let Err(reason) = clock {
+            capability_reason = reason;
+        }
+        audio.push(json!({"index":track.index,"audio_ordinal":track.index,"source_index":clock.as_ref().ok().and_then(|clock|clock.source_index),"source_start_ms":clock.as_ref().ok().map(|clock|clock.audio_start_samples.div_euclid(16)),"duration_ms":clock.as_ref().ok().map(|clock|clock.duration_ms),"capability":{"supported":clock.is_ok(),"reason":clock.err()},"language":track.language,"normalized_language":normalized_language(track.language.as_deref()),"title":track.title,"default":track.default}));
+    }
     response(
         json!({"version":1,"file_id":file.id.to_string(),"source_size":file.size.to_string(),"source_mtime":file.mtime.to_string(),
-        "content_revision":null,"duration_ms":file.duration_ms,"timeline_contract":super::profile::selected_profile().timeline_contract,
-        "audio_tracks":audio,"subtitle_streams":file.subtitle_streams,"models":[profile_summary()?],
-        "capability":{"supported":capability.is_ok(),"reason":capability.err()},
+        "content_revision":null,"duration_ms":file.duration_ms,"source_origin_ms":source_origin_ms,"timeline_contract":super::profile::selected_profile().timeline_contract,
+        "default_profile_id":default_profile_id,"audio_tracks":audio,"subtitle_streams":file.subtitle_streams,"models":super::profile::profiles().into_iter().map(|profile| profile_summary(profile, preferred_model)).collect::<Result<Vec<_>,_>>()?,
+        "capability":{"supported":any_supported,"reason":if any_supported{None}else{Some(capability_reason)}},
         "permissions":{"read":true,"demand":user.is_admin,"stop":user.is_admin,"resume":user.is_admin},
         "assets":assets,"assets_next_cursor":next,"server_now_ms":crate::state::clock_ms()}),
     )
@@ -449,13 +494,16 @@ pub(crate) struct CreateRequest {
     audio_index: i64,
     spoken_language: String,
     output_language: String,
-    task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task: Option<SpeechTask>,
     model_id: String,
     profile_id: String,
     playback_id: String,
     position_ms: i64,
     playback_rate: f64,
     paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continuity_id: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -469,6 +517,8 @@ pub(crate) struct DemandRequest {
     position_ms: i64,
     playback_rate: f64,
     paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continuity_id: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -502,6 +552,8 @@ pub(crate) enum RetryRequest {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
     Range {
         version: u8,
@@ -516,6 +568,8 @@ pub(crate) enum RetryRequest {
         position_ms: i64,
         playback_rate: f64,
         paused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity_id: Option<String>,
     },
 }
 fn window(playback_id: &str, position: i64, rate: f64) -> Result<(), ApiError> {
@@ -554,6 +608,16 @@ async fn mutate(
     action: TranslationAction,
     wire_outcome: &str,
 ) -> Result<Response, ApiError> {
+    let continuity = match &action {
+        TranslationAction::Create { continuity_id, .. }
+        | TranslationAction::Demand { continuity_id, .. }
+        | TranslationAction::RetryOperation { continuity_id, .. }
+        | TranslationAction::RetryRange { continuity_id, .. } => continuity_id.as_deref(),
+        _ => None,
+    };
+    if continuity.is_some_and(|id| id.len() != 36 || uuid::Uuid::parse_str(id).is_err()) {
+        return Err(invalid());
+    }
     let now = crate::state::clock_ms();
     if let Some(receipt) = config::replay(
         state.store.as_ref(),
@@ -567,6 +631,10 @@ async fn mutate(
         return response(mutation_receipt(&receipt, wire_outcome)?);
     }
     config::fresh_intent(expires, now)?;
+    let reconcile_producer = matches!(
+        &action,
+        TranslationAction::Create { .. } | TranslationAction::Demand { .. }
+    );
     let value = state
         .store
         .mutate_subtitle_translation(TranslationMutation {
@@ -582,6 +650,20 @@ async fn mutate(
         Some("accepted") => {}
         Some(outcome) => return Err(mutation_error(outcome, now)),
         None => return Err(observation_error()),
+    }
+    // Exact receipt replay returned above. Producer recovery is best effort and
+    // must never turn an accepted demand renewal into an ambiguous failure.
+    if reconcile_producer {
+        if let Some(operation_id) = value["operation_id"].as_str() {
+            let recovery = tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                super::manager::reconcile_producer(state, operation_id, user_id),
+            )
+            .await;
+            if !matches!(recovery, Ok(Ok(()))) {
+                tracing::debug!("caption producer reconciliation deferred");
+            }
+        }
     }
     // Create, demand, Stop and Retry change what the worker should do now.
     state.subtitle_models.translation.wake.notify_one();
@@ -626,6 +708,7 @@ fn mutation_receipt(value: &Value, outcome: &str) -> Result<Value, ApiError> {
         let demand = field(value, "demand_id")?;
         id_check(demand)?;
         answer["demand_id"] = demand.into();
+        answer["continuity_id"] = nullable_id(value, "continuity_id")?;
         answer["demand_generation"] = counter(value, "demand_generation", true)?.into();
     }
     if outcome == "updated" {
@@ -656,13 +739,18 @@ pub async fn create(
 ) -> Result<Response, ApiError> {
     envelope(input.version, &input.request_id, input.intent_expires_at_ms)?;
     window(&input.playback_id, input.position_ms, input.playback_rate)?;
-    if input.task != "translate"
-        || input.output_language != "en"
-        || input.audio_index != 0
+    let task = input.task.unwrap_or_else(|| {
+        super::profile::profiles()
+            .into_iter()
+            .find(|profile| profile.id().is_ok_and(|id| id == input.profile_id))
+            .map_or(SpeechTask::default(), |profile| profile.task)
+    });
+    if input.output_language != task.output_language(&input.spoken_language)
+        || !(0..=255).contains(&input.audio_index)
         || !plurx_core::store::background_jobs_transcription::whisper_language(
             &input.spoken_language,
         )
-        || input.spoken_language == "en"
+        || (task.is_translation() && input.spoken_language == "en")
         || file_id <= 0
         || !valid_digest(&input.profile_id)
         || input.model_id.is_empty()
@@ -700,6 +788,9 @@ pub async fn create(
     }
     config::fresh_intent(input.intent_expires_at_ms, now)?;
     let profile = selected_profile(&input.model_id, &input.profile_id)?;
+    if profile.task != task {
+        return Err(invalid());
+    }
     if !languages().contains(&input.spoken_language) {
         return Err(invalid());
     }
@@ -711,10 +802,24 @@ pub async fn create(
             crate::state::clock_ms(),
         ));
     }
-    let duration = super::file_capability(&state, &file)
+    let duration = super::selected_file_capability(&state, &file, input.audio_index)
         .await
         .map_err(|code| config::failure(StatusCode::CONFLICT, code, crate::state::clock_ms()))?;
-    let target = super::eligible_worker(&state, &file, &profile).await?;
+    let recipe_key = digest(
+        &json!({"source":SourceRevision { file_id:file.id,source_size:file.size,source_mtime:file.mtime },
+        "profile":profile,"audio_index":input.audio_index,"spoken_language":input.spoken_language,"duration_ms":duration.duration_ms}),
+    )?;
+    let existing = read_rows(
+        &state,
+        user.id,
+        TranslationQuery::RecipeOperation { recipe_key },
+    )
+    .await?;
+    let target = if let Some(existing) = existing.first() {
+        field(existing, "target_node_id")?.to_owned()
+    } else {
+        super::eligible_worker(&state, &file, &profile).await?
+    };
     mutate(
         &state,
         user.id,
@@ -730,12 +835,13 @@ pub async fn create(
             profile,
             audio_index: input.audio_index,
             spoken_language: input.spoken_language,
-            duration_ms: duration,
+            duration_ms: duration.duration_ms,
             target_node_id: target,
             playback_id: input.playback_id,
             position_ms: input.position_ms,
             playback_rate: input.playback_rate,
             paused: input.paused,
+            continuity_id: input.continuity_id,
         },
         "accepted",
     )
@@ -775,6 +881,7 @@ pub async fn demand(
             position_ms: input.position_ms,
             playback_rate: input.playback_rate,
             paused: input.paused,
+            continuity_id: input.continuity_id,
         },
         "updated",
     )
@@ -867,6 +974,7 @@ pub async fn retry(
             position_ms,
             playback_rate,
             paused,
+            continuity_id,
         } => {
             envelope(version, &request_id, intent_expires_at_ms)?;
             window(&playback_id, position_ms, playback_rate)?;
@@ -885,6 +993,7 @@ pub async fn retry(
                     position_ms,
                     playback_rate,
                     paused,
+                    continuity_id,
                 },
                 "resumed",
             )
@@ -902,6 +1011,7 @@ pub async fn retry(
             position_ms,
             playback_rate,
             paused,
+            continuity_id,
         } => {
             envelope(version, &request_id, intent_expires_at_ms)?;
             window(&playback_id, position_ms, playback_rate)?;
@@ -923,6 +1033,7 @@ pub async fn retry(
                     position_ms,
                     playback_rate,
                     paused,
+                    continuity_id,
                 },
                 "range_retry_queued",
             )
@@ -1081,7 +1192,7 @@ async fn operation_projection(state: &AppState, row: &Value) -> Result<Value, Ap
     };
     let audio = row["audio_index"]
         .as_i64()
-        .filter(|n| *n == 0)
+        .filter(|n| (0..=255).contains(n))
         .ok_or_else(observation_error)?;
     let spoken = field(row, "spoken_language")?;
     if !languages().iter().any(|language| language == spoken) {
@@ -1097,6 +1208,8 @@ async fn operation_projection(state: &AppState, row: &Value) -> Result<Value, Ap
     if !asset.is_null() && content.is_none() {
         return Err(observation_error());
     }
+    let capacity_wait =
+        active["state"] == "queued" && !state.transcode.speech_capacity_observation().await.2;
     let source_state = if content.is_some() {
         read = total.clone();
         "verified"
@@ -1106,11 +1219,11 @@ async fn operation_projection(state: &AppState, row: &Value) -> Result<Value, Ap
         "checking"
     };
     Ok(
-        json!({"version":1,"operation_id":operation_id,"operation_epoch":epoch,"view_revision":view,"state":state_name,
-        "reason":safe_reason(row["reason"].as_str()),"retryable":row["retryable"].as_bool().ok_or_else(observation_error)?,
+        json!({"version":1,"operation_id":operation_id,"operation_epoch":epoch,"view_revision":view,"state":if capacity_wait{"waiting_capacity"}else{state_name},
+        "reason":if capacity_wait{Some("waiting_for_playback_capacity")}else{safe_reason(row["reason"].as_str())},"retryable":row["retryable"].as_bool().ok_or_else(observation_error)?,
         "asset_id":asset,"manifest_revision":manifest,"file_id":counter(row,"file_id",true)?,
         "source_size":total,"source_mtime":mtime,"content_revision":content,"audio_index":audio,
-        "spoken_language":spoken,"output_language":"en","task":"translate","model_id":profile.model_id,
+        "spoken_language":spoken,"output_language":profile.task.output_language(spoken),"task":profile.task.name(),"model_id":profile.model_id,
         "model_sha256":profile.model_sha256,"profile_id":profile.id()?,"timeline_contract":profile.timeline_contract,
         "source_check":{"state":source_state,"bytes_read":read,"total_bytes":counter(row,"source_size",true)?},
         "active_job":active,"failed_ranges":[],"failed_ranges_next_cursor":null,"server_now_ms":crate::state::clock_ms()}),
@@ -1466,10 +1579,10 @@ pub async fn manifest(
         return Err(invalid());
     }
     let asset = asset_row(&state, user.id, &asset_id).await?;
-    let profile = super::profile::selected_profile();
-    if asset.profile_id != profile.id()? {
-        return Err(observation_error());
-    }
+    let profile = super::profile::profiles()
+        .into_iter()
+        .find(|p| p.id().is_ok_and(|id| id == asset.profile_id))
+        .ok_or_else(observation_error)?;
     let operation = operation_row(&state, user.id, &asset.operation_id).await?;
     let mut reused = false;
     let lease = if query.renew_lease.is_none() && headers.contains_key(LEASE_HEADER) {
@@ -1542,7 +1655,7 @@ pub async fn manifest(
     }
     let mut answer = response(
         json!({"version":1,"asset_id":asset.asset_id,"file_id":asset.file_id,"content_revision":asset.content_revision,
-        "profile_id":asset.profile_id,"audio_index":asset.audio_index,"spoken_language":asset.spoken_language,"output_language":"en","timeline_contract":asset.timeline_contract,
+        "profile_id":asset.profile_id,"audio_index":asset.audio_index,"spoken_language":asset.spoken_language,"output_language":asset.output_language,"task":asset.task.name(),"timeline_contract":asset.timeline_contract,
         "manifest_revision":lease.revision,"view_revision":counter(&operation,"view_revision",true)?,
         "operation":{"operation_id":asset.operation_id,"epoch":counter(&operation,"operation_epoch",true)?,"state":field(&operation,"state")?,"reason":safe_reason(operation["reason"].as_str()),"retry_after_ms":null},
         "snapshot":{"lease_id":lease.id,"revision":lease.revision,"expires_in_ms":lease.expires-now},"coverage":coverage,"segments":segments,
@@ -1762,6 +1875,92 @@ mod tests {
     use super::*;
     use plurx_core::store::{background_jobs::BackgroundJobStore, SqliteStore};
 
+    #[test]
+    fn configured_defaults_preserve_saved_model_and_task_without_readiness() {
+        let mut saved = config::Snapshot {
+            version: 1,
+            revision: "opaque".into(),
+            enabled: true,
+            model_id: None,
+            profile_id: None,
+            preferred_spoken_language: None,
+            outcome: None,
+            server_now_ms: 0,
+        };
+        assert_eq!(
+            configured_default_profile(&saved),
+            Some(super::super::profile::default_profile())
+        );
+        saved.model_id = Some("small".into());
+        assert_eq!(
+            configured_default_profile(&saved),
+            Some(super::super::profile::selected_profile())
+        );
+        for profile in super::super::profile::profiles() {
+            let summary = profile_summary(profile.clone(), Some("small")).expect("profile summary");
+            assert_eq!(summary["default"], profile.model_id == "small");
+        }
+        let transcribe = super::super::profile::for_task(SpeechTask::Transcribe);
+        saved.profile_id = Some(transcribe.id().expect("explicit task"));
+        assert_eq!(configured_default_profile(&saved), Some(transcribe));
+        saved.model_id = Some("base".into());
+        assert!(
+            configured_default_profile(&saved).is_none(),
+            "unregistered model pair cannot choose a default"
+        );
+        saved.profile_id = Some("f".repeat(64));
+        assert!(
+            configured_default_profile(&saved).is_none(),
+            "unknown explicit profile cannot choose a default"
+        );
+    }
+
+    #[test]
+    fn profile_projection_exposes_both_registered_small_task_defaults() {
+        let profiles = super::super::profile::profiles()
+            .into_iter()
+            .map(|profile| {
+                profile_summary(profile, Some("small")).expect("registered profile summary")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            profiles
+                .iter()
+                .filter(|profile| profile["default"] == true)
+                .count(),
+            2
+        );
+        for profile in profiles {
+            assert_eq!(profile["model_id"], "small");
+            assert_eq!(profile["default"], true);
+            assert!(profile["label"]
+                .as_str()
+                .is_some_and(|label| !label.is_empty()));
+            let input = profile["input_languages"]
+                .as_array()
+                .expect("input languages");
+            assert_eq!(
+                input.len(),
+                if profile["task"] == "translate" {
+                    98
+                } else {
+                    99
+                }
+            );
+            assert!(!input.iter().any(|language| language == "yue"));
+            let selected = selected_profile(
+                profile["model_id"].as_str().expect("model"),
+                profile["profile_id"].as_str().expect("profile"),
+            )
+            .expect("exact selection");
+            assert_eq!(
+                Some(selected.model_sha256.as_str()),
+                profile["model_sha256"].as_str()
+            );
+        }
+    }
+
     fn create_input() -> CreateRequest {
         let profile = super::super::profile::selected_profile();
         CreateRequest {
@@ -1773,13 +1972,14 @@ mod tests {
             audio_index: 0,
             spoken_language: "de".into(),
             output_language: "en".into(),
-            task: "translate".into(),
+            task: Some(SpeechTask::TranslateToEnglish),
             model_id: profile.model_id.clone(),
             profile_id: profile.id().expect("selected profile identity"),
             playback_id: uuid::Uuid::new_v4().to_string(),
             position_ms: 0,
             playback_rate: 1.0,
             paused: false,
+            continuity_id: None,
         }
     }
 
@@ -1845,6 +2045,7 @@ mod tests {
                     position_ms: 0,
                     playback_rate: 1.0,
                     paused: false,
+                    continuity_id: None,
                 },
             })
             .await

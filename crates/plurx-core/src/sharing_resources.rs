@@ -41,6 +41,9 @@ pub enum SharingFileResourceKind {
     SubtitleManifest { index: u16 },
     SubtitleObject { index: u16 },
     ChapterThumbnail { index: u16 },
+    Captions,
+    CaptionManifest,
+    CaptionSegment,
 }
 
 /// A file-relative suffix only. Authentication, exact file/revision membership
@@ -55,7 +58,12 @@ impl SharingFileResource {
         if suffix.len() > 256 || !suffix.is_ascii() {
             return Err(SharingResourceUnsupported);
         }
-        let fields = suffix.split('/').collect::<Vec<_>>();
+        let (path, query) = match suffix.split_once('?') {
+            Some((path, query)) if !query.is_empty() && !query.contains('?') => (path, Some(query)),
+            Some(_) => return Err(SharingResourceUnsupported),
+            None => (suffix, None),
+        };
+        let fields = path.split('/').collect::<Vec<_>>();
         let index = |value: &str| -> Result<u16> {
             let parsed = digits(value, 4095)?;
             if parsed.to_string() != value {
@@ -70,6 +78,13 @@ impl SharingFileResource {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         };
         let kind = match fields.as_slice() {
+            ["captions"] => SharingFileResourceKind::Captions,
+            ["captions", asset, "manifest"] if digest(asset) => {
+                SharingFileResourceKind::CaptionManifest
+            }
+            ["captions", asset, "segments", segment] if digest(asset) && digest(segment) => {
+                SharingFileResourceKind::CaptionSegment
+            }
             ["decision"] => SharingFileResourceKind::Decision,
             ["hls", "sessions"] => SharingFileResourceKind::Start,
             ["direct"] => SharingFileResourceKind::Direct,
@@ -92,6 +107,35 @@ impl SharingFileResource {
             },
             _ => return Err(SharingResourceUnsupported),
         };
+        match kind {
+            SharingFileResourceKind::Captions => {
+                if let Some(value) = query {
+                    if !value.strip_prefix("after=").is_some_and(digest) {
+                        return Err(SharingResourceUnsupported);
+                    }
+                }
+            }
+            SharingFileResourceKind::CaptionManifest => {
+                let value = query
+                    .and_then(|q| q.strip_prefix("position_ms="))
+                    .ok_or(SharingResourceUnsupported)?;
+                if digits(value, 14_400_000)?.to_string() != value {
+                    return Err(SharingResourceUnsupported);
+                }
+            }
+            SharingFileResourceKind::CaptionSegment => {
+                let value = query
+                    .and_then(|q| q.strip_prefix("lease="))
+                    .ok_or(SharingResourceUnsupported)?;
+                if !uuid::Uuid::parse_str(value)
+                    .is_ok_and(|id| !id.is_nil() && id.to_string() == value)
+                {
+                    return Err(SharingResourceUnsupported);
+                }
+            }
+            _ if query.is_some() => return Err(SharingResourceUnsupported),
+            _ => {}
+        }
         Ok(Self {
             suffix: suffix.to_owned(),
             kind,
@@ -665,7 +709,10 @@ mod tests {
                 SharingFileResourceKind::Subtitle { .. }
                 | SharingFileResourceKind::SubtitleManifest { .. }
                 | SharingFileResourceKind::SubtitleObject { .. }
-                | SharingFileResourceKind::ChapterThumbnail { .. } => "asset",
+                | SharingFileResourceKind::ChapterThumbnail { .. }
+                | SharingFileResourceKind::Captions
+                | SharingFileResourceKind::CaptionManifest
+                | SharingFileResourceKind::CaptionSegment => "asset",
             };
             assert_eq!(row["b"], route, "{suffix:?}");
         }
@@ -699,6 +746,38 @@ mod cached_caption_tests {
             "subs/4096/cached-a",
         ] {
             assert!(SharingHlsResource::parse(path).is_err(), "{path}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod progressive_caption_grammar_tests {
+    use super::*;
+    #[test]
+    fn shared_captions_are_closed_read_resources_with_canonical_queries() {
+        let hash = "a".repeat(64);
+        for path in [
+            "captions".to_owned(),
+            format!("captions?after={hash}"),
+            format!("captions/{hash}/manifest?position_ms=14400000"),
+            format!("captions/{hash}/segments/{hash}?lease=11111111-1111-4111-8111-111111111111"),
+        ] {
+            assert!(SharingFileResource::parse(&path).is_ok(), "{path}");
+        }
+        for path in [
+            "captions?after=".to_owned(),
+            "captions?after=wrong".into(),
+            format!("captions/{hash}/manifest"),
+            format!("captions/{hash}/manifest?position_ms=-1"),
+            format!("captions/{hash}/manifest?position_ms=01"),
+            format!("captions/{hash}/manifest?position_ms=1&position_ms=2"),
+            format!("captions/{hash}/manifest?position_ms=14400001"),
+            format!("captions/{hash}/segments/{hash}?lease=00000000-0000-0000-0000-000000000000"),
+            format!("captions/{hash}/stop"),
+            "captions%2fsecret".into(),
+            "decision?after=1".into(),
+        ] {
+            assert!(SharingFileResource::parse(&path).is_err(), "{path}");
         }
     }
 }

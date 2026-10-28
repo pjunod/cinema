@@ -52,7 +52,7 @@ internal class SharedFixture(itemId: String) {
         val url = if (method == "direct_play") "$base/direct" else "$base/stream.mp4"
         put("file_id", file); put("reference", binding()); put("method", method); put("play_url", url)
         put("delivery", buildJsonObject { put("mode", mode); put("url", url); put("sessions_url", "$base/hls/sessions") })
-        put("audio", buildJsonArray { add(buildJsonObject { put("index", 1); put("codec", "aac"); put("channels", 2) }); add(buildJsonObject { put("index", 2); put("codec", "ac3"); put("channels", 6) }) })
+        put("audio", buildJsonArray { add(buildJsonObject { put("index", 1); put("codec", "aac"); put("channels", 2) }); if (method != "direct_play") add(buildJsonObject { put("index", 2); put("codec", "ac3"); put("channels", 6) }) })
         put("subtitles", buildJsonArray { add(buildJsonObject { put("index", 4); put("codec", "subrip"); put("native", true) }) })
         put("audio_offset_ms", offset); put("transcode_audio", transcodeAudio); put("delivered_dynamic_range", "sdr")
     }.toString()

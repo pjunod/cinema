@@ -207,6 +207,8 @@ enum AdmissionInterleave {
     Ack,
     Seal,
     AckAll,
+    RepeatedAck,
+    SqlFault,
     WrongOwner,
     WrongRoutingOwner,
     WrongBoot,
@@ -224,6 +226,7 @@ struct AdmissionInterleavedStore<'a> {
     assignment: &'a SourceDispatchAssignment,
     action: std::sync::Mutex<Option<AdmissionInterleave>>,
     second: crate::sharing_ingress_custody::IngressRegistration,
+    writes: Option<&'a std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait::async_trait]
@@ -239,7 +242,15 @@ impl super::super::sharing::Backend for AdmissionInterleavedStore<'_> {
         let rows = self.store.sharing_read(sql, values).await?;
         let action =
             if sql.starts_with("SELECT json_object('revision',revision,'custody',custody_json)") {
-                self.action.lock().expect("one interleaving").take()
+                let mut action = self.action.lock().expect("one interleaving");
+                if matches!(
+                    *action,
+                    Some(AdmissionInterleave::RepeatedAck | AdmissionInterleave::SqlFault)
+                ) {
+                    *action
+                } else {
+                    action.take()
+                }
             } else {
                 None
             };
@@ -291,6 +302,19 @@ impl super::super::sharing::Backend for AdmissionInterleavedStore<'_> {
                         SourceCustodyWrite::Applied
                     );
                 }
+                AdmissionInterleave::RepeatedAck => {
+                    assert!(matches!(
+                        self.store
+                            .acknowledge_source_ingress_custody(
+                                self.assignment,
+                                &self.second,
+                                &"e".repeat(64),
+                            )
+                            .await?,
+                        SourceCustodyWrite::Applied | SourceCustodyWrite::ExactReplay
+                    ));
+                }
+                AdmissionInterleave::SqlFault => {}
                 AdmissionInterleave::RemoveFloor => {
                     self.store
                         .sharing_txn(vec![(
@@ -333,6 +357,22 @@ impl super::super::sharing::Backend for AdmissionInterleavedStore<'_> {
         &self,
         statements: Vec<super::super::sharing::Statement>,
     ) -> Result<Vec<usize>, StoreError> {
+        if let Some(writes) = self.writes {
+            writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let fault = matches!(
+            *self.action.lock().expect("one interleaving"),
+            Some(AdmissionInterleave::SqlFault)
+        );
+        if fault {
+            return self
+                .store
+                .sharing_txn(vec![(
+                    "SELECT * FROM source_ack_injected_missing_table".into(),
+                    vec![],
+                )])
+                .await;
+        }
         self.store.sharing_txn(statements).await
     }
     async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
@@ -393,6 +433,7 @@ async fn sharing_source_ingress_seal_retries_accounting_races_without_losing_clo
             store: &store,
             assignment: &assignment,
             action: std::sync::Mutex::new(Some(action)),
+            writes: None,
             second: IngressRegistration {
                 connection_id: Uuid::new_v4(),
                 driver_sequence: 2,
@@ -426,6 +467,184 @@ async fn sharing_source_ingress_seal_retries_accounting_races_without_losing_clo
             open,
             "{action:?}: seal preserves every registration and actual acknowledgement"
         );
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_ingress_ack_retries_seal_race_without_losing_actual_receipt() {
+    use crate::sharing_ingress_custody::IngressRegistration;
+    use crate::store::sharing_source_ingress_custody::SourceCustodyWrite;
+    let store = SqliteStore::open_in_memory().expect("actual Store");
+    let (grant, credential) = setup(&store).await;
+    install_fixture_ingress_context(&store).await;
+    let planned = intent(&store, grant, &credential, "ack-seal-interleave").await;
+    let binding = match store
+        .claim_source_media_session(&planned, &proof())
+        .await
+        .expect("claim")
+    {
+        SourceClaimOutcome::Acquired(value) => value,
+        _ => panic!("fresh claim"),
+    };
+    let assignment = store
+        .assign_source_dispatch(&binding, &credential, &proof())
+        .await
+        .expect("assignment")
+        .expect("exact owner");
+    let first = IngressRegistration {
+        node_id: "voter".into(),
+        boot_id: planned.request.ingress_registry_boot_id,
+        connection_id: Uuid::new_v4(),
+        driver_sequence: 1,
+        registration_sequence: 1,
+        closed_confirmation: None,
+    };
+    assert_eq!(
+        store
+            .register_source_ingress_custody(&assignment, &first, &proof())
+            .await
+            .expect("registration"),
+        SourceCustodyWrite::Applied
+    );
+    let interleaved = AdmissionInterleavedStore {
+        store: &store,
+        assignment: &assignment,
+        action: std::sync::Mutex::new(Some(AdmissionInterleave::Seal)),
+        writes: None,
+        second: first.clone(),
+    };
+    // A real seal commits after the ACK's captured ledger read. The daemon
+    // separately proves that this confirmation comes from actual driver join.
+    let result = interleaved
+        .acknowledge_source_ingress_custody(&assignment, &first, &"e".repeat(64))
+        .await;
+    assert_eq!(
+        result.expect("an exact-owner seal race cannot discard a joined-driver receipt"),
+        SourceCustodyWrite::Applied
+    );
+    let ledger = store
+        .source_ingress_custody(&assignment)
+        .await
+        .expect("read")
+        .expect("same owner");
+    assert!(ledger.state.is_sealed());
+    assert!(ledger.state.settled());
+    assert_eq!(ledger.state.open().count(), 0);
+}
+
+#[tokio::test]
+async fn sharing_source_ingress_ack_preserves_authority_faults_and_retry_bounds() {
+    use crate::sharing_ingress_custody::IngressRegistration;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for (action, expected_writes) in [
+        (Some(AdmissionInterleave::WrongOwner), 1),
+        (Some(AdmissionInterleave::SqlFault), 1),
+        (Some(AdmissionInterleave::RepeatedAck), 4),
+        (None, 0),
+    ] {
+        let store = SqliteStore::open_in_memory().expect("actual Store");
+        let (grant, credential) = setup(&store).await;
+        install_fixture_ingress_context(&store).await;
+        let planned = intent(&store, grant, &credential, "ack-retry-negative").await;
+        let binding = match store
+            .claim_source_media_session(&planned, &proof())
+            .await
+            .expect("claim")
+        {
+            SourceClaimOutcome::Acquired(value) => value,
+            _ => panic!("fresh claim"),
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &credential, &proof())
+            .await
+            .expect("assignment")
+            .expect("exact owner");
+        let first = IngressRegistration {
+            node_id: "voter".into(),
+            boot_id: planned.request.ingress_registry_boot_id,
+            connection_id: Uuid::new_v4(),
+            driver_sequence: 1,
+            registration_sequence: 1,
+            closed_confirmation: None,
+        };
+        store
+            .register_source_ingress_custody(&assignment, &first, &proof())
+            .await
+            .expect("registration");
+        let second = IngressRegistration {
+            connection_id: Uuid::new_v4(),
+            driver_sequence: 2,
+            registration_sequence: 2,
+            ..first.clone()
+        };
+        if matches!(action, Some(AdmissionInterleave::RepeatedAck)) {
+            store
+                .register_source_ingress_custody(&assignment, &second, &proof())
+                .await
+                .expect("independent slot for repeated exact accounting ACK");
+        }
+        let writes = AtomicUsize::new(0);
+        let interleaved = AdmissionInterleavedStore {
+            store: &store,
+            assignment: &assignment,
+            action: std::sync::Mutex::new(action),
+            second,
+            writes: Some(&writes),
+        };
+        let confirmation = if action.is_some() {
+            "e".repeat(64)
+        } else {
+            String::new()
+        };
+        let result = interleaved
+            .acknowledge_source_ingress_custody(&assignment, &first, &confirmation)
+            .await;
+        if action.is_none() {
+            assert!(
+                matches!(
+                    result,
+                    Ok(crate::store::sharing_source_ingress_custody::SourceCustodyWrite::Refused)
+                ),
+                "a malformed receipt never reaches a ledger write"
+            );
+        } else {
+            let error =
+                result.expect_err("authority/fault/exhausted races cannot acknowledge closure");
+            if matches!(action, Some(AdmissionInterleave::SqlFault)) {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("source_ack_injected_missing_table"),
+                    "the unchanged-ledger SQL error is preserved: {error}"
+                );
+            }
+        }
+        assert_eq!(
+            writes.load(Ordering::Relaxed),
+            expected_writes,
+            "{action:?}"
+        );
+        let ledger = store
+            .source_ingress_custody(&assignment)
+            .await
+            .expect("read");
+        if matches!(action, Some(AdmissionInterleave::WrongOwner)) {
+            assert!(
+                ledger.is_none(),
+                "a replaced owner is never adopted by a retry"
+            );
+        } else {
+            let ledger = ledger.expect("same exact owner");
+            assert!(
+                !ledger.state.settled(),
+                "no target-slot closure may be fabricated"
+            );
+            assert_eq!(ledger.state.open().count(), 1);
+            assert!(
+                ledger.state.open().any(|slot| slot == &first),
+                "the target registration itself must remain open"
+            );
+        }
     }
 }
 
@@ -509,6 +728,7 @@ async fn sharing_source_ingress_admission_accepts_current_accounting_but_refuses
             store: &store,
             assignment: &assignment,
             action: std::sync::Mutex::new(Some(action)),
+            writes: None,
             second,
         };
         let result = interleaved

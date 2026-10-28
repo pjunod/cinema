@@ -3,5 +3,5 @@ name = "segment-guard-controls"
 version = "0.1.0"
 edition = "2021"
 [dependencies]
-dolby_vision = { path = "/dovi/dolby_vision", features = ["serde"] }
+dolby_vision = { path = "/dovi/dolby_vision", features = ["serde", "xml"] }
 serde_json = "1"

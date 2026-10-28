@@ -16,7 +16,7 @@ fn candidate_refusals_distinguish_authority_identity_decoder_and_route() {
         "encode_route_unavailable"
     );
     let row = QualityCandidate {
-        processed_hdr10: false,
+        processed_dv: false,
         id: requested,
         recipe_digest: [0; 32],
         route: CandidateRoute::Encode,

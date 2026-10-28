@@ -1,0 +1,1943 @@
+{
+  "schema_version": 1,
+  "model_file": "verification/durable-jobs/DurableJobs.tla",
+  "model_sha256": "96d4e49281e562d43b412acd7c307afa7202b11763c24e511ad90cc3fd99bbaa",
+  "source_mapping": {
+    "status": "reviewed",
+    "tables": [
+      {
+        "anchor": "name = \"hiqlite\"\nversion = \"0.14.0\"",
+        "sha256": "fcdd68b956d1965645f63e5d91fb26a0bc940d57e9d45eefa5c6dc3d9ec26730",
+        "source": "Cargo.lock",
+        "table": "proposal \u00a74.2 lockfile runtime dependency pin"
+      },
+      {
+        "anchor": "hiqlite = { version = \"=0.14.0\"",
+        "sha256": "72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f",
+        "source": "Cargo.toml",
+        "table": "proposal \u00a74.2 runtime dependency pin"
+      },
+      {
+        "anchor": "pub fn publication_successor(&self) -> Result<Self, StoreError> {",
+        "sha256": "7997fed08cc2286e0f8e47ff98024a0adbd7a44a420734c21d6ab242c3822d9e",
+        "source": "crates/plurx-core/src/cluster/coordination.rs",
+        "table": "proposal \u00a74.1 successor lease"
+      },
+      {
+        "anchor": "        }\n        let now = unix_ms()?;\n        let minimum_expiry = self",
+        "sha256": "7997fed08cc2286e0f8e47ff98024a0adbd7a44a420734c21d6ab242c3822d9e",
+        "source": "crates/plurx-core/src/cluster/coordination.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/cluster/coordination.rs:52"
+      },
+      {
+        "anchor": "    let publisher = PublicationStore::unfenced(store);",
+        "sha256": "9bdd6813d84819eb38a30784e01eb8de4a426b3b01243f09335f61971d5a28e2",
+        "source": "crates/plurx-core/src/metadata/book.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/metadata/book.rs:157"
+      },
+      {
+        "anchor": "    backfill_pass_with_publication(&PublicationStore::unfenced(store), tmdb, anilist, pace).await",
+        "sha256": "933b36c73c9cac6618be27e6b031aa967678b3e058b547f410e9b304ec8f218e",
+        "source": "crates/plurx-core/src/metadata/genres.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/metadata/genres.rs:125"
+      },
+      {
+        "anchor": "    let publisher = PublicationStore::unfenced(store);",
+        "sha256": "de025c60bab3f354a43e378c6c415331e244bcaa1f5d017d1cc3607a4c82c11c",
+        "source": "crates/plurx-core/src/metadata/local.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/metadata/local.rs:40"
+      },
+      {
+        "anchor": "    enrich_library_with_publication(\n        &PublicationStore::unfenced(store),\n        tmdb,",
+        "sha256": "357dd388111ab259eb082427f6ac7848f9e813bb8a211a21c3e5581f38f5003a",
+        "source": "crates/plurx-core/src/metadata/mod.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/metadata/mod.rs:801"
+      },
+      {
+        "anchor": "    reprobe_files_with_publication(&PublicationStore::unfenced(store), files).await",
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c",
+        "source": "crates/plurx-core/src/scan/mod.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/scan/mod.rs:485"
+      },
+      {
+        "anchor": "pub trait BackgroundJobStore: Send + Sync {",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "proposal \u00a74.1 queue protocol trait"
+      },
+      {
+        "anchor": "pub struct JobToken {",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "proposal \u00a74.1 queue token schema"
+      },
+      {
+        "anchor": "impl<T: QueueSql> BackgroundJobStore for T {",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "proposal \u00a74.1 shared queue adapter"
+      },
+      {
+        "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:1495"
+      },
+      {
+        "anchor": "        if request.fence.is_none()",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3465"
+      },
+      {
+        "anchor": "            if token.lease_expires_ms <= request.now_ms {",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3497"
+      },
+      {
+        "anchor": "  AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:532"
+      },
+      {
+        "anchor": "    AND job.lease_expires_ms > now_ms AND job.state = 'running'",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:630"
+      },
+      {
+        "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:636"
+      },
+      {
+        "anchor": "pub const MAX_RETAINED_JOBS: usize = 10_000;",
+        "sha256": "63953a5c3a1d98e391391122107740feeeb118e1ccc31c37f775e59cbfe16e12",
+        "source": "crates/plurx-core/src/store/background_jobs.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs.rs:50"
+      },
+      {
+        "anchor": "pub struct BindLibraryJob {",
+        "sha256": "6479626d2de5337070c8cc7d830d7bbb4a9338fb64235d37c4b5876047570375",
+        "source": "crates/plurx-core/src/store/background_jobs_domain.rs",
+        "table": "proposal \u00a74.1 binding identity"
+      },
+      {
+        "anchor": "const BIND_SQL: &str = r#\"",
+        "sha256": "6479626d2de5337070c8cc7d830d7bbb4a9338fb64235d37c4b5876047570375",
+        "source": "crates/plurx-core/src/store/background_jobs_domain.rs",
+        "table": "proposal \u00a74.1 binding write statement"
+      },
+      {
+        "anchor": "    AND job.lease_expires_ms > json_extract($1, '$.now_ms')",
+        "sha256": "6479626d2de5337070c8cc7d830d7bbb4a9338fb64235d37c4b5876047570375",
+        "source": "crates/plurx-core/src/store/background_jobs_domain.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs_domain.rs:39"
+      },
+      {
+        "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
+        "sha256": "6479626d2de5337070c8cc7d830d7bbb4a9338fb64235d37c4b5876047570375",
+        "source": "crates/plurx-core/src/store/background_jobs_domain.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs_domain.rs:45"
+      },
+      {
+        "anchor": "    AND job.kind IN ('library_scan', 'metadata_refresh') AND job.payload_version = 1",
+        "sha256": "6479626d2de5337070c8cc7d830d7bbb4a9338fb64235d37c4b5876047570375",
+        "source": "crates/plurx-core/src/store/background_jobs_domain.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs_domain.rs:30"
+      },
+      {
+        "anchor": "    boot_id = excluded.boot_id, claim_id = excluded.claim_id",
+        "sha256": "6479626d2de5337070c8cc7d830d7bbb4a9338fb64235d37c4b5876047570375",
+        "source": "crates/plurx-core/src/store/background_jobs_domain.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs_domain.rs:57"
+      },
+      {
+        "anchor": "CREATE TABLE IF NOT EXISTS background_job_domain_leases (",
+        "sha256": "b7874bab929232c01d66800bc01f3ae0023d02c196ba4ab86f192469091f0598",
+        "source": "crates/plurx-core/src/store/background_jobs_domain.sql",
+        "table": "proposal \u00a74.1 binding lifetime"
+      },
+      {
+        "anchor": "    DELETE FROM background_jobs WHERE id IN (",
+        "sha256": "a586e5a1649cce7fdbb6e7e716f495e085226d5549d9b42ed1878f0b2a9048be",
+        "source": "crates/plurx-core/src/store/background_jobs_receipt_pressure.sql",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs_receipt_pressure.sql:112"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command",
+        "sha256": "a586e5a1649cce7fdbb6e7e716f495e085226d5549d9b42ed1878f0b2a9048be",
+        "source": "crates/plurx-core/src/store/background_jobs_receipt_pressure.sql",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs_receipt_pressure.sql:14"
+      },
+      {
+        "anchor": "    DELETE FROM background_job_attempts WHERE (job_id, fence) IN (",
+        "sha256": "a586e5a1649cce7fdbb6e7e716f495e085226d5549d9b42ed1878f0b2a9048be",
+        "source": "crates/plurx-core/src/store/background_jobs_receipt_pressure.sql",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs_receipt_pressure.sql:83"
+      },
+      {
+        "anchor": "        ORDER BY old.finished_at_ms, old.job_id, old.fence LIMIT 128);\n    DELETE FROM background_job_waiters WHERE (request_scope, request_id) IN (\n        SELECT request_scope, request_id FROM background_job_waiters",
+        "sha256": "a586e5a1649cce7fdbb6e7e716f495e085226d5549d9b42ed1878f0b2a9048be",
+        "source": "crates/plurx-core/src/store/background_jobs_receipt_pressure.sql",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs_receipt_pressure.sql:94"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command",
+        "sha256": "a586e5a1649cce7fdbb6e7e716f495e085226d5549d9b42ed1878f0b2a9048be",
+        "source": "crates/plurx-core/src/store/background_jobs_receipt_pressure.sql",
+        "table": "review \u00a73.1 receipt-pressure maintenance"
+      },
+      {
+        "anchor": "pub struct StorageDomainMapping {",
+        "sha256": "3b231d685d315cfacc4ab2665344007094ce981ee5c03045db84f455a3a5132e",
+        "source": "crates/plurx-core/src/store/background_jobs_resources.rs",
+        "table": "proposal \u00a74.1 resource mapping"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS background_job_claim_effects",
+        "sha256": "e2313d279bbbf5688adbfc6c3aba9f17d31e7fa93345c2193543a61639a50f81",
+        "source": "crates/plurx-core/src/store/background_jobs_resources.sql",
+        "table": "proposal \u00a74.1 resource claim effects"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS background_storage_domains_replace",
+        "sha256": "e2313d279bbbf5688adbfc6c3aba9f17d31e7fa93345c2193543a61639a50f81",
+        "source": "crates/plurx-core/src/store/background_jobs_resources.sql",
+        "table": "proposal \u00a74.1 resource replacement trigger"
+      },
+      {
+        "anchor": "CREATE TABLE IF NOT EXISTS background_storage_domains (",
+        "sha256": "e2313d279bbbf5688adbfc6c3aba9f17d31e7fa93345c2193543a61639a50f81",
+        "source": "crates/plurx-core/src/store/background_jobs_resources.sql",
+        "table": "proposal \u00a74.1 resource schema"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS background_job_enqueue_command",
+        "sha256": "c1a304fe29f6cf78c58fb94feb9f23d66396dc37739aa3baa430f81adb20817e",
+        "source": "crates/plurx-core/src/store/background_jobs_retention.sql",
+        "table": "proposal \u00a74.1 SQLite job retention trigger"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS background_job_enqueue_command",
+        "sha256": "c1a304fe29f6cf78c58fb94feb9f23d66396dc37739aa3baa430f81adb20817e",
+        "source": "crates/plurx-core/src/store/background_jobs_retention.sql",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs_retention.sql:20"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS background_job_retire_details",
+        "sha256": "11c521ad5bae7516e34bf02147e9d37e85e4f924b83283231178d6d0a5596984",
+        "source": "crates/plurx-core/src/store/background_jobs_schema.sql",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs_schema.sql:586"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS background_job_retire_details",
+        "sha256": "11c521ad5bae7516e34bf02147e9d37e85e4f924b83283231178d6d0a5596984",
+        "source": "crates/plurx-core/src/store/background_jobs_schema.sql",
+        "table": "review \u00a73.1 job detail retirement"
+      },
+      {
+        "anchor": "pub(super) const REPLICATED_STORE_TIMEOUT: &str = \"replicated store operation timed out\";",
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d",
+        "source": "crates/plurx-core/src/store/hiqlite.rs",
+        "table": "M2 Hiqlite replicated timeout classification"
+      },
+      {
+        "anchor": "                        super::background_jobs::RETENTION_SCHEMA",
+        "sha256": "40a5d7b0975db9f109a9511328e645ec919503acf99be514e7d5c034e6c5a22d",
+        "source": "crates/plurx-core/src/store/hiqlite.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585"
+      },
+      {
+        "anchor": "impl QueueSql for HiqliteAuthStore {",
+        "sha256": "e6d4f13cd6e5582a3567929a9b6a9073d47cf4daa0a6dc9c62bb4bcfcdfe7b4f",
+        "source": "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
+        "table": "proposal \u00a74.1 Hiqlite queue adapter"
+      },
+      {
+        "anchor": "impl CoordinationStore for HiqliteAuthStore {",
+        "sha256": "0650b290fd2ebeef8e4096d53fed8bb1d8c34c0c983b4c018cc9d1c11f6e9746",
+        "source": "crates/plurx-core/src/store/hiqlite_coordination.rs",
+        "table": "proposal \u00a74.1 Hiqlite coordination implementation"
+      },
+      {
+        "anchor": "                 SET expires_at_ms = CASE",
+        "sha256": "0650b290fd2ebeef8e4096d53fed8bb1d8c34c0c983b4c018cc9d1c11f6e9746",
+        "source": "crates/plurx-core/src/store/hiqlite_coordination.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_coordination.rs:162"
+      },
+      {
+        "anchor": "    WHERE job_leases.expires_at_ms <= $4",
+        "sha256": "0650b290fd2ebeef8e4096d53fed8bb1d8c34c0c983b4c018cc9d1c11f6e9746",
+        "source": "crates/plurx-core/src/store/hiqlite_coordination.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_coordination.rs:32"
+      },
+      {
+        "anchor": "seam.acknowledgement(&observed).apply(results)",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "M2 Hiqlite acknowledgement hook application"
+      },
+      {
+        "anchor": "fn acknowledgement(&self, attempt: &InsertionAttempt) -> Acknowledgement;",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "M2 Hiqlite acknowledgement hook contract"
+      },
+      {
+        "anchor": "pub(crate) struct InsertionSeamSlot",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "M2 Hiqlite per-store seam slot"
+      },
+      {
+        "anchor": "async fn insert_item_fenced(",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "proposal \u00a74.1 Hiqlite catalogue insertion"
+      },
+      {
+        "anchor": "pub(super) fn atomic_renewal_statement(",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "proposal \u00a74.1 Hiqlite renewal SQL"
+      },
+      {
+        "anchor": "        let renewal = atomic_renewal_statement(lease, replacement, unix_ms()?)?;",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:187"
+      },
+      {
+        "anchor": "        let results = match transaction {",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:198"
+      },
+      {
+        "anchor": "        || replacement.expires_at_unix_ms <= lease.expires_at_unix_ms",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:38"
+      },
+      {
+        "anchor": "            AND expires_at_ms > $9",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:49"
+      },
+      {
+        "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:61"
+      },
+      {
+        "anchor": "fn bind_atomic_authority(params: &mut hiqlite::Params, lease: &Lease) -> Result<(), StoreError> {",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:82"
+      },
+      {
+        "anchor": "        };\n        let now = self.now()?;\n        // authority: current allocator installation selects the identity-fenced write path.",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:915"
+      },
+      {
+        "anchor": "for attempt in 0..4 {",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:918"
+      },
+      {
+        "anchor": "                 WHERE EXISTS (",
+        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:934"
+      },
+      {
+        "anchor": "async fn fenced_call<",
+        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d",
+        "source": "crates/plurx-core/src/store/publication.rs",
+        "table": "proposal \u00a74.1 publication facade call"
+      },
+      {
+        "anchor": "pub async fn insert_item(&self, item: &NewItem) -> Result<i64, StoreError> {",
+        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d",
+        "source": "crates/plurx-core/src/store/publication.rs",
+        "table": "proposal \u00a74.1 publication facade insertion"
+      },
+      {
+        "anchor": "    async fn fenced_call<'call, T, F>(&'call self, operation: F) -> Result<T, StoreError>",
+        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d",
+        "source": "crates/plurx-core/src/store/publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/publication.rs:303"
+      },
+      {
+        "anchor": "        let predecessor = state.as_ref().cloned().ok_or_else(|| self.invalidated())?;\n        let now = unix_ms()?;\n        if predecessor.expires_at_unix_ms <= now {",
+        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d",
+        "source": "crates/plurx-core/src/store/publication.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/publication.rs:318"
+      },
+      {
+        "anchor": "impl QueueSql for SqliteStore {",
+        "sha256": "16a81e9ce15b78313deee940ea726bf802016ddae9884c7bb78641844e925c8c",
+        "source": "crates/plurx-core/src/store/sqlite/background_jobs.rs",
+        "table": "proposal \u00a74.1 SQLite queue adapter"
+      },
+      {
+        "anchor": "impl CoordinationStore for SqliteStore {",
+        "sha256": "b6f888196144a0231af75cdeef6bbb9ed0ccc4b7c912024d082191b6a0abe81b",
+        "source": "crates/plurx-core/src/store/sqlite/coordination.rs",
+        "table": "proposal \u00a74.1 SQLite coordination implementation"
+      },
+      {
+        "anchor": "            Ok(conn.execute(\n                \"UPDATE job_leases\n                 SET expires_at_ms = CASE",
+        "sha256": "b6f888196144a0231af75cdeef6bbb9ed0ccc4b7c912024d082191b6a0abe81b",
+        "source": "crates/plurx-core/src/store/sqlite/coordination.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/coordination.rs:123"
+      },
+      {
+        "anchor": "    WHERE job_leases.expires_at_ms <= ?3",
+        "sha256": "b6f888196144a0231af75cdeef6bbb9ed0ccc4b7c912024d082191b6a0abe81b",
+        "source": "crates/plurx-core/src/store/sqlite/coordination.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/coordination.rs:20"
+      },
+      {
+        "anchor": "async fn with_fenced_conn<T, F>",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
+        "source": "crates/plurx-core/src/store/sqlite/mod.rs",
+        "table": "proposal \u00a74.1 SQLite fenced transaction"
+      },
+      {
+        "anchor": "            let execution_time_ms = std::time::SystemTime::now()",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
+        "source": "crates/plurx-core/src/store/sqlite/mod.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1973"
+      },
+      {
+        "anchor": "                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
+        "source": "crates/plurx-core/src/store/sqlite/mod.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1984"
+      },
+      {
+        "anchor": "                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
+        "source": "crates/plurx-core/src/store/sqlite/mod.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1996"
+      },
+      {
+        "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
+        "source": "crates/plurx-core/src/store/sqlite/mod.rs",
+        "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:2008"
+      },
+      {
+        "anchor": "    super::background_jobs::RETENTION_SCHEMA,",
+        "sha256": "c6f01fbf519c7040fbe1623c2fa510c3e410c6c015a5ddb499960c2dfbc80167",
+        "source": "crates/plurx-core/src/store/sqlite/mod.rs",
+        "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255"
+      },
+      {
+        "anchor": "async fn insert_item_fenced(",
+        "sha256": "d7b3828853d96048066be319d36f6203b51ac81646f7844e44f3e215beaaa823",
+        "source": "crates/plurx-core/src/store/sqlite/publication.rs",
+        "table": "proposal \u00a74.1 SQLite catalogue insertion"
+      },
+      {
+        "anchor": "#[path = \"store_contract/formal_publication.rs\"]\nmod formal_publication;",
+        "sha256": "0458a31768007563ac77a221fdfab8d04f251d3b767b807eac65ce3a217f062a",
+        "source": "crates/plurx-core/tests/store_contract.rs",
+        "table": "M2 conformance parent module registration"
+      },
+      {
+        "anchor": "async fn formal_publication_binding_survives_independent_renewals_and_rejects_exact_stale_tokens",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293",
+        "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "table": "M2 conformance test formal_publication_binding_survives_independent_renewals_and_rejects_exact_stale_tokens"
+      },
+      {
+        "anchor": "async fn formal_publication_hiqlite_allocator_conflict_retries_same_authority_fresh_candidate",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293",
+        "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "table": "M2 conformance test formal_publication_hiqlite_allocator_conflict_retries_same_authority_fresh_candidate"
+      },
+      {
+        "anchor": "async fn formal_publication_hiqlite_lost_acknowledgement_retains_commit_and_clears_facade",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293",
+        "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "table": "M2 conformance test formal_publication_hiqlite_lost_acknowledgement_retains_commit_and_clears_facade"
+      },
+      {
+        "anchor": "async fn formal_publication_hiqlite_statement_zero_missing_output_is_fence_rejected_and_rolled_back",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293",
+        "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "table": "M2 conformance test formal_publication_hiqlite_statement_zero_missing_output_is_fence_rejected_and_rolled_back"
+      },
+      {
+        "anchor": "async fn formal_publication_live_bound_insertion_commits_and_cancellation_orders_around_commit",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293",
+        "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "table": "M2 conformance test formal_publication_live_bound_insertion_commits_and_cancellation_orders_around_commit"
+      },
+      {
+        "anchor": "async fn formal_publication_queue_expiry_with_live_domain_rejects_at_backend_sample",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293",
+        "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "table": "M2 conformance test formal_publication_queue_expiry_with_live_domain_rejects_at_backend_sample"
+      },
+      {
+        "anchor": "async fn formal_publication_reservations_owner_removal_and_binding_lifetime_follow_code_semantics",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293",
+        "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "table": "M2 conformance test formal_publication_reservations_owner_removal_and_binding_lifetime_follow_code_semantics"
+      },
+      {
+        "anchor": "async fn formal_publication_resolved_claim_keeps_attempt_identity_through_insertion",
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293",
+        "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
+        "table": "M2 conformance test formal_publication_resolved_claim_keeps_attempt_identity_through_insertion"
+      },
+      {
+        "anchor": "struct JobFence",
+        "sha256": "519ce88a703cd169569cc07509f38a1d6027678bb7b4aad6e46e9c49860532e6",
+        "source": "crates/plurxd/src/background_jobs.rs",
+        "table": "proposal \u00a74.1 runtime fence"
+      },
+      {
+        "anchor": "    pub(crate) fn publisher<'a>(&self, store: &'a dyn Store) -> PublicationStore<'a> {",
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57",
+        "source": "crates/plurxd/src/job_lease.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/job_lease.rs:145"
+      },
+      {
+        "anchor": "async fn process_library_requests(",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429",
+        "source": "crates/plurxd/src/library_work.rs",
+        "table": "proposal \u00a74.1 library worker"
+      },
+      {
+        "anchor": "Effect::Bind => {",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429",
+        "source": "crates/plurxd/src/library_work.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:257"
+      },
+      {
+        "anchor": "\"library publication binding refused\"",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429",
+        "source": "crates/plurxd/src/library_work.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:260"
+      },
+      {
+        "anchor": "                let scan = self",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429",
+        "source": "crates/plurxd/src/library_work.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:434"
+      },
+      {
+        "anchor": "    async fn run_targeted(",
+        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "source": "crates/plurxd/src/state.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/state.rs:5172"
+      },
+      {
+        "anchor": "        };\n        let Some(lease) = self.acquire_job(\"provider:artwork\".to_owned()).await? else {\n            return Err(StoreError::Task(",
+        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "source": "crates/plurxd/src/state.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/state.rs:5478"
+      },
+      {
+        "anchor": "    async fn run_scan(",
+        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "source": "crates/plurxd/src/state.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/state.rs:5856"
+      },
+      {
+        "anchor": "        match self.acquire_job(\"provider:artwork\".to_owned()).await {",
+        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "source": "crates/plurxd/src/state.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/state.rs:6430"
+      },
+      {
+        "anchor": "        let lease = match self.acquire_job(\"provider:genres\".to_owned()).await {",
+        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "source": "crates/plurxd/src/state.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/state.rs:6517"
+      },
+      {
+        "anchor": "pub async fn produce(",
+        "sha256": "da3bd4f80c46f3308c160871a7fc5d491b3229373aa3b0207deff98a07f154e1",
+        "source": "crates/plurxd/src/transcode/manager/produce.rs",
+        "table": "review \u00a73 artifact producer caller"
+      },
+      {
+        "anchor": "            true\n        } else if let Some(fence) = publication_fence {\n            PublicationStore::fenced(self.store.as_ref(), fence.clone())",
+        "sha256": "da3bd4f80c46f3308c160871a7fc5d491b3229373aa3b0207deff98a07f154e1",
+        "source": "crates/plurxd/src/transcode/manager/produce.rs",
+        "table": "review \u00a73 citation crates/plurxd/src/transcode/manager/produce.rs:2083"
+      },
+      {
+        "anchor": "does not have observable row output",
+        "sha256": "661a5a8a098b98a9df4a7771db8262ef380d0313e15e0795806ae886d24011ab",
+        "source": "vendor/hiqlite/src/store/state_machine/sqlite/transaction_env.rs",
+        "table": "review \u00a72 vendored output error source"
+      },
+      {
+        "table": "production-consumed post-claim lifecycle controller; local safety only",
+        "source": "crates/plurx-worker-control/src/library_lifecycle.rs",
+        "anchor": "pub fn step(state: State, event: Event)",
+        "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
+      },
+      {
+        "anchor": " job.state='running' AND job.kind='dv_title_scan' AND job.payload_version=1",
+        "sha256": "7de0613443a8b491448a38eea9d9e5a6500e4f9b2969c6957696d69a2862ee76",
+        "source": "crates/plurx-core/src/store/dv_title_jobs.rs",
+        "table": "DV extension exclusion: publication remains kind-specific"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS dv_title_jobs_probe_published",
+        "sha256": "3c292386047fc4e6d1945e1f14c9ddcf626e73076726c6fc3e9c68c6c7b20c7d",
+        "source": "crates/plurx-core/src/store/dv_title_jobs.sql",
+        "table": "DV extension isolation: installed trigger side effects"
+      },
+      {
+        "anchor": "pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreError> {",
+        "sha256": "fa313937dc51f19f934d69fd82785cab9b520c253c40b066e7c0f9e2af74fa06",
+        "source": "crates/plurx-core/src/store/dv_title_jobs_schema.rs",
+        "table": "DV extension isolation: exact installed schema verification"
+      },
+      {
+        "anchor": "async fn title_publication_is_atomic_idempotent_and_never_self_enqueues() {",
+        "sha256": "1fb929293fa295641f3fe0f34fd1cf402c499b58e723411d9e260ba7b1a17882",
+        "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
+        "table": "DV excluded runtime example: atomic idempotent publication"
+      },
+      {
+        "anchor": "async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yield() {",
+        "sha256": "1fb929293fa295641f3fe0f34fd1cf402c499b58e723411d9e260ba7b1a17882",
+        "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
+        "table": "DV excluded runtime example: cancellation rejects stale publication"
+      },
+      {
+        "table": "caption migration exact-shape recognizer outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_schema.rs",
+        "anchor": "/// Exact shapes: original=0, producer-retarget=1, claim-continuity=2.",
+        "sha256": "2ddca167f66170b385677f38469df4bdfe9d0520a7d63547f0822baed1c8c7d1"
+      },
+      {
+        "table": "caption retarget queue effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_retarget.sql",
+        "anchor": "last_error_code='producer_retargeted'",
+        "sha256": "775b12add23c672d863292db2b0b6c266a243d337c0eda437a316b67812831bf"
+      },
+      {
+        "table": "caption claim-continuity effects remain kind-scoped outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_continuity.sql",
+        "anchor": "WHEN NEW.kind='subtitle_translation_range' AND NEW.state='running' AND NEW.fence>OLD.fence",
+        "sha256": "fdd2ba41bacde0935f63499b197e944a0b59358b15901e528e0f71a13346807f"
+      },
+      {
+        "table": "caption demand revocation affects only captured caption grants outside selected library model",
+        "source": "crates/plurx-core/src/store/subtitle_translation_continuity.sql",
+        "anchor": "CREATE TRIGGER subtitle_translation_revoke_continuity BEFORE UPDATE ON subtitle_translation_demands",
+        "sha256": "fdd2ba41bacde0935f63499b197e944a0b59358b15901e528e0f71a13346807f"
+      }
+    ],
+    "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem. Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: budget registration, fragment-index pins and capacity checks preserve selected library bind-before-work and fenced publication. Budgeted artifact uploads preserve domain-only producer publication classification. All seven affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence or a refinement theorem. Codex reviewed the DV-title integration at 4b359f7923c47a1e8715e826a9b6581a08f60e05 against 1f30b4791476acb5d290c2f8e6ed38d07051f31d; all six drifted files matched the previously recorded hashes at that base. The selected library_scan/metadata_refresh claim CAS, stable binding, exact renewal/cancellation, fence/revision counters, reservation/receipt transitions and insert_item_fenced transaction guards are unchanged. New enqueue/claim predicates apply only to dv_title_scan. Added title SQL triggers and schema installation were reviewed for isolation: title job/waiter invalidation is kind-scoped, ordinary file publication creates or invalidates title demand within its existing transaction, and title publication has its own kind guard. New dependency anchors record that isolation and existing runtime-example definitions, not modeled DV guarantees. Title source generations, JSON attachment, scheduling/preemption, replay/retry and publication through publish_dv_title_job are outside this finite model. See CONTRACT.md for the scoped review; no model/config changes or new execution/qualification evidence are claimed. Construction correspondence reconciliation on 2026-10-26 against origin/main 087e836d369eb2b8f94ec1d0454ea6c157612df9: the selected library_scan/metadata_refresh claim CAS, binding, renewal, cancellation, token/fence and insert_item_fenced publication guards retain their base behavior. New text subtitle jobs add kind-scoped admission and payload validation; selected library kinds still require domain binding. Caption read leases and text slices install independent schema extensions; the ordinary Hiqlite timeout and SQLite publication transaction boundaries are unchanged. JobFence adds text-slice publication/progress methods without changing selected library completion or token retirement. The store-contract change adds a separate text-translation test module. Speech audio ordinals, transcription/translation tasks, text-model qualification, caption read retention and source attestation are outside this model. Exact existing anchors remain unique. This authored construction mapping refresh is not the pending final adversarial review, test execution, TLC qualification or a refinement theorem; model/configuration bytes and prior receipts retain their identities. Final construction rustfmt refresh on 2026-10-26 changes only line wrapping in read_shared_captions trait/adapter arguments and module declaration ordering; mapped selected-worker behavior, anchors, model/configuration bytes and pending evidence boundaries are unchanged. Independent final adversarial correspondence review on 2026-10-26 of the frozen completion/retarget delta atop be9ee45ae: shared queue changes add producer-node/preparation-incarnation predicates only for subtitle_translation_prepare/range and a legacy-defaulted subtitle range payload field. Selected library_scan/metadata_refresh enqueue/claim, binding, renewal, cancellation, publication and cleanup behavior is unchanged. The exact legacy-caption trigger migration and its shared-queue effects were inspected: only caption jobs for the same operation are cancelled; library kinds are excluded. SQLite v117 and Hiqlite recognize the complete old shape before the transactional trigger replacement and reject unknown shapes. Added store-contract module wiring is test-only. New mapping dependencies pin the migration recognizer and replacement trigger so their isolation cannot drift silently. This supersedes the earlier construction-only correspondence status for these changes; source hashes and unchanged anchors do not establish Rust test execution, TLC qualification, remote-worker liveness or new modeled caption guarantees. Model/configuration/fairness bytes and historical receipts remain unchanged. Independent bounded formatter correspondence on 2026-10-26: store_contract.rs only moves the unchanged cfg(feature = hiqlite-contract-tests)/path/module block for subtitle_translation_upgrade into lexical module order. Rust module declarations retain the same visibility, feature condition and source path; selected formal-publication fixtures and all model/configuration semantics remain unchanged. Only that inspected dependency hash is rebound; this records no test or TLC execution. Independent bounded moving-playback correspondence review on 2026-10-26 atop 352137f764d8cf87d530352222d5948a77275d4f: Hiqlite only chains exact recognized caption extensions and SQLite adds caption migration118; selected library transaction/publication/timeout paths are unchanged. The exact original0/retarget1/continuity2 recognizer and new continuity SQL were inspected. Capture/retirement triggers select only subtitle_translation_range; demand revocation deletes only matching caption grant rows; the replacement mutation trigger retains the previously reviewed caption-only job effects. New dependency anchors pin those isolation boundaries. Selected library enqueue/claim/renewal/binding/settlement semantics, model/configuration bytes, fairness premises and historical receipts remain unchanged. This is source correspondence, not runtime execution, TLC qualification, caption liveness proof or a refinement theorem. Incoming main correspondence record: Codex reviewed HTTPS completion source f18c39e66954b71fcedcf8f463914f112498a518 against main 9bcfa9ca1f792d214122762981c84c85ba5b3e64 on 2026-10-25; the parent coordinator approved this scoped disposition. Fragment enqueue receipt guards move before Existing only when fragment/analysis fields are present; ordinary selected library inputs omit those fields. Claim replay, binding, renewal, cancellation, settlement and fenced publication remain unchanged. Managed-schema bootstrap preserves the validated resource view and the QueueSql implementation is unchanged. AppState adds a public HTTPS control field; main adds separate TLS listener ownership without changing the selected worker spawn or wait/lock order. Tokio 1.53.1 and Hiqlite 0.14.0 remain pinned. This refresh covers whole-file source correspondence only: general fragment admission, bootstrap/startup and public TLS lifecycle remain outside the selected library-worker models. Model/configuration/toolchain bytes, exact anchors and rejection rules are unchanged; no new formal guarantee or execution evidence is claimed by this review. See the scoped contract/wait-map notes. Codex and the parent coordinator reviewed completion source 5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9 on 2026-10-25. The identity-repair result classifier now permits zero-to-many rows only for its existing guarded annotation set-copy, requires the complete result vector, and keeps every other mutation/guard/postcondition/ack count exactly one. Identity repair is outside this selected library-worker model and is not proved by it. The shared atomic_publication renewal, authority binding, wait/lock order and selected insert_item_fenced SQL/anchors are unchanged. Store-contract edits name existing title methods, validate historical empty-extension rewinds, and require rejection of a consumed fragment-analysis claim; general fragment admission, historical migrations and title jobs remain outside this model. The exact formal_publication parent registration and selected conformance examples are unchanged. Fourteen publication whole-file pins and one parent-module pin are refreshed only for source correspondence. No model/configuration/anchor/validator/scope changes or new runtime, theorem, physical-acceptance or qualification claim are made. Integration of HTTPS 67b09d29c with main 167af4616 preserves the selected library-worker protocol. Upstream adds three FEL trait/delegation methods outside the selected library scope and an off-boot VAAPI probe plus independent handoff-pruning loop; HTTPS retains fragment-only receipt fencing, publication result classification and TLS ownership. The Store parent composes strict historical fixtures and source-backed inventory; formal_publication remains unchanged. Only reviewed whole-file correspondence pins change; no model, configuration, exact anchor, validator or governed scope changes. FEL, handoffs, identity repair, historical migrations and public TLS remain excluded; no new theorem or qualification is claimed. Codex scoped source correspondence review on 2026-10-28 compares PR #1301 runtime source 7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37 with main 77e9858277813456bb94e855ec62ed3e9fd65af8. New title-only trait/delegation methods, local index-wait bookkeeping, stale-FEL selection and analysis publication do not change selected library_scan/metadata_refresh claim, binding, renewal, cancellation, settlement, insert_item_fenced or token/publication lock ordering. The analysis publisher validates source/scanner/generation and invokes the existing title trigger with job_id NULL, matching no queue/waiter settlement rows; its title binding and probe JSON remain outside the selected models. Formal-publication parent registration and selected examples are unchanged. Only reviewed whole-file pins are refreshed; existing anchors, model/configuration/toolchain bytes, bounds, properties, scope and historical receipt identities are preserved. This source review supplies no new execution, formal guarantee or qualification claim; fresh affected smoke receipts are separate."
+  },
+  "configs": {
+    "baseline.cfg": {
+      "sha256": "1d8bfbc36ba3f14f6ac0c333e5c425db456afaeaeddeca8f0faaf52a6ff17320",
+      "verdict": "pass",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1",
+            "j2"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 8,
+          "MaxBoots": 2,
+          "MaxClaims": 3,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "all"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S0_TypeAndIdentity",
+          "S1_ExclusiveCurrentAttempt",
+          "S2_PublicationAuthority",
+          "S3_Displacement",
+          "S4_ReplayStability",
+          "S5_CancellationPrecedence",
+          "S6_BindingContinuity",
+          "S7_RejectionPreservesCatalogue"
+        ],
+        "reductions": [
+          "SYMMETRY Symm",
+          "VIEW ModelView"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "safety",
+      "minimum_trace_states": null
+    },
+    "control-bind-before-work.cfg": {
+      "sha256": "3613c439ec663e732715e3c209f1294ecea26b5f96d1523bd492921cf840cc03",
+      "verdict": "violation",
+      "expected_error": "S2_PublicationAuthority",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant S2_PublicationAuthority is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 6,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "binding_ignored"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "binding"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S2_PublicationAuthority"
+        ],
+        "reductions": [
+          "SYMMETRY Symm"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
+    },
+    "control-binding-ignored.cfg": {
+      "sha256": "768b6aee82088dc09133f141b1fcd755288d3966a9063d08641560b5a49755ea",
+      "verdict": "violation",
+      "expected_error": "S2_PublicationAuthority",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant S2_PublicationAuthority is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 6,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "binding_ignored"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "publication"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S2_PublicationAuthority"
+        ],
+        "reductions": [
+          "SYMMETRY Symm"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
+    },
+    "control-renewal-revives-cancel.cfg": {
+      "sha256": "51e09ae2fda9f7d93a8fa6ee8202830b67ae322ddfec76534da914f166aee478",
+      "verdict": "violation",
+      "expected_error": "S5_CancellationPrecedence",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Action property S5_CancellationPrecedence is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 6,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "renewal_revives_cancel"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "renewal"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S5_CancellationPrecedence"
+        ],
+        "reductions": [
+          "SYMMETRY Symm"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
+    },
+    "control-replay-fresh-fence.cfg": {
+      "sha256": "24ff90e7697e591b34a80f00144519dbee98d16a1cad170638af75a48fc85ce3",
+      "verdict": "violation",
+      "expected_error": "S4_ReplayStability",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant S4_ReplayStability is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 6,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "replay_fresh_fence"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "claim"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S4_ReplayStability"
+        ],
+        "reductions": [
+          "SYMMETRY Symm"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
+    },
+    "control-retry-stalls.cfg": {
+      "sha256": "cf1806db353558b1a27fb4266806ce6c2d542a0d7a71c894f46f9b3e92222531",
+      "verdict": "violation",
+      "expected_error": "L1_FreshClaimEventually",
+      "expected_exit": 13,
+      "expected_error_match": {
+        "line": "Temporal properties were violated.",
+        "attribution": "sole_property",
+        "allowed_error_lines": [
+          "The following behavior constitutes a counter-example:"
+        ]
+      },
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 0,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "retry_stalls"
+          ],
+          "Scenario": [
+            "recovery"
+          ],
+          "Fragment": [
+            "all"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "L1_FreshClaimEventually"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "InitRecovery starts at now=0 with old claim1 expiry2, boot2, next claim2 and notBefore in {yield2,failure3}; polling is eligible only after both expiry and notBefore, so the claim may occur at sample2 or3; tick stops at current claim2 and need not reach3 on every path",
+          "no new cancellation/removal/compaction/outage; the stable suffix retains demand, quorum, resources, and the surviving worker",
+          "weak fairness covers tick/poll/retry/send/apply/ack and a Boolean old-reply scheduling placeholder with no reply payload or boot-adoption check; the retry_stalls mutation suppresses every later poll after the first early poll, so L1 current-owner claim2 can remain false even after now reaches3"
+        ]
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
+    },
+    "lifecycle.cfg": {
+      "sha256": "68af204cc5337a6c2d0352f8c8fe248f26d7e83e0be9d01bab11205066369dd9",
+      "verdict": "pass",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 11,
+          "MaxBoots": 2,
+          "MaxClaims": 3,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "claim"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S0_TypeAndIdentity",
+          "S1_ExclusiveCurrentAttempt",
+          "S2_PublicationAuthority",
+          "S3_Displacement",
+          "S4_ReplayStability",
+          "S5_CancellationPrecedence",
+          "S6_BindingContinuity",
+          "S7_RejectionPreservesCatalogue"
+        ],
+        "reductions": [
+          "SYMMETRY Symm",
+          "VIEW ModelView"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "safety",
+      "minimum_trace_states": null
+    },
+    "recovery.cfg": {
+      "sha256": "a5c659bc058f88f55239737b31266de9adada3abf445a1bfbbff5ed31b5b4ebb",
+      "verdict": "pass",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 0,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "recovery"
+          ],
+          "Fragment": [
+            "all"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "L1_FreshClaimEventually"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "InitRecovery starts at now=0 with old claim1 expiry2, boot2, next claim2 and notBefore in {yield2,failure3}; polling is eligible only after both expiry and notBefore, so the claim may occur at sample2 or3; tick stops at current claim2 and need not reach3 on every path",
+          "no new cancellation/removal/compaction/outage; the stable suffix retains demand, quorum, resources, and the surviving worker",
+          "weak fairness covers tick/poll/retry/send/apply/ack and a Boolean old-reply scheduling placeholder; it has no reply payload or boot-adoption check; L1 is only eventual current job owner claim2, not acknowledgement or completed work"
+        ]
+      },
+      "purpose": "liveness",
+      "minimum_trace_states": null
+    },
+    "smoke.cfg": {
+      "sha256": "ef4b435de5a589799a6e8a21d1541fa4674be6a91e2bba3f3c74e48a4c650c6e",
+      "verdict": "pass",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 60,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 6,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "all"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S0_TypeAndIdentity",
+          "S1_ExclusiveCurrentAttempt",
+          "S2_PublicationAuthority",
+          "S3_Displacement",
+          "S4_ReplayStability",
+          "S5_CancellationPrecedence",
+          "S6_BindingContinuity",
+          "S7_RejectionPreservesCatalogue"
+        ],
+        "reductions": [
+          "SYMMETRY Symm",
+          "VIEW ModelView"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "safety",
+      "minimum_trace_states": null
+    },
+    "witness-bind-refusal.cfg": {
+      "sha256": "e6cad2d04b786a0a213705aa9bba1545c858ac1fc95bbcfb4f1e36b26d7ec57f",
+      "verdict": "witness",
+      "expected_error": "Witness_BindRefusal",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_BindRefusal is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "binding"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_BindRefusal"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    },
+    "witness-cancelled-renewal.cfg": {
+      "sha256": "426c141c0a352aa8ec1dfc75613a3431ea3a912d2707db3e468e6c06fdafda5a",
+      "verdict": "witness",
+      "expected_error": "Witness_CancelledRenewal",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_CancelledRenewal is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "renewal"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_CancelledRenewal"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    },
+    "witness-displacement.cfg": {
+      "sha256": "0b34cffea44b81d33a2f32f6b1fde52eb74324ae5e6c4844ffb92396abe56979",
+      "verdict": "witness",
+      "expected_error": "Witness_Displacement",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_Displacement is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "publication"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_Displacement"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    },
+    "witness-four-submissions.cfg": {
+      "sha256": "08cb8ef8f691bb78bbb6b8682bf457f1f8999e097d0ae0ce08ab7dd7ae2db382",
+      "verdict": "witness",
+      "expected_error": "Witness_FourSubmissions",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_FourSubmissions is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "publication"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_FourSubmissions"
+        ],
+        "reductions": [
+          "CONSTRAINT PublicationWitnessBound"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    },
+    "witness-precommit-rollback.cfg": {
+      "sha256": "f85c45f98cc6531954ba27073c5587acbac0a0cdbc38c8677571abf1da3b65c3",
+      "verdict": "witness",
+      "expected_error": "Witness_PrecommitRollback",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_PrecommitRollback is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "publication"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_PrecommitRollback"
+        ],
+        "reductions": [
+          "CONSTRAINT PublicationWitnessBound"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    },
+    "witness-replay.cfg": {
+      "sha256": "a393ca62a38e9c24ba51d459d32bd5de99b36f2d3d030e4930628eaebefc3c8e",
+      "verdict": "witness",
+      "expected_error": "Witness_Replay",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_Replay is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "claim"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_Replay"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    },
+    "witness-three-samples.cfg": {
+      "sha256": "fa4d0a9e4802e1ed82a71e6794e53dc1489a2f4e2d639acb5b6ed7b07d60192e",
+      "verdict": "witness",
+      "expected_error": "Witness_ThreeSamples",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_ThreeSamples is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "publication"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_ThreeSamples"
+        ],
+        "reductions": [
+          "CONSTRAINT PublicationWitnessBound"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    }
+  },
+  "feasibility_attempts": [
+    {
+      "config_file": "baseline-abandoned10.cfg",
+      "config_sha256": "cf479cb7a8f05e979d29da13cf17c94e31bce504841fef89b37f5a00ed38d882",
+      "model_sha256": "96d4e49281e562d43b412acd7c307afa7202b11763c24e511ad90cc3fd99bbaa",
+      "status": "incomplete",
+      "qualifying": false,
+      "reason": "abandoned after finite coverage revision; incomplete development attempt is not safety evidence",
+      "wall_seconds": 647.03,
+      "exit": -9,
+      "metrics": {
+        "generated": 97640975,
+        "distinct": 12616232,
+        "queued": 7137143,
+        "depth": 9,
+        "child_maxrss_bytes": 4514365440
+      }
+    }
+  ]
+}

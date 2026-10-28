@@ -19,7 +19,7 @@ use super::{
 };
 use plurx_core::cluster::migration::status::ReplicationHealth;
 
-pub const TOPOLOGY_ARTIFACT_SCHEMA_VERSION: u32 = 2;
+pub const TOPOLOGY_ARTIFACT_SCHEMA_VERSION: u32 = 3;
 pub const TOPOLOGY_WRITE_OPERATIONS: u64 = 64;
 pub const TOPOLOGY_CATALOGUE_ROWS: u64 = 32;
 pub const TOPOLOGY_CATALOGUE_READ_OPERATIONS: u64 = 256;
@@ -152,7 +152,7 @@ pub struct ResourceSample {
 impl TopologyWorkload {
     pub(super) fn semantic() -> Self {
         Self {
-            id: "settings-put-and-local-catalogue-read-v2".to_owned(),
+            id: "settings-put-and-local-catalogue-read-v3".to_owned(),
             operation: "quorum_acknowledged_put_setting".to_owned(),
             operations: TOPOLOGY_WRITE_OPERATIONS,
             concurrency: 1,
@@ -1260,7 +1260,7 @@ fn normalize_build_sha(value: &str, source: &str) -> Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
@@ -1423,7 +1423,7 @@ mod tests {
         );
     }
 
-    fn fixture() -> ClusterTopologyArtifact {
+    pub(crate) fn fixture() -> ClusterTopologyArtifact {
         let workload = TopologyWorkload::semantic();
         let workload_sha256 = workload.sha256().expect("hash fixture workload");
         ClusterTopologyArtifact {
@@ -1441,6 +1441,55 @@ mod tests {
                 fixture_run(4, &workload_sha256),
             ],
         }
+    }
+
+    #[test]
+    fn topology_artifact_requires_preference_and_catalogue_queries_for_every_operation() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../benchmarks/cluster-topology.schema.json"
+        ))
+        .expect("parse topology schema");
+        let validator = jsonschema::validator_for(&schema).expect("compile topology schema");
+        let mut artifact = fixture();
+        for run in &mut artifact.runs {
+            run.catalogue_read_non_consistent_query_calls = 512;
+        }
+        validate_topology_artifact(&artifact).expect("256 preference + catalogue query pairs");
+        assert!(validator.is_valid(&serde_json::to_value(&artifact).expect("serialize artifact")));
+        for incorrect_count in [511, 513] {
+            let mut incorrect = artifact.clone();
+            incorrect.runs[0].catalogue_read_non_consistent_query_calls = incorrect_count;
+            assert!(validate_topology_artifact(&incorrect).is_err());
+            assert!(!validator.is_valid(&serde_json::to_value(incorrect).expect("serialize count")));
+        }
+        artifact.runs[0].catalogue_read_consistent_query_calls = 1;
+        assert!(validate_topology_artifact(&artifact).is_err());
+        assert!(
+            !validator.is_valid(&serde_json::to_value(artifact).expect("serialize authority read"))
+        );
+    }
+
+    #[test]
+    fn topology_artifact_refuses_legacy_single_query_evidence() {
+        let mut legacy = fixture();
+        legacy.schema_version = 2;
+        legacy.workload.id = "settings-put-and-local-catalogue-read-v2".to_owned();
+        legacy.workload_sha256 = legacy.workload.sha256().expect("hash historical workload");
+        for run in &mut legacy.runs {
+            run.workload_sha256 = legacy.workload_sha256.clone();
+            run.catalogue_read_non_consistent_query_calls = 256;
+        }
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../benchmarks/cluster-topology.schema.json"
+        ))
+        .expect("parse topology schema");
+        let validator = jsonschema::validator_for(&schema).expect("compile topology schema");
+        assert!(validate_topology_artifact(&legacy)
+            .expect_err("v2 evidence is not reinterpreted as v3")
+            .to_string()
+            .contains("schema version 2"));
+        assert!(!validator
+            .is_valid(&serde_json::to_value(legacy).expect("serialize historical artifact")));
     }
 
     #[test]
@@ -1500,7 +1549,7 @@ mod tests {
         assert!(schema_validator.is_valid(&artifact));
         assert_eq!(
             schema.get("$id").and_then(serde_json::Value::as_str),
-            Some("https://plurx.tv/schemas/cluster-topology-v2.json")
+            Some("https://plurx.tv/schemas/cluster-topology-v3.json")
         );
         assert_closed_schema_matches_fixture(&schema, None, &artifact);
         assert_closed_schema_matches_fixture(&schema, Some("workload"), &artifact["workload"]);

@@ -51,7 +51,9 @@ trap cleanup EXIT HUP INT TERM
 
 fail() {
   for container in "$source_name" "$restored_name"; do
-    docker logs "$container" >&2 2>/dev/null || true
+    docker logs "$container" >&2 || true
+    docker inspect --format 'Status={{.State.Status}} ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Error={{json .State.Error}}' \
+      "$container" >&2 || true
   done
   echo "container restore smoke: $*" >&2
   exit 1

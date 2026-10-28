@@ -158,14 +158,13 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
-    // Compare the configured root set, delete only admitted files and prune
-    // emptied items within the same authority boundary.
+    // Replace the provider scores and their fetch marker in one boundary.
     SqliteTransactionSite {
-        module: "media.rs",
-        method: "remove_files_outside_library_roots",
+        module: "annotations.rs",
+        method: "put_item_ratings",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
+        shape: TransactionShape::BatchWrite,
     },
     // Receiver and all grants revoke in the same boundary.
     SqliteTransactionSite {
@@ -266,6 +265,16 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
+    },
+    // Handoff redemption: the claim and the token it mints, the insert
+    // conditional on this batch's claim. The replicated twin sends the same
+    // two statements as one transaction.
+    SqliteTransactionSite {
+        module: "playback_handoffs.rs",
+        method: "redeem_playback_handoff",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
     },
     // The password-matched mint admits both replacement writes; a collision
     // or later statement failure rolls the whole scoped replacement back.
@@ -457,6 +466,15 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
         module: "media.rs",
         method: "reconcile_library",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    // Configuration check, file removal and item pruning share one snapshot
+    // and commit, so changed roots cannot race a removal based on old roots.
+    SqliteTransactionSite {
+        module: "media.rs",
+        method: "remove_files_outside_library_roots",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -701,6 +719,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
         method: "settle_analysis_requests",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "retire_analysis_requests_for_node",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BatchWrite,
@@ -1150,6 +1175,7 @@ mod tests {
     use super::*;
 
     const SQLITE_MODULES: &[(&str, &str)] = &[
+        ("annotations.rs", include_str!("sqlite/annotations.rs")),
         ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
         ("cache.rs", include_str!("sqlite/cache.rs")),
         (
@@ -1194,6 +1220,10 @@ mod tests {
         ("mod.rs", include_str!("sqlite/mod.rs")),
         ("offline.rs", include_str!("sqlite/offline.rs")),
         ("outbox.rs", include_str!("sqlite/outbox.rs")),
+        (
+            "playback_handoffs.rs",
+            include_str!("sqlite/playback_handoffs.rs"),
+        ),
         (
             "background_jobs.rs",
             include_str!("sqlite/background_jobs.rs"),
@@ -1405,7 +1435,12 @@ mod tests {
         // guarded transaction, each measured in sqlite/sharing.rs.
         // Cinema adds one paired receiver/grant revoke and four guarded
         // invitation admission/cleanup boundaries, registered above.
-        assert_eq!(methods.len(), 114);
+        // Root removal adds one guarded delete/prune boundary, named once.
+        // v113 adds the atomic annotation rating replacement/fetch marker.
+        // Playback handoff redemption adds one fixed claim/mint batch.
+        // Node removal retires the removed node's analysis requests and their
+        // attempts in one batch (`retire_analysis_requests_for_node`).
+        assert_eq!(methods.len(), 117);
     }
 
     mod source_inventory {

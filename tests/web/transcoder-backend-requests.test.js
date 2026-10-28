@@ -58,8 +58,8 @@ function harness(answer) {
   const sent = [], toasts = [];
   const status = { textContent: "" };
   const field = { value: "qsv", dataset: { nodeId: "node-a" } };
-  const card = { outerHTML: "" };
-  const elements = { "node-hwaccel": field, "node-hwaccel-status": status, "transcoder-card": card };
+  const card = { outerHTML: "", querySelectorAll:()=>[] };
+  const elements = { "node-hwaccel": field, "node-hwaccel-status": status, "system-performance": card };
   const buttons = new Function(
     "PlaybackPolicy", "answer", "sent", "toasts", "elements",
     [
@@ -68,8 +68,8 @@ function harness(answer) {
       "function fetch(url,init){sent.push({url,init});return Promise.resolve(answer);}",
       "function toast(message){toasts.push(message);}",
       "function esc(s){return String(s??'');}",
-      shippedSource("toneMapHtml"),
-      shippedSource("transcoderCard"),
+      shippedSource("systemPerformanceCard"),
+      shippedSource("replaceSystemCard"),
       "const document={getElementById:(id)=>elements[id]||null};",
       "const SETTINGS_DATA={sys:{node_id:'node-a',hwaccel_pref:'qsv',hwaccel_requested:'qsv',encoders:{qsv:true},transcoder_optimization:{}}};",
       apiPrelude() + shippedSource("api"),
@@ -94,8 +94,8 @@ test("optimize posts node_id as an object", async () => {
   assert.equal(button.disabled, true, "the button stays disabled while it runs");
   // The success path re-renders the real card in its running state; the
   // select it restores the draft into is still there, and the button says so.
-  assert.match(h.card.outerHTML, /<select id="node-hwaccel" data-node-id="node-a">/);
-  assert.match(h.card.outerHTML, /disabled>Optimizing…<\/button>/);
+  assert.match(h.card.outerHTML, /id="system-performance"/);
+  assert.match(h.card.outerHTML, /disabled>Running comparison…<\/button>/);
 });
 
 test("save puts node_id and preference as an object", async () => {

@@ -2040,6 +2040,7 @@ async fn a_discovery_daemon_that_cannot_be_withdrawn_still_drains_cleanly() {
         listener,
         app,
         JellyfinStandardListener::default(),
+        https::Serving::default(),
         progress,
         Some(daemon),
         async move {
@@ -2128,6 +2129,7 @@ async fn playback_progress_pending_at_shutdown_is_committed_not_lost() {
         listener,
         app,
         JellyfinStandardListener::default(),
+        https::Serving::default(),
         progress,
         None,
         async move {
@@ -2556,6 +2558,244 @@ fn booted_state(dir: &std::path::Path) -> AppState {
 }
 
 #[tokio::test]
+async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() {
+    let root = crate::test_tempdir().expect("tempdir");
+    let occupied_http = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("occupied HTTP");
+    let tls_reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve TLS");
+    let tls_address = tls_reservation.local_addr().expect("TLS address");
+    drop(tls_reservation);
+    let mut config = config_in(root.path());
+    config.server.bind = occupied_http.local_addr().expect("HTTP address");
+    config.server.https.enabled = true;
+    config.server.https.port = tls_address.port();
+    let handle = plurx_core::cluster::open_store(&config)
+        .await
+        .expect("store");
+    let catalogue = plurx_core::store::CatalogueReader::authority(handle.store.clone());
+    let result = boot(
+        config,
+        Boot {
+            source_activation_at_boot: None,
+            store: handle.store,
+            catalogue,
+            replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
+            membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+            identity: handle.identity,
+            credential_key: handle.credential_key,
+            backup_client: None,
+            dirs: create_dirs(root.path()).expect("dirs"),
+            encoder_caps: Default::default(),
+            system: Default::default(),
+            logs: logbuf::LogBuffers {
+                general: Arc::new(logbuf::LogBuffer::new(64)),
+                cluster: Arc::new(logbuf::LogBuffer::new(64)),
+            },
+        },
+        advertiser_that_fails,
+        std::future::pending(),
+    )
+    .await;
+    assert!(result.is_err(), "real HTTP boot bind must fail");
+    assert!(
+        root.path()
+            .join("https")
+            .join(https::MANAGED_IDENTITY_FILE)
+            .exists(),
+        "TLS preparation occurred before later startup failed"
+    );
+    tokio::net::TcpListener::bind(tls_address)
+        .await
+        .expect("failed boot must release prepared TLS socket");
+}
+
+#[tokio::test]
+async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
+    for observed in [false, true] {
+        let root = crate::test_tempdir().expect("tempdir");
+        let state = booted_state(root.path());
+        let progress = state.progress.clone();
+        let daemon_stop = state.shutdown.clone();
+        let app = http::router(state);
+        let plain_socket = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("HTTP");
+        let plain_address = plain_socket.local_addr().expect("HTTP address");
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve TLS port");
+        let tls_address = reservation.local_addr().expect("TLS address");
+        drop(reservation);
+        let mut plain_socket = Some(plain_socket);
+        let observer = if observed {
+            drop(plain_socket.take());
+            let owner = Arc::new(StartupObservationHttp::new(plain_address));
+            owner
+                .start(
+                    plurx_core::cluster::membership::MembershipManager::unavailable(),
+                    "pending-node".into(),
+                )
+                .await
+                .expect("pending owner");
+            let pending = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("client")
+                .get(format!("http://{plain_address}/api/v1/server"))
+                .send()
+                .await
+                .expect("pending response");
+            assert_eq!(pending.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+            assert!(
+                tokio::net::TcpStream::connect(tls_address).await.is_err(),
+                "observation-only phase is HTTP"
+            );
+            Some(owner)
+        } else {
+            None
+        };
+        // Reacquire only for the ordinary owner; the observation owner keeps
+        // its original socket and changes the router in place.
+        let ordinary = if observer.is_none() {
+            plain_socket.take()
+        } else {
+            None
+        };
+        let mut config = config_in(root.path());
+        config.server.https.enabled = true;
+        config.server.https.port = tls_address.port();
+        let prepared = https::Prepared::open(&config)
+            .await
+            .expect("prepare TLS")
+            .expect("enabled");
+        let root_cert = reqwest::Certificate::from_pem(&prepared.identity.public_chain_pem())
+            .expect("loaded public chain");
+        let listener_stop = tokio_util::sync::CancellationToken::new();
+        let tls = https::Serving::start(
+            Some(prepared),
+            app.clone(),
+            listener_stop.clone(),
+            daemon_stop,
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let shutdown = async move {
+            let _ = stopped.await;
+            listener_stop.cancel();
+        };
+        let server = if let Some(owner) = observer {
+            tokio::spawn(serve_observed(
+                owner,
+                app,
+                JellyfinStandardListener::default(),
+                tls,
+                progress,
+                None,
+                shutdown,
+            ))
+        } else {
+            tokio::spawn(serve(
+                ordinary.expect("ordinary listener"),
+                app,
+                JellyfinStandardListener::default(),
+                tls,
+                progress,
+                None,
+                shutdown,
+            ))
+        };
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .add_root_certificate(root_cert)
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("normally trusted client");
+        for scheme in ["http", "https"] {
+            let address = if scheme == "http" {
+                plain_address.to_string()
+            } else {
+                format!("localhost:{}", tls_address.port())
+            };
+            let base = format!("{scheme}://{address}");
+            assert!(client
+                .get(format!("{base}/healthz"))
+                .send()
+                .await
+                .expect("health")
+                .status()
+                .is_success());
+            let info: serde_json::Value = client
+                .get(format!("{base}/api/v1/server"))
+                .send()
+                .await
+                .expect("bootstrap")
+                .json()
+                .await
+                .expect("info");
+            assert_eq!(info["node_id"], "test-node");
+            let qr = client
+                .get(format!("{base}/connect.svg?origin={base}"))
+                .send()
+                .await
+                .expect("QR response")
+                .error_for_status()
+                .expect("QR preserves current origin");
+            assert!(qr
+                .headers()
+                .get("content-type")
+                .expect("SVG type")
+                .to_str()
+                .expect("type text")
+                .starts_with("image/svg+xml"));
+            assert!(qr.text().await.expect("QR SVG").contains("<svg"));
+            for (path, expected) in [
+                ("/api/v1/me", reqwest::StatusCode::UNAUTHORIZED),
+                ("/api/v1/settings", reqwest::StatusCode::UNAUTHORIZED),
+                ("/api/v1/files/1/direct", reqwest::StatusCode::UNAUTHORIZED),
+                (
+                    "/api/v1/images/missing.jpg",
+                    reqwest::StatusCode::UNAUTHORIZED,
+                ),
+                // HLS uses an opaque capability; unknown sessions retain
+                // their existing 404 behavior on both public transports.
+                (
+                    "/api/v1/hls/00000000-0000-0000-0000-000000000000/index.m3u8",
+                    reqwest::StatusCode::NOT_FOUND,
+                ),
+            ] {
+                assert_eq!(
+                    client
+                        .get(format!("{base}{path}"))
+                        .send()
+                        .await
+                        .expect("guarded response")
+                        .status(),
+                    expected,
+                    "{scheme} {path}"
+                );
+            }
+        }
+        stop.send(()).expect("stop");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(8), server)
+                .await
+                .expect("bounded drain")
+                .expect("join")
+                .expect("serve"),
+            HttpDrain::Complete
+        );
+        tokio::net::TcpListener::bind(plain_address)
+            .await
+            .expect("HTTP port released");
+        tokio::net::TcpListener::bind(tls_address)
+            .await
+            .expect("TLS port released");
+    }
+}
+
+#[tokio::test]
 async fn the_assembled_state_carries_the_configured_identity_and_directories() {
     let tmp = crate::test_tempdir().expect("tempdir");
     let state = booted_state(tmp.path());
@@ -2601,6 +2841,7 @@ async fn the_server_answers_until_it_is_asked_to_stop_and_then_drains() {
         listener,
         app,
         JellyfinStandardListener::default(),
+        https::Serving::default(),
         progress,
         None,
         async move {
@@ -2678,6 +2919,7 @@ async fn a_served_request_arrives_with_its_socket_peer() {
         listener,
         app,
         JellyfinStandardListener::default(),
+        https::Serving::default(),
         progress,
         None,
         async move {
@@ -2754,7 +2996,7 @@ fn json_format_emits_lines_a_parser_can_read() {
     }
 }
 
-/// Every tracing event in a split child names its parent's target.
+/// Split-child events name their parent or an owned dedicated channel.
 ///
 /// The S-14 moves put code from `transcode.rs`, `http/hls.rs` and
 /// `vodserve.rs` into `#[path]` child modules, and an event's default
@@ -2797,8 +3039,28 @@ fn split_children_log_under_their_parent_target() {
             for level in ["trace", "debug", "info", "warn", "error"] {
                 let call = format!("tracing::{level}!(");
                 for (at, _) in source.match_indices(&call) {
+                    let arguments = source[at + call.len()..].trim_start();
+                    // Two diagnostic channels are deliberately separate from
+                    // their parent target so an operator can enable them
+                    // alone: the hashed retained-output reuse facts
+                    // (CONTINUOUS-QUALITY-BUILD) and the typed Auto
+                    // preparation outcomes (2ed23494f). Each is admitted
+                    // only in the files that own it, and still requires an
+                    // explicit target, never a child default.
+                    let relative = path.strip_prefix(&src).expect("split child under src");
+                    let dedicated = [
+                        ("plurxd::retained_reuse", "transcode/manager/create.rs"),
+                        ("plurxd::retained_reuse", "vod/retained.rs"),
+                        ("plurxd::auto_prepare", "http/hls/create.rs"),
+                        ("plurxd::auto_prepare", "http/hls/preparation.rs"),
+                    ]
+                    .iter()
+                    .any(|(channel, owner)| {
+                        relative == std::path::Path::new(owner)
+                            && arguments.starts_with(&format!("target: \"{channel}\","))
+                    });
                     assert!(
-                        source[at + call.len()..].trim_start().starts_with(&pinned),
+                        arguments.starts_with(&pinned) || dedicated,
                         "{}: the `{call}` at byte {at} logs under its own module path, \
                              not `{target}`",
                         path.display()
@@ -4195,6 +4457,7 @@ async fn a_connection_that_never_finishes_does_not_hold_the_drain_open() {
         listener,
         app,
         JellyfinStandardListener::default(),
+        https::Serving::default(),
         progress,
         None,
         async move {

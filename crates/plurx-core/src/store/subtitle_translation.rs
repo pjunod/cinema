@@ -78,11 +78,41 @@ impl SourceRevision {
     }
 }
 
+/// Speech inference tasks share source clocks and publication fences. The
+/// omitted default preserves the serialized identity of existing profiles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpeechTask {
+    #[default]
+    #[serde(rename = "translate")]
+    TranslateToEnglish,
+    #[serde(rename = "transcribe")]
+    Transcribe,
+}
+impl SpeechTask {
+    pub fn is_translation(&self) -> bool {
+        *self == Self::TranslateToEnglish
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::TranslateToEnglish => "translate",
+            Self::Transcribe => "transcribe",
+        }
+    }
+    pub fn output_language(self, spoken_language: &str) -> &str {
+        match self {
+            Self::TranslateToEnglish => "en",
+            Self::Transcribe => spoken_language,
+        }
+    }
+}
+
 /// Selected production definitions are server-owned. A valid parameter shape
 /// alone never registers a profile or qualifies a model/engine capability.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranslationProfile {
+    #[serde(default, skip_serializing_if = "SpeechTask::is_translation")]
+    pub task: SpeechTask,
     pub version: u8,
     pub model_id: String,
     pub model_sha256: String,
@@ -194,12 +224,12 @@ impl RangeRecipe {
     pub fn expected_asset_id(&self) -> Result<String, StoreError> {
         digest(&json!({
             "version": TRANSLATION_VERSION,
-            "task": "translate",
+            "task": self.profile.task.name(),
             "source": self.source,
             "source_sha256": self.source_sha256,
             "audio_index": self.audio_index,
             "spoken_language": self.spoken_language,
-            "output_language": "en",
+            "output_language": self.profile.task.output_language(&self.spoken_language),
             "profile_id": self.profile.id()?,
             "duration_ms": self.duration_ms,
         }))

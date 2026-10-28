@@ -2331,7 +2331,8 @@ mod tests {
     async fn the_probe_uses_the_writable_runtime_cache_with_a_root_home() {
         let root = crate::test_tempdir().expect("root");
         let runtime_cache = root.path().join("runtime");
-        std::fs::create_dir(&runtime_cache).expect("cache exists before startup probes");
+        std::fs::create_dir_all(runtime_cache.join("gpu-cache"))
+            .expect("owned cache fixture exists before startup probes");
         let tools = Spawn {
             runtime_cache: Some(&runtime_cache),
             purpose: None,
@@ -2339,7 +2340,7 @@ mod tests {
         let mut command = tools.command("/bin/sh");
         command.env("HOME", "/").args([
             "-c",
-            "test \"$AV_LOG_FORCE_NOCOLOR\" = 1 && test \"$CUDA_CACHE_PATH\" = \"$XDG_CACHE_HOME\" && printf shader > \"$CUDA_CACHE_PATH/probe-cache\"",
+            "test \"$AV_LOG_FORCE_NOCOLOR\" = 1 && test \"$CUDA_CACHE_PATH\" = \"$XDG_CACHE_HOME\" && test \"$CUDA_CACHE_DISABLE\" = 1 && test \"$MESA_SHADER_CACHE_DISABLE\" = true && printf shader > \"$CUDA_CACHE_PATH/probe-cache\"",
         ]);
         let output = crate::process_control::output_job_owned(
             &mut command,
@@ -2349,7 +2350,8 @@ mod tests {
         .expect("spawn probe child");
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
-            std::fs::read(runtime_cache.join("probe-cache")).expect("child used app cache"),
+            std::fs::read(runtime_cache.join("gpu-cache/probe-cache"))
+                .expect("child used app cache"),
             b"shader"
         );
     }

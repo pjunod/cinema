@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "source_commit": "168fe74fb2a47f3ccd56b795741dfe3422307b0d",
+  "source_tree": "ea8c9c283a71b67bf773511144eb3ee7ab09ee9c",
+  "seal_metadata_sha256": "9c4c69510a157c6bd280c078515f395c258d1ec32d0a75c9600c69dafff23c51",
+  "counts": {
+    "acceptance_artifacts": 5,
+    "cases": 12,
+    "file_instances": 71,
+    "fixed_argv_templates": 8,
+    "immutable_baseline_blob_instances": 69,
+    "investigation": 4,
+    "patch_bundles": 4,
+    "planning-review": 4,
+    "receipt": 6,
+    "routing": 6,
+    "scoped_views": 26,
+    "sealed_source_transformations": 3,
+    "small-patch": 4,
+    "unresolved_normalization_blockers": 0,
+    "visible_synthetic_overlays": 2,
+    "whole_blob_views": 43
+  },
+  "integrity_flags": {
+    "all_directories_700_all_files_600": true,
+    "all_frozen_prompt_and_gold_component_commitments_verified": true,
+    "clean_view_has_no_gold_acceptance_private_origins_or_private_paths": true,
+    "frozen_original_gold_cases_and_reviews_unchanged": true,
+    "ids_copied_without_derivation": true,
+    "independent_exact_input_output_hash_review_complete": true,
+    "no_new_gold_semantics_or_critical_annotations": true,
+    "no_new_task_constraints": true,
+    "only_immutable_baseline_sources_and_frozen_visible_synthetic_materialization": true,
+    "private_gold_acceptance_and_reconstruction_remain_separate": true,
+    "scoped_selectors_are_hard_visibility_boundaries": true
+  },
+  "reviews": [
+    {
+      "blocking_issue_count": 0,
+      "report_sha256": "2d023de9bea60bd7e21cceb8d3c958f79c0879799ca3d6843321a5d63fe987cf",
+      "reviewer": "B",
+      "role": "independent_nonauthor_projection_reviewer",
+      "verdict": "approve"
+    },
+    {
+      "blocking_issue_count": 0,
+      "report_sha256": "980cd273e7690837d45473c7221a25dcf7c0ee81a93c661f0e98720b0f959ecf",
+      "reviewer": "B",
+      "role": "independent_nonauthor_projection_reviewer",
+      "verdict": "approve"
+    }
+  ],
+  "verdict": "approved_private_projection_and_clean_export",
+  "activity": {
+    "acceptance_runs": 0,
+    "builds_run": 0,
+    "network_calls": 0,
+    "new_implementation_imported": false,
+    "normalization_only_no_benchmark_or_savings_claim": true,
+    "owner_checkout_accessed": false,
+    "provider_calls": 0,
+    "solver_runs": 0,
+    "tests_run": 0,
+    "tmp_artifacts_created": false
+  },
+  "artifacts": [
+    {
+      "artifact_id": "normalized-dataset.json",
+      "sha256": "7d51f21a82fffdc6cc48d2f21813f7d34d5bcc40e17a150d9d1be75a0df1fd5e",
+      "access_policy": "trusted_private_evaluator_only"
+    },
+    {
+      "artifact_id": "project_frozen_cases.py",
+      "sha256": "49752d383a04ad73eef942faa36802ebe78713d3ccf8ad19a09d19f067a44d3f",
+      "access_policy": "trusted_private_evaluator_only"
+    },
+    {
+      "artifact_id": "projection-audit.json",
+      "sha256": "414fe42cb835bec66f34b1b1aa7c219ac11a12eb81b57bd891c314f6c45d61bf",
+      "access_policy": "trusted_private_evaluator_only"
+    },
+    {
+      "artifact_id": "selector-policy.json",
+      "sha256": "b8d486c840cd8299ac58068d5666c97ef52beb56ac42eec6078fc20838daa663",
+      "access_policy": "trusted_private_evaluator_only"
+    },
+    {
+      "artifact_id": "export_caseviews.py",
+      "sha256": "c14aee96dc42df4bf7647defc10608de30daa38a9e1c30a2c51e6d3eeafabb34",
+      "access_policy": "trusted_private_evaluator_only"
+    },
+    {
+      "artifact_id": "solver-caseviews.json",
+      "sha256": "bf180ebd9ee300f0251ea805140913ebf66441c544d08fb3f32202c1eaf58018",
+      "access_policy": "solver_source_proxy_only"
+    },
+    {
+      "artifact_id": "private-scoring-dataset.json",
+      "sha256": "91d140ec0b3dc28c0f5b747ce170b0f2b561a1c92de8c4638ea54d8a8596305a",
+      "access_policy": "trusted_private_evaluator_only"
+    },
+    {
+      "artifact_id": "view-export-audit.json",
+      "sha256": "b1d5f95ad4cd43dea604f7e792fcfb12fc46f02c8d9e311e79df29f3e3c37ae9",
+      "access_policy": "trusted_private_evaluator_only"
+    }
+  ],
+  "runtime_qualification": "not-run; projection review is not execution or CI evidence",
+  "scope": "Corpus normalization and clean export preparation only; counters are not whole-project activity."
+}

@@ -1,0 +1,79 @@
+#!/usr/bin/env node
+"use strict";
+// Render shipping shell/assets against local API fixtures. No production API.
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const {spawn}=require('node:child_process');
+const {createHash}=require('node:crypto');
+const {createInterface}=require('node:readline');
+const {chromium}=require('playwright');
+const root=path.resolve(__dirname,'..');
+const out=path.resolve(process.argv.find(arg=>arg.startsWith('--output='))?.slice(9)||path.join(root,'target/system-settings-browser'));
+const browserPath=process.argv.find(arg=>arg.startsWith('--browser='))?.slice(10)||[
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/usr/bin/chromium','/usr/bin/google-chrome'
+].find(candidate=>fs.existsSync(candidate));
+async function main(){
+  fs.mkdirSync(out,{recursive:true});
+  const server=spawn('python3',[path.join(root,'scripts/system-settings-preview'),'--port','0'],{cwd:root,stdio:['ignore','pipe','inherit']});
+  let browser;
+  try{
+    const url=await new Promise((resolve,reject)=>{
+      const lines=createInterface({input:server.stdout});
+      lines.once('line',line=>{const match=line.match(/http:\/\/127\.0\.0\.1:\d+/);match?resolve(match[0]):reject(Error(line));lines.close();});
+      server.once('exit',code=>reject(Error('Preview exited '+code)));
+    });
+    browser=await chromium.launch({headless:true,...(browserPath?{executablePath:browserPath}:{})});
+    const cases=[
+      {fixture:'macos',theme:'classic',appearance:'dark',width:1150},
+      {fixture:'macos',theme:'classic',appearance:'light',width:800},
+      {fixture:'linux',theme:'classic',appearance:'dark',width:1150},
+      {fixture:'linux',theme:'classic',appearance:'light',width:390},
+      {fixture:'macos',theme:'noirr',appearance:'dark',width:390},
+      {fixture:'unavailable',theme:'classic',appearance:'dark',width:390},
+    ];
+    const evidence=[];
+    for(const item of cases){
+      const context=await browser.newContext({viewport:{width:item.width,height:1100}});
+      const page=await context.newPage(), errors=[],requests=[];
+      page.on('pageerror',error=>errors.push(error.message));
+      page.on('request',request=>{if(request.url().includes('/api/v1/'))requests.push(request.url());});
+      await page.goto(`${url}/?fixture=${item.fixture}&theme=${item.theme}&appearance=${item.appearance}#/settings/system`);
+      await page.waitForSelector('#system-versions');
+      await page.waitForFunction(()=>document.getElementById('main').dataset.phase==='settled');
+      assert.deepEqual(errors,[]);
+      assert.equal(await page.locator('.system-capability[data-capability]').count(),6);
+      assert.equal(await page.locator('#system-storage').evaluate(node=>node.open),false);
+      assert.equal(await page.locator('#system-logs').evaluate(node=>node.open),false);
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,'page overflows '+JSON.stringify(item));
+      await page.waitForTimeout(2200);
+      assert.equal(requests.some(request=>/system\/(?:logs|playback-events)/.test(request)),false,'collapsed System fetches invisible data');
+      const file=`${item.fixture}-${item.theme}-${item.appearance}-${item.width}.png`;
+      await page.screenshot({path:path.join(out,file),fullPage:true});
+      if(item.fixture==='macos'&&item.width===1150){
+        await page.locator('[data-capability="hardware_decoding"] > summary').focus();
+        await page.keyboard.press('Enter');
+        assert.equal(await page.locator('[data-capability="hardware_decoding"]').evaluate(node=>node.open),true);
+        await page.selectOption('#node-hwaccel','software');
+        await page.evaluate(()=>pollTranscoderOptimization(SETTINGS_DATA.sys.node_id,PAGE_RENDER_GENERATION));
+        assert.equal(await page.locator('#node-hwaccel').inputValue(),'software');
+        assert.equal(await page.locator('[data-capability="hardware_decoding"]').evaluate(node=>node.open),true);
+        assert.match(await page.locator('#node-hwaccel-status').innerText(),/Unsaved preference/);
+        await page.locator('#system-logs > summary').click();
+        await page.waitForFunction(()=>document.getElementById('logbox').innerText.includes('Illustrative log entry'));
+        await page.locator('#system-logs > summary').click();
+        const count=requests.filter(request=>request.includes('/system/logs')).length;
+        await page.waitForTimeout(2200);
+        assert.equal(requests.filter(request=>request.includes('/system/logs')).length,count,'collapsed logs continue polling');
+      }
+      evidence.push({...item,screenshot:file,page_errors:errors,requests});
+      await context.close();
+    }
+    fs.writeFileSync(path.join(out,'receipt.json'),JSON.stringify({kind:'shipping-source-api-fixtures',source_files:['crates/plurxd/src/web/index.html','crates/plurxd/src/web/app.css','crates/plurxd/src/web/pages/settings-system.js'].map(file=>({path:file,sha256:createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')})),cases:evidence},null,2)+'\n');
+    console.log(`System browser checks passed · ${cases.length} renders · ${out}`);
+  }finally{
+    if(browser)await browser.close();
+    server.kill();
+  }
+}
+main().catch(error=>{console.error(error);process.exitCode=1;});

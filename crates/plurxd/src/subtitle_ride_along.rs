@@ -482,6 +482,8 @@ fn classify_filesystem_magic(magic: u32) -> Result<String, String> {
 #[derive(Debug)]
 pub(crate) struct StageDir {
     path: PathBuf,
+    _pin: Option<crate::playback_cache::CachePin>,
+    _reservation: Option<crate::playback_cache::CacheReservation>,
 }
 
 impl StageDir {
@@ -497,8 +499,32 @@ impl StageDir {
             use std::os::unix::fs::DirBuilderExt;
             builder.mode(0o700);
         }
+        let pin = crate::playback_cache::pin(&path)?;
         builder.create(&path)?;
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            _pin: pin,
+            _reservation: None,
+        })
+    }
+
+    async fn reserved(root: &Path, prefix: &str, bytes: u64) -> std::io::Result<Self> {
+        let path = root.join(format!("{prefix}{}", uuid::Uuid::new_v4().simple()));
+        let reservation = crate::playback_cache::reserve(&path, bytes).await?;
+        let pin = crate::playback_cache::pin(&path)?;
+        std::fs::create_dir_all(root)?;
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        Ok(Self {
+            path,
+            _pin: pin,
+            _reservation: reservation,
+        })
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -717,6 +743,7 @@ pub(crate) struct RideAlongPlan {
     /// Passes already spent on each extracted ordinal for this source.
     prior_attempts: BTreeMap<i64, u32>,
     stage: StageDir,
+    _source_pin: Option<crate::playback_cache::CachePin>,
     /// Declared after the stage, so the stage is gone before another pass
     /// for this file may ride.
     _claim: Option<FileClaim>,
@@ -823,7 +850,12 @@ pub(crate) async fn plan_tracks(
         return None;
     }
     let claim = FileClaim::take(&gate.root, file_id)?;
-    let stage = match StageDir::create(&gate.root, STAGE_PREFIX) {
+    let source_pin = crate::playback_cache::pin(&dir).ok()?;
+    let reserved_bytes = (tracks.len() as u64)
+        .saturating_mul(MAX_TRACK_BYTES)
+        .saturating_mul(3)
+        .saturating_add(1024 * 1024);
+    let stage = match StageDir::reserved(&gate.root, STAGE_PREFIX, reserved_bytes).await {
         Ok(stage) => stage,
         Err(error) => {
             tracing::warn!(file_id, %error, "creating a subtitle ride-along stage; this pass does not ride");
@@ -851,6 +883,7 @@ pub(crate) async fn plan_tracks(
         carried,
         prior_attempts,
         stage,
+        _source_pin: source_pin,
         _claim: Some(claim),
     })
 }
@@ -961,6 +994,7 @@ impl RideAlongPlan {
             tracks,
             carried: Vec::new(),
             stage: StageDir::create(root, STAGE_PREFIX)?,
+            _source_pin: crate::playback_cache::pin(&store::file_dir(root, file_id))?,
             _claim: None,
         })
     }
@@ -1098,6 +1132,52 @@ impl RideAlongPlan {
     pub(crate) fn stderr_scan(&self) -> StderrScan {
         StderrScan::new(self.slave_paths())
     }
+}
+
+/// The tee slaves write directly to disk. A post-exit size check cannot
+/// contain a runaway slave, so enforce each file's ceiling in the child.
+/// Ignoring SIGXFSZ converts the hard limit into EFBIG: tee's onfail=ignore
+/// then discards that subtitle output while the index continues normally.
+pub(crate) fn configure_stage_limits(command: &mut tokio::process::Command) -> std::io::Result<()> {
+    configure_stage_file_limit(command, MAX_TRACK_BYTES)
+}
+
+#[cfg(unix)]
+pub(crate) fn configure_stage_file_limit(
+    command: &mut tokio::process::Command,
+    max_bytes: u64,
+) -> std::io::Result<()> {
+    // SAFETY: this hook runs only async-signal-safe libc operations in the
+    // child, captures one integer, and leaves prior pre_exec hooks intact.
+    unsafe {
+        command.pre_exec(move || {
+            let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+            if libc::getrlimit(libc::RLIMIT_FSIZE, limit.as_mut_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut limit = limit.assume_init();
+            limit.rlim_cur = limit.rlim_cur.min(max_bytes as libc::rlim_t);
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn configure_stage_file_limit(
+    _command: &mut tokio::process::Command,
+    _max_bytes: u64,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "bounded child file output is unavailable on this platform",
+    ))
 }
 
 /// Escape a slave's file name for the tee spec.
@@ -2616,8 +2696,14 @@ pub(crate) async fn sweep_stale_stages(root: &Path, older_than: Duration) -> usi
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age >= older_than);
-        if old_enough && tokio::fs::remove_dir_all(entry.path()).await.is_ok() {
-            removed += 1;
+        if old_enough {
+            let _eviction = match crate::playback_cache::begin_eviction(&entry.path()) {
+                Ok(guard) => guard,
+                Err(_) => continue,
+            };
+            if tokio::fs::remove_dir_all(entry.path()).await.is_ok() {
+                removed += 1;
+            }
         }
     }
     removed
@@ -2714,7 +2800,8 @@ pub(crate) async fn run_self_test(
 ) -> Result<SelfTestReport, String> {
     let started = Instant::now();
     let version = matching_versions(bin, prober, runtime_cache).await?;
-    let work = StageDir::create(root, SELF_TEST_PREFIX)
+    let work = StageDir::reserved(root, SELF_TEST_PREFIX, 16 * 1024 * 1024)
+        .await
         .map_err(|error| format!("creating the self-test directory: {error}"))?;
     let source = synthetic_source(bin, work.path(), runtime_cache).await?;
     let file = synthetic_media_file(&source, 4_000)?;
@@ -2853,6 +2940,8 @@ impl FfmpegRun {
 /// capped.
 async fn run_ffmpeg(bin: &str, args: &[String], runtime_cache: &Path) -> Result<FfmpegRun, String> {
     let mut command = tokio::process::Command::new(bin);
+    configure_stage_limits(&mut command)
+        .map_err(|error| format!("bounded subtitle output unavailable: {error}"))?;
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     command
         .args(args)

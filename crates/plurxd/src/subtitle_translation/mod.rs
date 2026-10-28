@@ -5,6 +5,7 @@ mod installer;
 mod manager;
 pub(crate) mod profile;
 pub(crate) use manager::worker_pass;
+mod read_attestation;
 pub(crate) mod runtime;
 
 use crate::{http::error::ApiError, state::AppState, subtitle_models::artifacts};
@@ -24,6 +25,7 @@ use tokio::sync::{Notify, RwLock};
 
 pub(crate) struct Runtime {
     sources: RwLock<VecDeque<Arc<runtime::VerifiedSource>>>,
+    reads: Arc<read_attestation::ReadAttestations>,
     pub(crate) wake: Notify,
     operation_cursor: RwLock<Option<String>>,
     candidate_cursor: RwLock<Option<plurx_core::store::background_jobs::CandidateCursor>>,
@@ -37,6 +39,7 @@ impl Runtime {
     pub(crate) fn new() -> Self {
         Self {
             sources: RwLock::new(VecDeque::new()),
+            reads: read_attestation::ReadAttestations::new(),
             operation_cursor: RwLock::new(None),
             candidate_cursor: RwLock::new(None),
             turn: std::sync::atomic::AtomicUsize::new(0),
@@ -95,11 +98,8 @@ struct Capability {
 }
 pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiError> {
     let now = crate::state::clock_ms();
-    let selected = profile::selected_profile();
-    let profile_id = selected.id()?;
-    let spec = profile::model_spec();
     let engine = artifacts::inspect_engine().await;
-    let model = artifacts::model_identity(&state.subtitle_models.root, &spec).await;
+    let mut models = std::collections::BTreeMap::new();
     let receipts = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         state.store.read_subtitle_translation(TranslationRead {
@@ -112,61 +112,73 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiEr
     )
     .await
     .map_err(|_| ApiError::ServiceUnavailable("Worker readiness unavailable".into()))??;
-    let mut verified = None;
-    if let (Ok(engine), Ok(model)) = (&engine, &model) {
-        for row in receipts {
-            let Ok(receipt) = serde_json::from_value::<Capability>(row) else {
-                continue;
-            };
-            let m = &receipt.model;
-            if receipt.profile == selected
-                && receipt.profile_id == profile_id
-                && receipt.self_test_sha256 == profile::SELF_TEST_SHA256
-                && m.node_id == state.node_id
-                && m.boot_id == state.subtitle_models.boot_id
-                && m.model_id == spec.id
-                && m.model_sha256 == spec.sha256
-                && m.adapter_contract == engine.adapter_contract
-                && m.engine_sha256 == engine.binary_sha256
-                && m.engine_file_identity == artifacts::identity_key(engine.identity)
-                && m.model_file_identity == artifacts::identity_key(*model)
-            {
-                verified = Some(m.verified_at_ms);
-                break;
+    let failures = state.subtitle_models.translation.failures.read().await;
+    let mut capabilities = Vec::new();
+    for selected in profile::profiles() {
+        let spec = profile::model_spec_for(&selected)?;
+        // Both tasks share immutable bytes, while readiness remains per profile.
+        // Observe each model separately once per response, never reuse Small's
+        // metadata for Base or vice versa.
+        if !models.contains_key(&spec.sha256) {
+            models.insert(
+                spec.sha256.clone(),
+                artifacts::model_identity(&state.subtitle_models.root, &spec).await,
+            );
+        }
+        let model = &models[&spec.sha256];
+        let profile_id = selected.id()?;
+        let mut verified = None;
+        if let (Ok(engine), Ok(model)) = (&engine, model) {
+            for row in &receipts {
+                let Ok(receipt) = serde_json::from_value::<Capability>(row.clone()) else {
+                    continue;
+                };
+                let m = &receipt.model;
+                if receipt.profile == selected
+                    && receipt.profile_id == profile_id
+                    && receipt.self_test_sha256 == profile::SELF_TEST_SHA256
+                    && m.node_id == state.node_id
+                    && m.boot_id == state.subtitle_models.boot_id
+                    && m.model_id == spec.id
+                    && m.model_sha256 == spec.sha256
+                    && m.adapter_contract == engine.adapter_contract
+                    && m.engine_sha256 == engine.binary_sha256
+                    && m.engine_file_identity == artifacts::identity_key(engine.identity)
+                    && m.model_file_identity == artifacts::identity_key(*model)
+                {
+                    verified = Some(m.verified_at_ms);
+                    break;
+                }
             }
         }
+        let failure = failures.get(&profile_id).map(String::as_str);
+        let (status, reason) = if let Some(failure) = failure {
+            ("verification_failed", Some(failure))
+        } else if engine.is_err() {
+            ("unknown", Some("engine_unavailable"))
+        } else if model.as_ref().is_err_and(|e| e == "model_not_installed") {
+            ("missing", Some("model_missing"))
+        } else if model.is_err() {
+            ("unknown", Some("model_unavailable"))
+        } else if verified.is_some() {
+            ("verified", None)
+        } else {
+            ("unverified_cache", Some("translation_unverified"))
+        };
+        capabilities.push(json!({"task":selected.task.name(),"model_id":spec.id,"profile_id":profile_id,"status":status,"reason":reason,"verified_at_ms":if status=="verified"{verified}else{None},"model_sha256":spec.sha256,"engine_sha256":engine.as_ref().ok().map(|e|e.binary_sha256.clone())}));
     }
-    let failure = state
-        .subtitle_models
-        .translation
-        .failures
-        .read()
-        .await
-        .get(&profile_id)
-        .cloned();
-    let (status, reason) = if failure.is_some() {
-        ("verification_failed", failure.as_deref())
-    } else if engine.is_err() {
-        ("unknown", Some("engine_unavailable"))
-    } else if model.as_ref().is_err_and(|e| e == "model_not_installed") {
-        ("missing", Some("model_missing"))
-    } else if model.is_err() {
-        ("unknown", Some("model_unavailable"))
-    } else if verified.is_some() {
-        ("verified", None)
-    } else {
-        ("unverified_cache", Some("translation_unverified"))
-    };
+    let (cpu_budget, cpu_used, capacity_available) =
+        state.transcode.speech_capacity_observation().await;
     let eligible = state
         .jobs
         .execution_authority()
         .may_execute_job(JobKind::SubtitleTranslationRange)
         .await;
     Ok(vec![
-        json!({"node_id":state.node_id,"label":state.server_name,"current":true,"eligible":eligible,"observed_at_ms":now,"expires_at_ms":now+30000,"engine":engine.as_ref().ok().map(|e|json!({"adapter_contract":e.adapter_contract,"binary_sha256":e.binary_sha256,"platform":e.platform})),"capabilities":[{"model_id":spec.id,"profile_id":profile_id,"status":status,"reason":reason,"verified_at_ms":if status=="verified"{verified}else{None},"model_sha256":spec.sha256,"engine_sha256":engine.as_ref().ok().map(|e|e.binary_sha256.clone())}]}),
+        json!({"node_id":state.node_id,"label":state.server_name,"current":true,"eligible":eligible,"observed_at_ms":now,"expires_at_ms":now+30000,"engine":engine.as_ref().ok().map(|e|json!({"adapter_contract":e.adapter_contract,"binary_sha256":e.binary_sha256,"platform":e.platform})),"capacity":{"cpu_threads_required":2,"cpu_threads_budget":cpu_budget,"cpu_threads_used":cpu_used,"available":capacity_available,"reason":if capacity_available{None}else{Some("waiting_for_playback_capacity")}},"capabilities":capabilities}),
     ])
 }
-/// Seconds as ffprobe prints them, or a Matroska `HH:MM:SS.fffffffff` tag.
+
 fn probe_duration_ms(stream: &Value) -> Option<i64> {
     if let Some(seconds) = stream["duration"]
         .as_str()
@@ -193,23 +205,130 @@ fn probe_duration_ms(stream: &Value) -> Option<i64> {
     (seconds.is_finite() && seconds > 0.0).then_some((seconds * 1000.0) as i64)
 }
 
-/// The translation route's capability and its timeline. The timeline is the
-/// one audio stream's duration when the probe records one (bounded by the
-/// container's), because cores past the end of the audio have nothing to
-/// decode; the container duration stands in only when the stream has none.
-pub(crate) async fn file_capability(
+/// Clock coordinates are milliseconds/samples after subtracting the container
+/// origin, matching FFmpeg -copyts -start_at_zero and delivery media origins.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SourceClock {
+    pub(crate) origin_samples: i64,
+    pub(crate) audio_start_samples: i64,
+    pub(crate) duration_ms: i64,
+    pub(crate) source_index: Option<i64>,
+}
+fn rational_samples(numerator: i128, denominator: i128) -> Result<i64, &'static str> {
+    if denominator <= 0 {
+        return Err("source_clock_unsupported");
+    }
+    let rounded = numerator
+        .checked_abs()
+        .ok_or("source_clock_unsupported")?
+        .checked_add(denominator / 2)
+        .ok_or("source_clock_unsupported")?
+        / denominator;
+    let samples = rounded * numerator.signum();
+    if samples.abs() > 604_800 * 16_000 {
+        return Err("source_clock_unsupported");
+    }
+    i64::try_from(samples).map_err(|_| "source_clock_unsupported")
+}
+fn probe_samples(value: &Value) -> Result<i64, &'static str> {
+    let raw = value.as_str().ok_or("source_clock_unsupported")?;
+    let (negative, raw) = raw
+        .strip_prefix('-')
+        .map_or((false, raw), |value| (true, value));
+    let mut parts = raw.split('.');
+    let seconds = parts.next().ok_or("source_clock_unsupported")?;
+    let fraction = parts.next().unwrap_or("");
+    if parts.next().is_some()
+        || seconds.is_empty()
+        || fraction.len() > 9
+        || !seconds
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|b| b.is_ascii_digit())
+    {
+        return Err("source_clock_unsupported");
+    }
+    let denominator = 10_i128.pow(fraction.len() as u32);
+    let seconds: i128 = seconds.parse().map_err(|_| "source_clock_unsupported")?;
+    let fraction: i128 = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse().map_err(|_| "source_clock_unsupported")?
+    };
+    let ticks = seconds
+        .checked_mul(denominator)
+        .and_then(|v| v.checked_add(fraction))
+        .and_then(|v| v.checked_mul(16_000))
+        .ok_or("source_clock_unsupported")?;
+    rational_samples(if negative { -ticks } else { ticks }, denominator)
+}
+fn stream_start_samples(stream: &Value) -> Result<i64, &'static str> {
+    // Prefer the stream's rational clock over a decimal ffprobe rendering.
+    if let (Some(pts), Some(base)) = (stream["start_pts"].as_i64(), stream["time_base"].as_str()) {
+        let (numerator, denominator) = base.split_once('/').ok_or("source_clock_unsupported")?;
+        let numerator: i128 = numerator.parse().map_err(|_| "source_clock_unsupported")?;
+        let denominator: i128 = denominator
+            .parse()
+            .map_err(|_| "source_clock_unsupported")?;
+        if numerator <= 0 {
+            return Err("source_clock_unsupported");
+        }
+        let ticks = i128::from(pts)
+            .checked_mul(numerator)
+            .and_then(|v| v.checked_mul(16_000))
+            .ok_or("source_clock_unsupported")?;
+        return rational_samples(ticks, denominator);
+    }
+    probe_samples(&stream["start_time"])
+}
+pub(crate) fn source_clock(
+    value: &Value,
+    ordinal: i64,
+    container_ms: i64,
+) -> Result<SourceClock, &'static str> {
+    let streams = value["streams"]
+        .as_array()
+        .ok_or("source_clock_unsupported")?;
+    if !(0..=255).contains(&ordinal) || !(1..=14_400_000).contains(&container_ms) {
+        return Err("delivery_unsupported");
+    }
+    let origin_samples = probe_samples(&value["format"]["start_time"])?;
+    let audio = streams
+        .iter()
+        .filter(|s| s["codec_type"] == "audio")
+        .nth(ordinal as usize)
+        .ok_or("direct_audio_selection_unverified")?;
+    let audio_start_samples = stream_start_samples(audio)? - origin_samples;
+    // A stream wholly outside the bounded source timeline cannot supply cores.
+    if audio_start_samples.abs() > 14_400_000 * 16 {
+        return Err("source_clock_unsupported");
+    }
+    let duration_ms = probe_duration_ms(audio).map_or(container_ms, |duration| {
+        (audio_start_samples.div_euclid(16) + duration).min(container_ms)
+    });
+    if duration_ms <= 0 {
+        return Err("delivery_unsupported");
+    }
+    Ok(SourceClock {
+        origin_samples,
+        audio_start_samples,
+        duration_ms,
+        source_index: audio["index"].as_i64().filter(|n| *n >= 0),
+    })
+}
+pub(crate) async fn selected_file_capability(
     state: &AppState,
     file: &MediaFile,
-) -> Result<i64, &'static str> {
-    if file.audio_streams.len() != 1 || file.audio_streams[0].index != 0 {
+    ordinal: i64,
+) -> Result<SourceClock, &'static str> {
+    if !file
+        .audio_streams
+        .iter()
+        .any(|audio| audio.index == ordinal)
+    {
         return Err("direct_audio_selection_unverified");
     }
-    if file.size <= 0
-        || !file
-            .duration_ms
-            .is_some_and(|d| (1..=14400000).contains(&d))
-        || file.video_codec.is_none()
-    {
+    if file.size <= 0 || file.video_codec.is_none() {
         return Err("delivery_unsupported");
     }
     let raw = state
@@ -222,40 +341,28 @@ pub(crate) async fn file_capability(
         return Err("source_clock_unsupported");
     }
     let value: Value = serde_json::from_str(&raw).map_err(|_| "source_clock_unsupported")?;
-    let zero = |v: &Value| v.as_str().and_then(|s| s.parse::<f64>().ok()) == Some(0.0);
-    if !zero(&value["format"]["start_time"]) {
-        return Err("source_clock_unsupported");
+    if value["streams"].as_array().map(|streams| {
+        streams
+            .iter()
+            .filter(|s| s["codec_type"] == "audio")
+            .count()
+    }) != Some(file.audio_streams.len())
+    {
+        return Err("source_changed");
     }
-    let streams = value["streams"]
-        .as_array()
-        .ok_or("source_clock_unsupported")?;
-    let mut audio = None;
-    for kind in ["video", "audio"] {
-        let mut matched = streams.iter().filter(|s| s["codec_type"] == kind);
-        let first = matched.next().ok_or("source_clock_unsupported")?;
-        if matched.next().is_some() || !zero(&first["start_time"]) {
-            return Err("source_clock_unsupported");
-        }
-        if kind == "audio" {
-            audio = probe_duration_ms(first);
-        }
-    }
-    let container = file.duration_ms.ok_or("delivery_unsupported")?;
-    Ok(audio.map_or(container, |audio| audio.min(container)))
+    source_clock(
+        &value,
+        ordinal,
+        file.duration_ms.ok_or("delivery_unsupported")?,
+    )
 }
 pub(crate) async fn eligible_worker(
     state: &AppState,
     file: &MediaFile,
     selected: &TranslationProfile,
 ) -> Result<String, ApiError> {
-    file_capability(state, file).await.map_err(|reason| {
-        ApiError::typed(
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-            reason,
-            "This playback source is unavailable for progressive translation",
-        )
-    })?;
-    if selected != &profile::selected_profile() {
+    // Create validated the selected audio and source clock before worker choice.
+    if !profile::registered(selected) {
         return Err(ApiError::BadRequest(
             "Choose the current translation profile".into(),
         ));
@@ -263,9 +370,12 @@ pub(crate) async fn eligible_worker(
     let rows = workers_public(state).await?;
     if !rows.iter().any(|w| {
         w["eligible"] == true
-            && w["capabilities"]
-                .as_array()
-                .is_some_and(|caps| caps.iter().any(|c| c["status"] == "verified"))
+            && w["capabilities"].as_array().is_some_and(|caps| {
+                caps.iter().any(|c| {
+                    c["status"] == "verified"
+                        && c["profile_id"].as_str() == selected.id().ok().as_deref()
+                })
+            })
     }) {
         return Err(ApiError::typed(
             axum::http::StatusCode::CONFLICT,
@@ -321,6 +431,19 @@ pub(crate) async fn authorize_asset_source(
         .get_file(file_id)
         .await?
         .ok_or(ApiError::NotFound("file"))?;
+    let expected_size = asset["source_size"]
+        .as_str()
+        .and_then(|value| value.parse::<i64>().ok());
+    let expected_mtime = asset["source_mtime"]
+        .as_str()
+        .and_then(|value| value.parse::<i64>().ok());
+    if expected_size != Some(file.size) || expected_mtime != Some(file.mtime) {
+        return Err(ApiError::typed(
+            axum::http::StatusCode::GONE,
+            "source_changed",
+            "The source changed",
+        ));
+    }
     // Same authenticated local-catalog scope as /files/{id}/direct. Source
     // references and remote-library credentials never enter this local route.
     if let Some(source) = state.subtitle_models.translation.cached(&file).await {
@@ -328,61 +451,16 @@ pub(crate) async fn authorize_asset_source(
             return Ok(());
         }
     }
-    let rows = state
-        .store
-        .read_subtitle_translation(TranslationRead {
-            user_id: 0,
-            now_ms: now,
-            query: TranslationQuery::SourceBinding {
-                asset_id: asset_id.into(),
-                node_id: state.node_id.clone(),
-            },
-        })
-        .await?;
-    let proof = rows.first().ok_or_else(|| {
-        ApiError::typed(
-            axum::http::StatusCode::GONE,
-            "source_unverified",
-            "Verify this source through a fresh translation request",
-        )
-    })?;
-    if proof["boot_id"].as_str() != Some(state.subtitle_models.boot_id.as_str()) {
-        return Err(ApiError::typed(
-            axum::http::StatusCode::GONE,
-            "source_unverified",
-            "Verify this source through a fresh translation request",
-        ));
-    }
-    let held = crate::fragment_index_cluster::open_source_playback_fence(&file, None)
+    let content = asset["content_revision"]
+        .as_str()
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or(ApiError::NotFound("translation asset"))?;
+    state
+        .subtitle_models
+        .translation
+        .reads
+        .authorize(state, &file, content)
         .await
-        .map_err(|_| {
-            ApiError::typed(
-                axum::http::StatusCode::GONE,
-                "source_changed",
-                "The source changed",
-            )
-        })?;
-    let identity = plurx_core::fs_secure::std_file_identity(&held.handle).map_err(|_| {
-        ApiError::typed(
-            axum::http::StatusCode::GONE,
-            "source_changed",
-            "The source changed",
-        )
-    })?;
-    if !source_proof_matches(
-        proof,
-        &state.subtitle_models.boot_id,
-        &artifacts::identity_key(identity),
-        &asset["content_revision"],
-    ) || !held.unchanged()
-    {
-        return Err(ApiError::typed(
-            axum::http::StatusCode::GONE,
-            "source_changed",
-            "The source changed",
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Deserialize, Serialize)]
@@ -404,8 +482,11 @@ pub(crate) async fn model_operation(
     use plurx_core::store::background_jobs::{EnqueueJob, EnqueueOutcome, JobPayload, JobRequest};
     let request: ModelRequest = serde_json::from_value(body)
         .map_err(|_| ApiError::BadRequest("Invalid translation model request".into()))?;
-    let selected = profile::selected_profile();
-    let spec = profile::model_spec();
+    let selected = profile::profiles()
+        .into_iter()
+        .find(|p| p.id().is_ok_and(|id| id == request.profile_id))
+        .ok_or_else(|| ApiError::BadRequest("Choose a current speech profile".into()))?;
+    let spec = profile::model_spec_for(&selected)?;
     let now = crate::state::clock_ms();
     let unique = request
         .node_ids
@@ -504,19 +585,44 @@ pub(crate) async fn model_operation(
         .remove(&request.profile_id);
     state.subtitle_models.translation.wake.notify_one();
     Ok(axum::Json(
-        json!({"version":2,"model_id":id,"profile_id":request.profile_id,"operations":operations,"intent_expires_at_ms":request.intent_expires_at_ms,"server_now_ms":now}),
+        json!({"version":2,"purpose":"translation","model_id":id,"profile_id":request.profile_id,"operations":operations,"intent_expires_at_ms":request.intent_expires_at_ms,"server_now_ms":now}),
     ))
 }
 
-fn source_proof_matches(proof: &Value, boot: &str, identity: &str, content: &Value) -> bool {
-    proof["boot_id"].as_str() == Some(boot)
-        && proof["local_identity"].as_str() == Some(identity)
-        && proof["source_sha256"] == *content
-}
 #[cfg(test)]
 mod duration_tests {
-    use super::probe_duration_ms;
+    use super::{probe_duration_ms, source_clock, stream_start_samples};
     use serde_json::json;
+
+    #[test]
+    fn selected_audio_uses_ordinal_and_normalizes_signed_container_origin() {
+        let probe = json!({"format":{"start_time":"-1.500000"},"streams":[
+            {"index":0,"codec_type":"video","start_time":"-1.500000"},
+            {"index":2,"codec_type":"audio","start_time":"-1.500000","duration":"20"},
+            {"index":5,"codec_type":"audio","start_pts":-48000,"time_base":"1/48000","start_time":"-1.000000","duration":"10"}
+        ]});
+        let clock = source_clock(&probe, 1, 20_000).expect("selected audio clock");
+        assert_eq!(clock.origin_samples, -24_000);
+        assert_eq!(clock.audio_start_samples, 8_000);
+        assert_eq!(clock.source_index, Some(5));
+        assert_eq!(clock.duration_ms, 10_500);
+        assert!(source_clock(&probe, 2, 20_000).is_err());
+    }
+
+    #[test]
+    fn rational_audio_clock_refuses_invalid_and_overflowing_metadata() {
+        assert_eq!(
+            stream_start_samples(&json!({"start_pts":1,"time_base":"1/48000"}))
+                .expect("rounded sample"),
+            0
+        );
+        assert!(stream_start_samples(&json!({"start_pts":1,"time_base":"1/0"})).is_err());
+        assert!(stream_start_samples(
+            &json!({"start_pts":i64::MIN,"time_base":"18446744073709551616/1"})
+        )
+        .is_err());
+        assert!(stream_start_samples(&json!({"start_time":"NaN"})).is_err());
+    }
 
     #[test]
     fn audio_timeline_reads_stream_seconds_or_matroska_tag() {
@@ -530,26 +636,5 @@ mod duration_tests {
         );
         assert_eq!(probe_duration_ms(&json!({"tags":{"title":"x"}})), None);
         assert_eq!(probe_duration_ms(&json!({"duration":"N/A"})), None);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn prior_boot_binding_cannot_authorize_cached_bytes_before_fresh_verification() {
-        let proof =
-            json!({"boot_id":"old","local_identity":"same inode","source_sha256":"a".repeat(64)});
-        let content = json!("a".repeat(64));
-        assert!(!source_proof_matches(&proof, "new", "same inode", &content));
-        let mut fresh = proof.clone();
-        fresh["boot_id"] = json!("new");
-        assert!(source_proof_matches(&fresh, "new", "same inode", &content));
-        assert!(!source_proof_matches(
-            &fresh,
-            "new",
-            "replacement inode",
-            &content
-        ));
     }
 }

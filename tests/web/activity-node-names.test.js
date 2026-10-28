@@ -384,6 +384,22 @@ test("an active transcode leads with a state pill, a method line and named meter
   assert.doesNotMatch(html, /undefined|NaN|null/);
 });
 
+test("a live FEL reconstruction names its picture, its GPU work and why, beside its Stop", () => {
+  const processing = {
+    delivered: "Reconstructed Dolby Vision Profile 8.1",
+    work: "VA-API decode, base and full enhancement layers composed on the GPU, hevc_vaapi Main10 encode, a rewritten 8.1 RPU per frame",
+    reason: "Dolby Vision client playing a Profile 7 FEL title; FEL re-encode is on in Settings → Developer",
+    fel_composed: true,
+    live_rendering: true,
+  };
+  const html = paint(streaming({ presentation: "vod", vod_observation: { processing } }, { presentation: "vod", node_id: NODE_A }));
+  assert.match(html, /<div class="stream-processing" data-processing="Reconstructed Dolby Vision Profile 8.1"><b>Reconstructed Dolby Vision Profile 8.1<\/b> <span class="sub">· VA-API decode, base and full enhancement layers composed on the GPU, hevc_vaapi Main10 encode, a rewritten 8.1 RPU per frame<\/span>/);
+  assert.match(html, /Why: Dolby Vision client playing a Profile 7 FEL title; FEL re-encode is on in Settings → Developer · live rendering · FEL composed/);
+  assert.match(html, /<dt>Serving node<\/dt>/);
+  assert.match(html, /stopSession\(&quot;75813686-9927-41d0-97e0-18d152f9efa2&quot;\)|stopSession\("75813686-9927-41d0-97e0-18d152f9efa2"\)/);
+  assert.doesNotMatch(paint(streaming()), /stream-processing/);
+});
+
 test("the sequence numbers survive behind the disclosure, none of them lost", () => {
   const html = paint(streaming({ pending_fetched_segment: 116, fetched_segment: 113, last_request: "segment", recent_speed: 1.42 }));
   assert.match(html, /<details class="stream-diag" data-stream="75813686-9927-41d0-97e0-18d152f9efa2"><summary>Technical details<\/summary>/);

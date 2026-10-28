@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 68] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 71] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1727,6 +1727,12 @@ mod tests {
             // v112: the shared rewind verifies exact shape and refuses all
             // translation data before removing the empty extension.
             "CREATE TABLE subtitle_translation_schema",
+            // v113 and v114: the shared rewind verifies exact empty annotation
+            // and title-job extensions before removing their objects/markers.
+            "CREATE TABLE library_annotations_schema",
+            "CREATE TABLE IF NOT EXISTS dv_title_jobs_schema",
+            // v115: the same strict empty-extension rewind removes handoffs.
+            "CREATE TABLE IF NOT EXISTS playback_handoffs_schema",
         ];
 
         assert!(

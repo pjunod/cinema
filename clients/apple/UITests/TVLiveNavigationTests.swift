@@ -30,7 +30,12 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
             let began = Date()
             remote.press(direction)
             let target = cell(row)
-            let visibleFocus = { target.exists && target.hasFocus && bounds.contains(target.frame) }
+            let visibleFocus = {
+                // Observe focus and geometry together without repeating the
+                // remote accessibility query for each attribute on every row.
+                guard let snapshot = try? target.snapshot() else { return false }
+                return snapshot.hasFocus && bounds.contains(snapshot.frame)
+            }
             // Check immediately: XCTest's predicate waiter otherwise adds a
             // one-second polling floor to every already-completed remote move.
             if !visibleFocus() {

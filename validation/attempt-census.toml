@@ -153,3 +153,15 @@ autoQualityOffer = { function = "tickDisplayAwareAuto", scopes = ["lifecycle", "
 preparedPipelineRollback = { function = "commitPreparedSuccessor", scopes = ["lifecycle", "open", "seek"] }
 preparedCommit = { function = "preparedCommitStillOwned", scopes = ["viewerAction"] }
 retainedQualityRestart = { function = "applyRetainedQualityWithRestart", scopes = ["viewerAction"] }
+
+# Caption continuations retain their original viewer-action-only comparisons;
+# lifecycle, item and presentation predicates remain at each call site.
+subtitleReopenCompletion = { function = "applySubtitleSelection", scopes = ["viewerAction"] }
+progressiveCaptionCleanup = { function = "selectProgressiveCaptions", scopes = ["viewerAction"] }
+progressiveCaptionAfterControl = { function = "selectProgressiveCaptions", scopes = ["viewerAction"] }
+progressiveCaptionAfterSubtitleRemoval = { function = "selectProgressiveCaptions", scopes = ["viewerAction"] }
+progressiveAssetCleanup = { function = "selectProgressiveAsset", scopes = ["viewerAction"] }
+progressiveAssetAfterControl = { function = "selectProgressiveAsset", scopes = ["viewerAction"] }
+progressiveAssetAfterSubtitleRemoval = { function = "selectProgressiveAsset", scopes = ["viewerAction"] }
+translatedCaptionDecision = { function = "useTranslatedTextCaption", scopes = ["viewerAction"] }
+translatedCaptionFailure = { function = "useTranslatedTextCaption", scopes = ["viewerAction"] }

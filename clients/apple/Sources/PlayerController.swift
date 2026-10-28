@@ -87,6 +87,7 @@ final class PlayerController: ObservableObject {
     private let reportPlaybackIntent: @MainActor (PlaybackControlSession) async -> UInt64?
     private let mediaSelectionPreparation: MediaSelectionPreparation
     private let itemPreparation: ItemPreparation
+    private let makePlayerItem: @MainActor (URL) -> AVPlayerItem
     private let prepareGrowingPlaylist: @MainActor (URL) async throws -> Void
     private let nativeSeek: @MainActor (AVPlayer, Int) async -> Bool
     private let waitNativeSeekDeadline: @MainActor () async throws -> Void
@@ -106,6 +107,7 @@ final class PlayerController: ObservableObject {
 
     init(
         player: AVPlayer = AVPlayer(),
+        makePlayerItem: @escaping @MainActor (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
         requestPlaybackDecision: (@MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps))? = nil,
         mediaSelectionPreparation: MediaSelectionPreparation = MediaSelectionPreparation(),
         itemPreparation: ItemPreparation = ItemPreparation(),
@@ -150,6 +152,7 @@ final class PlayerController: ObservableObject {
         displayWakeOwner: DisplayWakeOwner? = nil
     ) {
         self.player = player
+        self.makePlayerItem = makePlayerItem
         displayWake = PlaybackDisplayWake(owner: displayWakeOwner)
         self.requestPlaybackDecision = { model, context, selection, quality in
             let id = try context.localID()
@@ -175,6 +178,10 @@ final class PlayerController: ObservableObject {
         self.reportPlaybackIntent = reportPlaybackIntent
         self.resumeNow = resumeNow
         self.waitResumeSample = waitResumeSample
+        textTranslationObservation = subtitleTextTranslation.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+        progressiveCaptionObservation = progressiveCaptions.objectWillChange.sink { [weak self] in
+            self?.objectWillChange.send()
+        }
     }
 
     /// The server retains 180 seconds behind the download frontier: the 120 s
@@ -510,6 +517,16 @@ final class PlayerController: ObservableObject {
                 settleStreamChangePreparing()
             }
         }
+    }
+    let progressiveCaptions = ProgressiveCaptionSession()
+    let subtitleTextTranslation = SubtitleTextTranslation()
+    private var textTranslationObservation: AnyCancellable?
+    private var progressiveCaptionObservation: AnyCancellable?
+    private var progressiveCaptionTask: Task<Void, Never>?
+    var progressiveCaptionOutputSelected: Bool { progressiveCaptions.selected || progressiveCaptionTask != nil }
+    var captionIntent: CaptionIntent {
+        if progressiveCaptions.selected { return .progressive(progressiveCaptions.assetId) }
+        return selectedSubtitle.map(CaptionIntent.source) ?? .off
     }
     @Published private(set) var selectedSubtitle: Int?
     @Published private(set) var selectedAudio: Int?
@@ -2701,6 +2718,9 @@ final class PlayerController: ObservableObject {
         currentMs = target
         ttffMeasurement.rebasePosition(at: target)
         pgsOverlaySeeked(to: target)
+        // Every viewer, relative and marker discontinuity revokes the old
+        // caption traversal. Ordinary item/quality attachments keep it alive.
+        progressiveCaptions.mediaChanged(seek: true, positionMs: target)
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
         interactiveSeekTask?.cancel()
@@ -2841,9 +2861,13 @@ final class PlayerController: ObservableObject {
     }
 
     func selectSubtitle(_ index: Int?) {
+        let wasProgressive = progressiveCaptionOutputSelected
+        retireProgressiveCaptionSelection()
+        progressiveCaptions.deselect()
+        player.allowsExternalPlayback = !pgsOverlayIsActive
         let cold = started && decision == nil
         let requestedIndex = index ?? PrePlaySelection.subtitleOff
-        guard index != selectedSubtitle
+        guard wasProgressive || index != selectedSubtitle
                 || (cold && initialDecisionRequest.selection.subtitleIndex != requestedIndex)
         else { return }
         if Self.subtitleUsesOverlay(index, in: subtitles), player.isExternalPlaybackActive {
@@ -2925,20 +2949,25 @@ final class PlayerController: ObservableObject {
         raiseSurfaceNotice(source: "control_hold", context: .attached, detail: message)
     }
 
-    private func applySubtitleSelection(
+    @discardableResult private func applySubtitleSelection(
         _ index: Int?,
         route: SubtitleSelectionRoute,
         destination: (target: Int, generation: Int)? = nil,
         expectedActionEpoch: Int
-    ) async {
-        guard expectedActionEpoch == viewerActionEpoch else { return }
+    ) async -> Bool {
+        guard !Task.isCancelled, expectedActionEpoch == viewerActionEpoch else { return false }
+        let selectionAttempt = snapshotAttempt()
         // Overlay teardown/installation changes visible presentation and
         // external-output behavior, so it belongs after the urgent intent
         // publication and stale-action guard just like the AVPlayer mutation.
         updatePGSOverlaySelection(index)
         switch route {
         case .reopen:
-            await reopen(at: destination?.target ?? positionForPlaybackIntent())
+            let incumbent = player.currentItem
+            var applied = false
+            await reopen(at: destination?.target ?? positionForPlaybackIntent(), applied: { applied = $0 })
+            return applied && !Task.isCancelled && attemptStillCurrent(selectionAttempt, fence: .subtitleReopenCompletion)
+                && player.currentItem != nil && player.currentItem !== incumbent
         case .bitmapOverlay:
             // Moving from a native rendition to bitmap presentation must also
             // turn AVPlayer's legible option off. The synchronized layer then
@@ -2953,7 +2982,9 @@ final class PlayerController: ObservableObject {
                 currentActionEpoch: viewerActionEpoch
             ) {
                 settleInPlaceSubtitleDestination(destination)
+                return true
             }
+            return false
         case .mediaSelection:
             // Selection belongs to AVPlayerItem, not the HLS session. This is
             // the no-restart path that preserves video copy, HDR, position,
@@ -2969,7 +3000,9 @@ final class PlayerController: ObservableObject {
                 currentActionEpoch: viewerActionEpoch
                ) {
                 settleInPlaceSubtitleDestination(destination)
+                return true
             }
+            return false
         }
     }
 
@@ -3010,6 +3043,7 @@ final class PlayerController: ObservableObject {
         )
         currentMs = destination.target
         selectedAudio = index
+        configureProgressiveCaptions()
         refreshAutoCatalogForViewerRecipe()
         recipeRevision.change()
         if started && decision == nil {
@@ -3468,6 +3502,9 @@ final class PlayerController: ObservableObject {
     }
 
     func stop(deactivateAudioSession: Bool = true) {
+        progressiveCaptionTask?.cancel(); progressiveCaptionTask = nil
+        progressiveCaptions.retire()
+        subtitleTextTranslation.retire()
         let position = positionForPlaybackStop()
         recordDiagnosticPlayback("terminal", action: "stop")
         diagnosticAuthorizationGeneration = nil
@@ -3778,6 +3815,7 @@ final class PlayerController: ObservableObject {
             // audio choice already arrives marked here.
             selectedAudio = request.selection.audioIndex
                 ?? decision.audio?.first(where: { $0.default })?.index
+            configureProgressiveCaptions()
             let wantedSubtitle = Self.initialSubtitleIndex(
                 prePlay: request.selection.subtitleIndex,
                 serverSelection: decision.selection,
@@ -3829,7 +3867,10 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    private func reopen(at position: Int, intent: PlayerOpenIntent = .normal) async {
+    private func reopen(at position: Int, intent: PlayerOpenIntent = .normal,
+                        applied: ((Bool) -> Void)? = nil) async {
+        var attached = false
+        defer { applied?(attached) }
         #if os(iOS)
         if offlineId != nil {
             await reloadOffline(at: position)
@@ -3854,6 +3895,8 @@ final class PlayerController: ObservableObject {
         }
         do {
             try await openAndDrain(decision: decision, request: next)
+            attached = isCurrentLifecycle(lifecycle) && !Task.isCancelled
+                && !isChangingStream && !recipeRevision.needsReopen
         } catch {
             guard isCurrentLifecycle(lifecycle) else { return }
             reopenQueue.clear()
@@ -3973,7 +4016,13 @@ final class PlayerController: ObservableObject {
         let burnSubtitle = subtitleFields.burn
         let nativeSubtitle = subtitleFields.native
         let forceTranscode = burnSubtitle != nil || requestedHeight != nil || forceCompatibilityTranscode
+        // A direct multi-audio asset lets AVFoundation choose by language,
+        // which cannot identify duplicate-language/commentary tracks. Bind
+        // the server's actual audio ordinal from the first attachment instead.
         let customAudio = requestedAudioOverride != nil
+        let ordinalBoundAudio = Self.needsOrdinalBoundAudioSession(
+            audioTrackCount: audioTracks.count, explicitAudio: requestedAudioOverride
+        )
         // Whether this open has to be a session for no reason other than making
         // the file's text subtitles selectable. Sticky once true, so leaving
         // subtitles again does not buy a second restart.
@@ -3991,7 +4040,7 @@ final class PlayerController: ObservableObject {
         // transcode. Entering the session is deferred to the moment a native
         // subtitle is actually chosen, which costs exactly one reopen there
         // (routed explicitly by `subtitleSelectionRoute`).
-        let direct = normalMode == "direct" && !forceTranscode && !customAudio
+        let direct = normalMode == "direct" && !forceTranscode && !ordinalBoundAudio
             && nativeSubtitle == nil && !needsSubtitleRenditions
         let url: URL?
         var seekAfterAttach: Int?
@@ -4295,7 +4344,7 @@ final class PlayerController: ObservableObject {
             // preparation. Its completed playlist cannot resurrect the item.
             guard !isSuperseded(generation), started, !Task.isCancelled else { return }
         }
-        let item = AVPlayerItem(url: url)
+        let item = makePlayerItem(url)
         Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
         installSeekVideoOutput(on: item)
         #if os(iOS)
@@ -4334,6 +4383,7 @@ final class PlayerController: ObservableObject {
         // creation mixed the predecessor's local time into the successor's
         // base and was the source of the apparently random seek jumps.
         baseMs = nextBaseMs
+        progressiveCaptions.mediaChanged()
         if seekAfterAttach == nil {
             ttffMeasurement.rebasePosition(at: realPositionMs())
         }
@@ -4477,6 +4527,114 @@ final class PlayerController: ObservableObject {
         }
     }
 
+    private func configureProgressiveCaptions() {
+        retireProgressiveCaptionSelection()
+        guard started, let model, fileId > 0 else { return }
+        let lifecycle = lifecycleGeneration
+        subtitleTextTranslation.configure(api: model.requireAPI(), fileId: fileId)
+        progressiveCaptions.configure(api: model.requireAPI(), fileId: fileId, sourceAudioIndex: selectedAudio,
+            now: { [weak self] in
+                guard let self else { return (0, 0, 1, true) }
+                return (self.realPositionMs(), self.baseMs, Double(self.preferredRate), !self.wantsPlayback)
+            }, current: { [weak self] in self?.isCurrentLifecycle(lifecycle) == true })
+    }
+
+    private func retireProgressiveCaptionSelection() {
+        // An attached stream replacement owns the reopen queue until it drains.
+        // Retire caption intent through viewerActionEpoch without cancelling
+        // that physical owner and stranding its queued newer subtitle change.
+        if !isChangingStream { progressiveCaptionTask?.cancel() }
+        progressiveCaptionTask = nil
+    }
+
+    /// Explicit local caption output is chosen by the player UI before entry.
+    func selectProgressiveCaptions(_ task: CaptionTask) {
+        guard started, !player.isExternalPlaybackActive else {
+            showPlaybackNotice("Return playback to this device to show progressive captions.")
+            return
+        }
+        retireProgressiveCaptionSelection()
+        let actionEpoch = beginViewerAction(), lifecycle = lifecycleGeneration
+        let captionAttempt = snapshotAttempt()
+        let route = Self.subtitleSelectionRoute(for: nil, tracks: subtitles,
+            activeBurn: activeBurnedSubtitle, isDirectPlayback: isDirectPlayback, activeOverlay: pgsOverlayTrackIndex)
+        if route == .reopen { recipeRevision.change() }
+        selectedSubtitle = nil
+        progressiveCaptionTask = Task {
+            defer { if attemptStillCurrent(captionAttempt, fence: .progressiveCaptionCleanup) { progressiveCaptionTask = nil; objectWillChange.send() } }
+            retainControlSequence(await playbackControl.reportIntent())
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), attemptStillCurrent(captionAttempt, fence: .progressiveCaptionAfterControl) else { return }
+            let applied = await applySubtitleSelection(nil, route: route, expectedActionEpoch: actionEpoch)
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), attemptStillCurrent(captionAttempt, fence: .progressiveCaptionAfterSubtitleRemoval), !player.isExternalPlaybackActive else { return }
+            guard applied, activeBurnedSubtitle == nil, !recipeRevision.needsReopen else {
+                showPlaybackNotice("Captions were not selected because subtitle removal did not attach. Try again after the stream change finishes.")
+                return
+            }
+            if progressiveCaptions.request(task) { player.allowsExternalPlayback = false }
+        }
+    }
+
+    func selectProgressiveAsset(_ asset: CaptionAsset) {
+        guard started, !player.isExternalPlaybackActive else {
+            showPlaybackNotice("Return playback to this device to show progressive captions.")
+            return
+        }
+        retireProgressiveCaptionSelection()
+        let actionEpoch = beginViewerAction(), lifecycle = lifecycleGeneration
+        let captionAttempt = snapshotAttempt()
+        let route = Self.subtitleSelectionRoute(for: nil, tracks: subtitles,
+            activeBurn: activeBurnedSubtitle, isDirectPlayback: isDirectPlayback, activeOverlay: pgsOverlayTrackIndex)
+        if route == .reopen { recipeRevision.change() }
+        selectedSubtitle = nil
+        progressiveCaptionTask = Task {
+            defer { if attemptStillCurrent(captionAttempt, fence: .progressiveAssetCleanup) { progressiveCaptionTask = nil; objectWillChange.send() } }
+            retainControlSequence(await playbackControl.reportIntent())
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), attemptStillCurrent(captionAttempt, fence: .progressiveAssetAfterControl) else { return }
+            let applied = await applySubtitleSelection(nil, route: route, expectedActionEpoch: actionEpoch)
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), attemptStillCurrent(captionAttempt, fence: .progressiveAssetAfterSubtitleRemoval), !player.isExternalPlaybackActive else { return }
+            guard applied, activeBurnedSubtitle == nil, !recipeRevision.needsReopen else {
+                showPlaybackNotice("Captions were not selected because subtitle removal did not attach. Try again after the stream change finishes.")
+                return
+            }
+            player.allowsExternalPlayback = false
+            progressiveCaptions.read(asset)
+        }
+    }
+
+    nonisolated static func translatedTextCaptionIndex(
+        _ result: TextCaptionResult, fileId: Int, tracks: [SubtitleTrack]
+    ) -> Int? {
+        guard result.fileId == String(fileId), result.language == "en",
+              CaptionValidation.digest(result.downloadedSubtitleId) else { return nil }
+        let matches = tracks.filter { $0.downloadedSubtitleId == result.downloadedSubtitleId && $0.isNativeHLS }
+        return matches.count == 1 ? matches.first?.index : nil
+    }
+
+    func useTranslatedTextCaption(_ result: TextCaptionResult) {
+        guard started, result.fileId == String(fileId), let model, let context = fileContext else { return }
+        _ = beginViewerAction()
+        let captionAttempt = snapshotAttempt(), lifecycle = lifecycleGeneration
+        Task {
+            do {
+                let quality: PlaybackQuality = selectedHeight.map(Self.initialQuality(height:)) ?? (selectedQualityIsOriginal ? .original : .auto)
+                let refreshed = try await requestPlaybackDecision(model, context,
+                    PrePlaySelection(audioIndex: selectedAudio, subtitleIndex: selectedSubtitle ?? PrePlaySelection.subtitleOff), quality)
+                guard !Task.isCancelled, isCurrentLifecycle(lifecycle), attemptStillCurrent(captionAttempt, fence: .translatedCaptionDecision),
+                      refreshed.decision.fileId == fileId else { return }
+                guard let index = Self.translatedTextCaptionIndex(result, fileId: fileId, tracks: refreshed.decision.subtitles ?? []) else {
+                    showPlaybackNotice("That translated caption is no longer available. Refresh its job before selecting it.")
+                    return
+                }
+                // Bind the immutable result to its current index. Another
+                // acquired caption may have shifted the original result index.
+                decision?.subtitles = refreshed.decision.subtitles
+                selectSubtitle(index)
+            } catch { if isCurrentLifecycle(lifecycle), attemptStillCurrent(captionAttempt, fence: .translatedCaptionFailure) { showPlaybackNotice(error.localizedDescription) } }
+        }
+    }
+
+    func useLocalCaptionOutput() { player.allowsExternalPlayback = false }
+
     // MARK: - PGS application overlay
 
     /// Custom application layers are not carried by Apple's system PiP or
@@ -4578,7 +4736,7 @@ final class PlayerController: ObservableObject {
         pgsOverlayImageCache.removeAll(keepingCapacity: false)
         pgsOverlayImageBytes.removeAll(keepingCapacity: false)
         pgsOverlayImageLRU.removeAll(keepingCapacity: false)
-        player.allowsExternalPlayback = true
+        player.allowsExternalPlayback = !progressiveCaptions.selected
     }
 
     /// Why a window refresh was asked for. Only `.force` skips the policy.
@@ -6677,6 +6835,7 @@ final class PlayerController: ObservableObject {
                 self.autoSkipActiveMarkerIfNeeded()
                 self.playbackControlPlayerChanged()
                 self.pgsOverlayPeriodicTick(currentMs: self.currentMs)
+                self.progressiveCaptions.mediaChanged()
                 // The last rate the viewer was genuinely playing at, so a
                 // pause at 1.5× is restored as 1.5× and not as the 0 the
                 // transport reports while paused (P2-5).
@@ -8477,6 +8636,10 @@ final class PlayerController: ObservableObject {
     /// as given (docs/CLIENTS.md §1); it sits *below* `explicit` because the
     /// plan was decided before the viewer changed their mind mid-playback, and
     /// a reopen replays that stale plan otherwise.
+    nonisolated static func needsOrdinalBoundAudioSession(audioTrackCount: Int, explicitAudio: Int?) -> Bool {
+        explicitAudio != nil || audioTrackCount > 1
+    }
+
     nonisolated static func sessionAudioIndex(
         explicit: Int?,
         plan: Int?,
@@ -10626,6 +10789,7 @@ extension PlayerController: PreparedSuccessorHost {
         sessionId = action.sessionId
         autoActiveCandidateId = action.effectiveSelection.candidateId
         baseMs = action.mediaOriginMs
+        progressiveCaptions.mediaChanged()
         isVOD = stagedFilmLocalVOD
         usesDirectTimeline = stagedFilmLocalVOD
         activeMediaPath = clusterRelativeMediaPath(action.playlistUrl)
@@ -10677,6 +10841,7 @@ extension PlayerController: PreparedSuccessorHost {
                 sessionId = incumbentState.sessionId
                 autoActiveCandidateId = incumbentState.candidateId
                 baseMs = incumbentState.baseMs
+                progressiveCaptions.mediaChanged()
                 activeMediaPath = incumbentState.path
                 activeMediaAuthenticated = incumbentState.authenticated
                 sessionHeight = incumbentState.height

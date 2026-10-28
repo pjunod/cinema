@@ -547,6 +547,74 @@ mod rate_control;
 pub use rate_control::*;
 // split: end rate-control
 
+/// Live FEL reconstruction graphs one worker runs at once. Measured on a
+/// Phoenix iGPU (VA-API decode, Vulkan compose, hevc_vaapi Main10): one 4K
+/// FEL compose + encode sustains 1.4-1.7x real time. Concurrent graphs are not
+/// measured, so a second play takes its ordinary route with the reason.
+#[cfg(target_os = "linux")]
+pub(crate) const LIVE_RECONSTRUCTION_SLOTS: usize = 1;
+
+/// What the reconstructed 8.1 route does for one title on one node.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg(target_os = "linux")]
+pub(crate) enum FelGate {
+    Serve,
+    /// The play keeps the plain conversion, with this reason.
+    Decline(String),
+    /// No verdict yet: ask for the title to be measured; the play keeps the
+    /// plain conversion, saying it is being measured.
+    Measure,
+}
+
+/// How often one node may ask for the same title's FEL qualification.
+#[cfg(target_os = "linux")]
+pub(crate) const FEL_REQUALIFICATION_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(6 * 60 * 60);
+
+/// How long a live reconstructed 8.1 waits for a FEL qualification it has
+/// asked to yield the worker's reconstruction slot. The qualification kills
+/// and reaps its window children on the signal; that is well under a second.
+#[cfg(target_os = "linux")]
+pub(crate) const QUALIFICATION_SLOT_YIELD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The reconstruction slot as a FEL qualification holds it: preemptible. A
+/// live play that finds the slot taken cancels `preempt` (the qualification's
+/// own cancellation) and waits for the permit. The permit is released before
+/// the registration is cleared, so a racing play never sees a taken slot
+/// with no one to ask.
+#[cfg(target_os = "linux")]
+pub(crate) struct QualificationSlot {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    holder: Arc<std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for QualificationSlot {
+    fn drop(&mut self) {
+        let mut holder = self
+            .holder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(self.permit.take());
+        *holder = None;
+    }
+}
+
+/// Node readings behind the Developer tab's FEL re-encode rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveReconstructionFacts {
+    /// A FEL qualification holds the slot (a live play would preempt it).
+    pub(crate) held_by_qualification: bool,
+    pub(crate) device_present: bool,
+    pub(crate) main10_vaapi_decode: bool,
+    pub(crate) gpu_decode: bool,
+    pub(crate) renderer_threads: usize,
+    pub(crate) encoder_threads: usize,
+    pub(crate) software_budget: usize,
+    pub(crate) slots: usize,
+    pub(crate) slots_in_use: usize,
+}
+
 pub struct TranscodeManager {
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
     source_workers: source_actor::SourceWorkerRegistry,
@@ -601,7 +669,7 @@ pub struct TranscodeManager {
     hooks: crate::seam_hooks::HookSlot<dyn TranscodeManagerHooks>,
     /// Descriptor-bound per-source decode facts, scoped to the configured
     /// FFprobe build rather than to a mutable pathname.
-    decode_facts: crate::decode_facts::DecodeFactCache,
+    decode_facts: Arc<crate::decode_facts::DecodeFactCache>,
     decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     candidate_production_proofs: Arc<crate::vodencode::CandidateProductionProofs>,
     #[cfg(any(target_os = "linux", test))]
@@ -610,6 +678,21 @@ pub struct TranscodeManager {
     processed_preparation_slot: Arc<tokio::sync::Semaphore>,
     #[cfg(target_os = "linux")]
     processed_instance_slots: Arc<tokio::sync::Semaphore>,
+    /// Live FEL reconstruction (BL+EL composed on the GPU, then re-encoded):
+    /// one graph per worker until concurrent reconstruction is measured. Its
+    /// permit lives in the graph's runtime recipe, so it is held exactly as
+    /// long as the graph that spends the GPU.
+    #[cfg(target_os = "linux")]
+    pub(crate) processed_reconstruction_slots: Arc<tokio::sync::Semaphore>,
+    /// The FEL qualification holding the reconstruction slot, if any: its
+    /// cancellation, which a live play triggers to take the slot.
+    #[cfg(target_os = "linux")]
+    pub(crate) reconstruction_qualification:
+        Arc<std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Titles this node asked to have FEL-qualified, and when.
+    #[cfg(target_os = "linux")]
+    fel_requalification_requests:
+        std::sync::Mutex<std::collections::HashMap<i64, std::time::Instant>>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,

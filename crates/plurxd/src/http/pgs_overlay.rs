@@ -140,7 +140,7 @@ async fn manifest_for_track(
             if let Some(generation_dir) = path.parent() {
                 pgs_overlay::record_access(generation_dir).await;
             }
-            let bytes = match tokio::fs::read(&path).await {
+            let bytes = match pgs_overlay::read_cached_bytes(&path).await {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     tracing::warn!(error = %error, "published PGS manifest vanished; rebuilding");
@@ -217,7 +217,7 @@ async fn object_for_track(
     if let Some(generation_dir) = path.parent().and_then(Path::parent) {
         pgs_overlay::record_access(generation_dir).await;
     }
-    let bytes = match tokio::fs::read(&path).await {
+    let bytes = match pgs_overlay::read_cached_bytes(&path).await {
         Ok(bytes) => bytes,
         Err(error) => {
             tracing::warn!(error = %error, "published PGS object vanished; rebuilding generation");

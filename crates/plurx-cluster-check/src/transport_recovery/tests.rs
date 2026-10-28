@@ -945,6 +945,80 @@ fn artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result()
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn snapshot_publication_can_arrive_after_the_bounded_trigger_load() {
+    let mut samples =
+        std::collections::VecDeque::from([(None, "absent"), (Some(20), "old"), (Some(21), "new")]);
+    let deadline = (tokio::time::Instant::now() + Duration::from_secs(1)).into_std();
+    let result = await_snapshot_publication(Some(20), deadline, async || {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        Ok(samples
+            .pop_front()
+            .expect("only the three planned observations"))
+    })
+    .await
+    .expect("publication may finish after the finite trigger load");
+    assert_eq!(result, "new");
+    assert!(
+        samples.is_empty(),
+        "absence and the old index cannot settle publication"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_snapshot_publication_deadline_does_not_start_an_observation() {
+    let mut called = false;
+    let deadline = tokio::time::Instant::now().into_std();
+    let result = await_snapshot_publication(Some(20), deadline, async || {
+        called = true;
+        Ok((Some(21), ()))
+    })
+    .await;
+    assert!(result
+        .expect_err("an expired budget cannot accept a snapshot")
+        .to_string()
+        .contains("deadline"));
+    assert!(!called, "the old budget must not start another request");
+}
+
+#[tokio::test(start_paused = true)]
+async fn snapshot_publication_observation_is_bounded_by_the_remaining_budget() {
+    let start = tokio::time::Instant::now();
+    let deadline = start + Duration::from_millis(50);
+    let mut completed = false;
+    let result = await_snapshot_publication(Some(20), deadline.into_std(), async || {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        completed = true;
+        Ok((Some(21), ()))
+    })
+    .await;
+    assert!(result
+        .expect_err("a slow request cannot extend the absolute budget")
+        .to_string()
+        .contains("deadline"));
+    assert!(
+        !completed,
+        "the owned request future must be dropped at its deadline"
+    );
+    assert_eq!(tokio::time::Instant::now(), deadline);
+}
+
+#[tokio::test(start_paused = true)]
+async fn snapshot_publication_completion_after_the_absolute_deadline_is_refused() {
+    let start = tokio::time::Instant::now();
+    let deadline = start + Duration::from_millis(50);
+    let result = await_snapshot_publication(Some(20), deadline.into_std(), async || {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        Ok((Some(21), "late snapshot"))
+    })
+    .await;
+    assert!(result
+        .expect_err("a late ready value cannot settle publication")
+        .to_string()
+        .contains("deadline"));
+    assert!(tokio::time::Instant::now() >= deadline);
+}
+
 #[tokio::test]
 async fn installed_snapshot_evidence_survives_rotation_after_threshold_writes() {
     let root = tempfile::tempdir().expect("snapshot rotation fixture root");

@@ -48,7 +48,7 @@ pub(super) fn auto_encode_fallback<'a>(
     fn encode(candidate: &plurx_core::playback::candidate::QualityCandidate) -> bool {
         candidate.decoder_compatible
             && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
-            && (!candidate.processed_hdr10 || candidate.playable())
+            && (!candidate.processed_dv || candidate.playable())
     }
     fn at_height(
         list: &[plurx_core::playback::candidate::QualityCandidate],
@@ -71,7 +71,7 @@ pub(super) fn auto_encode_fallback<'a>(
 }
 
 /// Cold ordinary output may acquire its first bounded window. Processed output
-/// still needs the complete executable HDR10 recipe and production proof.
+/// still needs the complete executable processed recipe and production proof.
 pub(super) fn auto_bootstrap_encode_fallback(
     catalog: &[plurx_core::playback::candidate::QualityCandidate],
     height: i64,
@@ -81,10 +81,22 @@ pub(super) fn auto_bootstrap_encode_fallback(
         .filter(|candidate| {
             candidate.decoder_compatible
                 && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
-                && (!candidate.processed_hdr10 || candidate.playable())
+                && (!candidate.processed_dv || candidate.playable())
                 && i64::from(candidate.target_height) <= height
         })
         .max_by_key(|candidate| candidate.target_height)
+}
+
+/// Admission is for the exact prepared recipe, independent of its SDR/HDR grade.
+pub(crate) fn processed_candidate_is_admitted(
+    admitted: &[plurx_core::playback::candidate::QualityCandidate],
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+) -> bool {
+    admitted.iter().any(|admitted| {
+        admitted.id == candidate.id
+            && admitted.recipe_digest == candidate.recipe_digest
+            && admitted.playable()
+    })
 }
 
 /// Replace one local descriptive row with its admitted executable facts.
@@ -116,7 +128,7 @@ pub(super) fn eligible_quality_workers(
         entry.dispatch_supported
             && !entry.partial
             && entry.candidate.decoder_compatible
-            && (!entry.candidate.processed_hdr10 || entry.candidate.playable())
+            && (!entry.candidate.processed_dv || entry.candidate.playable())
     });
     workers
         .iter()
@@ -148,7 +160,7 @@ pub(super) fn prefer_equivalent_hevc<'a>(
                 other.identity_matches()
                     && other.decoder_compatible
                     && other.planned_codec.as_deref() == Some("hevc")
-                    && other.processed_hdr10 == chosen.processed_hdr10
+                    && other.processed_dv == chosen.processed_dv
                     && other.route == chosen.route
                     && other.grade == chosen.grade
                     && other.normalized_geometry == chosen.normalized_geometry
@@ -668,6 +680,7 @@ impl CreateSession {
                 // re-derives (`review_client_plan`). A wire field here would
                 // be a claim the client has no way to be right about.
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             }
         } else {
             SessionKind::Transcode { height }
@@ -807,6 +820,11 @@ pub(crate) struct PlanReview {
     /// declines the converted kind too, and there is no such thing as
     /// converting RPUs a stripping filter has already removed.
     pub convert_dolby_vision: bool,
+    /// The copy hands a dual-layer source over as copied, because the
+    /// client's own capabilities enumerate its profile. Derived after every
+    /// clamp, so it is only ever true beside `preserve_dolby_vision` without
+    /// `convert_dolby_vision`; the trust path never sets it.
+    pub dual_layer_as_copied: bool,
     /// Likewise for the HDR10 re-encode request. Still only a *request*:
     /// `TranscodeManager::hdr10_grade_for` refuses it for any source, rung, or
     /// build that did not prove the chain, and that refusal is unchanged.
@@ -826,6 +844,23 @@ pub(crate) struct PlanReview {
 /// Vision decisions of a create are, next to `delivered_dynamic_range`.
 pub(super) fn processing_declined_note(reason: &str) -> String {
     format!("Dolby Vision processing declined: {reason}")
+}
+
+/// Finish response notes from the request that dispatch actually served.
+/// Qualification may be declined at admission or degraded by the worker, so
+/// its display explanation must not escape before those choices are final.
+pub(super) fn delivered_plan_notes(
+    mut notes: Vec<String>,
+    request: &crate::transcode::SessionRequest,
+) -> Vec<String> {
+    if let Some(note) = request
+        .candidate_context
+        .as_ref()
+        .and_then(|context| context.display_target_note.as_ref())
+    {
+        notes.push(note.clone());
+    }
+    notes
 }
 
 /// Put the reconciled plan onto the request that will actually be built, and
@@ -848,12 +883,14 @@ pub(super) fn apply_plan_review(
     if let crate::transcode::SessionKind::Copy {
         preserve_dolby_vision,
         convert_dolby_vision,
+        dual_layer_as_copied,
         ..
     } = &mut request.kind
     {
         *preserve_dolby_vision = review.preserve_dolby_vision;
-        // The only place this is ever set. It is derived, never echoed.
+        // The only place these two are ever set. Derived, never echoed.
         *convert_dolby_vision = review.convert_dolby_vision;
+        *dual_layer_as_copied = review.dual_layer_as_copied;
     }
     request.hdr10 = review.hdr10;
     review.notes
@@ -1011,6 +1048,8 @@ pub(super) fn legacy_trusted_review(
     PlanReview {
         preserve_dolby_vision,
         convert_dolby_vision,
+        // A build that sent no capability document named no profile.
+        dual_layer_as_copied: false,
         hdr10: asked_hdr10,
         notes,
         mismatched: false,
@@ -1098,6 +1137,7 @@ pub(super) fn review_client_plan_inner(
     let mut review = PlanReview {
         preserve_dolby_vision: derived.preserve_dolby_vision,
         convert_dolby_vision: derived.convert_dolby_vision,
+        dual_layer_as_copied: false,
         hdr10: asked_hdr10 && profile.supports_hdr10_transcode,
         notes: Vec::new(),
         mismatched: false,
@@ -1164,6 +1204,13 @@ pub(super) fn review_client_plan_inner(
     // Vision, or a client that never asked for it, must not be handed a
     // converted stream by a flag nobody looked at.
     review.convert_dolby_vision &= review.preserve_dolby_vision;
+    // A dual-layer source preserved without a conversion is a plan the
+    // derivation only makes for a client that enumerated the profile; say so
+    // explicitly, so the copy downstream can tell it from a stale echo.
+    review.dual_layer_as_copied = review.preserve_dolby_vision
+        && !review.convert_dolby_vision
+        && plurx_core::playback::dolby_vision_is_dual_layer(file)
+        && profile.decodes_dolby_vision_as_copied(file);
     if review.mismatched && count_create_metrics {
         plan_derivation::count_mismatched();
     }
@@ -1499,13 +1546,20 @@ pub(super) fn session_enhancement(
         .dolby_vision
         .profile
         .and_then(|profile| u8::try_from(profile).ok());
-    let has_el = file.dolby_vision.el_present != Some(false);
     let (delivered, _) =
         session_delivered_processing_shape(source, kind, grade, processed_dv_profile);
     let (_, preserve, convert) = session_delivery_shape(kind);
     let route = if processed_dv_profile == Some(8) {
+        // FEL is claimed only from processing truth: the current served-window
+        // receipt when one is published, else the selected plan (which admits
+        // a reconstructed 8.1 only for a composed FEL picture). Never from the
+        // source's tags.
         EnhancementRoute::ReconstructedProfile81 {
-            fel_contributed: processed_fel.unwrap_or(profile == Some(7) && has_el),
+            fel_contributed: effective
+                .filter(|report| report.profile81_reconstructed())
+                .map(|report| report.fel_contributed())
+                .or(processed_fel)
+                .unwrap_or(false),
         }
     } else {
         match delivered {
@@ -1514,13 +1568,24 @@ pub(super) fn session_enhancement(
             Some("hdr10") => match (effective, processed_fel) {
                 (Some(report), _) => EnhancementRoute::ProcessedHdr10 {
                     fel_contributed: report.fel_contributed(),
+                    display_target: report.display_target_nits(),
+                    creative_trims: report.creative_trims(),
                 },
                 (None, Some(fel)) => EnhancementRoute::ProcessedHdr10 {
                     fel_contributed: fel,
+                    display_target: None,
+                    creative_trims: plurx_core::playback::enhancement::CreativeTrims::None,
                 },
                 (None, None) => EnhancementRoute::Hdr10Base,
             },
-            Some("sdr") => EnhancementRoute::ToneMappedSdr,
+            Some("sdr") => match effective.filter(|report| report.sdr_processed()) {
+                Some(report) => EnhancementRoute::ProcessedSdr {
+                    fel_contributed: report.fel_contributed(),
+                    display_target: report.display_target_nits(),
+                    creative_trims: report.creative_trims(),
+                },
+                None => EnhancementRoute::ToneMappedSdr,
+            },
             _ => EnhancementRoute::Other,
         }
     };
@@ -3701,10 +3766,7 @@ async fn create_with_purpose_inner(
                     // from being adopted here leaves that start in place and
                     // is reported with it, like every other declined
                     // qualification.
-                    let adopted = if !admitted
-                        .iter()
-                        .any(|admitted| admitted.id == candidate.id && admitted.playable())
-                    {
+                    let adopted = if !processed_candidate_is_admitted(&admitted, &candidate) {
                         Err(if recovered {
                             "Auto's link evidence for this playback does not admit the \
                              processed candidate's bitrate"
@@ -4023,7 +4085,8 @@ async fn create_with_purpose_inner(
                     replacement,
                     created,
                 } = started;
-                let degraded_processing = info.degraded_processing.take();
+                let degraded_processing =
+                    (info.degraded_processing.take(), info.processing_note.take());
                 let session_id = info.session_id.clone();
                 let response = RemoteStartResponse::from(info);
                 let guard = Some(if created {
@@ -4128,7 +4191,7 @@ async fn create_with_purpose_inner(
                             "media worker {candidate} did not return an activation generation"
                         )));
                     };
-                    Ok((started.info, guard, Some(target_generation), None))
+                    Ok((started.info, guard, Some(target_generation), (None, None)))
                 }
                 Err(error) => Err(ApiError::ServiceUnavailable(format!(
                     "media worker {candidate} could not start the session: {error:?}"
@@ -4162,7 +4225,13 @@ async fn create_with_purpose_inner(
         }
     }
     crate::media_pool::mark_create_phase("dispatch");
-    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) = started
+    let Some((
+        owner_node_id,
+        info,
+        guard,
+        local_serving_generation,
+        (degraded_processing, processing_note),
+    )) = started
     else {
         return Err(last_error.unwrap_or_else(|| {
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
@@ -4206,6 +4275,13 @@ async fn create_with_purpose_inner(
         let mut worker_request = request.clone();
         worker_request.request_id = Some(incarnation_id.clone());
         remote_request.request = worker_request;
+    }
+    if let Some(reason) = processing_note {
+        // This start's own processing was declined inside the worker (its
+        // FEL verdict, a busy reconstruction slot, a refused window): the
+        // enhancement detail names that reason, not a generic fallback.
+        processing_decline.get_or_insert_with(|| reason.clone());
+        plan_notes.push(processing_declined_note(&reason));
     }
     if !ingress_serving_authority.is_current(ingress_serving_generation) {
         return Err(ApiError::ServiceUnavailable(
@@ -4424,7 +4500,7 @@ async fn create_with_purpose_inner(
             )
             .expect("new media-session owner epochs begin at one")
         }),
-        plan_notes,
+        plan_notes: delivered_plan_notes(plan_notes, &request),
     };
     // `response_json` is the canonical durable session recipe/response. Keep
     // channel purpose in that row so restart and owner takeover cannot turn a
@@ -5884,9 +5960,24 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
                 retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
             };
         }
+        // What the local indexer found can carry source paths and ffmpeg's
+        // stderr. The WARN above keeps it; the client is told what the code
+        // means and nothing of the indexer's log.
+        let reason = match code {
+            "vod_index_unavailable" => {
+                "this title has no fragment index on this node and will not get one \
+                 until its source changes; play it through another engine"
+            }
+            _ => reason,
+        };
         let (status, code) = match code {
             "vod_disabled" => (StatusCode::SERVICE_UNAVAILABLE, "vod_disabled"),
             "vod_index_pending" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
+            // Every shipped client answers `vod_index_pending` by falling
+            // back (a progressive remux on the web), and none knows the
+            // terminal code, so a VOD-only start keeps the public code with
+            // the generic message above.
+            "vod_index_unavailable" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
             "hevc_configuration_unverified" => {
                 (StatusCode::CONFLICT, "hevc_configuration_unverified")
             }

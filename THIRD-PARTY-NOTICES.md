@@ -1010,6 +1010,23 @@ and package identity contracts together.
 
 ---
 
+## 9. Embedded representative media
+
+The daemon embeds three ten-second adaptations of *Sol Levante* (2020), by
+Netflix and Production I.G, from the [official Netflix Open Content collection](https://opencontent.netflix.com/).
+The content is available under [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/);
+the complete terms are in [licenses/CC-BY-4.0.txt](licenses/CC-BY-4.0.txt).
+No endorsement is implied.
+
+The adaptations select source frames 1440–1679, remove audio, re-encode HEVC,
+and derive BT.709 SDR/H.264 versions using zscale/Hable tone mapping and
+resizing. They are throughput fixtures, not unmodified HDR masters. Exact
+source, attribution, changes, frame metadata and SHA-256 hashes are recorded in
+the [fixture manifest](crates/plurxd/src/transcoder_optimization/fixtures/manifest.json)
+and the [preparation recipe](crates/plurxd/src/transcoder_optimization/fixtures/README.md).
+
+---
+
 ## Keeping this file honest
 
 This document is a claim about what is in the dependency graph, so it goes
@@ -1020,5 +1037,5 @@ allow-list, so a new copyleft dependency cannot land quietly. Run it with
 
 `cargo deny` cannot see the parts that are not crates — the web UI bundle,
 the fonts, the client dependencies, the Dockerfile's ffmpeg, the source checked
-into the tree. Update §1, §2, §5, §6, §7 and §8 by hand when those move, in the
+into the tree. Update §1, §2, §5, §6, §7, §8 and §9 by hand when those move, in the
 same commit that moves them.

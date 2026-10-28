@@ -36,10 +36,13 @@ use super::placeholder_census::STORE_SOURCES;
 
 /// Consistent-read call sites per replicated slice, production code only.
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
-    // Progressive translation checks both the committed extension shape and its
-    // singleton marker before migration/admission; neither may use a stale replica.
-    ("hiqlite.rs", 50),
-    ("hiqlite_background_jobs.rs", 2),
+    // Translation, annotations, title jobs and handoffs validate committed
+    // extension shape and singleton authority: eight consistent reads.
+    ("hiqlite.rs", 56),
+    // Two rating-cache reads and three person-owned list membership/page reads.
+    ("hiqlite_annotations.rs", 5),
+    // Managed bootstrap validates committed shape and the singleton marker.
+    ("hiqlite_background_jobs.rs", 4),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
     ("hiqlite_coordination.rs", 2),
@@ -57,6 +60,10 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
     ("hiqlite_media.rs", 72),
+    // Handoff status, the redemption verdict, handoff-audience authentication
+    // and the token scope each read committed authority; see the
+    // `authority:` reasons at the sites.
+    ("hiqlite_playback_handoffs.rs", 4),
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 7),
     ("hiqlite_reading.rs", 2),
@@ -216,6 +223,8 @@ fn with_synthetic_watch_dispatch() -> Vec<(&'static str, String)> {
         .collect()
 }
 
+// Exercise unexplained growth against the measured fixture baseline even
+// when production removals leave headroom under the historical ceiling.
 fn raised(name: &str) -> Vec<(&'static str, usize)> {
     CONSISTENT_READ_SITES
         .iter()
@@ -277,7 +286,7 @@ fn consistent_read_census_refuses_a_new_authority_read_through_a_dispatch_helper
     let failure = census(
         &borrowed(&fixture),
         CONSISTENT_READ_SITES,
-        UNANNOTATED_CEILING,
+        saturated_fixture_ceiling(),
     )
     .expect_err("a new Authority watch read must fail the census");
     assert!(
@@ -289,7 +298,9 @@ fn consistent_read_census_refuses_a_new_authority_read_through_a_dispatch_helper
     );
     // The dispatch arm and comments naming the kind are not sites.
     assert_eq!(
-        dispatch_sites("            WatchRead::Authority => self.client().query_consistent_map(sql, params).await,"),
+        dispatch_sites(
+            "            WatchRead::Authority => self.client().query_consistent_map(sql, params).await,"
+        ),
         0
     );
     assert_eq!(dispatch_sites("    // WatchRead::Authority here"), 0);

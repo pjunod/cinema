@@ -878,6 +878,11 @@
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
     padding:10px 16px;border-radius:10px;z-index:60;opacity:0;transition:opacity .2s;pointer-events:none}
   .toast.show{opacity:1}
+  /* plurx Player handoff (docs/clients/LINUX-PLAYER-PLAN.md §4.1): actionable, so not a toast. */
+  .handoff-notice{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
+    padding:12px 16px;border-radius:10px;z-index:61;max-width:min(480px,calc(100vw - 32px))}
+  .handoff-notice p{margin:0 0 6px}
+  .handoff-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
   .err{color:var(--bad);font-size:13px;min-height:18px;margin-top:8px}
   /* minmax(0,1fr), not 1fr: a plain 1fr track has an implicit min-content
      minimum, so a wide child (the libraries table with its path chips + action
@@ -1019,6 +1024,8 @@
   .subsrc-rides li{margin:2px 0;overflow-wrap:anywhere}
   .chk{display:inline-flex;align-items:center;gap:8px;font-size:13.5px;color:var(--text);margin:0;padding:8px 0}
   .chk input[type=checkbox]{width:18px;min-width:0;height:18px;margin:0;accent-color:var(--accent)}
+  #settings-https{overflow-wrap:anywhere}
+  #settings-https textarea{box-sizing:border-box;width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text);font:inherit;resize:vertical}
   @media(min-width:900px){ .adminwrap td.rowactions{white-space:nowrap} .adminwrap td.rowactions>.row{flex-wrap:nowrap!important} }
   .setgrid2>.card{margin:0;min-width:0}
   .pill.ok{color:var(--good);border-color:color-mix(in srgb,var(--good) 55%,var(--line))}
@@ -3848,3 +3855,46 @@ button.listtoggle.on{border-color:var(--accent);color:var(--accent)}
 button.listtoggle.fav.on{border-color:var(--bad);color:var(--bad)}
 .rowscroll .seeall{flex:0 0 auto;align-self:center;display:flex;align-items:center;justify-content:center;width:120px;height:180px;border-radius:8px;border:1px dashed var(--line);color:var(--muted);text-decoration:none;font-weight:600}
 .rowscroll .seeall:hover{color:var(--text);border-color:var(--muted)}
+
+/* System: versions first, configured capabilities in compact disclosures.
+   Use the current theme tokens and the shared Settings shell in every layout. */
+.system-settings{min-width:0;font-size:14px;line-height:1.45}
+.system-title{display:flex;align-items:baseline;gap:10px;margin:0 0 17px}
+.system-title h1{font-size:27px;letter-spacing:-.5px;margin:0;font-weight:650}
+.system-settings .system-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:17px 20px;margin:14px 0 0;min-width:0}
+.system-settings .system-title+.system-card{margin-top:0}
+.system-card h2{font-size:16px;font-weight:600;margin:0}
+.system-small{font-size:12px}.system-good{color:var(--good)}.system-warn{color:var(--warn)}
+.system-heading{display:flex;flex-wrap:wrap;gap:9px 18px;align-items:center;justify-content:space-between}
+.system-version{padding-top:13px}.system-version+.system-version{border-top:1px solid var(--line);margin-top:8px}
+.system-versionline{display:grid;grid-template-columns:150px minmax(0,1fr) auto;gap:10px;align-items:baseline}
+.system-versionline strong{font-weight:600}.system-state{font-size:12px;text-align:right}
+.system-settings summary{cursor:pointer}.system-package>summary{padding:5px 0 2px;font-size:12px;color:var(--muted)}
+.system-detail{color:var(--muted);font-size:12px;padding:7px 0 8px 16px;overflow-wrap:anywhere}
+.system-detail p{margin:7px 0}.system-detail strong{color:var(--text);font-weight:500}
+.system-kv{display:grid;grid-template-columns:135px minmax(0,1fr);gap:6px 12px}
+.system-kv>*{min-width:0}.system-settings code{font-size:12px;line-height:1.5;overflow-wrap:anywhere;white-space:normal;color:var(--text)}
+.system-preference{display:flex;flex-wrap:wrap;align-items:end;gap:9px;margin-top:14px}
+.system-preference label{display:grid;gap:5px;flex:1;color:var(--muted);font-size:12px;margin:0}
+.system-preference select,.system-preference button,.system-runline button{font:inherit;font-size:13px;padding:8px 10px;border-radius:6px;max-width:100%;min-height:36px}
+.system-preference select{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text)}
+.system-pref-status{font-size:12px;margin:7px 0 13px}
+.system-capability{border-top:1px solid var(--line)}
+.system-card h2+.system-capability{margin-top:13px}
+.system-capability>summary{list-style:none;display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:9px;align-items:center;padding:12px 0;font-size:13px;font-weight:500}
+.system-capability>summary::-webkit-details-marker,.system-compact>details>summary::-webkit-details-marker{display:none}
+.system-capability>summary::before{content:'›';color:var(--muted)}.system-capability[open]>summary::before{content:'⌄'}
+.system-capability>.system-detail{padding:0 0 8px 21px}.system-probes{margin-top:8px}.system-probes>summary{font-size:12px;color:var(--muted)}
+.system-version .media-support{margin:8px 0 0;padding:12px}.system-version .media-support-heading,.system-version .media-support>dl,.system-version .media-support>h3{display:none}
+.system-comparison-scroll{overflow-x:auto}.system-performance table{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}
+.system-performance th,.system-performance td{border-bottom:1px solid var(--line);padding:9px 7px;text-align:right;font-weight:400;white-space:nowrap}
+.system-performance th{color:var(--muted);font-size:11px}.system-performance th:first-child,.system-performance td:first-child{padding-left:0;text-align:left;white-space:normal}
+.system-runline{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;margin-top:13px}
+.system-settings .system-compact{padding:0 20px}.system-compact>details>summary{display:flex;align-items:center;gap:10px;padding:13px 0;font-size:13px;list-style:none}
+.system-compact>details>summary::before{content:'›';color:var(--muted)}.system-compact>details[open]>summary::before{content:'⌄'}.system-compact>details>summary>span:first-of-type{flex:1}
+.system-notice,.system-settings .system-attention{border:1px solid var(--line);border-left:2px solid var(--warn);border-radius:6px;padding:10px 14px;margin:0 0 14px;font-size:12px;background:var(--panel)}
+.system-notice p{margin:5px 0}.system-notice summary{color:var(--muted)}.system-notice .system-detail{padding-left:0}.system-settings .system-attention h2{font-size:13px;margin:0}.system-settings .system-attention summary{margin-top:5px}
+@media(max-width:700px){.system-versionline{grid-template-columns:125px minmax(0,1fr)}.system-versionline .system-state{grid-column:2;text-align:left}}
+@media(max-width:640px){.adminwrap .system-performance table{display:table;width:100%}.adminwrap .system-performance thead{display:table-header-group}.adminwrap .system-performance tbody{display:table-row-group}.adminwrap .system-performance tr{display:table-row;border:0;background:none;margin:0;padding:0}.adminwrap .system-performance td{display:table-cell;width:auto;padding:9px 7px;border-bottom:1px solid var(--line)}}
+@media(max-width:450px){.system-settings .system-card{padding:15px}.system-settings .system-compact{padding:0 15px}.system-versionline{grid-template-columns:minmax(0,1fr);gap:3px}.system-versionline .system-state{grid-column:1}.system-capability>summary{grid-template-columns:12px minmax(0,1fr);gap:4px 8px}.system-capability .system-state{grid-column:2;text-align:left}.system-kv{grid-template-columns:minmax(0,1fr)}.system-preference label{flex-basis:100%}.system-performance th,.system-performance td{padding:8px 3px}}
+.system-performance pre{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.5 var(--font-mono);color:var(--muted)}

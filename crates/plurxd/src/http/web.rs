@@ -5,7 +5,7 @@
 //! non-API GET path.
 //!
 //! The app is not one file. `index.html` is a 97-line shell of markup and tags;
-//! the CSS and the JavaScript live in the ninety-one files of [`WEB_ASSETS`],
+//! the CSS and the JavaScript live in the ninety-four files of [`WEB_ASSETS`],
 //! which is also their load order. There is no bundler and no build step —
 //! `docs/clients/WEB-SHELL-LAYOUT.md` is the map, and adding a file means a row
 //! there, a row here, and a tag in the shell, or the tests below say so.
@@ -73,6 +73,7 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("core/file-context.js",                   WebAsset::BodyScript,  include_str!("../web/core/file-context.js")),
     ("core/shared-decision.js",                WebAsset::BodyScript,  include_str!("../web/core/shared-decision.js")),
     ("player/measurements.js",                 WebAsset::BodyScript,  include_str!("../web/player/measurements.js")),
+    ("player/frame-drop-recorder.js",           WebAsset::BodyScript,  include_str!("../web/player/frame-drop-recorder.js")),
     ("core/auth.js",                           WebAsset::BodyScript,  include_str!("../web/core/auth.js")),
     ("core/keyboard-reach.js",                 WebAsset::BodyScript,  include_str!("../web/core/keyboard-reach.js")),
     ("core/chrome.js",                         WebAsset::BodyScript,  include_str!("../web/core/chrome.js")),
@@ -107,6 +108,8 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("player/menus.js",                        WebAsset::BodyScript,  include_str!("../web/player/menus.js")),
     ("player/audio-sync.js",                   WebAsset::BodyScript,  include_str!("../web/player/audio-sync.js")),
     ("player/subtitle-translation.js",          WebAsset::BodyScript,  include_str!("../web/player/subtitle-translation.js")),
+    ("player/subtitle-text-translation.js",      WebAsset::BodyScript,  include_str!("../web/player/subtitle-text-translation.js")),
+    ("player/shared-subtitle-captions.js",       WebAsset::BodyScript,  include_str!("../web/player/shared-subtitle-captions.js")),
     ("player/stats.js",                        WebAsset::BodyScript,  include_str!("../web/player/stats.js")),
     ("player/watch-presentation.js", WebAsset::BodyScript, include_str!("../web/player/watch-presentation.js")),
     ("detail/watch-browser.js", WebAsset::BodyScript, include_str!("../web/detail/watch-browser.js")),

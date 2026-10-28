@@ -119,6 +119,7 @@ function togglePlayerInfo(){
   toast(on?"Title info shown":"Title info hidden");
 }
 function renderPlayerInfo(){
+  if(typeof watchRefreshFactBadges==="function")watchRefreshFactBadges();
   const c=document.getElementById("pinfo"); if(!c) return;
   const b=document.getElementById("pbinfo"); if(b) b.classList.toggle("on", playerInfoOn());
   const m=(PLAYER&&PLAYER.meta)||null;

@@ -77,49 +77,9 @@ struct LibraryView: View {
     var body: some View {
         ScrollViewReader { proxy in
             VStack(alignment: .leading, spacing: 12) {
-                #if os(tvOS)
-                Text(collection.title).font(.title2.bold()).foregroundStyle(Palette.onBg)
-                    .accessibilityAddTraits(.isHeader)
+                #if !os(tvOS)
+                libraryHeader(proxy: proxy)
                 #endif
-                summary
-                TextField("Find a title in this library", text: $query, prompt: searchPrompt)
-                    #if os(tvOS)
-                    .foregroundStyle(Palette.onBg)
-                    #endif
-                    #if os(iOS)
-                    .textFieldStyle(.roundedBorder)
-                    #endif
-                    .accessibilityLabel("Find a title in this library")
-                    .remoteControl("library:search", label: "Find a title") {}
-                if rows && !state.groups.isEmpty {
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 8) {
-                            ForEach(state.groups) { group in
-                                Button(group.label) {
-                                    selectedGroup = group.id
-                                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(LibraryScrollTarget.row(group.id), anchor: .top) }
-                                    #if os(tvOS)
-                                    if let item = group.items.first {
-                                        remoteNavigation.focusControl(scope: remoteScope, key: "item:\(item.id)")
-                                    }
-                                    #endif
-                                }
-                                .shelfActionButtonStyle()
-                                .tint(selectedGroup == group.id ? Palette.accent : Palette.muted)
-                                .accessibilityLabel("Jump to \(group.label)")
-                                .accessibilityAddTraits(selectedGroup == group.id ? .isSelected : [])
-                            }
-                        }
-                        .padding(.vertical, 8)
-                    }
-                    .accessibilityIdentifier("library-group-index")
-                }
-                if let error {
-                    HStack {
-                        Text("Incomplete library: \(error)").foregroundColor(Palette.muted)
-                        Button("Retry") { Task { await state.retry() } }
-                    }
-                }
                 #if os(tvOS)
                 tvToolbar
                     .remoteContentReturn(to: toolbarReturn ?? contentBookmark ?? visibleItems.first.map { "item:\($0.id)" }) { toolbarReturn = nil }
@@ -129,20 +89,26 @@ struct LibraryView: View {
                     // However deep the viewer is, one Back returns to the
                     // toolbar. Back from the toolbar is outside this adapter
                     // and leaves the library natively.
-                    stateContent.padding(.bottom, 36)
-                        .remoteContentBack(to: "library:view") {
-                            // Where Back left the content; Down returns there.
-                            toolbarReturn = contentBookmark
-                        }
+                    VStack(alignment: .leading, spacing: 12) {
+                        // Keep the preamble in the results scroll. Pinning it
+                        // above this viewport leaves less height than a complete
+                        // poster card, so native focus clips the artwork's top
+                        // while revealing its title and metadata.
+                        libraryHeader(proxy: proxy)
+                        stateContent.padding(.bottom, 36)
+                            .remoteContentBack(to: "library:view") {
+                                // Where Back left the content; Down returns there.
+                                toolbarReturn = contentBookmark
+                            }
+                    }
                     #else
                     stateContent.padding(.bottom, 36)
                     #endif
                 }
                 .accessibilityIdentifier("library-results")
                 #if os(tvOS)
-                // tvOS focus ignores scroll clipping: titles scrolled up under
-                // the fixed toolbar would otherwise compete for Left/Right.
-                // As its own section, the results are entered only by Down.
+                // Bound the results focus section to its viewport, so titles
+                // scrolled above it cannot compete with the fixed toolbar.
                 .focusSection()
                 #endif
                 #if os(iOS)
@@ -181,7 +147,7 @@ struct LibraryView: View {
             }
             .onChange(of: rows) { _, _ in updateRemoteOrder() }
             .onChange(of: gridColumns) { _, _ in updateRemoteOrder() }
-            .onChange(of: remoteNavigation.focusRevision) { _, _ in
+            .onRemoteFocusChange(remoteNavigation) {
                 guard remoteNavigation.activeScope == remoteScope,
                       let key = remoteNavigation.focusedKey else { return }
                 contentOwnedFocus = key.hasPrefix("item:")
@@ -210,6 +176,53 @@ struct LibraryView: View {
                 if expandedGroup == nil { state.stop() }
                 visibleIndices.removeAll()
                 remoteNavigation.removeSearch(scope: remoteScope, nonce: searchNonce)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func libraryHeader(proxy: ScrollViewProxy) -> some View {
+        #if os(tvOS)
+        Text(collection.title).font(.title2.bold()).foregroundStyle(Palette.onBg)
+            .accessibilityAddTraits(.isHeader)
+        #endif
+        summary
+        TextField("Find a title in this library", text: $query, prompt: searchPrompt)
+            #if os(tvOS)
+            .foregroundStyle(Palette.onBg)
+            #endif
+            #if os(iOS)
+            .textFieldStyle(.roundedBorder)
+            #endif
+            .accessibilityLabel("Find a title in this library")
+            .remoteControl("library:search", label: "Find a title") {}
+        if rows && !state.groups.isEmpty {
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(state.groups) { group in
+                        Button(group.label) {
+                            selectedGroup = group.id
+                            withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(LibraryScrollTarget.row(group.id), anchor: .top) }
+                            #if os(tvOS)
+                            if let item = group.items.first {
+                                remoteNavigation.focusControl(scope: remoteScope, key: "item:\(item.id)")
+                            }
+                            #endif
+                        }
+                        .shelfActionButtonStyle()
+                        .tint(selectedGroup == group.id ? Palette.accent : Palette.muted)
+                        .accessibilityLabel("Jump to \(group.label)")
+                        .accessibilityAddTraits(selectedGroup == group.id ? .isSelected : [])
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+            .accessibilityIdentifier("library-group-index")
+        }
+        if let error {
+            HStack {
+                Text("Incomplete library: \(error)").foregroundColor(Palette.muted)
+                Button("Retry") { Task { await state.retry() } }
             }
         }
     }
@@ -558,7 +571,7 @@ private struct LibraryGroupView: View {
             }
             #endif
         }
-        .onChange(of: navigation.focusRevision) { _, _ in
+        .onRemoteFocusChange(navigation) {
             guard navigation.activeScope == remoteScope, let key = navigation.focusedKey else { return }
             contentOwnedFocus = key.hasPrefix("item:")
             if key == "group:tools" { toolsOwnedFocus = true }

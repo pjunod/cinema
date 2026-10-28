@@ -1,8 +1,9 @@
 #ifndef PLURX_BASE_DV_RENDERER_H
 #define PLURX_BASE_DV_RENDERER_H
-// Decode and GPU mapping are public FFmpeg/libplacebo APIs. No color-math fork.
+// Public FFmpeg/libplacebo reconstruction; optional separate public-spec export.
 #include <libplacebo/utils/libav.h>
 #include "dv_trace.h"
+#include "dv_metadata.h"
 struct base_gpu {
   pl_log log;
   pl_vulkan vk;
@@ -59,69 +60,13 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
                     dm->dm_data.level5->active_area_bottom_offset <
                 (unsigned)frame->height,
             "invalid base active area");
-  AVFrameSideData *side = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
-  require(side && side->size >= sizeof(AVDOVIMetadata) + sizeof(AVDOVIDataMapping) && side->size <= 65536,
-          "actual decoder-derived base metadata required");
-  const AVDOVIMetadata *data = (const void *)side->data;
-  require(data->header_offset >= sizeof(*data) &&
-              data->header_offset % _Alignof(AVDOVIRpuDataHeader) == 0 &&
-              data->mapping_offset % _Alignof(AVDOVIDataMapping) == 0 &&
-              data->color_offset % _Alignof(AVDOVIColorMetadata) == 0 &&
-              data->header_offset <= side->size - sizeof(AVDOVIRpuDataHeader) &&
-              data->mapping_offset <= side->size - sizeof(AVDOVIDataMapping) &&
-              data->color_offset <= side->size - sizeof(AVDOVIColorMetadata),
-          "bounded decoded metadata offsets");
-  require(data->header_offset + sizeof(AVDOVIRpuDataHeader) <= data->mapping_offset &&
-              data->mapping_offset + sizeof(AVDOVIDataMapping) <= data->color_offset &&
-              data->color_offset + sizeof(AVDOVIColorMetadata) <= data->ext_block_offset,
-          "nonoverlapping decoded metadata sections");
-  require(data->num_ext_blocks >= 0 && data->num_ext_blocks <= 32 &&
-              data->ext_block_offset <= side->size &&
-              data->ext_block_size >= sizeof(AVDOVIDmData) &&
-              (size_t)data->num_ext_blocks <=
-                  (side->size - data->ext_block_offset) / data->ext_block_size,
-          "bounded decoded extension metadata");
-  const AVDOVIRpuDataHeader *dh = av_dovi_get_header(data);
-  require(dh->ext_mapping_idc_0_4 == 0 && dh->ext_mapping_idc_5_7 == 0,
-          "unsupported extended base inverse mapping");
-  const AVDOVIDataMapping *m = av_dovi_get_mapping(data);
-  const AVDOVIColorMetadata *color = av_dovi_get_color(data);
-  require(dh->bl_bit_depth == 10 && dh->vdr_bit_depth == 12 &&
-              dh->coef_log2_denom == 23 && dh->vdr_rpu_normalized_idc == 1 &&
-              dh->bl_video_full_range_flag == (profile == 5) &&
-              m->mapping_color_space == 0 && m->mapping_chroma_format_idc == 0 &&
-              m->num_x_partitions == 1 && m->num_y_partitions == 1 &&
-              color->signal_eotf == 65535 && color->signal_eotf_param0 == 0 &&
-              color->signal_eotf_param1 == 0 && color->signal_eotf_param2 == 0,
-          "decoded base metadata representation");
-  *out = (struct base_mapping){.profile = profile};
-  for (int c = 0; c < 3; c++) {
-    const AVDOVIReshapingCurve *curve = &m->curves[c];
-    require(curve->num_pivots >= 2 && curve->num_pivots <= 9 &&
-                curve->pivots[0] <= 1023 &&
-                curve->pivots[curve->num_pivots - 1] <= 1023,
-            "bounded base curve extent");
-    for (int i = 0; i < curve->num_pivots - 1; i++) {
-      require(curve->pivots[i] < curve->pivots[i + 1],
-              "strict base curve pivots");
-      if (curve->mapping_idc[i] == AV_DOVI_MAPPING_POLYNOMIAL) {
-        require(curve->poly_order[i] >= 1 && curve->poly_order[i] <= 2,
-                "supported base polynomial order");
-        out->polynomial_segments++;
-      } else {
-        require(curve->mapping_idc[i] == AV_DOVI_MAPPING_MMR &&
-                    curve->mmr_order[i] >= 1 && curve->mmr_order[i] <= 3,
-                "supported base MMR order");
-        out->mmr_segments++;
-      }
-    }
-  }
-  // This public mapper carries arbitrary signalled polynomial/MMR/color
-  // coefficients, including its signalled lower/upper output clamp. Real
-  // profiles need not span the entire ten-bit range. Preserve those endpoints;
-  // do not widen them to an identity curve or substitute a fixed matrix.
-  pl_map_dovi_metadata(&out->dovi, data);
-  out->dovi.nlq_active = false; // Explicitly omitted EL: never compose residuals.
+  struct dv_decoded_mapping decoded;
+  require(dv_map_decoded_metadata(frame, profile, false, &decoded),
+          "bounded decoder-derived base metadata mapping");
+  *out = (struct base_mapping){.dovi = decoded.dovi, .profile = profile,
+      .polynomial_segments = decoded.polynomial_segments,
+      .mmr_segments = decoded.mmr_segments};
+  dv_target_metadata(dm);
   dovi_rpu_free_vdr_dm_data(dm);
   dovi_rpu_free_data_mapping(mapping);
   dovi_rpu_free_header(h);
@@ -148,7 +93,7 @@ static void base_gpu_init(int width, int height) {
   base_context.renderer = pl_renderer_create(base_context.log, gpu);
   pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
                            PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE |
-                           ((EXPORT_WIDTH != width || EXPORT_HEIGHT != height) ?
+                           ((dv_target.nits || EXPORT_WIDTH != width || EXPORT_HEIGHT != height) ?
                             PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR : 0) |
                            (EXPORT_YUV10 ? PL_FMT_CAP_SAMPLEABLE : 0));
   require(base_context.renderer && fmt && fmt->texel_size == 16,
@@ -163,7 +108,7 @@ static void base_gpu_init(int width, int height) {
           "GPU yuv420p10 export planes");
   base_context.rgba = malloc(EXPORT_FLOAT_COUNT * sizeof(float));
   require(base_context.output_texture && base_context.rgba, "base output buffer");
-  if (EXPORT_WIDTH != width || EXPORT_HEIGHT != height) {
+  if (dv_target.nits || EXPORT_WIDTH != width || EXPORT_HEIGHT != height) {
     base_context.native_texture = pl_tex_create(gpu,
         pl_tex_params(.w = width, .h = height, .format = fmt,
                       .renderable = true, .sampleable = true));
@@ -226,6 +171,9 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   pl_renderer_reset_errors(base_context.renderer, NULL);
   require(pl_render_image(base_context.renderer, &source, &destination, &params),
           "base DV render");
+  if (dv_target.nits)
+    destination.planes[0].texture = dv_target_render(base_context.log, gpu,
+                                                    destination.planes[0].texture, index);
   if (base_context.native_texture)
     export_native_rgb(base_context.renderer, destination, base_context.output_texture);
   struct pl_render_errors errors = pl_renderer_get_errors(base_context.renderer);
@@ -235,7 +183,7 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   size_t exported_bytes = 0;
   uint8_t *packed = NULL;
   if (EXPORT_YUV10) {
-    require(dv_yuv10_export(base_context.renderer, gpu, base_context.output_texture),
+    require(dv_yuv10_export_color(base_context.renderer, gpu, base_context.output_texture, dv_target.sdr),
             "base GPU yuv420p10 export");
     pl_unmap_avframe(gpu, &source);
     exported = dv_yuv10_context.frame;
@@ -277,14 +225,19 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   printf(",\"applied_operations\":[\"RepresentationNormalization\"");
   if (mapping->polynomial_segments) printf(",\"PolynomialReshape\"");
   if (mapping->mmr_segments) printf(",\"MmrReshape\"");
-  printf(",\"RpuColorConversion\",\"TargetMapping\"]");
+  printf(",\"RpuColorConversion\",\"TargetMapping\"");
+  if (dv_target.nits)
+    printf(",{\"DisplayTargetMapping\":{\"nits\":%u}}", dv_target.nits);
+  if (dv_target_trims_applied()) printf(",\"CreativeTrimApplication\"");
+  printf("]");
   if (diagnostic_hashes)
     printf(EXPORT_YUV10 ? ",\"yuv10_sha256\":\"%s\"" : ",\"rgb_sha256\":\"%s\"", rgb_hash);
-  printf(",\"creative_trims_applied\":false,\"render_errors\":%u,"
-         "\"production_qualified\":false}\n", errors.errors);
+  printf(",\"creative_trims_applied\":%s,\"render_errors\":%u,"
+         "\"production_qualified\":false}\n", dv_target_trims_applied() ? "true" : "false", errors.errors);
 }
 static void base_gpu_close(void) {
   pl_gpu gpu = base_context.vk->gpu;
+  dv_target_destroy(gpu);
   for (int i = 0; i < 4; i++) pl_tex_destroy(gpu, &base_context.textures[i]);
   pl_tex_destroy(gpu, &base_context.output_texture);
   pl_tex_destroy(gpu, &base_context.native_texture);

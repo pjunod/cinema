@@ -233,7 +233,8 @@ function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry
   }
   p.controlSeek={sequence,intentGeneration,
     targetMs:Math.max(0,Math.round(targetSec*1000)),
-    executed:false,frameFloor,audioPositionMs:null,seekTelemetry};
+    executed:false,frameFloor,audioPositionMs:null,seekTelemetry,captionViewerSeek:supersedeIntent};
+  if(supersedeIntent&&typeof translationPlaybackSeek==="function")translationPlaybackSeek(p,p.controlSeek);
   if(preserveContinuousManualQuality)p.continuousQuality?.noteSeek?.(targetSec);
   const reporter=p.controlReporter;
   const predicted=reporter&&!reporter.stopped?(Number(reporter.sequence)||0)+1:null;
@@ -253,6 +254,7 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   // request (contract §3.4).
   playbackSurfaceStep({intent_settled:pending.sequence});
   pending.executed=true;
+  if(pending.captionViewerSeek&&typeof translationPlaybackSeek==="function")translationPlaybackSeek(p,pending);
   pending.executedAt=performance.now();
   pending.attachment=p.mediaAttachment;
   pending.targetFrame=null;
@@ -344,8 +346,8 @@ function playbackProgressTick(v,p,frameSample=false){
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
     if(p.controlHasFrameCallbacks){
-      // Callback support is itself the observation contract. Zero presented
-      // callbacks is real evidence and must not fall through to a decoded-frame
+      // Count delivered callbacks independently of their timestamp quality.
+      // Zero callbacks is real evidence and must not fall through to a decoded-frame
       // counter that can advance while the compositor remains frozen.
       frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
     }else try{

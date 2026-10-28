@@ -203,6 +203,25 @@ enum AttemptFence: String, CaseIterable, Sendable {
     /// report belongs to the explicit Apply with restart that asked for it.
     case retainedQualityRestart = "retained_quality_restart"
 
+    /// A subtitle reopen may report success only to its original viewer action.
+    case subtitleReopenCompletion = "subtitle_reopen_completion"
+    /// Only the current caption selection may clear its owned task.
+    case progressiveCaptionCleanup = "progressive_caption_cleanup"
+    /// Caption selection after the control report; lifecycle stays a separate predicate.
+    case progressiveCaptionAfterControl = "progressive_caption_after_control"
+    /// Caption generation after awaited subtitle removal.
+    case progressiveCaptionAfterSubtitleRemoval = "progressive_caption_after_subtitle_removal"
+    /// Only the current cached-caption selection may clear its owned task.
+    case progressiveAssetCleanup = "progressive_asset_cleanup"
+    /// Cached-caption selection after the control report.
+    case progressiveAssetAfterControl = "progressive_asset_after_control"
+    /// Cached-caption reading after awaited subtitle removal.
+    case progressiveAssetAfterSubtitleRemoval = "progressive_asset_after_subtitle_removal"
+    /// A refreshed translated-caption index belongs to the requesting viewer action.
+    case translatedCaptionDecision = "translated_caption_decision"
+    /// A refresh failure may be shown only to the requesting viewer action.
+    case translatedCaptionFailure = "translated_caption_failure"
+
     /// The epochs this fence depends on — exactly the fields its old
     /// conjunction compared.
     var scopes: Set<Attempt.Scope> {
@@ -233,6 +252,15 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .preparedPipelineRollback: return [.lifecycle, .open, .seek]
         case .preparedCommit: return [.viewerAction]
         case .retainedQualityRestart: return [.viewerAction]
+        case .subtitleReopenCompletion: return [.viewerAction]
+        case .progressiveCaptionCleanup: return [.viewerAction]
+        case .progressiveCaptionAfterControl: return [.viewerAction]
+        case .progressiveCaptionAfterSubtitleRemoval: return [.viewerAction]
+        case .progressiveAssetCleanup: return [.viewerAction]
+        case .progressiveAssetAfterControl: return [.viewerAction]
+        case .progressiveAssetAfterSubtitleRemoval: return [.viewerAction]
+        case .translatedCaptionDecision: return [.viewerAction]
+        case .translatedCaptionFailure: return [.viewerAction]
         }
     }
 }

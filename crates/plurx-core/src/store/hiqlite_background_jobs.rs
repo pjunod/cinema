@@ -63,7 +63,102 @@ impl From<&mut hiqlite::Row<'_>> for JsonRow {
     }
 }
 
+// Read and validate before touching the managed extension. A marker alone is
+// never evidence of a complete installation; both canonical SQL and its row
+// are required. This is also the strict read-back after a lost/stale proposal.
+async fn managed_bootstrap_layout(
+    client: &hiqlite::Client,
+) -> Result<(Option<i64>, String), StoreError> {
+    let shape = {
+        let mut rows = timeout_store(
+            // authority: committed schema SQL decides whether bootstrap may replace the legacy view or must preserve the installed managed extension.
+            client.query_consistent(super::subtitle_managed_schema::SHAPE_SQL, params!()),
+        )
+        .await?;
+        rows.iter_mut()
+            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+            .collect::<Vec<_>>()
+    };
+    if shape.is_empty() {
+        return Ok((None, String::new()));
+    }
+    let version = super::subtitle_managed_schema::bootstrap_version(&shape)?;
+    if version == Some(1) {
+        // authority: canonical DDL cannot substitute for the committed singleton version row when deciding that another installation already won.
+        let mut marker = timeout_store(client.query_consistent(
+            "SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=1",
+            params!(),
+        ))
+        .await?;
+        if marker.len() != 1 || marker[0].get::<i64>("count") != 1 {
+            return Err(StoreError::Migration(
+                "managed subtitle schema marker missing".into(),
+            ));
+        }
+    }
+    let view = shape
+        .iter()
+        .find(|(name, _)| name == "background_job_required_resources")
+        .ok_or_else(|| StoreError::Migration("managed subtitle resource view missing".into()))?
+        .1
+        .clone();
+    Ok((version, view))
+}
+
+async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
+    let (version, observed_view) = managed_bootstrap_layout(client).await?;
+    if version == Some(1) {
+        // Reinstall only idempotent probe objects; never replace a managed view.
+        let prefix = super::background_jobs_probe::SCHEMA
+            .split_once("-- next statement\nDROP VIEW")
+            .ok_or_else(|| StoreError::Migration("probe view boundary missing".into()))?
+            .0;
+        for result in timeout_store(client.batch(prefix)).await? {
+            result.map_err(database_error)?;
+        }
+        return Ok(());
+    }
+    let mut statements = vec![(
+        super::subtitle_managed_schema::BOOTSTRAP_GUARD.to_owned(),
+        params!(observed_view),
+    )];
+    statements.extend(
+        super::background_jobs_probe::SCHEMA
+            .split("-- next statement")
+            .map(str::trim)
+            .filter(|sql| !sql.is_empty())
+            .map(|sql| (sql.to_owned(), params!())),
+    );
+    statements.extend(
+        super::subtitle_managed_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!())),
+    );
+    // One guarded schema transaction owns both replacements. A stale legacy
+    // observer cannot drop the view after a concurrent managed install commits.
+    let attempt = timeout_store(client.txn(statements))
+        .await
+        .and_then(|results| {
+            results
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(database_error)
+        });
+    let (settled, _) = managed_bootstrap_layout(client).await?;
+    if settled == Some(1) {
+        return Ok(());
+    }
+    attempt?;
+    Err(StoreError::Migration(
+        "managed subtitle bootstrap did not settle".into(),
+    ))
+}
+
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
+    // Refuse a pre-existing partial extension before any base CREATE IF NOT
+    // EXISTS could recreate its missing view. Empty fresh bootstrap is allowed;
+    // the guarded installer re-observes the exact predecessor after base DDL.
+    managed_bootstrap_layout(client).await?;
     validate_sql(SCHEMA)?;
     for result in timeout_store(client.batch(SCHEMA)).await? {
         result.map_err(database_error)?;
@@ -74,17 +169,6 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     }
     validate_sql(super::background_jobs_library::SCHEMA)?;
     for result in timeout_store(client.batch(super::background_jobs_library::SCHEMA)).await? {
-        result.map_err(database_error)?;
-    }
-    // Bootstrap may be retried after a newer extension has installed its
-    // resource view. Create the probe-era view before the older resource
-    // schema, but never replay its migration-only DROP here. IF NOT EXISTS
-    // preserves an installed managed view even across concurrent bootstraps;
-    // the managed extension still verifies its exact shape at bootstrap end.
-    let probe_schema = super::background_jobs_probe::SCHEMA
-        .replace("DROP VIEW IF EXISTS background_job_required_resources;", "");
-    validate_sql(&probe_schema)?;
-    for result in timeout_store(client.batch(probe_schema)).await? {
         result.map_err(database_error)?;
     }
     validate_sql(super::background_jobs_resources::SCHEMA)?;
@@ -117,6 +201,8 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs_embeddings::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
+    validate_sql(super::background_jobs_probe::SCHEMA)?;
+    install_probe_and_managed_schema(client).await?;
     validate_sql(super::background_jobs_integrity::SCHEMA)?;
     // authority: committed column constraints decide whether bootstrap ALTER still applies.
     let shape = timeout_store(client.query_consistent_map::<ProducerPayloadShape, _>(

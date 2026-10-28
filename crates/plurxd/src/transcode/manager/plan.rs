@@ -1,6 +1,18 @@
 use super::*;
 
 impl TranscodeManager {
+    /// The representative comparison uses the same resolved movie plan as
+    /// production, including the currently qualified native processing context.
+    pub(crate) fn representative_comparison_plan(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        probe: &str,
+    ) -> Result<ResolvedTranscode, String> {
+        self.resolve_movie_plan_from_probe(file, options, encoder, Some(probe))
+    }
+
     /// This node's output identity, for naming a transcode.
     pub(super) fn digest(&self) -> Option<PipelineDigest> {
         let cache = self.cache.as_ref()?;
@@ -500,6 +512,116 @@ impl TranscodeManager {
                     format!("the held source could not be verified against its scan: {error}"),
                 )
             })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn source_frame_probe(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        handle: Arc<std::fs::File>,
+        offsets: Arc<tokio::sync::Semaphore>,
+        prepared: &crate::decode_facts::FreshSourceProbe,
+        absolute_stream: u32,
+    ) -> Result<Option<Arc<crate::decode_facts::SourceFrameProbe>>, String> {
+        let Some(probe) = self.decode_probe_identity.as_ref() else {
+            return Ok(None);
+        };
+        let catalog =
+            DecodeCatalogMetadata::from_media_file(file).map_err(|error| error.to_string())?;
+        let source = self
+            .hooks
+            .get()
+            .decode_fact_source(BoundPlanCaller::Vod.decode_fact_source(handle, offsets));
+        self.decode_facts
+            .source_frame_probe(probe, source, Some(catalog), prepared, absolute_stream)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Target identity must include the actual source's mastering fallback
+    /// before candidate/lease identity freezes. Compare the ordinary document
+    /// first; the bounded frame document remains a separate held-source fact.
+    #[cfg(target_os = "linux")]
+    async fn held_mastering_probe_for_policy(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        stored: &str,
+    ) -> Result<
+        (
+            serde_json::Value,
+            Option<Arc<crate::decode_facts::SourceFrameProbe>>,
+        ),
+        String,
+    > {
+        let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
+        let handle = Arc::new(source.handle);
+        let prepared = self
+            .probe_vod_source_once(file, Arc::clone(&handle))
+            .await?
+            .ok_or("display targeting requires a bound held-source probe")?;
+        let comparison = crate::ffmpeg::compare_probe_documents(stored, &prepared.document)?;
+        if !comparison.same {
+            return Err(vod_refusal_error(
+                "vod_source_rescan_required",
+                format!(
+                    "the stored probe differs from the held source at {}",
+                    comparison.rendered_differences()
+                ),
+            ));
+        }
+        let document: serde_json::Value =
+            serde_json::from_str(&prepared.document).map_err(|error| error.to_string())?;
+        let selected = prepared
+            .absolute_video_stream()
+            .ok_or("held video stream unavailable")?;
+        let stream = document
+            .get("streams")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|streams| {
+                streams.iter().find(|stream| {
+                    stream.get("index").and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(selected))
+                })
+            })
+            .ok_or("held video stream unavailable")?;
+        let frames = self.source_frame_probe(
+            file,
+            handle,
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            &prepared,
+            selected,
+        )?;
+        Ok((stream.clone(), frames))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) async fn held_mastering_for_policy(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        stored: &str,
+    ) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
+        let (stream, frames) = self.held_mastering_probe_for_policy(file, stored).await?;
+        crate::vodencode::dv_runtime::held_source_mastering(
+            crate::decode_facts::mastering::source_mastering_metadata(&stream),
+            frames.as_deref(),
+            None,
+        )
+        .await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) async fn held_minimum_for_policy(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        stored: &str,
+    ) -> Result<Option<u32>, String> {
+        let (stream, frames) = self.held_mastering_probe_for_policy(file, stored).await?;
+        crate::vodencode::dv_runtime::held_source_minimum(
+            crate::decode_facts::mastering::source_mastering_minimum(&stream),
+            frames.as_deref(),
+            None,
+        )
+        .await
     }
 
     pub(super) async fn resolve_vod_prepared_source(

@@ -326,6 +326,7 @@ impl VodServe {
                     aac: true,
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                 },
                 supersession_user: "[\"user_id\",1]".to_owned(),
                 block_budget: Duration::from_secs(1),

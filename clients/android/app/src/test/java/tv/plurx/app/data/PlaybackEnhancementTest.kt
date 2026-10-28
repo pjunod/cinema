@@ -83,6 +83,37 @@ class PlaybackEnhancementTest {
     }
 
     @Test
+    fun displayTargetOperationObjectRetainsTheCurrentReport() {
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val wire = """{"generation":"$generation","hdr10_enhanced":true,"fel_contributed":false,"applied_operations":["RpuColorConversion","TargetMapping",{"DisplayTargetMapping":{"nits":1600}}]}"""
+        val report = EffectiveProcessingReport.fromJson(json.parseToJsonElement(wire))
+        assertEquals(true, report?.matches(generation, "hdr10"))
+        assertEquals(true, report?.appliedOperations?.contains("DisplayTargetMapping:1600"))
+    }
+
+    @Test
+    fun sdrReceiptRequiresItsGradeAndExportOperations() {
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val wire = """{"generation":"$generation","hdr10_enhanced":false,"sdr_processed":true,"fel_contributed":false,"applied_operations":["RpuColorConversion","TargetMapping","Bt709Gamma24Conversion",{"DisplayTargetMapping":{"nits":100}}]}"""
+        val report = EffectiveProcessingReport.fromJson(json.parseToJsonElement(wire))
+        assertEquals(true, report?.matches(generation, "sdr"))
+        assertEquals(false, report?.matches(generation, "hdr10"))
+        assertEquals("SDR-E", report?.mark)
+        assertEquals(true, report?.detail?.contains("L1 only"))
+        val trimmed = EffectiveProcessingReport.fromJson(json.parseToJsonElement(
+            wire.replace("\"sdr_processed\":true,", "\"sdr_processed\":true,\"creative_trims_applied\":true,")
+                .replace("\"TargetMapping\",", "\"TargetMapping\",\"CreativeTrimApplication\",")))
+        assertEquals(true, trimmed?.matches(generation, "sdr"))
+        assertEquals("SDR-E", trimmed?.mark)
+        assertEquals(true, trimmed?.detail?.contains("BT.709 gamma 2.4, creative trims applied"))
+        assertEquals(false, trimmed?.detail?.contains("L1 only"))
+        val partial = EffectiveProcessingReport.fromJson(json.parseToJsonElement(
+            wire.replace("\"sdr_processed\":true,", "\"sdr_processed\":true,\"creative_trims_partial\":true,")))
+        assertEquals(true, partial?.matches(generation, "sdr"))
+        assertEquals(true, partial?.detail?.contains("BT.709 gamma 2.4, creative trims on some shots"))
+    }
+
+    @Test
     fun aProcessedDeliveryIsShownOnlyWithACurrentMatchingReport() {
         val generation = "11111111-1111-4111-8111-111111111111"
         val enhancement = PlaybackEnhancement(

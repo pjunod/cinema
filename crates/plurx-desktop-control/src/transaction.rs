@@ -130,6 +130,19 @@ impl JournalV1 {
         Ok(())
     }
 }
+/// Shared read-only refusal for preflight and transaction creation.
+pub fn ensure_resolved(active: Option<&JournalV1>) -> Result<()> {
+    if let Some(j) = active.filter(|j| !j.terminal()) {
+        return Err(Error::new(
+            ErrorCode::Busy,
+            format!(
+                "installation has unresolved transaction {} at {:?}; run plurx-recovery --transaction {}",
+                j.transaction_id, j.phase, j.transaction_id
+            ),
+        ));
+    }
+    Ok(())
+}
 pub struct TransactionStore {
     pub root: SecureDir,
     pub transactions: SecureDir,
@@ -177,12 +190,7 @@ impl TransactionStore {
         operation: Operation,
         candidate: Option<&VerifiedManifest>,
     ) -> Result<JournalV1> {
-        if self.active()?.is_some_and(|j| !j.terminal()) {
-            return Err(Error::new(
-                ErrorCode::Busy,
-                "installation has an unresolved transaction",
-            ));
-        }
+        ensure_resolved(self.active()?.as_ref())?;
         let observed = supervisor::observe(i)?;
         if !observed.stopped() && observed.process.is_none() {
             return Err(Error::new(

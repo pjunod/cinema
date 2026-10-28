@@ -80,6 +80,66 @@ final class TVNavigationTests: TVNavigationTestCase {
     func testRowsToolsAndJump416() throws { try toolsJourney(itemCount: 416, presentation: "rows") }
     func testRowsToolsAndJump5000() throws { try toolsJourney(itemCount: 5000, presentation: "rows") }
 
+    func testRowsKeepWholeCardsVisibleAtMediumSize() throws { try wholeRowJourney(posterSize: "m") }
+    func testRowsKeepWholeCardsVisibleAtExtraLargeSize() throws { try wholeRowJourney(posterSize: "xl") }
+
+    func testShowRowsKeepWholeCardsVisibleAtExtraLargeSize() throws {
+        let server = try TVNavigationServer(includeShows: true)
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin, presentation: "rows", collectionID: "show", posterSize: "xl")
+        defer { app.terminate() }
+        let card = app.buttons["item:10001"]
+        remote.press(.down)
+        assertFocus(card, in: app, context: "Whole show card")
+        assertWholeCardVisible(card, in: app)
+    }
+
+    private func wholeRowJourney(posterSize: String) throws {
+        let server = try TVNavigationServer(itemCount: 416)
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin, presentation: "rows", posterSize: posterSize)
+        defer { app.terminate() }
+        let jump = app.buttons["library:jump"]
+        reachForSetup(jump, in: app, limit: 8)
+        assertFocus(jump, in: app, context: "Whole row jump opener")
+        remote.press(.select)
+        assertFocus(app.buttons["choice:A"], in: app, context: "Whole row initial group")
+        for _ in 0..<12 { remote.press(.down) }
+        assertFocus(app.buttons["choice:M"], in: app, context: "Whole row deep group")
+        remote.press(.select)
+        let first = app.buttons["item:193"]
+        assertFocus(first, in: app, context: "Whole row first title")
+        assertWholeCardVisible(first, in: app)
+        for id in 194...200 {
+            remote.press(.right)
+            let card = app.buttons["item:\(id)"]
+            assertFocus(card, in: app, context: "Whole row horizontal move \(id)")
+            assertWholeCardVisible(card, in: app)
+        }
+        remote.press(.menu)
+        assertFocus(app.buttons["library:view"], in: app, context: "Whole row Back reaches tools")
+        remote.press(.down)
+        let bookmark = app.buttons["item:200"]
+        assertFocus(bookmark, in: app, context: "Whole row tools return")
+        assertWholeCardVisible(bookmark, in: app)
+    }
+
+    private func assertWholeCardVisible(_ card: XCUIElement, in app: XCUIApplication,
+                                       file: StaticString = #filePath, line: UInt = #line) {
+        let results = app.scrollViews["library-results"]
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let viewport = results.frame
+            let frame = card.frame
+            return frame.height > 0 && frame.minY >= viewport.minY + 4
+                && frame.maxY <= viewport.maxY - 4
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed,
+                       "The entire focused poster, title and metadata must fit below the toolbar: card=\(card.frame), viewport=\(results.frame)",
+                       file: file, line: line)
+    }
+
     private func toolsJourney(itemCount: Int, presentation: String) throws {
         let server = try TVNavigationServer(itemCount: itemCount)
         let origin = try server.start()

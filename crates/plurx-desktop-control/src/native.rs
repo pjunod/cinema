@@ -138,44 +138,50 @@ fn bootstrap_package_with_origin(
         let old = InstallationV1::load(&record)?;
         let store = TransactionStore::locked(&old)?;
         let mut j = store.create(&old, crate::protocol::Operation::Upgrade, None)?;
-        j.target_version = Some(release.version.clone());
-        j.rollback = update::Rollback::ManualRecovery;
-        store.save(&j)?;
-        crate::transaction::stop_clean(&old, &store, &mut j)?;
-        let install_lock = crate::launch_lock::acquire(&old, true)?;
-        if !supervisor::observe(&old)?.stopped() {
-            return Err(invalid(
-                "external service launch raced bootstrap; installation refused",
-            ));
+        let result = (|| {
+            j.target_version = Some(release.version.clone());
+            j.rollback = update::Rollback::ManualRecovery;
+            store.save(&j)?;
+            crate::transaction::stop_clean(&old, &store, &mut j)?;
+            let install_lock = crate::launch_lock::acquire(&old, true)?;
+            if !supervisor::observe(&old)?.stopped() {
+                return Err(invalid(
+                    "external service launch raced bootstrap; installation refused",
+                ));
+            }
+            j.transition(crate::transaction::Phase::Installing)?;
+            store.save(&j)?;
+            promote(&old, &store, &j, root)?;
+            j.transition(crate::transaction::Phase::CandidateInstalled)?;
+            store.save(&j)?;
+            let mut installed = old.clone();
+            installed.current_version = release.version;
+            installed.current_tag = format!("v{}", installed.current_version);
+            installed.current_commit = release.source_commit;
+            installed.architecture = release.architecture;
+            installed.trust_key_ids = update::production_keys()?
+                .into_iter()
+                .map(|k| k.id)
+                .collect();
+            installed.last_transaction_id = Some(j.transaction_id.clone());
+            crate::controller::save_installation(&installed)?;
+            j.transition(crate::transaction::Phase::Restoring)?;
+            store.save(&j)?;
+            drop(install_lock);
+            if j.initial_running && !no_start {
+                crate::controller::authorize_start(&store, &mut j)?;
+                supervisor::start(&installed)?;
+                crate::controller::wait_ready(&installed, &j, Some(&installed.current_commit))?;
+            }
+            j.transition(crate::transaction::Phase::Committed)?;
+            j.start_permit_expires = None;
+            store.save(&j)?;
+            Ok(installed)
+        })();
+        if let Err(error) = &result {
+            crate::controller::record_failure(&store, &mut j, error)?;
         }
-        j.transition(crate::transaction::Phase::Installing)?;
-        store.save(&j)?;
-        promote(&old, &store, &j, root)?;
-        j.transition(crate::transaction::Phase::CandidateInstalled)?;
-        store.save(&j)?;
-        let mut installed = old.clone();
-        installed.current_version = release.version;
-        installed.current_tag = format!("v{}", installed.current_version);
-        installed.current_commit = release.source_commit;
-        installed.architecture = release.architecture;
-        installed.trust_key_ids = update::production_keys()?
-            .into_iter()
-            .map(|k| k.id)
-            .collect();
-        installed.last_transaction_id = Some(j.transaction_id.clone());
-        crate::controller::save_installation(&installed)?;
-        j.transition(crate::transaction::Phase::Restoring)?;
-        store.save(&j)?;
-        drop(install_lock);
-        if j.initial_running && !no_start {
-            crate::controller::authorize_start(&store, &mut j)?;
-            supervisor::start(&installed)?;
-            crate::controller::wait_ready(&installed, &j, Some(&installed.current_commit))?;
-        }
-        j.transition(crate::transaction::Phase::Committed)?;
-        j.start_permit_expires = None;
-        store.save(&j)?;
-        return Ok(installed);
+        return result;
     }
     let (installed, disposition) = bootstrap_with_disposition(
         InstallMethod::MacosNative,
@@ -362,6 +368,11 @@ pub fn preflight_source_package(root: &Path) -> Result<()> {
         }
         let installed = InstallationV1::load(&record)?;
         installed.managed()?;
+        let state = installed.state_dir()?;
+        let transactions = state.child("transactions", false)?;
+        crate::transaction::ensure_resolved(
+            crate::transaction::read_active(&state, &transactions)?.as_ref(),
+        )?;
         return Ok(());
     }
     let home = home_for(native_uid())?;
@@ -709,6 +720,133 @@ pub fn promote(
     )?;
     Ok(())
 }
+/// Verify completed promotion before explicitly finishing an interrupted health check.
+/// Write-ahead promotion flags alone do not prove the filesystem changes completed.
+pub fn verify_promoted_installation(
+    i: &InstallationV1,
+    store: &TransactionStore,
+    j: &JournalV1,
+) -> Result<()> {
+    let app = home_for(i.owner_uid)?.join("Applications/Plurx Server.app");
+    verify_promoted_installation_at(i, store, j, &app)
+}
+
+fn verify_promoted_installation_at(
+    i: &InstallationV1,
+    store: &TransactionStore,
+    j: &JournalV1,
+    app: &Path,
+) -> Result<()> {
+    if i.method != InstallMethod::MacosNative
+        || j.phase != crate::transaction::Phase::Restoring
+        || j.operation != crate::protocol::Operation::Upgrade
+        || j.installation_id != i.installation_id
+        || i.last_transaction_id.as_deref() != Some(&j.transaction_id)
+        || j.target_version.as_deref() != Some(&i.current_version)
+    {
+        return Err(invalid(
+            "installed native candidate does not match restoration transaction",
+        ));
+    }
+    let p: PromotionV1 = store.dir(&j.transaction_id)?.json("promotion.json")?;
+    let version_id = format!("{}-{}", i.current_version, j.transaction_id);
+    let target = PathBuf::from("versions").join(&version_id);
+    if p.schema_version != 1
+        || p.transaction_id != j.transaction_id
+        || p.version_id != version_id
+        || !p.app_promoted
+        || !p.pointer_promoted
+        || p.controls_promoted != CONTROL_BINARIES
+        || current_target(&i.paths.runtime)?.as_ref() != Some(&target)
+    {
+        return Err(invalid(
+            "native promotion is incomplete or current runtime differs",
+        ));
+    }
+    let root = i.paths.runtime.join(target);
+    let dir = secure_fs::open_dir(&root, i.owner_uid)?;
+    let closure: RuntimeClosureV1 = dir.json(CLOSURE_NAME)?;
+    if !closure.files.iter().any(|f| f.path == "release.json") {
+        return Err(invalid(
+            "promoted release identity is not bound to its closure",
+        ));
+    }
+    let source = closure
+        .files
+        .iter()
+        .any(|f| f.path == "source-install-v1.json");
+    let release = verify_bootstrap_identity(
+        &root,
+        if source {
+            BootstrapPackageOrigin::LocalSource
+        } else {
+            BootstrapPackageOrigin::Release
+        },
+    )?;
+    if release.version != i.current_version
+        || release.source_commit != i.current_commit
+        || release.architecture != i.architecture
+        || release.repository != i.repository
+    {
+        return Err(invalid(
+            "promoted release differs from installed candidate identity",
+        ));
+    }
+    verify_promoted_copies(i, app, &closure)
+}
+
+fn verify_promoted_copies(
+    i: &InstallationV1,
+    app: &Path,
+    closure: &RuntimeClosureV1,
+) -> Result<()> {
+    let mut expected_app = BTreeSet::new();
+    for file in &closure.files {
+        let destination = if let Some(name) = file.path.strip_prefix("control/") {
+            if !CONTROL_BINARIES.contains(&name) {
+                continue;
+            }
+            i.paths.state.join(name)
+        } else if let Some(name) = file.path.strip_prefix("Plurx Server.app/") {
+            expected_app.insert(name.to_owned());
+            app.join(name)
+        } else {
+            continue;
+        };
+        let parent = secure_fs::open_dir(
+            destination
+                .parent()
+                .ok_or_else(|| invalid("promoted member parent"))?,
+            i.owner_uid,
+        )?;
+        let mut installed = parent.open(
+            destination
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| invalid("promoted member name"))?,
+        )?;
+        let metadata = installed.metadata()?;
+        let mut digest = Sha256::new();
+        std::io::copy(&mut installed, &mut DigestWriter(&mut digest))?;
+        if metadata.len() != file.size
+            || (metadata.mode() & 0o111 != 0) != file.executable
+            || hex::encode(digest.finalize()) != file.sha256
+        {
+            return Err(invalid(
+                "installed app/controller differs from promoted closure",
+            ));
+        }
+    }
+    let mut actual_app = BTreeSet::new();
+    regular_files(app, app, &mut actual_app)?;
+    if actual_app != expected_app {
+        return Err(invalid(
+            "installed app inventory differs from promoted closure",
+        ));
+    }
+    Ok(())
+}
+
 pub fn rollback(i: &InstallationV1, store: &TransactionStore, j: &JournalV1) -> Result<()> {
     if j.rollback != update::Rollback::BinaryCompatible {
         return Err(Error::new(ErrorCode::RecoveryRequired, "candidate may have written incompatible data; binary rollback and DB/Raft restore are not automatic"));
@@ -1215,4 +1353,233 @@ where
         .write("com.plurx.plurxd.plist", &std::fs::read(canonical)?, 0o600)?;
     }
     Ok(disposition)
+}
+
+#[cfg(test)]
+mod restoration_tests {
+    use super::*;
+    use crate::{protocol::*, transaction::Phase};
+
+    #[test]
+    fn interrupted_native_restoration_requires_exact_promoted_identity_and_copies() {
+        let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/native-restoration-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        let scratch = scratch.canonicalize().expect("absolute scratch");
+        let uid = native_uid();
+        let id = uuid::Uuid::new_v4().to_string();
+        let installation_id = uuid::Uuid::new_v4().to_string();
+        let runtime = scratch.join("runtime");
+        let mut i: InstallationV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "installation_id": installation_id,
+            "method": "macos-native", "owner_uid": uid, "service_uid": uid,
+            "architecture": native_architecture().expect("native architecture"), "desktop_installed": true,
+            "repository": REPOSITORY, "current_version": "0.7.0", "current_tag": "v0.7.0",
+            "current_commit": "a".repeat(40), "controller_protocol": 1,
+            "trust_key_ids": [], "last_transaction_id": id,
+            "paths": {"state": runtime.join("control"), "runtime": runtime,
+                "socket": scratch.join("socket"), "config": scratch.join("config"),
+                "data": scratch.join("data"), "log": scratch.join("log")},
+            "service": {"kind": "launchd", "name": LAUNCH_LABEL, "domain": format!("gui/{uid}")},
+            "browser_origin": "http://127.0.0.1:32400"
+        }))
+        .expect("installation fixture");
+        std::fs::create_dir_all(&i.paths.state).expect("state");
+        let store = TransactionStore::locked(&i).expect("store");
+        let mut j: JournalV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "transaction_id": id, "installation_id": installation_id,
+            "operation": "upgrade", "old_version": "0.7.0", "target_version": "0.7.0",
+            "phase": "restoring", "initial_running": true,
+            "initial_startup": {"state": "enabled", "detail": null},
+            "policy_revision": "fixture", "config_digest": "fixture", "rollback": "manual_recovery"
+        }))
+        .expect("journal fixture");
+        let transaction = store.transactions.child(&id, true).expect("transaction");
+        let version_id = format!("0.7.0-{id}");
+        let root = runtime.join("versions").join(&version_id);
+        std::fs::create_dir_all(&root).expect("version");
+        let release = ReleaseIdentityV1 {
+            schema_version: 1,
+            repository: REPOSITORY.into(),
+            version: "0.7.0".into(),
+            source_commit: i.current_commit.clone(),
+            architecture: native_architecture().expect("native architecture"),
+        };
+        let mut members = vec![(
+            "release.json".to_owned(),
+            serde_json::to_vec(&release).expect("release"),
+            false,
+        )];
+        members.push((
+            "source-install-v1.json".into(),
+            serde_json::to_vec(&SourceInstallV1 {
+                schema_version: 1,
+                source_commit: i.current_commit.clone(),
+                architecture: release.architecture.clone(),
+            })
+            .expect("source identity"),
+            false,
+        ));
+        for path in [
+            "runtime/plurxd",
+            "runtime/ffmpeg",
+            "runtime/ffprobe",
+            "Plurx Server.app/Contents/Info.plist",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(
+            CONTROL_BINARIES
+                .iter()
+                .map(|name| format!("control/{name}")),
+        ) {
+            members.push((path, b"fixture".to_vec(), true));
+        }
+        let mut closure = RuntimeClosureV1 {
+            schema_version: 1,
+            version: "0.7.0".into(),
+            files: Vec::new(),
+        };
+        for (name, bytes, executable) in &members {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("member parent");
+            secure_fs::open_dir(path.parent().expect("parent"), uid)
+                .expect("parent")
+                .write(
+                    path.file_name().expect("name").to_str().expect("UTF8"),
+                    bytes,
+                    if *executable { 0o500 } else { 0o400 },
+                )
+                .expect("member");
+            closure.files.push(ClosureFileV1 {
+                path: name.clone(),
+                size: bytes.len() as u64,
+                sha256: hex::encode(Sha256::digest(bytes)),
+                executable: *executable,
+            });
+        }
+        secure_fs::open_dir(&root, uid)
+            .expect("root")
+            .write_json(CLOSURE_NAME, &closure)
+            .expect("closure");
+        let app = scratch.join("Plurx Server.app");
+        copy_tree(&root.join("Plurx Server.app"), &app, uid).expect("app");
+        for name in CONTROL_BINARIES {
+            store.root.write(name, b"fixture", 0o500).expect("control");
+        }
+        let mut p = PromotionV1 {
+            schema_version: 1,
+            transaction_id: id.clone(),
+            version_id: version_id.clone(),
+            previous_current: None,
+            app_backup: None,
+            app_promoted: true,
+            controls_promoted: CONTROL_BINARIES.iter().map(|name| (*name).into()).collect(),
+            pointer_promoted: true,
+        };
+        transaction
+            .write_json("promotion.json", &p)
+            .expect("promotion");
+        pointer(&runtime, &PathBuf::from("versions").join(&version_id)).expect("pointer");
+        let verify =
+            |i: &InstallationV1, j: &JournalV1| verify_promoted_installation_at(i, &store, j, &app);
+        verify(&i, &j).expect("healthy same-version source replacement");
+        j.expected_node_id = Some("original-node".into());
+        let mut identity: DaemonIdentityV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "installation_id": installation_id,
+            "process": {"pid": 123, "uid": uid, "start_generation": "fixture", "nonce": "fixture"},
+            "node_id": "original-node", "instance_id": "fixture", "version": "0.7.0",
+            "build": i.current_commit, "browser_origin": i.browser_origin,
+            "supervisor": {"kind": "launchd", "name": LAUNCH_LABEL, "invocation_id": "fixture"},
+            "ready": true
+        }))
+        .expect("daemon identity");
+        let ready = |identity: &DaemonIdentityV1| {
+            crate::controller::readiness_matches(&i, &j, identity, Some(&i.current_commit))
+        };
+        assert!(ready(&identity));
+        identity.build = "b".repeat(40);
+        assert!(
+            !ready(&identity),
+            "same version with a different build cannot recover"
+        );
+        identity.build = i.current_commit.clone();
+        identity.node_id = "another-node".into();
+        assert!(!ready(&identity));
+        identity.node_id = "original-node".into();
+        identity.ready = false;
+        assert!(!ready(&identity));
+        i.current_commit = "b".repeat(40);
+        assert!(
+            verify(&i, &j).is_err(),
+            "version alone cannot identify candidate"
+        );
+        i.current_commit = release.source_commit;
+        i.last_transaction_id = None;
+        assert!(verify(&i, &j).is_err());
+        i.last_transaction_id = Some(id.clone());
+        j.installation_id = uuid::Uuid::new_v4().to_string();
+        assert!(verify(&i, &j).is_err());
+        j.installation_id = installation_id;
+        p.controls_promoted.pop();
+        transaction
+            .write_json("promotion.json", &p)
+            .expect("incomplete promotion");
+        assert!(verify(&i, &j).is_err());
+        p.controls_promoted = CONTROL_BINARIES.iter().map(|name| (*name).into()).collect();
+        transaction
+            .write_json("promotion.json", &p)
+            .expect("promotion");
+        pointer(&runtime, Path::new("versions/another-transaction")).expect("other pointer");
+        assert!(verify(&i, &j).is_err());
+        pointer(&runtime, &PathBuf::from("versions").join(version_id)).expect("pointer");
+        store
+            .root
+            .write("plurx-control", b"altered", 0o500)
+            .expect("altered control");
+        assert!(verify(&i, &j).is_err());
+        store
+            .root
+            .write("plurx-control", b"fixture", 0o500)
+            .expect("control");
+        secure_fs::open_dir(&app, uid)
+            .expect("app")
+            .write("extra", b"extra", 0o400)
+            .expect("extra");
+        assert!(verify(&i, &j).is_err());
+        secure_fs::open_dir(&app, uid)
+            .expect("app")
+            .remove("extra")
+            .expect("remove extra");
+        secure_fs::open_dir(&root.join("runtime"), uid)
+            .expect("runtime")
+            .write("plurxd", b"altered", 0o500)
+            .expect("altered daemon");
+        assert!(verify(&i, &j).is_err());
+        assert_eq!(
+            j.phase,
+            Phase::Restoring,
+            "verification never commits on failure"
+        );
+        j.start_permit_expires = Some(u64::MAX);
+        let failure = Error::new(ErrorCode::RecoveryRequired, "health check failed");
+        crate::controller::record_failure(&store, &mut j, &failure)
+            .expect("record restoration failure");
+        assert_eq!(
+            store.load(&id).expect("retained journal").phase,
+            Phase::Restoring
+        );
+        assert_eq!(j.start_permit_expires, None);
+        assert_eq!(j.detail.as_deref(), Some("health check failed"));
+        j.phase = Phase::Prepared;
+        crate::controller::record_failure(&store, &mut j, &failure)
+            .expect("record preparation failure");
+        assert_eq!(
+            store.load(&id).expect("cancelled journal").phase,
+            Phase::Cancelled
+        );
+        drop(store);
+        std::fs::remove_dir_all(scratch).expect("cleanup");
+    }
 }

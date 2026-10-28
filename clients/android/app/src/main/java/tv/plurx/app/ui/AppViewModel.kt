@@ -20,6 +20,7 @@ import retrofit2.HttpException
 import java.net.URI
 import tv.plurx.app.data.ItemAnnotations
 import tv.plurx.app.data.PresentationTarget
+import tv.plurx.app.data.withPeakFrom
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.CapabilitySnapshot
 import tv.plurx.app.data.DecisionCapsReq
@@ -569,6 +570,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setHomeGrouping(grouping: HomeGrouping) = updatePreferences { copy(homeGrouping = grouping) }
 
+    fun setHdrDisplayPeak(peak: tv.plurx.app.data.HdrDisplayPeak) = updatePreferences { copy(hdrDisplayPeak = peak) }
+
     fun setPlaybackQuality(quality: PlaybackQuality) = updatePreferences { copy(playbackQuality = quality) }
 
     fun setSubtitleReadiness(readiness: SubtitleReadiness) =
@@ -852,11 +855,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         audioOffsetMs: Long = 0,
         fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId),
         linkReceipt: String? = null,
+        retainedPeak: tv.plurx.app.data.DisplayCaps? = null,
     ): PlaybackDecision {
         fileContext.localId(fileId)
         val measured = Caps.snapshot(getApplication<Application>())
         val snapshot = measured.copy(document = measured.document.copy(
-            display = measured.document.display.copy(
+            display = measured.document.display.withPeakFrom(retainedPeak).copy(
                 presentation_target = presentationTarget.takeIf { Session.displayAwareAuto },
             ),
         ))

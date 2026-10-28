@@ -1,0 +1,1113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: plurx contributors <noreply@plurx.invalid>
+Date: Mon, 26 Oct 2026 12:00:00 +0000
+Subject: [PATCH 3/5] vo_gpu_next: map Dolby Vision with plurx's closed-form
+ display management
+
+A Profile 5 or 8 frame is reconstructed to BT.2020/PQ by libplacebo (the
+RPU's reshaping and colour conversion only, as the plurx server renders
+its master), then mapped for the display with plurx's closed-form CM v4.0
+and CM v2.9 equations, creative trims included. The equations are
+video/out/placebo/plurx/dv_dm.h and dm_closed_form.h, which the plurx
+Player package copies from plurx's tools/dv_processing at build time, so
+the player and the server run the same code. libdovi parses the RPU.
+
+The target is the compositor's preferred description: its luminance range
+and the largest named gamut (BT.2020, P3-D65, BT.709) inside the panel's
+primaries, within half a step of the precision they were reported in. The
+mapped frame and the swapchain hint carry that target's volume, so neither
+libplacebo nor the compositor tone maps it again.
+
+Each configuration logs one "plurx mapper:" line for the plurx Player
+launcher. When the display is not in HDR mode or a frame cannot be mapped,
+the line says why and libplacebo's own Dolby Vision handling renders it.
+--dv-cm4-trims and --dv-cm29-trims (default yes) switch each family's
+creative trims.
+--dv-brightness=relative (default) maps on mpv's reference-white scale, so
+the desktop's HDR brightness setting applies; absolute maps for the
+panel's real luminance (the compositor's reference luminance, which
+wayland_common now keeps, undoes mpv's rescaling) and scales the result
+back.
+
+A screenshot of a Dolby Vision frame is the same mapping for the last
+presented target, so an unscaled screenshot with screenshot-tag-colorspace
+is the post-mapping BT.2020/PQ frame.
+---
+ meson.build                  |   5 +
+ video/out/placebo/plurx_dv.c | 541 +++++++++++++++++++++++++++++++++++
+ video/out/placebo/plurx_dv.h |  99 +++++++
+ video/out/vo_gpu_next.c      | 228 ++++++++++++++-
+ video/out/wayland_common.c   |   7 +
+ video/out/wayland_common.h   |   2 +
+ 6 files changed, 880 insertions(+), 2 deletions(-)
+ create mode 100644 video/out/placebo/plurx_dv.c
+ create mode 100644 video/out/placebo/plurx_dv.h
+
+diff --git a/meson.build b/meson.build
+index 45742345a..c80c622cc 100644
+--- a/meson.build
++++ b/meson.build
+@@ -267,6 +267,7 @@ sources = files(
+     ## libplacebo
+     'video/out/placebo/ra_pl.c',
+     'video/out/placebo/utils.c',
++    'video/out/placebo/plurx_dv.c',
+     'video/out/vo_gpu_next.c',
+     'video/out/gpu_next/context.c',
+ 
+@@ -700,6 +701,10 @@ if features['javascript']
+                      'sub/filter_jsre.c')
+ endif
+ 
++# plurx Player: libdovi parses the Dolby Vision RPU for the closed-form mapper.
++libdovi = dependency('dovi', version: '>= 3.2')
++dependencies += libdovi
++
+ lcms2 = dependency('lcms2', version: '>= 2.6', required: get_option('lcms2'))
+ features += {'lcms2': lcms2.found()}
+ if features['lcms2']
+diff --git a/video/out/placebo/plurx_dv.c b/video/out/placebo/plurx_dv.c
+new file mode 100644
+index 000000000..898c2aa56
+--- /dev/null
++++ b/video/out/placebo/plurx_dv.c
+@@ -0,0 +1,541 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <math.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <libavutil/frame.h>
++// libdovi C API header pinned by the package (plurx tools use the same one);
++// the library itself is the distribution's libdovi.
++#include "plurx/rpu_parser.h"
++#include <libplacebo/filters.h>
++#include <stdio.h>
++#include <libplacebo/shaders/colorspace.h>
++#include <libplacebo/shaders/custom.h>
++#include <libplacebo/shaders/sampling.h>
++
++// plurx's closed-form display management: the same header the plurx server
++// renders with, copied in by the package build.
++#include "plurx/dv_dm.h"
++
++#include "plurx_dv.h"
++#include "video/mp_image.h"
++
++// ------------------------------------------------------------------ target
++
++// Exact named primaries (x, y) and D65.
++static const double named_xy[3][3][2] = {
++    [DM_BT2020] = {{.708, .292}, {.170, .797}, {.131, .046}},
++    [DM_P3D65]  = {{.680, .320}, {.265, .690}, {.150, .060}},
++    [DM_BT709]  = {{.640, .330}, {.300, .600}, {.150, .060}},
++};
++static const double d65_xy[2] = {.3127, .3290};
++// Mutter's D65 white in XYZ, the frame the compositor compares gamuts in
++// (from D65 xy this adaptation is nearly the identity).
++static const double common_white[3] = {.95047, 1.0, 1.08883};
++static const double bradford[3][3] = {
++    { .8951,  .2664, -.1614},
++    {-.7502, 1.7135,  .0367},
++    { .0389, -.0685, 1.0296},
++};
++
++const char *plurx_dv_gamut_name(int prim)
++{
++    switch (prim) {
++    case DM_BT2020: return "BT.2020";
++    case DM_P3D65: return "P3-D65";
++    case DM_BT709: return "BT.709";
++    }
++    return "unknown";
++}
++
++static void mv3(const double m[3][3], const double v[3], double o[3])
++{
++    for (int i = 0; i < 3; i++)
++        o[i] = m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2];
++}
++
++static bool inv3(const double m[3][3], double o[3][3])
++{
++    double c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1];
++    double c01 = m[1][2] * m[2][0] - m[1][0] * m[2][2];
++    double c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
++    double det = m[0][0] * c00 + m[0][1] * c01 + m[0][2] * c02;
++    if (!isfinite(det) || det == 0)
++        return false;
++    o[0][0] = c00 / det;
++    o[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det;
++    o[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det;
++    o[1][0] = c01 / det;
++    o[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det;
++    o[1][2] = (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det;
++    o[2][0] = c02 / det;
++    o[2][1] = (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det;
++    o[2][2] = (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det;
++    return true;
++}
++
++// Bradford adaptation of chromaticities from D65 (xy) to the common frame,
++// normalized by X+Y+Z.
++struct cat {
++    double back[3][3], gain[3];
++};
++
++static bool cat_init(struct cat *c)
++{
++    double src[3] = {d65_xy[0] / d65_xy[1], 1, (1 - d65_xy[0] - d65_xy[1]) / d65_xy[1]};
++    double ls[3], ld[3];
++    if (!inv3(bradford, c->back))
++        return false;
++    mv3(bradford, src, ls);
++    mv3(bradford, common_white, ld);
++    for (int i = 0; i < 3; i++)
++        c->gain[i] = ld[i] / ls[i];
++    return true;
++}
++
++static bool adapt(const struct cat *c, double x, double y, double out[2])
++{
++    double xyz[3] = {x, y, 1 - x - y}, l[3], r[3];
++    mv3(bradford, xyz, l);
++    for (int i = 0; i < 3; i++)
++        l[i] *= c->gain[i];
++    mv3(c->back, l, r);
++    double s = r[0] + r[1] + r[2];
++    if (!isfinite(s) || s == 0)
++        return false;
++    out[0] = r[0] / s;
++    out[1] = r[1] / s;
++    return isfinite(out[0]) && isfinite(out[1]);
++}
++
++// The protocol carries primaries as xy * 1e6, not the panel's own storage.
++// The six primary coordinates (not the white, which a compositor may
++// replace with D65) all within one unit of a multiple of 1/4096 are
++// DisplayID 12-bit; otherwise they are taken as EDID's 10-bit, the coarsest
++// a display reports. A named vertex counts as inside when it is at most one
++// step outside the panel triangle: rounding x and y each by half a step can
++// move a vertex by up to sqrt(2)/2 of a step, and an encoder may truncate.
++static void primaries_source(const int32_t wire[8], struct plurx_dv_target *out)
++{
++    double n = 4096;
++    bool displayid = true;
++    for (int i = 0; i < 6 && displayid; i++) {
++        double code = nearbyint(wire[i] * n / 1e6);
++        displayid = fabs(wire[i] - code * 1e6 / n) < 1.0;
++    }
++    if (!displayid)
++        n = 1024;
++    out->primaries_source = displayid ? "displayid-12bit" : "edid-10bit";
++    out->tolerance = 1.0 / n;
++}
++
++// Largest perpendicular xy distance of p outside any edge of triangle t
++// (negative: inside by that margin).
++static double outside_distance(const double t[3][2], const double p[2])
++{
++    double worst = -INFINITY;
++    for (int i = 0; i < 3; i++) {
++        const double *a = t[i], *b = t[(i + 1) % 3], *c = t[(i + 2) % 3];
++        double ex = b[0] - a[0], ey = b[1] - a[1], len = hypot(ex, ey);
++        double side_c = ex * (c[1] - a[1]) - ey * (c[0] - a[0]);
++        double side_p = (ex * (p[1] - a[1]) - ey * (p[0] - a[0])) / len;
++        worst = fmax(worst, side_c > 0 ? -side_p : side_p);
++    }
++    return worst;
++}
++
++static bool refuse(const char **why, const char *reason)
++{
++    *why = reason;
++    return false;
++}
++
++bool plurx_dv_select_target(const struct pl_color_space *display,
++                            struct plurx_dv_target *out, const char **why)
++{
++    *why = NULL;
++    *out = (struct plurx_dv_target){0};
++    if (display->transfer != PL_COLOR_TRC_PQ || display->primaries != PL_COLOR_PRIM_BT_2020)
++        return refuse(why, "the display is not in HDR (BT.2020/PQ) mode");
++    double peak = display->hdr.max_luma, black = display->hdr.min_luma;
++    if (!(peak > 0) || !(peak <= 10000) || !(black >= 0) || !(black < peak))
++        return refuse(why, "the display reports no usable luminance range");
++    const struct pl_raw_primaries *p = &display->hdr.prim;
++    if (!pl_primaries_valid(p))
++        return refuse(why, "the display reports no panel primaries");
++
++    const struct pl_cie_xy *v[4] = {&p->red, &p->green, &p->blue, &p->white};
++    int32_t wire[8];
++    double tri[3][2];
++    struct cat cat;
++    if (!cat_init(&cat))
++        return refuse(why, "internal: chromatic adaptation");
++    for (int i = 0; i < 4; i++) {
++        wire[2 * i] = lrint(v[i]->x * 1e6);
++        wire[2 * i + 1] = lrint(v[i]->y * 1e6);
++        if (i < 3 && !adapt(&cat, wire[2 * i] / 1e6, wire[2 * i + 1] / 1e6, tri[i]))
++            return refuse(why, "the display reports invalid panel primaries");
++    }
++    double area = (tri[1][0] - tri[0][0]) * (tri[2][1] - tri[0][1]) -
++                  (tri[2][0] - tri[0][0]) * (tri[1][1] - tri[0][1]);
++    if (!(fabs(area) > 1e-9))
++        return refuse(why, "the display reports degenerate panel primaries");
++
++    primaries_source(wire, out);
++    out->prim = DM_BT709; // the smallest, used when none fits
++    for (int c = DM_BT2020; c <= DM_BT709; c++) {
++        double worst = -INFINITY;
++        for (int i = 0; i < 3; i++) {
++            double q[2];
++            if (!adapt(&cat, named_xy[c][i][0], named_xy[c][i][1], q))
++                return refuse(why, "internal: named primaries");
++            worst = fmax(worst, outside_distance(tri, q));
++        }
++        if (worst <= out->tolerance) {
++            out->prim = c;
++            break;
++        }
++    }
++    static const enum pl_color_primaries pl_named[] = {
++        [DM_BT2020] = PL_COLOR_PRIM_BT_2020,
++        [DM_P3D65] = PL_COLOR_PRIM_DISPLAY_P3,
++        [DM_BT709] = PL_COLOR_PRIM_BT_709,
++    };
++    out->named = *pl_raw_primaries_get(pl_named[out->prim]);
++    out->min_nits = black;
++    out->peak_nits = peak;
++    out->gain = 1;
++    return true;
++}
++
++void plurx_dv_target_absolute(struct plurx_dv_target *t, double ref)
++{
++    // mpv rescales the compositor's luminances so its reference white sits
++    // at 203 nits; undo that for the mapping, and scale the result back.
++    if (!(ref > 0) || ref == PL_COLOR_SDR_WHITE)
++        return;
++    // (mpv keeps the minimum display-referred; only the peak is rescaled)
++    t->gain = PL_COLOR_SDR_WHITE / ref;
++    t->peak_nits /= t->gain;
++}
++
++struct pl_color_space plurx_dv_output_color(const struct plurx_dv_target *t)
++{
++    return (struct pl_color_space) {
++        .primaries = PL_COLOR_PRIM_BT_2020,
++        .transfer = PL_COLOR_TRC_PQ,
++        .hdr = {
++            .prim = t->named,
++            .min_luma = t->min_nits,
++            .max_luma = t->peak_nits * t->gain,
++            // The mapped frame never exceeds the target: maximum content and
++            // frame-average light levels are the target peak (the protocol
++            // refuses a zero maxFALL).
++            .max_cll = t->peak_nits * t->gain,
++            .max_fall = t->peak_nits * t->gain,
++        },
++    };
++}
++
++// ------------------------------------------------------------------ frames
++
++struct plurx_dv {
++    pl_gpu gpu;
++    pl_log log;
++    pl_renderer recon;   // reconstruction only, never the presentation renderer
++    pl_tex native;       // BT.2020/PQ RGBA32F reconstruction, reused per frame
++    pl_dispatch copy;    // keeps each frame's mapped result
++};
++
++struct plurx_dv_source {
++    pl_gpu gpu;
++    const char *refusal;
++    DoviRpuOpaque *rpu;
++    const DoviVdrDmData *dm;
++    double mastering_peak;
++    pl_tex mapped;
++    bool mapped_valid;
++    struct plurx_dv_target mapped_target;
++    bool mapped_cm4, mapped_cm29;
++    struct plurx_dv_report report;
++    uint64_t signature;
++};
++
++static const struct mp_ff_side_data *side_data(const struct mp_image *mpi, int type)
++{
++    for (int i = 0; i < mpi->num_ff_side_data; i++) {
++        if (mpi->ff_side_data[i].type == type && mpi->ff_side_data[i].buf)
++            return &mpi->ff_side_data[i];
++    }
++    return NULL;
++}
++
++bool plurx_dv_declared(const struct mp_image *mpi)
++{
++    return mpi && mpi->params.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION &&
++           mpi->params.repr.dovi && side_data(mpi, AV_FRAME_DATA_DOVI_RPU_BUFFER);
++}
++
++struct plurx_dv *plurx_dv_create(pl_gpu gpu, pl_log log)
++{
++    struct plurx_dv *dv = calloc(1, sizeof(*dv));
++    if (!dv)
++        return NULL;
++    dv->gpu = gpu;
++    dv->log = log;
++    // Every format the mapping needs, checked once: the reconstruction and
++    // the mapped frame (16-bit UNORM; PQ is in [0, 1]), and dv_dm.h's
++    // float intermediates, which it samples with linear filtering.
++    bool formats =
++        pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, PL_FMT_CAP_RENDERABLE |
++                    PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR) &&
++        pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_RENDERABLE |
++                    PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
++    dv->recon = pl_renderer_create(log, gpu);
++    dv->copy = pl_dispatch_create(log, gpu);
++    if (!formats || !dv->recon || !dv->copy)
++        plurx_dv_destroy(&dv);
++    return dv;
++}
++
++void plurx_dv_destroy(struct plurx_dv **value)
++{
++    struct plurx_dv *dv = *value;
++    if (!dv)
++        return;
++    dv_dm_destroy(dv->gpu);
++    pl_tex_destroy(dv->gpu, &dv->native);
++    pl_dispatch_destroy(&dv->copy);
++    pl_renderer_destroy(&dv->recon);
++    free(dv);
++    *value = NULL;
++}
++
++struct plurx_dv_source *plurx_dv_source_create(const struct mp_image *mpi)
++{
++    struct plurx_dv_source *s = calloc(1, sizeof(*s));
++    if (!s)
++        return NULL;
++    const struct mp_ff_side_data *raw = side_data(mpi, AV_FRAME_DATA_DOVI_RPU_BUFFER);
++    if (!raw || !raw->buf->size || raw->buf->size > 65536) {
++        s->refusal = "the frame has no raw Dolby Vision RPU";
++        return s;
++    }
++    // libdovi parses the whole NAL unit; FFmpeg exports it without the
++    // two-byte UNSPEC62 NAL header.
++    size_t size = raw->buf->size + 2;
++    uint8_t *nal = malloc(size);
++    if (!nal) {
++        s->refusal = "out of memory";
++        return s;
++    }
++    nal[0] = 0x7c;
++    nal[1] = 0x01;
++    memcpy(nal + 2, raw->buf->data, raw->buf->size);
++    s->rpu = dovi_parse_unspec62_nalu(nal, size);
++    free(nal);
++    if (!s->rpu || dovi_rpu_get_error(s->rpu)) {
++        s->refusal = "the Dolby Vision RPU does not parse";
++        return s;
++    }
++    s->dm = dovi_rpu_get_vdr_dm_data(s->rpu);
++    if (!s->dm || !s->dm->dm_data.level1) {
++        s->refusal = "the Dolby Vision RPU has no L1 metadata";
++        return s;
++    }
++    const DoviExtMetadataBlockLevel6 *l6 = s->dm->dm_data.level6;
++    s->mastering_peak = l6 && l6->max_display_mastering_luminance
++                      ? l6->max_display_mastering_luminance : 4000;
++    return s;
++}
++
++void plurx_dv_source_free(struct plurx_dv_source **value)
++{
++    struct plurx_dv_source *s = *value;
++    if (!s)
++        return;
++    if (s->gpu)
++        pl_tex_destroy(s->gpu, &s->mapped);
++    if (s->dm)
++        dovi_rpu_free_vdr_dm_data(s->dm);
++    if (s->rpu)
++        dovi_rpu_free(s->rpu);
++    free(s);
++    *value = NULL;
++}
++
++const char *plurx_dv_source_refusal(const struct plurx_dv_source *s)
++{
++    return s ? s->refusal : "out of memory";
++}
++
++// The RPU's reconstruction to BT.2020/PQ, exactly as the plurx server
++// renders its master: libplacebo applies the reshaping and colour
++// conversion, and identical 0.005-10000 nit source and destination volumes
++// with clipping make its colour mapping an identity.
++static bool reconstruct(struct plurx_dv *dv, const struct pl_frame *decoded,
++                        int w, int h, const char **why)
++{
++    // 16-bit UNORM: the reconstruction is clipped to PQ [0, 1], and 1.5e-5
++    // is far below the mapping's own precision.
++    pl_fmt fmt = pl_find_fmt(dv->gpu, PL_FMT_UNORM, 4, 16, 16,
++                             PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE);
++    if (!fmt)
++        return refuse(why, "the GPU has no renderable RGBA16 format");
++    if (!pl_tex_recreate(dv->gpu, &dv->native, pl_tex_params(.w = w, .h = h,
++                         .format = fmt, .renderable = true, .sampleable = true)))
++        return refuse(why, "reconstruction texture allocation failed");
++
++    struct pl_frame image = *decoded;
++    image.crop = (pl_rect2df){0, 0, w, h};
++    image.rotation = PL_ROTATION_0;
++    image.overlays = NULL;
++    image.num_overlays = 0;
++    image.icc = NULL;
++    image.profile = (struct pl_icc_profile){0};
++    image.lut = NULL;
++    image.film_grain = (struct pl_film_grain_data){0};
++    image.color.hdr.max_luma = 10000;
++    image.color.hdr.min_luma = 0.005;
++    struct pl_frame target = {
++        .num_planes = 1,
++        .planes = {{.texture = dv->native, .components = 3, .component_mapping = {0, 1, 2}}},
++        // No .bits on a float target: libplacebo 7.360 would scale the output
++        // as if it were 32-bit integer samples.
++        .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL},
++        .color = pl_color_space_hdr10,
++        .crop = {0, 0, w, h},
++    };
++    target.color.hdr.max_luma = 10000;
++    target.color.hdr.min_luma = 0.005;
++
++    struct pl_color_map_params cmap = pl_color_map_default_params;
++    cmap.tone_mapping_function = &pl_tone_map_clip;
++    cmap.gamut_mapping = &pl_gamut_map_clip;
++    cmap.metadata = PL_HDR_METADATA_NONE;
++    struct pl_render_params params = pl_render_fast_params;
++    params.color_map_params = &cmap;
++    params.plane_upscaler = &pl_filter_bilinear;
++    params.plane_downscaler = &pl_filter_bilinear;
++    params.dither_params = NULL;
++    params.peak_detect_params = NULL;
++    params.color_adjustment = NULL;
++    params.sigmoid_params = NULL;
++    params.skip_caching_single_frame = true;
++
++    pl_renderer_reset_errors(dv->recon, NULL);
++    if (!pl_render_image(dv->recon, &image, &target, &params))
++        return refuse(why, "Dolby Vision reconstruction failed");
++    return true;
++}
++
++static uint64_t mix64(uint64_t h, uint64_t v)
++{
++    return h ^ (v + UINT64_C(0x9e3779b97f4a7c15) + (h << 6) + (h >> 2));
++}
++
++bool plurx_dv_map(struct plurx_dv *dv, struct plurx_dv_source *s,
++                  const struct pl_frame *decoded, int width, int height,
++                  const struct plurx_dv_target *t, bool cm4_trims, bool cm29_trims,
++                  struct pl_frame *view, uint64_t *signature,
++                  struct plurx_dv_report *report, const char **why)
++{
++    *why = NULL;
++    if (s->refusal)
++        return refuse(why, s->refusal);
++    if (width <= 0 || height <= 0)
++        return refuse(why, "invalid frame size");
++    bool same = s->mapped_valid && s->mapped_cm4 == cm4_trims && s->mapped_cm29 == cm29_trims &&
++                s->mapped_target.prim == t->prim && s->mapped_target.min_nits == t->min_nits &&
++                s->mapped_target.peak_nits == t->peak_nits && s->mapped_target.gain == t->gain;
++    if (!same) {
++        s->mapped_valid = false;
++        dv_dm_frame *f = malloc(sizeof(*f));
++        if (!f)
++            return refuse(why, "out of memory");
++        const char *bad = dv_dm_prepare(s->dm, t->peak_nits, t->min_nits, (enum dm_prim)t->prim,
++                                        s->mastering_peak, cm4_trims, cm29_trims, f);
++        if (bad) {
++            free(f);
++            return refuse(why, "the Dolby Vision metadata cannot be mapped for this display");
++        }
++        pl_tex out = NULL;
++        if (reconstruct(dv, decoded, width, height, why))
++            out = dv_dm_render(dv->log, dv->gpu, dv->native, f);
++        s->report = (struct plurx_dv_report){.algo = f->algo, .trim = f->trim};
++        free(f);
++        if (!out)
++            return refuse(why, *why ? *why : "the closed-form mapping failed on the GPU");
++        // Keep this frame's result: dv_dm_render reuses its output texture.
++        // The mapped PQ is in [0, 1]; 16-bit UNORM keeps it to 1.5e-5, half
++        // the memory of the float output (half float would lose up to 5e-4).
++        pl_fmt fmt = pl_find_fmt(dv->gpu, PL_FMT_UNORM, 4, 16, 16,
++                                 PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
++        if (!fmt)
++            fmt = out->params.format;
++        s->gpu = dv->gpu;
++        if (!pl_tex_recreate(dv->gpu, &s->mapped, pl_tex_params(.w = width, .h = height,
++                             .format = fmt, .sampleable = true, .renderable = true)))
++            return refuse(why, "mapped texture allocation failed");
++        pl_shader sh = pl_dispatch_begin(dv->copy);
++        pl_shader_sample_direct(sh, pl_sample_src(.tex = out));
++        if (t->gain != 1) {
++            // Absolute mapping: the frame is in the panel's nits; bring it
++            // to libplacebo's scale, which the compositor scales back.
++            struct pl_color_space pq = pl_color_space_hdr10;
++            char body[64];
++            snprintf(body, sizeof(body), "color.rgb *= %.9g;\n", t->gain);
++            pl_shader_linearize(sh, &pq);
++            pl_shader_custom(sh, &(struct pl_custom_shader) {
++                .description = "plurx absolute-brightness scale",
++                .input = PL_SHADER_SIG_COLOR, .output = PL_SHADER_SIG_COLOR,
++                .body = body,
++            });
++            pl_shader_delinearize(sh, &pq);
++        }
++        if (!pl_dispatch_finish(dv->copy, pl_dispatch_params(.shader = &sh, .target = s->mapped)))
++            return refuse(why, "copying the mapped frame failed");
++        s->mapped_target = *t;
++        s->mapped_cm4 = cm4_trims;
++        s->mapped_cm29 = cm29_trims;
++        s->mapped_valid = true;
++        uint64_t sig = mix64(UINT64_C(0x706c75727864), (uint64_t)t->prim);
++        sig = mix64(sig, (uint64_t)llrint(t->min_nits * 1e6));
++        sig = mix64(sig, (uint64_t)llrint(t->peak_nits * 1e6));
++        sig = mix64(sig, (uint64_t)llrint(t->gain * 1e9));
++        s->signature = mix64(sig, (cm4_trims ? 1u : 0u) | (cm29_trims ? 2u : 0u));
++    }
++    *view = (struct pl_frame) {
++        .num_planes = 1,
++        .planes = {{.texture = s->mapped, .components = 3, .component_mapping = {0, 1, 2}}},
++        .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL,
++                 .alpha = PL_ALPHA_NONE},
++        .color = plurx_dv_output_color(t),
++        .crop = decoded->crop,
++        .rotation = decoded->rotation,
++        .overlays = decoded->overlays,
++        .num_overlays = decoded->num_overlays,
++        .user_data = decoded->user_data,
++    };
++    if (!view->crop.x1 && !view->crop.y1)
++        view->crop = (pl_rect2df){0, 0, width, height};
++    *signature = s->signature;
++    *report = s->report;
++    return true;
++}
+diff --git a/video/out/placebo/plurx_dv.h b/video/out/placebo/plurx_dv.h
+new file mode 100644
+index 000000000..9815dc0b8
+--- /dev/null
++++ b/video/out/placebo/plurx_dv.h
+@@ -0,0 +1,99 @@
++/*
++ * This file is part of mpv.
++ *
++ * mpv is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * mpv is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*
++ * Closed-form Dolby Vision display management for plurx Player.
++ *
++ * A Profile 5 or 8 frame is reconstructed to BT.2020/PQ by libplacebo (the
++ * RPU's reshaping and colour conversion only, no tone mapping), then mapped
++ * for the display with plurx's closed-form CM v4.0 / CM v2.9 equations
++ * (plurx/dv_dm.h, copied from plurx's tools/dv_processing when the package
++ * is built). The mapped frame carries the target's own colour volume, so the
++ * final render has nothing left to map and the compositor only finishes the
++ * named gamut to the panel's real primaries.
++ *
++ * The target is the compositor's preferred description: its luminance range
++ * and the largest named gamut (BT.2020, P3-D65 or BT.709) that fits inside
++ * the panel's primaries, within half a step of the precision those primaries
++ * were reported in (EDID 10-bit or DisplayID 12-bit).
++ */
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <libplacebo/renderer.h>
++
++struct mp_image;
++struct plurx_dv;
++struct plurx_dv_source;
++
++struct plurx_dv_target {
++    int prim;                        // enum dm_prim
++    double min_nits, peak_nits;      // the display the equations map for
++    // Scale from the mapping's nits to libplacebo's reference-white scale
++    // (203 / the compositor's reference luminance) when mapping for the
++    // panel's absolute luminance; 1 when mapping on libplacebo's scale.
++    double gain;
++    struct pl_raw_primaries named;   // the named gamut's RGBW (D65)
++    const char *primaries_source;    // "edid-10bit", "displayid-12bit" or "unstated"
++    double tolerance;                // containment tolerance, xy distance
++};
++
++struct plurx_dv_report {
++    int algo;                        // 4 or 29
++    const char *trim;                // "l8-interpolated", "l2-exact", "l2-interpolated", "l1-only"
++};
++
++// Name of a target's named gamut, as the "plurx mapper:" line prints it.
++const char *plurx_dv_gamut_name(int prim);
++
++// The display's preferred colour space (mpv's target_csp) to a target, or
++// false with *why when the display is not in PQ/BT.2020 HDR mode or reports
++// no usable luminance or primaries.
++bool plurx_dv_select_target(const struct pl_color_space *display,
++                            struct plurx_dv_target *out, const char **why);
++
++// Map for the panel's absolute luminance instead of libplacebo's reference-
++// white scale: ref is the compositor's reference luminance in nits.
++void plurx_dv_target_absolute(struct plurx_dv_target *t, double ref);
++
++// The colour space of a mapped frame, and of the swapchain hint for it.
++struct pl_color_space plurx_dv_output_color(const struct plurx_dv_target *t);
++
++// True if mpv decoded this frame as Dolby Vision with an RPU it reconstructs
++// (Profile 5, 8, or 7 with its enhancement layer paired by mpv).
++bool plurx_dv_declared(const struct mp_image *mpi);
++
++struct plurx_dv *plurx_dv_create(pl_gpu gpu, pl_log log);
++void plurx_dv_destroy(struct plurx_dv **dv);
++
++// Parse the frame's RPU once. Never NULL except on allocation failure; a
++// refused source reports why with plurx_dv_source_refusal().
++struct plurx_dv_source *plurx_dv_source_create(const struct mp_image *mpi);
++void plurx_dv_source_free(struct plurx_dv_source **s);
++const char *plurx_dv_source_refusal(const struct plurx_dv_source *s);
++
++// Map one decoded frame for the target. The mapped texture is kept by the
++// source and reused while the target and trim switches stay the same. On
++// success *view is the mapped frame with geometry (crop, rotation,
++// overlays) copied from `decoded`, and *signature changes whenever its
++// pixels do.
++bool plurx_dv_map(struct plurx_dv *dv, struct plurx_dv_source *s,
++                  const struct pl_frame *decoded, int width, int height,
++                  const struct plurx_dv_target *t, bool cm4_trims, bool cm29_trims,
++                  struct pl_frame *view, uint64_t *signature,
++                  struct plurx_dv_report *report, const char **why);
+diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c
+index b892ff1cc..2537c81e4 100644
+--- a/video/out/vo_gpu_next.c
++++ b/video/out/vo_gpu_next.c
+@@ -42,6 +42,10 @@
+ #include "video/fmt-conversion.h"
+ #include "video/mp_image.h"
+ #include "video/out/placebo/ra_pl.h"
++#include "video/out/placebo/plurx_dv.h"
++#if HAVE_WAYLAND
++#include "video/out/wayland_common.h"
++#endif
+ #include "placebo/utils.h"
+ #include "gpu/context.h"
+ #include "gpu/hwdec.h"
+@@ -181,6 +185,19 @@ struct priv {
+     struct frame_info perf_redraw;
+ 
+     struct mp_image_params target_params;
++
++    // Closed-form Dolby Vision display management (plurx_dv.h)
++    struct plurx_dv *pdv;
++    char pdv_line[256];          // last "plurx mapper:" line
++    struct plurx_dv_target pdv_target; // last presented target, for screenshots
++    bool pdv_target_valid;
++    // A mapping refusal holds for the rest of the configuration (file or
++    // display change), so playback never alternates between mappers.
++    char pdv_refused[160];
++    struct pl_frame *pdv_views;
++    const struct pl_frame **pdv_frames;
++    uint64_t *pdv_sigs;
++    int pdv_cap;
+ };
+ 
+ static void update_render_options(struct vo *vo);
+@@ -200,6 +217,9 @@ struct gl_next_opts {
+     int target_hint;
+     int target_hint_mode;
+     bool target_hint_strict;
++    bool dv_cm4_trims;
++    bool dv_cm29_trims;
++    int dv_brightness;
+     char **raw_opts;
+ };
+ 
+@@ -235,6 +255,9 @@ const struct m_sub_options gl_next_conf = {
+         {"target-colorspace-hint", OPT_CHOICE(target_hint, {"auto", -1}, {"no", 0}, {"yes", 1})},
+         {"target-colorspace-hint-mode", OPT_CHOICE(target_hint_mode, {"target", 0}, {"source", 1}, {"source-dynamic", 2})},
+         {"target-colorspace-hint-strict", OPT_BOOL(target_hint_strict)},
++        {"dv-cm4-trims", OPT_BOOL(dv_cm4_trims)},
++        {"dv-cm29-trims", OPT_BOOL(dv_cm29_trims)},
++        {"dv-brightness", OPT_CHOICE(dv_brightness, {"relative", 0}, {"absolute", 1})},
+         // No `target-lut-type` because we don't support non-RGB targets
+         {"libplacebo-opts", OPT_KEYVALUELIST(raw_opts)},
+         {0},
+@@ -246,6 +269,8 @@ const struct m_sub_options gl_next_conf = {
+         .image_subs_hdr_peak = 1000,
+         .target_hint = -1,
+         .target_hint_strict = true,
++        .dv_cm4_trims = true,
++        .dv_cm29_trims = true,
+     },
+     .size = sizeof(struct gl_next_opts),
+     .change_flags = UPDATE_VIDEO,
+@@ -582,8 +607,15 @@ struct frame_priv {
+     struct ra_hwdec *el_hwdec;
+     pl_tex el_tex[4];
+     struct pl_frame el_frame;
++    struct plurx_dv_source *pdv; // parsed RPU and mapped frame, if Dolby Vision
+ };
+ 
++static void frame_priv_destroy(void *ptr)
++{
++    struct frame_priv *fp = ptr;
++    plurx_dv_source_free(&fp->pdv);
++}
++
+ static int plane_data_from_imgfmt(struct pl_plane_data out_data[4],
+                                   struct pl_bit_encoding *out_bits,
+                                   enum mp_imgfmt imgfmt, bool use_uint)
+@@ -1356,6 +1388,96 @@ static void update_tm_viz(struct pl_color_map_params *params,
+ static void update_hook_opts_dynamic(struct priv *p, const struct pl_hook *hook,
+                                      const struct mp_image *mpi);
+ 
++// One info line per mapper configuration, read by the plurx Player
++// launcher: "plurx mapper: closed-form CM v4.0 target=<min>-<max> nits
++// gamut=<gamut> (...)" or "plurx mapper: none (<reason>)".
++static void pdv_line(struct vo *vo, const char *fmt, ...) MP_PRINTF_ATTRIBUTE(2, 3);
++static void pdv_line(struct vo *vo, const char *fmt, ...)
++{
++    struct priv *p = vo->priv;
++    char line[sizeof(p->pdv_line)];
++    va_list ap;
++    va_start(ap, fmt);
++    vsnprintf(line, sizeof(line), fmt, ap);
++    va_end(ap);
++    if (!strcmp(line, p->pdv_line))
++        return;
++    snprintf(p->pdv_line, sizeof(p->pdv_line), "%s", line);
++    MP_INFO(vo, "plurx mapper: %s\n", line);
++}
++
++// The compositor's reference luminance (nits) that mpv rescaled the
++// display description by, or 0 when not known.
++static float pdv_reference_luma(struct vo *vo)
++{
++    float ref = get_ref_luma(vo->priv);
++#if HAVE_WAYLAND
++    if (!ref && vo->wl)
++        ref = vo_wayland_preferred_ref_luma(vo);
++#endif
++    return ref;
++}
++
++static bool pdv_mix_has_dv(const struct pl_frame_mix *mix)
++{
++    for (int i = 0; i < mix->num_frames; i++) {
++        if (plurx_dv_declared(mix->frames[i]->user_data))
++            return true;
++    }
++    return false;
++}
++
++// Map every Dolby Vision frame of the mix for the target; *out is the same
++// mix over the mapped frames. On failure nothing is replaced and libplacebo's
++// own Dolby Vision handling renders the mix, which the mapper line reports.
++static bool pdv_map_mix(struct vo *vo, const struct plurx_dv_target *t,
++                        const struct pl_frame_mix *mix, struct pl_frame_mix *out,
++                        struct plurx_dv_report *report, const char **why)
++{
++    struct priv *p = vo->priv;
++    int n = mix->num_frames;
++    if (n > p->pdv_cap) {
++        MP_RESIZE_ARRAY(p, p->pdv_views, n);
++        MP_RESIZE_ARRAY(p, p->pdv_frames, n);
++        MP_RESIZE_ARRAY(p, p->pdv_sigs, n);
++        p->pdv_cap = n;
++    }
++    if (!p->pdv && !(p->pdv = plurx_dv_create(p->gpu, p->pllog))) {
++        *why = "the closed-form mapper could not start on this GPU";
++        return false;
++    }
++    const struct pl_frame *nearest = pl_frame_mix_nearest(mix);
++    for (int i = 0; i < n; i++) {
++        const struct pl_frame *image = mix->frames[i];
++        struct mp_image *mpi = image->user_data;
++        p->pdv_frames[i] = image;
++        p->pdv_sigs[i] = mix->signatures[i];
++        if (!plurx_dv_declared(mpi))
++            continue;
++        struct frame_priv *fp = mpi->priv;
++        if (!fp->pdv)
++            fp->pdv = plurx_dv_source_create(mpi);
++        if (!fp->pdv) {
++            *why = "out of memory";
++            return false;
++        }
++        struct plurx_dv_report r;
++        uint64_t sig;
++        if (!plurx_dv_map(p->pdv, fp->pdv, image, mpi->w, mpi->h, t,
++                          p->next_opts->dv_cm4_trims, p->next_opts->dv_cm29_trims,
++                          &p->pdv_views[i], &sig, &r, why))
++            return false;
++        p->pdv_frames[i] = &p->pdv_views[i];
++        p->pdv_sigs[i] ^= sig * UINT64_C(0x9e3779b97f4a7c15);
++        if (image == nearest || !report->algo)
++            *report = r;
++    }
++    *out = *mix;
++    out->frames = p->pdv_frames;
++    out->signatures = p->pdv_sigs;
++    return true;
++}
++
+ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+ {
+     struct priv *p = vo->priv;
+@@ -1435,6 +1557,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+ 
+         struct mp_image *mpi = mp_image_new_ref(frame->frames[n]);
+         struct frame_priv *fp = talloc_zero(mpi, struct frame_priv);
++        talloc_set_destructor(fp, frame_priv_destroy);
+         mpi->priv = fp;
+         fp->vo = vo;
+ 
+@@ -1482,6 +1605,20 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+         target_ref_luma = get_ref_luma(p);
+     }
+     bool external_params = false;
++    // Dolby Vision: map for the display's own preferred description and
++    // present the mapped frame in that target's colour volume (one hint per
++    // frame, below), so neither libplacebo nor the compositor maps it again.
++    struct plurx_dv_target dv_target = {0};
++    const char *dv_why = NULL;
++    bool dv = frame->current && plurx_dv_declared(frame->current);
++    if (dv && p->pdv_refused[0])
++        dv_why = p->pdv_refused;
++    else if (dv && target_unknown)
++        dv_why = "the display reports no colour description";
++    else if (dv && !target_hint)
++        dv_why = "target-colorspace-hint is off";
++    if (dv_why)
++        dv = false;
+     if (target_hint && frame->current) {
+         const struct pl_color_space *source = &frame->current->params.color;
+         const struct pl_color_space *target = &target_csp;
+@@ -1583,6 +1720,23 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+         // Update again after possible max_luma change
+         if (p->icc_profile)
+             hint = p->icc_profile->csp;
++        if (dv && !p->icc_profile) {
++            // The display's own description (with --target-peak if set),
++            // not the source-derived hint.
++            struct pl_color_space display = target_csp;
++            if (opts->target_peak)
++                display.hdr.max_luma = opts->target_peak;
++            if (plurx_dv_select_target(&display, &dv_target, &dv_why)) {
++                // relative: map on the desktop's reference-white scale, so
++                // the HDR brightness setting applies; absolute: map for the
++                // panel's real luminance (Dolby's absolute rendering).
++                if (p->next_opts->dv_brightness == 1)
++                    plurx_dv_target_absolute(&dv_target, pdv_reference_luma(vo));
++                hint = plurx_dv_output_color(&dv_target);
++            }
++        } else if (dv) {
++            dv_why = "an ICC display profile is set";
++        }
+         external_params = set_colorspace_hint(p, &hint);
+     } else if (!target_hint) {
+         if (!hint.hdr.min_luma)
+@@ -1590,6 +1744,20 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+         external_params = set_colorspace_hint(p, NULL);
+     }
+ 
++    if (frame->current && plurx_dv_declared(frame->current) && (!dv || dv_why)) {
++        pdv_line(vo, "none (%s; libplacebo's built-in Dolby Vision mapping is used)",
++                 dv_why ? dv_why : "not mapped");
++        dv = false;
++        p->pdv_target_valid = false;
++    } else if (frame->current && !dv) {
++        pdv_line(vo, "none (no Dolby Vision RPU)");
++        p->pdv_target_valid = false;
++    }
++    if (dv) {
++        p->pdv_target = dv_target;
++        p->pdv_target_valid = true;
++    }
++
+     struct pl_swapchain_frame swframe;
+     bool should_draw = sw->fns->start_frame(sw, NULL); // for wayland logic
+     if (!should_draw || !pl_swapchain_start_frame(p->sw, &swframe)) {
+@@ -1770,9 +1938,38 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+             update_hook_opts_dynamic(p, p->hooks[i], frame->current);
+     }
+ 
++    const struct pl_frame_mix *render_mix = &mix;
++    const struct pl_render_params *render_params = &params;
++    struct pl_frame_mix dv_mix;
++    struct pl_render_params dv_params;
++    if (dv && pdv_mix_has_dv(&mix)) {
++        struct plurx_dv_report r = {0};
++        if (pdv_map_mix(vo, &dv_target, &mix, &dv_mix, &r, &dv_why)) {
++            // The mapped frames are already in the target's colour volume.
++            dv_params = params;
++            dv_params.peak_detect_params = NULL;
++            render_mix = &dv_mix;
++            render_params = &dv_params;
++            // relative: the target is on libplacebo's scale (reference white
++            // 203 nits), which the compositor scales to its own reference;
++            // absolute: the panel's own luminance.
++            float ref = pdv_reference_luma(vo);
++            pdv_line(vo, "closed-form CM %s target=%.4g-%.4g nits gamut=%s "
++                     "(trim %s, primaries %s, tolerance %.3g, brightness %s, reference %.0f nits)",
++                     r.algo == 4 ? "v4.0" : "v2.9", dv_target.min_nits,
++                     dv_target.peak_nits, plurx_dv_gamut_name(dv_target.prim),
++                     r.trim ? r.trim : "none", dv_target.primaries_source,
++                     dv_target.tolerance, dv_target.gain != 1 ? "absolute" : "relative",
++                     ref ? ref : PL_COLOR_SDR_WHITE);
++        } else {
++            snprintf(p->pdv_refused, sizeof(p->pdv_refused), "%s", dv_why);
++            pdv_line(vo, "none (%s; libplacebo's built-in Dolby Vision mapping is used)", dv_why);
++        }
++    }
++
+     // Render frame
+     stats_time_start(p->stats, "render");
+-    bool render_ok = pl_render_image_mix(p->rr, &mix, &target, &params);
++    bool render_ok = pl_render_image_mix(p->rr, render_mix, &target, render_params);
+     stats_time_end(p->stats, "render");
+     if (!render_ok) {
+         MP_ERR(vo, "Failed rendering frame!\n");
+@@ -1780,7 +1977,7 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
+     }
+ 
+     struct pl_frame ref_frame;
+-    pl_frames_infer_mix(p->rr, &mix, &target, &ref_frame);
++    pl_frames_infer_mix(p->rr, render_mix, &target, &ref_frame);
+ 
+     mp_mutex_lock(&vo->params_mutex);
+     p->target_params = (struct mp_image_params){
+@@ -1880,6 +2077,8 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
+     mp_mutex_lock(&vo->params_mutex);
+     vo->target_params = NULL;
+     mp_mutex_unlock(&vo->params_mutex);
++    p->pdv_line[0] = '\0'; // a new configuration reports its mapper again
++    p->pdv_refused[0] = '\0';
+     return 0;
+ }
+ 
+@@ -2044,6 +2243,30 @@ static void video_screenshot(struct vo *vo, struct voctrl_screenshot *args)
+         },
+     };
+ 
++    // A Dolby Vision frame is the closed-form mapping for the display's
++    // target, exactly as presented (libplacebo's own mapping otherwise).
++    if (plurx_dv_declared(mpi) && p->pdv_target_valid &&
++        (p->pdv || (p->pdv = plurx_dv_create(p->gpu, p->pllog))))
++    {
++        struct frame_priv *dv_fp = mpi->priv;
++        struct plurx_dv_report r;
++        struct pl_frame view;
++        uint64_t sig;
++        const char *why = NULL;
++        if (!dv_fp->pdv)
++            dv_fp->pdv = plurx_dv_source_create(mpi);
++        if (dv_fp->pdv && plurx_dv_map(p->pdv, dv_fp->pdv, &image, mpi->w, mpi->h,
++                                       &p->pdv_target, p->next_opts->dv_cm4_trims,
++                                       p->next_opts->dv_cm29_trims, &view, &sig, &r, &why))
++        {
++            image = view;
++            params.peak_detect_params = NULL;
++        } else {
++            MP_WARN(vo, "plurx mapper: screenshot not mapped (%s)\n",
++                    why ? why : plurx_dv_source_refusal(dv_fp->pdv));
++        }
++    }
++
+     const struct gl_video_opts *opts = p->opts_cache->opts;
+     if (args->scaled) {
+         // Apply target LUT, ICC profile and CSP override only in window mode
+@@ -2515,6 +2738,7 @@ static void uninit(struct vo *vo)
+     pl_lut_free(&p->next_opts->target_lut.lut);
+ 
+     pl_icc_close(&p->icc_profile);
++    plurx_dv_destroy(&p->pdv);
+     pl_renderer_destroy(&p->rr);
+ 
+     for (int i = 0; i < VO_PASS_PERF_MAX; ++i) {
+diff --git a/video/out/wayland_common.c b/video/out/wayland_common.c
+index fe37b4f88..9192ac73c 100644
+--- a/video/out/wayland_common.c
++++ b/video/out/wayland_common.c
+@@ -2285,6 +2285,7 @@ static void info_done(void *data, struct wp_image_description_info_v1 *image_des
+             wd->csp.hdr.max_fall = MPMIN(wd->csp.hdr.max_fall, wd->csp.hdr.max_luma);
+     }
+     wl->preferred_csp = wd->csp;
++    wl->preferred_ref_luma = wd->ref_luma;
+     talloc_free(wd);
+ }
+ 
+@@ -4258,6 +4259,12 @@ struct pl_color_space vo_wayland_preferred_csp(struct vo *vo)
+     return wl->preferred_csp;
+ }
+ 
++float vo_wayland_preferred_ref_luma(struct vo *vo)
++{
++    struct vo_wayland_state *wl = vo->wl;
++    return wl ? wl->preferred_ref_luma : 0;
++}
++
+ int vo_wayland_control(struct vo *vo, int *events, int request, void *arg)
+ {
+     struct vo_wayland_state *wl = vo->wl;
+diff --git a/video/out/wayland_common.h b/video/out/wayland_common.h
+index 1f91bdd5c..301de36a1 100644
+--- a/video/out/wayland_common.h
++++ b/video/out/wayland_common.h
+@@ -131,6 +131,7 @@ struct vo_wayland_state {
+     void *icc_file;
+     uint32_t icc_size;
+     struct pl_color_space preferred_csp;
++    float preferred_ref_luma; // the compositor's reference luminance, nits
+     bool image_description_info_done;
+     bool image_description_pending;
+ 
+@@ -228,6 +229,7 @@ struct vo_wayland_state {
+ 
+ bool vo_wayland_check_visible(struct vo *vo);
+ struct pl_color_space vo_wayland_preferred_csp(struct vo *vo);
++float vo_wayland_preferred_ref_luma(struct vo *vo);
+ bool vo_wayland_valid_format(struct vo_wayland_state *wl, uint32_t drm_format, uint64_t modifier);
+ bool vo_wayland_init(struct vo *vo);
+ bool vo_wayland_reconfig(struct vo *vo);

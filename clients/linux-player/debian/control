@@ -1,0 +1,79 @@
+Source: plurx-player
+Section: video
+Priority: optional
+Maintainer: plurx maintainers <noreply@plurx.invalid>
+Build-Depends: debhelper-compat (= 13),
+               dh-sequence-python3,
+               git,
+               glslang-dev,
+               libasound2-dev,
+               libass-dev,
+               libavcodec-dev (>= 7:8),
+               libavfilter-dev (>= 7:8),
+               libavformat-dev (>= 7:8),
+               libavutil-dev (>= 7:8),
+               libdisplay-info-dev,
+               libdovi-dev,
+               libdrm-dev,
+               libegl-dev,
+               libffmpeg-nvenc-dev,
+               libgbm-dev,
+               libjpeg-dev,
+               liblcms2-dev,
+               liblua5.2-dev,
+               lua5.2,
+               libpipewire-0.3-dev,
+               libpulse-dev,
+               libswresample-dev (>= 7:8),
+               libswscale-dev (>= 7:8),
+               libuchardet-dev,
+               libva-dev,
+               libvulkan-dev,
+               libwayland-dev,
+               libx11-dev,
+               libxext-dev,
+               libxinerama-dev,
+               libxkbcommon-dev,
+               libxpresent-dev,
+               libxrandr-dev,
+               libxss-dev,
+               libxxhash-dev,
+               libzimg-dev,
+               meson,
+               ninja-build,
+               pkgconf,
+               python3 (>= 3.10),
+               python3-glad (>= 2),
+               python3-jinja2,
+               patch,
+               python3-setuptools,
+               spirv-tools,
+               spirv-tools-dev,
+               wayland-protocols,
+               zlib1g-dev
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: plurx-player
+Architecture: amd64
+Depends: ${misc:Depends}, ${python3:Depends}, ${shlibs:Depends}, libdovi3 (<< 3.4~), python3 (>= 3.10), zenity
+Recommends: desktop-file-utils, mesa-vulkan-drivers | vulkan-icd
+Built-Using: ${plurx:Built-Using}
+Description: Dolby Vision playback of plurx titles on Linux
+ plurx Player plays titles handed over from the plurx web app ("Open titles
+ in: plurx Player") in mpv, keeping the original Dolby Vision stream for
+ profile 5 and 8 titles and receiving profile 7 FEL titles as profile 8.1.
+ .
+ Dolby Vision is mapped for the screen with plurx's closed-form CM v4.0 and
+ CM v2.9 display management, the same equations the plurx server uses,
+ targeting the compositor's reported luminance and the largest standard
+ gamut inside the panel's primaries.
+ .
+ It carries its own build of mpv and libplacebo in /usr/lib/plurx-player.
+ The distribution's mpv and libplacebo, and every program linked against
+ them, are untouched.
+ .
+ HDR output needs a Wayland compositor with wp_color_manager_v1 in HDR mode,
+ such as GNOME in HDR mode. An accurate target luminance needs a compositor
+ that reports the panel's real luminance; stock compositors may report a
+ default instead.

@@ -43,6 +43,7 @@ mod fragindex;
 mod fragment_index_cluster;
 mod hevc_census;
 mod http;
+mod https;
 mod job_lease;
 mod library_search;
 mod live_tv;
@@ -58,6 +59,7 @@ mod online_subtitles;
 mod panics;
 mod pgs_overlay;
 mod pipeprobe;
+mod playback_cache;
 mod playback_control;
 mod playstart;
 mod process_control;
@@ -93,6 +95,7 @@ mod subtitle_models;
 mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;
+mod subtitle_text_translation;
 mod subtitle_transcription;
 mod subtitle_translation;
 mod subtitles;
@@ -2228,6 +2231,7 @@ async fn boot_observing(
         Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
         _ => None,
     };
+    let prepared_https = https::Prepared::open(&config).await?;
     let Boot {
         source_activation_at_boot,
         store,
@@ -2277,6 +2281,13 @@ async fn boot_observing(
         system,
         logs,
     );
+    state.https = Some(Arc::new(https::Control::new(
+        node_id.clone(),
+        config.clone(),
+        prepared_https
+            .as_ref()
+            .map(|prepared| prepared.identity.clone()),
+    )?));
     state
         .sharing
         .observe_source_activation_at_boot(source_activation_at_boot);
@@ -2388,6 +2399,13 @@ async fn boot_observing(
     } else {
         None
     };
+    let public_listener_stop = tokio_util::sync::CancellationToken::new();
+    let https_serving = https::Serving::start(
+        prepared_https,
+        app.clone(),
+        public_listener_stop.clone(),
+        leave_shutdown.clone(),
+    );
     #[cfg(windows)]
     crate::windows_service::report_listener_ready()?;
     trigger_shutdown_registration_failpoint("after-listener-bind");
@@ -2433,21 +2451,26 @@ async fn boot_observing(
         }
         // The main listener stops accepting when this future completes;
         // the Jellyfin standard port stops at the same moment.
+        public_listener_stop.cancel();
         jellyfin_stop.cancel();
     };
     let served = if let Some(owner) = observation {
-        match owner.serve_normal(app, shutdown).await {
-            Ok(drain) => {
-                let drain = drain.and(jellyfin.drain().await);
-                drain_serving_state(progress, mdns).await.map(|()| drain)
-            }
-            Err(error) => Err(error),
-        }
+        serve_observed(
+            owner,
+            app,
+            jellyfin,
+            https_serving,
+            progress,
+            mdns,
+            shutdown,
+        )
+        .await
     } else {
         serve(
             listener.expect("normal startup owns its listener"),
             app,
             jellyfin,
+            https_serving,
             progress,
             mdns,
             shutdown,
@@ -3000,6 +3023,16 @@ async fn probe_system(
     for (codec, backend, decoder) in measured_decoders.measured_paths() {
         tracing::info!(%codec, backend = backend.name(), %decoder, "measured the decoder this ffmpeg selects");
     }
+    // The Dolby Vision renderer's CPU debit reads this. Warm it off the boot
+    // path: until it is proved, a play is debited the software shape, and a
+    // failure is retried on later need (`has_hevc_main10_vaapi_decode`).
+    drop(tokio::spawn(async {
+        let hevc_main10_vaapi_decode = crate::ffmpeg::has_hevc_main10_vaapi_decode().await;
+        tracing::info!(
+            hevc_main10_vaapi_decode,
+            "measured VA-API HEVC Main10 decode"
+        );
+    }));
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
     let hwaccel_override = store
@@ -3007,23 +3040,14 @@ async fn probe_system(
         .await?;
     let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
-    let optimization = match tokio::time::timeout(
-        std::time::Duration::from_secs(180),
-        transcoder_optimization::measure(&ffmpeg, &encoder_caps),
-    )
-    .await
+    // Representative comparisons run only on an explicit idle-node request.
+    // A saved receipt is reusable only for this executable/fixture/driver set.
+    let optimization = match transcoder_optimization::load(store, node_id, &ffmpeg, &encoder_caps)
+        .await
     {
-        Ok(Ok(report)) => {
-            if let Err(error) = transcoder_optimization::save(store, node_id, &report).await {
-                tracing::warn!(%error, "could not persist transcoder benchmark");
-            }
-            Some(report)
-        }
-        result => {
-            tracing::warn!(
-                ?result,
-                "transcoder benchmark unavailable; using validated encoder order"
-            );
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, "could not load representative transcode comparison; using validated hardware order");
             None
         }
     };
@@ -3410,6 +3434,10 @@ fn spawn_background_loops(
         state.clone(),
         background_shutdown.clone(),
     ));
+    tokio::spawn(http::playback_handoffs::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(subtitle_transcription::run(
         state.clone(),
         background_shutdown.clone(),
@@ -3459,6 +3487,7 @@ fn spawn_background_loops(
             .root_readability_loop(std::sync::Arc::clone(&state.store)),
     );
     tokio::spawn(std::sync::Arc::clone(&state.shared_cache).run(background_shutdown.clone()));
+    tokio::spawn(std::sync::Arc::clone(&state.playback_cache).run(background_shutdown.clone()));
     // Fragment indexes are node-local for both storage backends. Validate one
     // bounded page here on every node; cluster leadership is neither required
     // nor sufficient to cover another node's sidecar.
@@ -3664,17 +3693,38 @@ async fn serve(
     listener: tokio::net::TcpListener,
     app: axum::Router,
     jellyfin: JellyfinStandardListener,
+    https: https::Serving,
     progress: Arc<crate::progress::ProgressCoalescer>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<HttpDrain> {
     // The shutdown future stops both listeners at once; the standard port
     // finishes draining before progress is flushed, like the main one.
-    let drain = serve_http(listener, app, shutdown, HTTP_TIMEOUTS)
-        .await?
-        .and(jellyfin.drain().await);
-    drain_serving_state(progress, mdns).await?;
-    Ok(drain)
+    let main = serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await;
+    let tls = https.drain().await;
+    let jellyfin = jellyfin.drain().await;
+    let cleanup = drain_serving_state(progress, mdns).await;
+    main.and_then(|main| tls.map(|tls| main.and(tls).and(jellyfin)))
+        .and_then(|drain| cleanup.map(|()| drain))
+}
+
+/// The observation socket transfers its router per request, but shares the
+/// same TLS/Jellyfin/progress ownership order as ordinary startup.
+async fn serve_observed(
+    owner: Arc<StartupObservationHttp>,
+    app: axum::Router,
+    jellyfin: JellyfinStandardListener,
+    https: https::Serving,
+    progress: Arc<crate::progress::ProgressCoalescer>,
+    mdns: Option<mdns_sd::ServiceDaemon>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<HttpDrain> {
+    let main = owner.serve_normal(app, shutdown).await;
+    let tls = https.drain().await;
+    let jellyfin = jellyfin.drain().await;
+    let cleanup = drain_serving_state(progress, mdns).await;
+    main.and_then(|main| tls.map(|tls| main.and(tls).and(jellyfin)))
+        .and_then(|drain| cleanup.map(|()| drain))
 }
 
 /// How `serve_http`'s shutdown drain ended. Only `Complete` proves that no
@@ -4070,6 +4120,9 @@ async fn serve_http<A: HttpAcceptor>(
         });
     }
 
+    // Cancel owned pending TLS handshakes before waiting on active bodies.
+    // This also releases the listening socket immediately on shutdown.
+    drop(listener);
     let _ = drain_started.send(());
     connection_shutdown.cancel();
     let connections_drained = async { while connections.join_next().await.is_some() {} };

@@ -6,17 +6,18 @@
 > in-process, and what plurx deliberately hands to the reverse proxy in front
 > of it.
 
-plurx is built for a home LAN: one binary, token auth, plain HTTP. That
-premise shapes everything here. The server hardens what it owns — login,
-query building, file-path resolution, subprocess arguments, and browser
-output — and assumes a TLS-terminating reverse proxy owns the wire the moment
-traffic leaves a network you trust. If you're about to expose the port to the
-internet, read [Non-goals](#non-goals--what-plurx-does-not-defend-against)
+plurx is built for a home LAN: one binary, token auth and plain HTTP by
+default, with optional native HTTPS. The server hardens what it owns — login,
+query building, file-path resolution, subprocess arguments and browser output.
+Traffic crossing an untrusted network needs verified TLS, either the native
+HTTPS listener with appropriate client trust or a TLS-terminating reverse
+proxy. If you're about to expose the port to the internet, read [Non-goals](#non-goals--what-plurx-does-not-defend-against)
 first: several protections you'd expect at that boundary are the proxy's job,
 not plurx's, by design.
 
 Audited 2026-09-09; the shared-library boundary below was updated 2026-10-06
-for the effort implementation. Where a claim below is exhaustive, the test
+for the effort implementation; the native HTTPS transport section was updated
+2026-10-15. Where a claim below is exhaustive, the test
 that keeps it honest is named inline.
 
 ## Shared libraries — private peer authority and local viewer authority
@@ -656,12 +657,27 @@ Job Object with kill-on-close before it can execute. Console Ctrl-C and SCM
 stop/shutdown converge on the same graceful cancellation path; closing the job
 is the final descendant-containment backstop.
 
-## Transport — public HTTP, internal cluster TLS
+<a id="transport--public-http-internal-cluster-tls"></a>
 
-plurx's public HTTP/API listener remains **plain HTTP**. It does not terminate
-public HTTPS, because on a home LAN the certificate story is pure friction and
-the design target is "works on `http://192.168.x.x:32400` out of the box." The
-Android client even sets `usesCleartextTraffic` for the same reason.
+## Transport — optional public HTTPS and separate internal cluster TLS
+
+The public HTTP/API listener remains available on its existing port. Optional
+native HTTPS serves the identical authorized router on a separate port
+(default `32443`), disabled by default and activated at restart. It does not
+redirect HTTP, enable HSTS or change discovery. The Android client's existing
+cleartext permission remains; enabling HTTPS does not enforce client use.
+
+Node-local HTTPS intent is admin-only, guarded by node identity and persistent
+revision, and never replicated. Generated self-signed identity is retained
+across restart and off/on in a private bundle; supplied chain/key paths are
+server-side files loaded at startup. Generated identities never silently rotate
+or renew. The public-certificate download derives only CERTIFICATE blocks from
+the active loaded chain, not the managed bundle or subsequently changed file.
+Verify its fingerprint and establish client trust explicitly. A displayed URL
+or downloaded chain is not trust qualification. Browser/native and physical
+playback acceptance remain open in [the HTTPS ledger](server/HTTPS-BUILD.md).
+The [operations guide](OPERATIONS.md#optional-https-and-persistent-identity)
+covers permissions, explicit replacement, env overrides and recovery.
 
 Hiqlite's Raft and internal cluster-API listeners use automatic rustls TLS and
 their separate shared secrets. They may bind a reachable LAN address for voter
@@ -693,17 +709,17 @@ wire during rolling upgrades. The activity key is not substituted into the
 artwork protocol without a future negotiated protocol transition; new and old
 v4 voters therefore continue to exchange artwork while a cluster rolls.
 
-The consequence is explicit: **anything past a network you fully trust belongs
-behind a TLS-terminating reverse proxy** (Caddy, nginx, Traefik). Over plain
-HTTP the bearer token crosses the wire in the clear, so on an untrusted segment
-a passive listener can lift it and gain exactly the holder's access. The proxy
-is also where you add the two things plurx intentionally omits below —
-HTTPS and request rate limiting. Deploy recipes: [deploy/README.md](../deploy/README.md).
+Over plain HTTP the bearer token crosses the wire in the clear, so on an
+untrusted segment a passive listener can lift it and gain the holder's access.
+Use verified native HTTPS or a TLS-terminating reverse proxy for that traffic.
+A reverse proxy also supplies perimeter controls such as request rate limiting
+that encryption alone does not provide. Deploy recipes:
+[deploy/README.md](../deploy/README.md).
 
 Cluster admission narrows that exposure but does not erase it. The
 redeem/finalize bodies carry only the join-token digest, never its embedded
 secrets. The admin issuance response still returns the complete bearer once,
-so mint it over a trusted LAN or an HTTPS reverse-proxy URL and put it directly
+so mint it over a trusted LAN or verified HTTPS URL and put it directly
 into the owner-only file.
 
 ## Non-goals — what plurx does not defend against
@@ -711,10 +727,11 @@ into the owner-only file.
 Listing these is the point, not an apology — an honest boundary is what makes
 the protections above believable. plurx does **not**:
 
-- **Terminate public TLS.** No HTTPS on the public HTTP/API listener; front it
-  with a reverse proxy for any exposure beyond a trusted LAN (see above). The
-  Hiqlite Raft/API listeners use internal automatic TLS, not operator-facing
-  HTTPS.
+- **Force encrypted public access or install client trust.** Optional native
+  HTTPS keeps HTTP available; it does not redirect, add HSTS, provision a
+  public CA certificate or alter browser/native trust stores. Choose and
+  qualify trusted client URLs explicitly. Hiqlite and sharing TLS use separate
+  identities and do not confer trust on the public HTTPS listener.
 - **Authenticate cluster peers with a certificate authority.** Hiqlite's
   automatic self-signed certificates are accepted without verification. The
   shared Raft/API secrets authenticate requests, but an active LAN attacker who

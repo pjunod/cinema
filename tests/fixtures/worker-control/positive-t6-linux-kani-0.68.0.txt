@@ -1,0 +1,2202 @@
+Kani Rust Verifier 0.68.0 (cargo plugin)
+CBMC 6.11.0
+   Compiling plurx-worker-control v0.7.0 (~/ci-workspace/target/verification/worker-control-5811-1/source)
+warning: use of an unstable feature
+ --> <crate attribute>:1:12
+  |
+1 | #![feature(register_tool)]
+  |            ^^^^^^^^^^^^^
+  |
+  = note: requested on the command line with `--force-warn unstable-features`
+
+warning: Found the following unsupported constructs:
+             - caller_location (1)
+             - foreign function (1)
+         
+         Verification will fail if one or more of these constructs is reachable.
+         See https://model-checking.github.io/kani/rust-feature-support.html for more details.
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.45s
+Checking harness proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected...
+CBMC 6.11.0 (cbmc-6.11.0)
+CBMC version 6.11.0 (cbmc-6.11.0) 64-bit x86_64 linux
+Reading GOTO program from file ~/ci-workspace/target/verification/worker-control-5811-1/build/kani/x86_64-unknown-linux-gnu/debug/build/plurx-worker-control/4a87db9354386e77/out/plurx_worker_control-4a87db9354386e77__RNvNtCsj4KlKh3A38j_20plurx_worker_control6proofs54t6_all_typed_stale_pairs_and_terminal_reentry_rejected.out
+Generating GOTO Program
+Adding CPROVER library (x86_64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Running with 16 object bits, 48 offset bits (user-specified)
+Starting Bounded Model Checking
+aborting path on assume(false) at file src/lib.rs line 0 column 0 function library_lifecycle::step thread 0
+aborting path on assume(false) at file src/proofs.rs line 114 column 1 function proofs::accepted_pair thread 0
+aborting path on assume(false) at file src/lib.rs line 0 column 0 function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq thread 0
+aborting path on assume(false) at file src/lib.rs line 0 column 0 function library_lifecycle::step thread 0
+aborting path on assume(false) at file src/lib.rs line 0 column 0 function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq thread 0
+aborting path on assume(false) at file ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs line 50 column 9 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2641 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panic.rs line 177 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs line 69 column 5 function core::slice::index::slice_index_fail::do_panic::runtime thread 0
+aborting path on assume(false) at file ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs line 2641 column 9 function core::slice::index::slice_index_fail::do_panic thread 0
+aborting path on assume(false) at file ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panic.rs line 177 column 9 function core::slice::index::slice_index_fail thread 0
+aborting path on assume(false) at file ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs line 413 column 13 function <core::ops::Range<usize> as core::slice::SliceIndex<[library_lifecycle::Effect]>>::index thread 0
+aborting path on assume(false) at file library/kani_core/src/models.rs line 203 column 17 function <usize as kani::rustc_intrinsics::ToISize>::to_isize thread 0
+aborting path on assume(false) at file library/kani/src/lib.rs line 57 column 1 function <usize as kani::rustc_intrinsics::ToISize>::to_isize thread 0
+aborting path on assume(false) at file library/kani/src/lib.rs line 57 column 1 function <usize as kani::rustc_intrinsics::ToISize>::to_isize thread 0
+Unwinding loop _RNvNtCsj4KlKh3A38j_20plurx_worker_control6proofs54t6_all_typed_stale_pairs_and_terminal_reentry_rejected.0 iteration 1 file src/proofs.rs line 568 column 9 function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected thread 0
+aborting path on assume(false) at file library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+Unwinding loop _RNvNtCsj4KlKh3A38j_20plurx_worker_control6proofs54t6_all_typed_stale_pairs_and_terminal_reentry_rejected.0 iteration 2 file src/proofs.rs line 568 column 9 function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected thread 0
+aborting path on assume(false) at file library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+Unwinding loop _RNvNtCsj4KlKh3A38j_20plurx_worker_control6proofs54t6_all_typed_stale_pairs_and_terminal_reentry_rejected.0 iteration 3 file src/proofs.rs line 568 column 9 function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected thread 0
+aborting path on assume(false) at file library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+Unwinding loop _RNvNtCsj4KlKh3A38j_20plurx_worker_control6proofs54t6_all_typed_stale_pairs_and_terminal_reentry_rejected.0 iteration 4 file src/proofs.rs line 568 column 9 function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected thread 0
+aborting path on assume(false) at file library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+Unwinding loop _RNvNtCsj4KlKh3A38j_20plurx_worker_control6proofs54t6_all_typed_stale_pairs_and_terminal_reentry_rejected.0 iteration 5 file src/proofs.rs line 568 column 9 function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected thread 0
+aborting path on assume(false) at file library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+Unwinding loop _RNvNtCsj4KlKh3A38j_20plurx_worker_control6proofs54t6_all_typed_stale_pairs_and_terminal_reentry_rejected.0 iteration 6 file src/proofs.rs line 568 column 9 function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected thread 0
+aborting path on assume(false) at file library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+Unwinding loop _RNvNtCsj4KlKh3A38j_20plurx_worker_control6proofs54t6_all_typed_stale_pairs_and_terminal_reentry_rejected.0 iteration 7 file src/proofs.rs line 568 column 9 function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected thread 0
+aborting path on assume(false) at file library/kani/src/lib.rs line 57 column 1 function kani::mem::cbmc::same_allocation thread 0
+Not unwinding loop _RNvNtCsj4KlKh3A38j_20plurx_worker_control6proofs54t6_all_typed_stale_pairs_and_terminal_reentry_rejected.0 iteration 8 file src/proofs.rs line 568 column 9 function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected thread 0
+aborting path on assume(false) at file src/lib.rs line 0 column 0 function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected thread 0
+Runtime Symex: 0.992208s
+size of program expression: 32952 steps
+slicing removed 27033 assignments
+Generated 832 VCC(s), 147 remaining after simplification
+Runtime Postprocess Equation: 0.0363847s
+Passing problem to propositional reduction
+converting SSA
+Runtime Convert SSA: 0.136402s
+Running propositional reduction
+Post-processing
+Runtime Post-process: 0.0119038s
+Solving with CaDiCaL 3.0.0
+113197 variables, 357696 clauses
+SAT checker: instance is SATISFIABLE
+Runtime Solver: 0.031772s
+Runtime decision procedure: 0.172372s
+Running propositional reduction
+Solving with CaDiCaL 3.0.0
+113198 variables, 357697 clauses
+SAT checker: instance is SATISFIABLE
+Runtime Solver: 0.00908886s
+Runtime decision procedure: 0.0102188s
+Running propositional reduction
+Solving with CaDiCaL 3.0.0
+113199 variables, 357698 clauses
+SAT checker: instance is SATISFIABLE
+Runtime Solver: 0.00962087s
+Runtime decision procedure: 0.0107427s
+Running propositional reduction
+Solving with CaDiCaL 3.0.0
+113200 variables, 357699 clauses
+SAT checker: instance is SATISFIABLE
+Runtime Solver: 0.241141s
+Runtime decision procedure: 0.242184s
+Running propositional reduction
+Solving with CaDiCaL 3.0.0
+113201 variables, 357700 clauses
+SAT checker: instance is SATISFIABLE
+Runtime Solver: 0.0804152s
+Runtime decision procedure: 0.0815947s
+Running propositional reduction
+Solving with CaDiCaL 3.0.0
+113202 variables, 357701 clauses
+SAT checker: instance is UNSATISFIABLE
+Runtime Solver: 0.0939234s
+Runtime decision procedure: 0.0949075s
+
+RESULTS:
+Check 1: kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *const library_lifecycle::Effect, usize>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset in bytes overflows isize"
+	 - Location: library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *const library_lifecycle::Effect, usize>
+
+Check 2: kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *const library_lifecycle::Effect, usize>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "Offset result address must equal original pointer address plus offset"
+	 - Location: library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *const library_lifecycle::Effect, usize>
+
+Check 3: kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *const library_lifecycle::Effect, usize>.safety_check.3
+	 - Status: SUCCESS
+	 - Description: "Offset result and original pointer must point to the same allocation"
+	 - Location: library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *const library_lifecycle::Effect, usize>
+
+Check 4: proofs::state.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: src/proofs.rs:31:11 in function proofs::state
+
+Check 5: proofs::state.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: src/proofs.rs:31:11 in function proofs::state
+
+Check 6: proofs::interrupt.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: src/proofs.rs:13:11 in function proofs::interrupt
+
+Check 7: proofs::interrupt.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: src/proofs.rs:13:11 in function proofs::interrupt
+
+Check 8: kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *mut library_lifecycle::Effect, usize>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset in bytes overflows isize"
+	 - Location: library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *mut library_lifecycle::Effect, usize>
+
+Check 9: kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *mut library_lifecycle::Effect, usize>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "Offset result address must equal original pointer address plus offset"
+	 - Location: library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *mut library_lifecycle::Effect, usize>
+
+Check 10: kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *mut library_lifecycle::Effect, usize>.safety_check.3
+	 - Status: SUCCESS
+	 - Description: "Offset result and original pointer must point to the same allocation"
+	 - Location: library/kani/src/lib.rs:57:1 in function kani::rustc_intrinsics::offset::<library_lifecycle::Effect, *mut library_lifecycle::Effect, usize>
+
+Check 11: core::slice::index::slice_index_fail::do_panic::runtime.assertion.2
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:59:9 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 12: proofs::event.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: src/proofs.rs:47:11 in function proofs::event
+
+Check 13: proofs::event.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: src/proofs.rs:47:11 in function proofs::event
+
+Check 14: kani::mem::cbmc::same_allocation.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "Kani does not support reasoning about pointer to unallocated memory"
+	 - Location: library/kani/src/lib.rs:57:1 in function kani::mem::cbmc::same_allocation
+
+Check 15: core::slice::index::slice_index_fail::do_panic::runtime.assertion.3
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:69:5 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 16: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/lib.rs:0:0 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 17: core::num::<impl usize>::checked_sub.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_sub` which would overflow"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:1096:31 in function core::num::<impl usize>::checked_sub
+
+Check 18: core::fmt::Arguments::<'_>::from_str.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to shift left with overflow"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/fmt/mod.rs:820:38 in function core::fmt::Arguments::<'_>::from_str
+
+Check 19: core::panicking::panic_nounwind_fmt::runtime.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "call to foreign "Rust" function `_RNvCskSgPeDzUGbv_7___rustc17rust_begin_unwind` is not currently supported by Kani. Please post your example at https://github.com/model-checking/kani/issues/new/choose"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panicking.rs:110:17 in function core::panicking::panic_nounwind_fmt::runtime
+
+Check 20: core::panic::Location::<'_>::caller.unsupported_construct.1
+	 - Status: SUCCESS
+	 - Description: "caller_location is not currently supported by Kani. Please post your example at https://github.com/model-checking/kani/issues/374"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panic/location.rs:181:9 in function core::panic::Location::<'_>::caller
+
+Check 21: proofs::accepted_pair.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/proofs.rs:114:1 in function proofs::accepted_pair
+
+Check 22: core::slice::index::slice_index_fail::do_panic::runtime.assertion.1
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:41:9 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 23: core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:454:18 in function core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>
+
+Check 24: core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:454:18 in function core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>
+
+Check 25: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.assertion.1
+	 - Status: SUCCESS
+	 - Description: "T6 all stale state event pairs rejected without effects"
+	 - Location: src/proofs.rs:541:9 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 26: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.assertion.2
+	 - Status: SUCCESS
+	 - Description: "T6 terminal rejects every typed event"
+	 - Location: src/proofs.rs:546:5 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 27: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.assertion.3
+	 - Status: SUCCESS
+	 - Description: "T6 domain outcome cannot be repeated outside claimed"
+	 - Location: src/proofs.rs:551:9 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 28: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.assertion.4
+	 - Status: SUCCESS
+	 - Description: "T6 reachable protocol event accepted"
+	 - Location: src/proofs.rs:562:30 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 29: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.assertion.5
+	 - Status: SUCCESS
+	 - Description: "T6 bind refusal cannot restart processing"
+	 - Location: src/proofs.rs:569:13 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 30: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.assertion.6
+	 - Status: SUCCESS
+	 - Description: "T6 reachable protocol event accepted"
+	 - Location: src/proofs.rs:578:25 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 31: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/lib.rs:0:0 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 32: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.assertion.7
+	 - Status: SUCCESS
+	 - Description: "T6 refused bind terminates after release acknowledgment"
+	 - Location: src/proofs.rs:586:5 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 33: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.assertion.8
+	 - Status: SUCCESS
+	 - Description: "T6 refused bind remains terminal"
+	 - Location: src/proofs.rs:590:5 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 34: proofs::settlement_kind.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: src/proofs.rs:22:11 in function proofs::settlement_kind
+
+Check 35: proofs::settlement_kind.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to calculate the remainder with a divisor of zero"
+	 - Location: src/proofs.rs:22:11 in function proofs::settlement_kind
+
+Check 36: core::num::<impl usize>::unchecked_sub.arithmetic_overflow.1
+	 - Status: SUCCESS
+	 - Description: "attempt to compute `unchecked_sub` which would overflow"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/uint_macros.rs:1192:17 in function core::num::<impl usize>::unchecked_sub
+
+Check 37: <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:133:25 in function <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length
+
+Check 38: <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:133:25 in function <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length
+
+Check 39: <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length.safety_check.3
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:133:42 in function <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length
+
+Check 40: <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length.safety_check.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:133:42 in function <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length
+
+Check 41: <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length.assertion.1
+	 - Status: UNREACHABLE
+	 - Description: "attempt to add with overflow"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/cmp.rs:136:13 in function <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length
+
+Check 42: library_lifecycle::step.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/lib.rs:0:0 in function library_lifecycle::step
+
+Check 43: core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:594:5 in function core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok
+
+Check 44: core::slice::index::slice_index_fail::do_panic::runtime.assertion.4
+	 - Status: SUCCESS
+	 - Description: "This is a placeholder message; Kani doesn't support message formatted at runtime"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:50:9 in function core::slice::index::slice_index_fail::do_panic::runtime
+
+Check 45: <core::ops::Range<usize> as core::slice::SliceIndex<[library_lifecycle::Effect]>>::index.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:405:5 in function <core::ops::Range<usize> as core::slice::SliceIndex<[library_lifecycle::Effect]>>::index
+
+Check 46: <core::ops::Range<usize> as core::slice::SliceIndex<[library_lifecycle::Effect]>>::index.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "misaligned pointer to reference cast: address must be a multiple of its type's alignment"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:411:22 in function <core::ops::Range<usize> as core::slice::SliceIndex<[library_lifecycle::Effect]>>::index
+
+Check 47: <core::ops::Range<usize> as core::slice::SliceIndex<[library_lifecycle::Effect]>>::index.safety_check.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:411:22 in function <core::ops::Range<usize> as core::slice::SliceIndex<[library_lifecycle::Effect]>>::index
+
+Check 48: <usize as kani::rustc_intrinsics::ToISize>::to_isize.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: library/kani_core/src/models.rs:203:17 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 49: <usize as kani::rustc_intrinsics::ToISize>::to_isize.safety_check.1
+	 - Status: SUCCESS
+	 - Description: "Offset value overflows isize"
+	 - Location: library/kani/src/lib.rs:57:1 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 50: <usize as kani::rustc_intrinsics::ToISize>::to_isize.assertion.1
+	 - Status: SUCCESS
+	 - Description: "internal error: entered unreachable code"
+	 - Location: library/kani/src/lib.rs:57:1 in function <usize as kani::rustc_intrinsics::ToISize>::to_isize
+
+Check 51: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.unreachable.1
+	 - Status: SUCCESS
+	 - Description: "unreachable code"
+	 - Location: src/lib.rs:0:0 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 52: core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:595:18 in function core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok
+
+Check 53: core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:595:18 in function core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok
+
+Check 54: core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:595:18 in function core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok
+
+Check 55: core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:595:18 in function core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok
+
+Check 56: core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:595:18 in function core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok
+
+Check 57: core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:595:18 in function core::result::Result::<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale>::is_ok
+
+Check 58: library_lifecycle::Effects::one.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:95:17 in function library_lifecycle::Effects::one
+
+Check 59: library_lifecycle::Effects::one.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:96:17 in function library_lifecycle::Effects::one
+
+Check 60: library_lifecycle::Effects::one.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:97:17 in function library_lifecycle::Effects::one
+
+Check 61: library_lifecycle::Effects::one.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:98:17 in function library_lifecycle::Effects::one
+
+Check 62: library_lifecycle::Effects::one.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:99:17 in function library_lifecycle::Effects::one
+
+Check 63: library_lifecycle::Effects::two.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:110:17 in function library_lifecycle::Effects::two
+
+Check 64: library_lifecycle::Effects::two.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:111:17 in function library_lifecycle::Effects::two
+
+Check 65: library_lifecycle::Effects::two.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:112:17 in function library_lifecycle::Effects::two
+
+Check 66: library_lifecycle::Effects::two.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:113:17 in function library_lifecycle::Effects::two
+
+Check 67: library_lifecycle::Effects::empty.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:82:21 in function library_lifecycle::Effects::empty
+
+Check 68: library_lifecycle::Effects::three.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:125:17 in function library_lifecycle::Effects::three
+
+Check 69: library_lifecycle::Effects::three.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:126:17 in function library_lifecycle::Effects::three
+
+Check 70: library_lifecycle::Effects::three.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:127:17 in function library_lifecycle::Effects::three
+
+Check 71: library_lifecycle::Effects::as_slice.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:87:35 in function library_lifecycle::Effects::as_slice
+
+Check 72: library_lifecycle::Effects::as_slice.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:87:35 in function library_lifecycle::Effects::as_slice
+
+Check 73: library_lifecycle::Effects::as_slice.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:87:35 in function library_lifecycle::Effects::as_slice
+
+Check 74: library_lifecycle::Effects::as_slice.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:87:35 in function library_lifecycle::Effects::as_slice
+
+Check 75: library_lifecycle::Effects::as_slice.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:87:35 in function library_lifecycle::Effects::as_slice
+
+Check 76: library_lifecycle::Effects::as_slice.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:87:35 in function library_lifecycle::Effects::as_slice
+
+Check 77: core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:454:20 in function core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>
+
+Check 78: core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:454:20 in function core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>
+
+Check 79: core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:454:20 in function core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>
+
+Check 80: core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:454:20 in function core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>
+
+Check 81: core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:454:20 in function core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>
+
+Check 82: core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:454:20 in function core::ptr::NonNull::<library_lifecycle::Effect>::as_ref::<'_>
+
+Check 83: library_lifecycle::step.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:224:54 in function library_lifecycle::step
+
+Check 84: library_lifecycle::step.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:224:67 in function library_lifecycle::step
+
+Check 85: library_lifecycle::step.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:221:21 in function library_lifecycle::step
+
+Check 86: library_lifecycle::step.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:222:21 in function library_lifecycle::step
+
+Check 87: library_lifecycle::step.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:214:21 in function library_lifecycle::step
+
+Check 88: library_lifecycle::step.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:215:21 in function library_lifecycle::step
+
+Check 89: library_lifecycle::step.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:207:21 in function library_lifecycle::step
+
+Check 90: library_lifecycle::step.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:208:21 in function library_lifecycle::step
+
+Check 91: library_lifecycle::step.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:192:26 in function library_lifecycle::step
+
+Check 92: library_lifecycle::step.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:192:41 in function library_lifecycle::step
+
+Check 93: library_lifecycle::step.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:178:54 in function library_lifecycle::step
+
+Check 94: library_lifecycle::step.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:180:36 in function library_lifecycle::step
+
+Check 95: library_lifecycle::step.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:180:50 in function library_lifecycle::step
+
+Check 96: library_lifecycle::step.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:180:62 in function library_lifecycle::step
+
+Check 97: library_lifecycle::step.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:167:41 in function library_lifecycle::step
+
+Check 98: library_lifecycle::step.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:173:26 in function library_lifecycle::step
+
+Check 99: library_lifecycle::step.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:173:41 in function library_lifecycle::step
+
+Check 100: library_lifecycle::step.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:148:50 in function library_lifecycle::step
+
+Check 101: library_lifecycle::step.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:162:17 in function library_lifecycle::step
+
+Check 102: library_lifecycle::step.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:163:17 in function library_lifecycle::step
+
+Check 103: library_lifecycle::step.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:227:21 in function library_lifecycle::step
+
+Check 104: library_lifecycle::step.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:146:73 in function library_lifecycle::step
+
+Check 105: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/proofs.rs:95:15 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 106: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/proofs.rs:567:31 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 107: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/proofs.rs:568:23 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 108: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 109: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 110: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 111: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 112: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 113: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 114: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 115: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 116: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 117: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 118: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 119: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/proofs.rs:571:21 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 120: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/proofs.rs:95:15 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+Check 121: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:27 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 122: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:27 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 123: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:27 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 124: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:27 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 125: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:27 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 126: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:161:27 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 127: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:162:34 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 128: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:162:34 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 129: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:162:34 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 130: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:162:34 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 131: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:162:34 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 132: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:162:34 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 133: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:169:36 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 134: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:175:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 135: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:175:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 136: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:175:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 137: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:175:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 138: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:175:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 139: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:175:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 140: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:181:36 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 141: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:185:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 142: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:185:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 143: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:185:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 144: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:185:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 145: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:185:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 146: <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:185:25 in function <core::slice::Iter<'_, library_lifecycle::Effect> as core::iter::Iterator>::next
+
+Check 147: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 148: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 149: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 150: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 151: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 152: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 153: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 154: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 155: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 156: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 157: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 158: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 159: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 160: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 161: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 162: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 163: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 164: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 165: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 166: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 167: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 168: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 169: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 170: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 171: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 172: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 173: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 174: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 175: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 176: <library_lifecycle::State as core::cmp::PartialEq>::eq.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:12:30 in function <library_lifecycle::State as core::cmp::PartialEq>::eq
+
+Check 177: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 178: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 179: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 180: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 181: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 182: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 183: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 184: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 185: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 186: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 187: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 188: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Settlement>::eq
+
+Check 189: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 190: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 191: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 192: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 193: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 194: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 195: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 196: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 197: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 198: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 199: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 200: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::SettlementKind>::eq
+
+Check 201: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 202: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 203: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 204: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 205: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 206: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 207: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 208: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 209: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 210: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 211: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 212: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Stale>::eq
+
+Check 213: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 214: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 215: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 216: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 217: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 218: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 219: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 220: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 221: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 222: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 223: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 224: core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &library_lifecycle::Interrupt>::eq
+
+Check 225: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 226: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 227: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 228: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 229: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 230: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 231: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 232: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 233: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 234: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 235: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 236: core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &(library_lifecycle::State, library_lifecycle::Effects)>::eq
+
+Check 237: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 238: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 239: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 240: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 241: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 242: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:27 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 243: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 244: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 245: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 246: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 247: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 248: core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2399:34 in function core::cmp::impls::<impl core::cmp::PartialEq for &i64>::eq
+
+Check 249: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 250: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 251: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 252: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 253: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 254: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 255: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 256: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 257: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 258: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 259: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 260: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 261: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 262: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 263: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 264: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 265: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 266: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 267: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 268: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 269: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 270: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 271: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 272: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 273: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 274: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 275: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 276: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 277: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 278: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 279: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.31
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 280: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.32
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 281: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.33
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 282: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.34
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 283: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.35
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 284: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.36
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 285: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.37
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 286: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.38
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 287: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.39
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 288: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.40
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 289: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.41
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 290: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.42
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 291: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.43
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 292: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.44
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 293: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.45
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 294: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.46
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 295: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.47
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 296: <library_lifecycle::Effect as core::cmp::PartialEq>::eq.pointer_dereference.48
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:56:30 in function <library_lifecycle::Effect as core::cmp::PartialEq>::eq
+
+Check 297: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 298: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 299: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 300: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 301: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 302: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 303: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 304: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 305: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 306: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 307: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 308: <library_lifecycle::Effects as core::cmp::PartialEq>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:74:5 in function <library_lifecycle::Effects as core::cmp::PartialEq>::eq
+
+Check 309: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:9 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 310: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:9 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 311: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:9 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 312: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:9 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 313: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:9 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 314: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:9 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 315: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:26 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 316: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:26 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 317: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:26 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 318: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:26 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 319: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:26 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 320: <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1663:26 in function <core::ptr::NonNull<library_lifecycle::Effect> as core::cmp::PartialEq>::eq
+
+Check 321: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 322: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 323: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 324: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 325: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 326: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 327: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 328: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 329: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 330: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 331: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 332: <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:33:30 in function <library_lifecycle::Interrupt as core::cmp::PartialEq>::eq
+
+Check 333: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 334: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 335: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 336: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 337: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 338: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 339: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 340: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 341: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 342: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 343: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 344: <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:42:30 in function <library_lifecycle::SettlementKind as core::cmp::PartialEq>::eq
+
+Check 345: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:54 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 346: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:54 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 347: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:54 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 348: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:54 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 349: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:54 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 350: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:54 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 351: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:63 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 352: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:63 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 353: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:63 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 354: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:63 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 355: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:63 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 356: core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:2153:63 in function core::cmp::impls::<impl core::cmp::PartialEq for i64>::eq
+
+Check 357: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 358: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 359: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 360: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 361: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 362: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 363: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 364: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 365: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 366: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 367: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 368: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 369: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 370: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 371: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 372: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 373: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 374: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 375: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 376: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 377: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 378: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 379: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 380: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 381: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 382: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 383: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 384: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 385: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 386: <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: ../../../../../../../..~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:554:16 in function <core::result::Result<(library_lifecycle::State, library_lifecycle::Effects), library_lifecycle::Stale> as core::cmp::PartialEq>::eq
+
+Check 387: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.1
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 388: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.2
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 389: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.3
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 390: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.4
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 391: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.5
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 392: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.6
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 393: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.7
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 394: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.8
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 395: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.9
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 396: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.10
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 397: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.11
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 398: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.12
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 399: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.13
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 400: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.14
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 401: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.15
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 402: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.16
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 403: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.17
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 404: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.18
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 405: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.19
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 406: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.20
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 407: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.21
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 408: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.22
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 409: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.23
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 410: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.24
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 411: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.25
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer NULL"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 412: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.26
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer invalid"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 413: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.27
+	 - Status: SUCCESS
+	 - Description: "dereference failure: deallocated dynamic object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 414: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.28
+	 - Status: SUCCESS
+	 - Description: "dereference failure: dead object"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 415: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.29
+	 - Status: SUCCESS
+	 - Description: "dereference failure: pointer outside object bounds"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 416: <library_lifecycle::Settlement as core::cmp::PartialEq>::eq.pointer_dereference.30
+	 - Status: SUCCESS
+	 - Description: "dereference failure: invalid integer address"
+	 - Location: src/library_lifecycle.rs:50:30 in function <library_lifecycle::Settlement as core::cmp::PartialEq>::eq
+
+Check 417: proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected.unwind.0
+	 - Status: SUCCESS
+	 - Description: "unwinding assertion loop 0"
+	 - Location: src/proofs.rs:568:9 in function proofs::t6_all_typed_stale_pairs_and_terminal_reentry_rejected
+
+
+SUMMARY:
+ ** 0 of 417 failed (2 unreachable)
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 2.2681594s
+
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.

@@ -25,7 +25,7 @@ fn prepared_bootstrap_purpose_refuses_voluntary_upward_foreign_and_missing_decod
     automatic.candidate_catalog = Some(crate::media_sessions::CandidateCatalogContext {
         caps,
         candidate: QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Encode,
@@ -135,7 +135,7 @@ fn cached_recovery_purpose_requires_downward_auto_identity_grade_and_decoder() {
     automatic.candidate_catalog = Some(crate::media_sessions::CandidateCatalogContext {
         caps,
         candidate: QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Encode,
@@ -249,7 +249,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
         .expect("actual bounded enqueue receiver");
     let digest = [42; 32];
     let candidate = QualityCandidate {
-        processed_hdr10: false,
+        processed_dv: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Remux,
@@ -285,6 +285,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds: 0.0,
         audio_index: None,

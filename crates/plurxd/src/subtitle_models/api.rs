@@ -270,6 +270,7 @@ fn job_public(
             matches!(
                 *phase,
                 "downloading"
+                    | "waiting_for_capacity"
                     | "verifying"
                     | "decoding"
                     | "transcribing"
@@ -481,6 +482,11 @@ mod tests {
                 "queued"
             );
         }
+        job.checkpoint = Some(json!({"fence":2,"phase":"waiting_for_capacity"}));
+        assert_eq!(
+            job_public(&job, &payload, &[], 1300).expect("live wait stage")["phase"],
+            "waiting_for_capacity"
+        );
         job.checkpoint = Some(json!({"fence":2,"phase":"transcribing"}));
         job.token
             .as_mut()
@@ -649,6 +655,7 @@ mod tests {
         assert_eq!((stored.size, stored.mtime), (size, mtime));
         let body = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nPRIVATE CAPTION BODY\n";
         let provider = DownloadedSubtitle {
+            text_translation: None,
             source_size: size,
             source_mtime: mtime,
             provider_file_id: 42,

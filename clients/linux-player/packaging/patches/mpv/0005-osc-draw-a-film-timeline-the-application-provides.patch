@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: plurx contributors <noreply@plurx.invalid>
+Date: Mon, 26 Oct 2026 12:00:00 +0000
+Subject: [PATCH 5/5] osc: draw a film timeline the application provides
+
+An application that plays part of a longer film, such as a live
+presentation that starts part way in and grows, can set
+user-data/osc/film to {origin = <s>, duration = <s>}. The seekbar, its
+tooltip and seekable ranges, and both time codes then show the whole film
+instead of the stream mpv holds, and a seek outside what the stream holds
+is handed to the application as the script message
+"osc-film-seek <seconds>" instead of being sent to mpv, which could only
+clamp it. Unset, the OSC behaves exactly as before.
+---
+ player/lua/osc.lua | 91 ++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 80 insertions(+), 11 deletions(-)
+
+diff --git a/player/lua/osc.lua b/player/lua/osc.lua
+index 80604ca52..918d03cd7 100644
+--- a/player/lua/osc.lua
++++ b/player/lua/osc.lua
+@@ -366,6 +366,52 @@ local state = {
+     osc_tracklist_warned = false,
+ }
+ 
++-- A film timeline the embedding application sets in user-data/osc/film as
++-- {origin = <s>, duration = <s>} when the stream mpv plays covers only part
++-- of a longer film: a live presentation that starts at `origin` and grows.
++-- The seekbar and the time display then show the whole film, and a seek
++-- outside what the stream holds is handed to the application as the script
++-- message "osc-film-seek <s>" instead of being sent to mpv.
++local function film()
++    local f = state.film
++    if type(f) == "table" and type(f.origin) == "number"
++            and type(f.duration) == "number" and f.duration > 0 then
++        return f
++    end
++    return nil
++end
++
++local function osc_duration()
++    local f = film()
++    return f and f.duration or state.duration
++end
++
++local function film_position()
++    local f = film()
++    local t = mp.get_property_number("playback-time")
++    if not f or not t then
++        return nil
++    end
++    return f.origin + t
++end
++
++-- Seek to `pos` percent of the timeline the OSC shows.
++local function seek_percent(pos, flags)
++    local f = film()
++    if not f then
++        mp.commandv("seek", pos, flags)
++        return
++    end
++    local target = f.duration * pos / 100
++    local held = mp.get_property_number("duration")
++    local local_target = target - f.origin
++    if held and local_target >= 0 and local_target <= held then
++        mp.commandv("seek", local_target, "absolute+exact")
++    else
++        mp.commandv("script-message", "osc-film-seek", tostring(target))
++    end
++end
++
+ local logo_lines = {
+     -- White border
+     "{\\c&HE5E5E5&\\p6}m 895 10 b 401 10 0 410 0 905 0 1399 401 1800 895 1800 1390 1800 1790 1399 1790 905 1790 410 1390 10 895 10 {\\p0}",
+@@ -2512,7 +2558,7 @@ local function osc_init()
+                  and user_opts.layout ~= "slimtopbar"
+     state.slider_element = ne.enabled and ne or nil  -- used for forced_title
+     ne.slider.markerF = function ()
+-        if state.duration then
++        if state.duration and not film() then
+             local markers = {}
+             for n = 1, #state.chapter_list do
+                 markers[n] = (state.chapter_list[n].time / state.duration * 100)
+@@ -2522,11 +2568,17 @@ local function osc_init()
+             return {}
+         end
+     end
+-    ne.slider.posF =
+-        function () return mp.get_property_number("percent-pos") end
++    ne.slider.posF = function ()
++        local f, t = film(), film_position()
++        if f and t then
++            return 100 * t / f.duration
++        end
++        return mp.get_property_number("percent-pos")
++    end
+     ne.slider.tooltipF = function (pos)
+-        if state.duration and pos then
+-            local possec = state.duration * (pos / 100)
++        local duration = osc_duration()
++        if duration and pos then
++            local possec = duration * (pos / 100)
+             return mp.format_time(possec)
+         else
+             return ""
+@@ -2540,10 +2592,13 @@ local function osc_init()
+             return nil
+         end
+         local nranges = {}
++        local f = film()
++        local origin = f and f.origin or 0
++        local duration = osc_duration()
+         for _, range in pairs(state.demuxer_cache_state["seekable-ranges"]) do
+             nranges[#nranges + 1] = {
+-                ["start"] = 100 * range["start"] / state.duration,
+-                ["end"] = 100 * range["end"] / state.duration,
++                ["start"] = 100 * (origin + range["start"]) / duration,
++                ["end"] = 100 * (origin + range["end"]) / duration,
+             }
+         end
+         return nranges
+@@ -2564,14 +2619,14 @@ local function osc_init()
+                     if not user_opts.seekbarkeyframes then
+                         flags = flags .. "+exact"
+                     end
+-                    mp.commandv("seek", seekto, flags)
++                    seek_percent(seekto, flags)
+                     element.state.lastseek = seekto
+             end
+ 
+         end
+     ne.eventresponder["mbtn_left_down"] = function (element)
+         element.state.mbtn_left = true
+-        mp.commandv("seek", get_slider_value(element), "absolute-percent+exact")
++        seek_percent(get_slider_value(element), "absolute-percent+exact")
+     end
+     ne.eventresponder["mbtn_left_up"] = function (element)
+         element.state.mbtn_left = false
+@@ -2607,6 +2662,10 @@ local function osc_init()
+     ne = new_element("tc_left", "button")
+ 
+     ne.content = function ()
++        local t = film_position()
++        if t then
++            return mp.format_time(t, state.tc_ms and "%H:%M:%S.%T" or "%H:%M:%S")
++        end
+         if state.tc_ms then
+             return (mp.get_property_osd("playback-time/full"))
+         else
+@@ -2621,8 +2680,14 @@ local function osc_init()
+     -- tc_right (total/remaining time)
+     ne = new_element("tc_right", "button")
+ 
+-    ne.visible = state.duration and state.duration > 0
++    ne.visible = osc_duration() and osc_duration() > 0
+     ne.content = function ()
++        local f, t = film(), film_position()
++        if f and t and state.rightTC_trem then
++            local minus = user_opts.unicodeminus and UNICODE_MINUS or "-"
++            return minus .. mp.format_time(math.max(0, f.duration - t),
++                                           state.tc_ms and "%H:%M:%S.%T" or "%H:%M:%S")
++        end
+         if state.rightTC_trem then
+             local minus = user_opts.unicodeminus and UNICODE_MINUS or "-"
+             local property = user_opts.remaining_playtime and "playtime-remaining"
+@@ -2634,7 +2699,7 @@ local function osc_init()
+             end
+         end
+ 
+-        return mp.format_time(state.duration or 0, state.tc_ms and "%H:%M:%S.%T" or "%H:%M:%S")
++        return mp.format_time(osc_duration() or 0, state.tc_ms and "%H:%M:%S.%T" or "%H:%M:%S")
+     end
+     ne.eventresponder["mbtn_left_up"] =
+         function () state.rightTC_trem = not state.rightTC_trem end
+@@ -3206,6 +3271,10 @@ observe_cached("chapter-list", function ()
+     table.sort(state.chapter_list, function(a, b) return a.time < b.time end)
+     request_init()
+ end)
++mp.observe_property("user-data/osc/film", "native", function (_, value)
++    state.film = value
++    request_init()
++end)
+ observe_cached("duration", function ()
+     local has_duration = state.duration ~= nil and state.duration > 0
+     if has_duration ~= state.has_duration then

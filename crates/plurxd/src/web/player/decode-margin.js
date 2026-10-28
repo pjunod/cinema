@@ -357,6 +357,7 @@ function teardownHls(){
   if(PLAYER&&PLAYER.preparedRetiring)
     retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
   if(PLAYER) cancelHlsStartup(PLAYER,'teardown');
+  if(PLAYER?.mediaAttachment?.captionReadyCleanup)PLAYER.mediaAttachment.captionReadyCleanup();
   if(PLAYER) PLAYER.mediaAttachment=null;
   // A staged successor belongs to the stream it was prepared against. Any new
   // attach on the authoritative element — a seek, a quality change, a close —
@@ -406,6 +407,8 @@ function setPlaybackMediaSource(v,url){
 function retirePlaybackPredecessor(p,release=releaseSession){
   if(!p?.mediaPredecessor) return;
   const predecessor=p.mediaPredecessor;
+  if(typeof translationAttachmentWillChange==="function")translationAttachmentWillChange(p);
+  if(typeof sharedCaptionAttachmentWillChange==="function")sharedCaptionAttachmentWillChange(p);
   // Its generation stops being about anything the moment it is retired, and so
   // does every fault that was about it (contract §3.4).
   playbackSurfaceStep({retire:playbackSurfaceGeneration(predecessor)});
@@ -420,14 +423,25 @@ function retirePlaybackPredecessor(p,release=releaseSession){
 // Attachment ownership is not command ownership: a native seek or Pause can
 // change the current command while this same decoder is still loading.
 function beginPlaybackMediaAttachment(p){
-  if(typeof translationRetire==="function")translationRetire("attachment changed");
+  if(typeof stopFrameDropRecorder==="function")stopFrameDropRecorder(p,"replaced");
+  if(typeof translationAttachmentWillChange==="function")translationAttachmentWillChange(p);
+  if(typeof sharedCaptionAttachmentWillChange==="function")sharedCaptionAttachmentWillChange(p);
   clearEffectiveProcessing(p);
   // A Shared direct session is read by exactly one attachment; any new one on
   // this player, whatever its route, ends it.
   if(p.sharedDirect)releaseSharedDirect(p);
-  const token={id:(p._mediaAttachmentOrdinal||0)+1};
+  const token={id:(p._mediaAttachmentOrdinal||0)+1,audioOrdinal:typeof selectedAudioIndex==="function"?selectedAudioIndex(p):p.audio?.[p.curAudio]?.index,captionPositionReady:false,captionPositionApplied:false};
   p._mediaAttachmentOrdinal=token.id;
+  if(p.mediaAttachment?.captionReadyCleanup)p.mediaAttachment.captionReadyCleanup();
   p.mediaAttachment=token;
+  const video=typeof document!=="undefined"?document.getElementById("video"):null;
+  const positionReady=()=>playbackCaptionAttachmentPositionReady(video,p,token);
+  if(video&&typeof video.addEventListener==="function"){
+    for(const kind of ["loadeddata","canplay","seeked"])video.addEventListener(kind,positionReady);
+    token.captionReadyCleanup=()=>{for(const kind of ["loadeddata","canplay","seeked"])video.removeEventListener(kind,positionReady);};
+  }
+  if(typeof translationAttachmentDidBegin==="function")translationAttachmentDidBegin(p,token);
+  if(typeof sharedCaptionAttachmentDidBegin==="function")sharedCaptionAttachmentDidBegin(p,token);
   try{window.CinemaDiagnostics?.attach(token,AUTH_GENERATION);}catch(_){}
   // A deliberate reopen mints a new attachment. Clear the retired attempt
   // only after the old attachment can no longer pass its identity closure.
@@ -441,13 +455,31 @@ function beginPlaybackMediaAttachment(p){
   // keeps its own `FAILURE_FRESH_MS` freshness check, which decides whether a
   // refusal still has a sentence worth repeating; it is a different question.)
   playbackSurfaceStep({attach:playbackSurfaceGeneration(p)});
-  return {current:()=>PLAYER===p&&p.mediaAttachment===token};
+  return {token,current:()=>PLAYER===p&&p.mediaAttachment===token};
 }
 function applyPlaybackAttachmentPosition(v,p,attachment,startAt){
   if(!attachment.current()) return;
   const pending=p.controlSeek;
   const position=pending?Math.max(0,pending.targetMs/1000-(p.offset||0)):startAt;
-  if(Number.isFinite(position)&&position>=0) try{v.currentTime=position;}catch(e){}
+  if(Number.isFinite(position)&&position>=0){
+    try{v.currentTime=position;}catch(e){return;}
+    const token=attachment.token||p.mediaAttachment;
+    if(token){token.captionPositionApplied=true;playbackCaptionAttachmentPositionReady(v,p,token);}
+  }
+}
+function playbackCaptionAttachmentPositionReady(v,p,token,frameOwned=false){
+  if(!v||PLAYER!==p||p.mediaAttachment!==token||token?.captionPositionReady||!Number.isFinite(v.readyState)||v.readyState<2||v.seeking||!Number.isFinite(p.offset))return;
+  if(!token.captionPositionApplied){
+    const episode=p.hlsStartup;
+    // hls.js executes its startPosition itself. Its accepted startup episode
+    // and loaded media, or the existing owned frame callback, prove that the
+    // attachment's actual local clock is available without a second seek.
+    if(!frameOwned&&!(episode?.mediaAttachment===token&&episode.transport==="hlsjs"&&episode.hls===p.hls&&episode.manifestState==="parsed"&&episode.mediaLoaded))return;
+    token.captionPositionApplied=true;
+  }
+  token.captionPositionReady=true;
+  if(typeof translationAttachmentPositionReady==="function")translationAttachmentPositionReady(p,token);
+  if(typeof sharedCaptionAttachmentPositionReady==="function")sharedCaptionAttachmentPositionReady(p,token);
 }
 function playbackTransportRecord(v,p,action,origin,reason){
   const sequence=p?(p._transportCommandSequence=(p._transportCommandSequence||0)+1):0;
@@ -605,6 +637,7 @@ function stopPlayerTimers(){
   if(!PLAYER) return;
   if(PLAYER.preparedRetiring)
     retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
+  if(typeof stopFrameDropRecorder==="function")stopFrameDropRecorder(PLAYER);
   stopPlaybackControl(PLAYER);
   clearPendingSeekTimer();
   clearInterval(PLAYER.timer); PLAYER.timer=null;
@@ -627,6 +660,7 @@ function stopPlayerTimers(){
 // full open.
 function armPlaybackSampling(v,p){
   if(!v||!p||p.playPermissionDenied) return;
+  if(typeof startFrameDropRecorder==="function")startFrameDropRecorder(v,p);
   clearInterval(p.progressTimer);
   p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
   clearInterval(p.autoTimer);

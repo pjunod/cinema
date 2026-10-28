@@ -108,7 +108,7 @@ struct HandoffRequest {
 
 /// How long a rendition with no attached sessions is kept warm before an
 /// un-admitted one is purged. Admitted renditions are the completed cache and
-/// are never purged here — cache retention is `cachekeep`'s job, not a TTL's.
+/// are retained past this TTL; the shared playback disk budget may evict them.
 const DORMANT_RENDITION_TTL: Duration = Duration::from_secs(1800);
 
 /// Compact terminal owners remain available long enough for a lost 410 or
@@ -181,6 +181,9 @@ const ENCODED_RECONCILE_BATCH: usize = 128;
 /// Sentinel in the per-entry watchdog map for the rendition init object.
 const INIT_DEMAND_INDEX: u32 = u32::MAX;
 
+#[path = "vod/cache_budget.rs"]
+mod cache_budget;
+
 // split: begin vod-discovery
 #[path = "vod/discovery.rs"]
 mod discovery;
@@ -195,11 +198,9 @@ pub struct VodSettings {
     pub working_set_bytes: u64,
     /// What `cache.max_gb` sizes the per-rendition admission threshold from.
     ///
-    /// Not a bound on the completed cache. It reaches `Budgets` as
-    /// `admission_sizing_bytes` and is only ever multiplied by the admission
-    /// share to decide whether one rendition may be published; the node's
-    /// total admitted bytes are counted and reported but never compared
-    /// against anything. See `Budgets::admission_sizing_bytes`.
+    /// It reaches `Budgets` as `admission_sizing_bytes` for individual
+    /// admission. The shared playback cache coordinator separately bounds
+    /// physical bytes across completed renditions and every other cache.
     pub completed_cache_bytes: u64,
     /// One hard deadline for a blocking segment GET.
     pub block_budget: Duration,
@@ -641,18 +642,65 @@ pub struct VodActivityObservation {
     pub control_age_ms: Option<u64>,
     pub producer_state: Option<String>,
     pub producer_hold: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_target: Option<DisplayTargetActivity>,
+    /// The Dolby Vision processing this session's GPU is doing, and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing: Option<ProcessingActivity>,
+}
+
+/// What a processed rendition spends the node's hardware on, in an
+/// operator's words: the delivered picture, the work, and the reason it was
+/// chosen. Stopping the session (Activity → Stop playback) ends the graph.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessingActivity {
+    pub delivered: String,
+    pub work: String,
+    pub reason: String,
+    /// The served base layer is the FEL-composed picture.
+    pub fel_composed: bool,
+    pub live_rendering: bool,
+}
+
+impl ProcessingActivity {
+    pub(crate) const MAX_TEXT: usize = 256;
+    pub(crate) fn bounded(&self) -> bool {
+        [&self.delivered, &self.work, &self.reason]
+            .iter()
+            .all(|text| text.len() <= Self::MAX_TEXT)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DisplayTargetActivity {
+    pub reported_peak_nits: Option<i64>,
+    pub peak_source: Option<plurx_core::playback::caps::DisplayPeakSource>,
+    pub bucket_nits: Option<u32>,
+    pub live_rendering: bool,
+    pub note: String,
 }
 
 impl VodActivityObservation {
     pub(crate) fn bounded(&self) -> bool {
-        [
-            &self.control_demand,
-            &self.render_state,
-            &self.producer_state,
-            &self.producer_hold,
-        ]
-        .iter()
-        .all(|value| value.as_ref().is_none_or(|text| text.len() <= 32))
+        self.processing
+            .as_ref()
+            .is_none_or(ProcessingActivity::bounded)
+            && self.display_target.as_ref().is_none_or(|target| {
+                target.note.len() <= 512
+                    && target.bucket_nits.is_none_or(|nits| {
+                        nits == 100
+                            || plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS
+                                .contains(&nits)
+                    })
+            })
+            && [
+                &self.control_demand,
+                &self.render_state,
+                &self.producer_state,
+                &self.producer_hold,
+            ]
+            .iter()
+            .all(|value| value.as_ref().is_none_or(|text| text.len() <= 32))
     }
     pub(crate) fn demand(&self) -> Option<&'static str> {
         match self.control_demand.as_deref() {
@@ -864,7 +912,7 @@ pub(crate) struct ProcessedReuseSeed {
 impl ProcessedReuseSeed {
     fn from_request(request: &SessionRequest) -> Option<Self> {
         let context = request.candidate_context.as_ref()?;
-        context.selected_candidate.processed_hdr10.then_some(())?;
+        context.selected_candidate.processed_dv.then_some(())?;
         Some(Self {
             query: context.catalog_query.clone()?,
             caps: context.canonical_caps.clone()?,
@@ -1117,6 +1165,7 @@ pub struct SegmentReady {
     /// telemetry; a body served against no meter would silently lose it.
     pub delivery: Arc<crate::meter::Meter>,
     pub(crate) retained_lease: Option<Arc<retained::RetainedVodArtifact>>,
+    pub(crate) cache_pin: Option<crate::playback_cache::CachePin>,
 }
 
 // split: begin vod-reader
@@ -1205,6 +1254,14 @@ struct Shared {
 /// is the struct and the set of await points, not scheduling. `Any` is a
 /// supertrait only so a test can reach the test hooks behind the registry.
 pub(crate) trait VodSharedHooks: std::any::Any + Send + Sync {
+    /// Production starts its ordinary driver. Custody controls can retain a
+    /// scoped worker claim without qualifying normal producer scheduling.
+    fn controlled_driver(
+        &self,
+        _encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
     fn private_cleanup_failure(&self, _phase: &str) -> bool {
         false
     }
@@ -1212,6 +1269,9 @@ pub(crate) trait VodSharedHooks: std::any::Any + Send + Sync {
         self.private_cleanup_failure(phase)
     }
     fn before_ordinary_materialize(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn after_cache_presence_observed(&self) -> crate::seam_hooks::HookFuture<'_> {
         Box::pin(crate::seam_hooks::HookReady)
     }
     fn before_private_inventory_read(&self, _phase: &str) -> crate::seam_hooks::HookFuture<'_> {
@@ -1306,6 +1366,7 @@ pub(crate) struct VodSharedTestHooks {
     dormant_purge: crate::seam_hooks::PauseSlot,
     terminal_route_outcomes: StdMutex<HashMap<String, TerminalRouteTestOutcome>>,
     ordinary_materialize: crate::seam_hooks::PauseSlot,
+    cache_presence: crate::seam_hooks::PauseSlot,
     private_marker: crate::seam_hooks::PauseSlot,
     private_registration: crate::seam_hooks::PauseSlot,
     inventory_entry: crate::seam_hooks::PauseSlot,
@@ -1317,6 +1378,13 @@ pub(crate) struct VodSharedTestHooks {
 
 #[cfg(test)]
 impl VodSharedHooks for VodSharedTestHooks {
+    fn controlled_driver(
+        &self,
+        encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        driver::controlled_driver::spawn(encoding)
+    }
+
     fn private_cleanup_failure_for(&self, phase: &str, key: &str) -> bool {
         let failures = self.private_failures.lock().expect("private failures");
         failures.contains(phase) || failures.contains(&format!("{phase}:{key}"))
@@ -1324,6 +1392,9 @@ impl VodSharedHooks for VodSharedTestHooks {
 
     fn before_ordinary_materialize(&self) -> crate::seam_hooks::HookFuture<'_> {
         self.ordinary_materialize.hold()
+    }
+    fn after_cache_presence_observed(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.cache_presence.hold()
     }
 
     fn before_private_registration(&self) -> crate::seam_hooks::HookFuture<'_> {

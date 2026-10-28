@@ -1916,13 +1916,12 @@ async fn the_producer_answers_only_once_two_segments_are_listed() {
         r#"#!/bin/sh
 for output do playlist="$output"; done
 directory=${playlist%/*}
-root=${directory%/*}
-printf 'transport-stream' > "$directory/segment-000001.ts"
-printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n' > "$playlist"
+root="${0%/*}/live-tv"
+printf 'transport-stream' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000001.ts" > /dev/null
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$playlist" > /dev/null
 while [ ! -f "$root/release-second" ]; do sleep 0.01; done
-printf 'transport-stream-two' > "$directory/segment-000002.ts"
-printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' > "$playlist.tmp"
-mv "$playlist.tmp" "$playlist"
+printf 'transport-stream-two' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000002.ts" > /dev/null
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$playlist" > /dev/null
 exec /bin/cat >/dev/null
 "#,
         0o755,
@@ -2333,10 +2332,9 @@ fn publishing_ffmpeg(root: &Path, keep_input: bool) -> String {
         r#"echo "$$ $(/bin/date +%s%N)" >> '{spawns}'
 for output do playlist="$output"; done
 directory=${{playlist%/*}}
-printf 'transport-stream' > "$directory/segment-000001.ts"
-printf 'transport-stream-two' > "$directory/segment-000002.ts"
-printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' > "$playlist.tmp"
-mv "$playlist.tmp" "$playlist"
+printf 'transport-stream' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000001.ts" > /dev/null
+printf 'transport-stream-two' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000002.ts" > /dev/null
+printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$playlist" > /dev/null
 exec /bin/cat > {sink}"#,
         spawns = root.join("ffmpeg.spawns").display(),
     )
@@ -2755,8 +2753,8 @@ fn advancing_ffmpeg() -> String {
 directory=${playlist%/*}
 (
 n=1
-while [ -d "$directory" ]; do
-  printf 'segment-%d' "$n" > "$directory/$(printf 'segment-%06d.ts' "$n")"
+while :; do
+  printf 'segment-%d' "$n" | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/$(printf 'segment-%06d.ts' "$n")" > /dev/null
   first=1
   [ "$n" -gt 2 ] && first=$((n - 2))
   {
@@ -2766,9 +2764,9 @@ while [ -d "$directory" ]; do
       printf '#EXTINF:1.000000,\nsegment-%06d.ts\n' "$listed"
       listed=$((listed + 1))
     done
-  } > "$playlist.tmp" && /bin/mv "$playlist.tmp" "$playlist"
+  } | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$playlist" > /dev/null
   stale=$((first - 2))
-  [ "$stale" -ge 1 ] && /bin/rm -f "$directory/$(printf 'segment-%06d.ts' "$stale")"
+  [ "$stale" -ge 1 ] && /usr/bin/curl --noproxy '*' -fsS -X DELETE "$directory/$(printf 'segment-%06d.ts' "$stale")" > /dev/null
   n=$((n + 1))
   /bin/sleep 0.3
 done
@@ -3965,6 +3963,7 @@ async fn a_fast_source_change_exit_is_classified_after_the_owned_stderr_reader_s
     });
     *session.process.lock().await = Some(LiveTvProcess {
         child,
+        sink: None,
         _job: job,
         _admission: None,
         stderr: Some(stderr),
@@ -4377,6 +4376,7 @@ async fn a_failed_cleanup_retires_the_session_and_keeps_the_child_until_reaped()
     let pid = child.id().expect("child pid");
     *session.process.lock().await = Some(LiveTvProcess {
         child,
+        sink: None,
         _job: job,
         _admission: Some(admission),
         stderr: None,
@@ -4957,6 +4957,8 @@ fn live_tv_software_hls_argument_baseline_is_stable() {
         "CUDA_VISIBLE_DEVICES",
         "NVIDIA_VISIBLE_DEVICES",
         "NVIDIA_DRIVER_CAPABILITIES",
+        "CUDA_CACHE_DISABLE",
+        "MESA_SHADER_CACHE_DISABLE",
     ];
     assert!(command
         .as_std()
@@ -4964,6 +4966,17 @@ fn live_tv_software_hls_argument_baseline_is_stable() {
         .all(|(name, _)| allowed_environment
             .iter()
             .any(|allowed| name == std::ffi::OsStr::new(allowed))));
+    for (key, value) in [
+        ("CUDA_CACHE_DISABLE", "1"),
+        ("MESA_SHADER_CACHE_DISABLE", "true"),
+    ] {
+        assert!(
+            command.as_std().get_envs().any(|(name, supplied)| {
+                name == std::ffi::OsStr::new(key) && supplied == Some(std::ffi::OsStr::new(value))
+            }),
+            "{key} must preserve the runtime cache contract"
+        );
+    }
     let actual = command
         .as_std()
         .get_args()
@@ -5077,6 +5090,18 @@ fn live_hls_cuts_uniform_one_second_segments_and_keeps_a_24_entry_window() {
     .expect("prepare live-TV plan");
     let command = live_ffmpeg_command(&system, &plan, Path::new("/fixture/live"))
         .expect("build live-TV command");
+    let environment = command
+        .as_std()
+        .get_envs()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("CUDA_CACHE_DISABLE")),
+        Some(&Some(std::ffi::OsStr::new("1")))
+    );
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("MESA_SHADER_CACHE_DISABLE")),
+        Some(&Some(std::ffi::OsStr::new("true")))
+    );
     let arguments = command
         .as_std()
         .get_args()
@@ -7519,4 +7544,209 @@ fn the_air_date_conversion_is_a_calendar_day_and_rejects_impossible_instants() {
     );
     assert_eq!(guide::unix_to_air_date(0).as_deref(), Some("1970-01-01"));
     assert_eq!(guide::unix_to_air_date(-1), None);
+}
+
+#[tokio::test]
+async fn live_tv_http_writer_preserves_ts_and_fmp4_sliding_windows() {
+    plurx_core::testfixtures::require_ffmpeg();
+    for packaging in [LivePackaging::Mpegts, LivePackaging::Fmp4] {
+        let root = crate::test_tempdir().expect("live HTTP output");
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let budget =
+            crate::playback_cache::PlaybackCacheBudget::new(store, vec![root.path().to_path_buf()]);
+        budget.configure_for_test(64 << 20);
+        let sink =
+            crate::scratch_put::PutSink::bind_live_tv(root.path().to_path_buf()).expect("receiver");
+        let system = SystemInfo {
+            ffmpeg: plurx_core::testfixtures::ffmpeg(),
+            ..SystemInfo::default()
+        };
+        let mut delivery = test_encode_delivery(180);
+        delivery.packaging = packaging;
+        if packaging == LivePackaging::Fmp4 {
+            delivery.output.container = "fmp4".into();
+        }
+        let plan = LiveTvTranscodePlan::new(&system, delivery, Some(Encoder::Software), Some(2))
+            .expect("plan");
+        let command = live_ffmpeg_command_for_output(
+            &system,
+            &plan,
+            root.path(),
+            LiveTvFfmpegInput::GraphProbe,
+            Some(&sink.base_url(0)),
+        )
+        .expect("HTTP graph");
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| match argument.to_str() {
+                Some("4.25") => std::ffi::OsString::from("36.25"),
+                Some("testsrc2=size=1920x1080:rate=30") => {
+                    std::ffi::OsString::from("testsrc2=size=320x180:rate=30")
+                }
+                _ => argument.to_os_string(),
+            })
+            .collect::<Vec<_>>();
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair[0] == "-method" && pair[1] == "PUT"));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair[0] == "-http_proxy" && pair[1].is_empty()));
+        assert!(arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "-hls_flags")
+            .all(|pair| !pair[1].to_string_lossy().contains("temp_file")));
+        // Rebuild only the synthetic duration/raster arguments; keep the
+        // production command's executable and explicit runtime environment.
+        // In particular, env_clear alone loses Homebrew's PATH on macOS.
+        let mut execution = tokio::process::Command::new(command.as_std().get_program());
+        execution.env_clear();
+        for (name, value) in command.as_std().get_envs() {
+            if let Some(value) = value {
+                execution.env(name, value);
+            }
+        }
+        let output = tokio::time::timeout(
+            Duration::from_secs(40),
+            execution.args(arguments).kill_on_drop(true).output(),
+        )
+        .await
+        .expect("bounded graph deadline")
+        .expect("FFmpeg graph");
+        sink.drain().await;
+        assert!(
+            output.status.success(),
+            "{}",
+            crate::scratch_put::redact(&String::from_utf8_lossy(&output.stderr))
+        );
+        assert!(sink.failure().is_none(), "{:?}", sink.failure());
+        let inventory = inspect_scratch(root.path())
+            .await
+            .unwrap_or_else(|error| {
+                let names = std::fs::read_dir(root.path())
+                    .expect("diagnostic inventory")
+                    .map(|entry| entry.expect("diagnostic entry").file_name())
+                    .collect::<Vec<_>>();
+                panic!(
+                    "{packaging:?}: {error:?}; files={names:?}; stderr={}",
+                    crate::scratch_put::redact(&String::from_utf8_lossy(&output.stderr))
+                );
+            })
+            .expect("published playlist");
+        assert_eq!(inventory.listed, MAX_LISTED_SEGMENTS);
+        let mut count = 0;
+        let mut entries = tokio::fs::read_dir(root.path())
+            .await
+            .expect("output directory");
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            if parse_segment_name(&entry.file_name().to_string_lossy(), false).is_some() {
+                count += 1;
+            }
+        }
+        assert!(
+            count <= MAX_LISTED_SEGMENTS + MAX_DELETION_LAG_SEGMENTS,
+            "old segments must be deleted through the receiver"
+        );
+        assert!(
+            inventory.media_sequence > 0,
+            "playlist must advance beyond startup"
+        );
+        assert_eq!(inventory.init.is_some(), packaging == LivePackaging::Fmp4);
+    }
+}
+
+#[tokio::test]
+async fn live_tv_delete_defers_response_pins_and_retries_after_playlist_promotion() {
+    let root = crate::test_tempdir().expect("live delete");
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let budget =
+        crate::playback_cache::PlaybackCacheBudget::new(store, vec![root.path().to_path_buf()]);
+    budget.configure_for_test(64 << 10);
+    let sink = crate::scratch_put::PutSink::bind_live_tv(root.path().to_path_buf()).expect("sink");
+    let base = sink.base_url(0);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
+    for sequence in 0..3 {
+        assert!(client
+            .put(format!("{base}/segment-{sequence:06}.ts"))
+            .body(vec![sequence as u8; 128])
+            .send()
+            .await
+            .expect("upload")
+            .status()
+            .is_success());
+    }
+    let playlist = |sequence| {
+        format!("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n#EXTINF:1,\nsegment-{sequence:06}.ts\n")
+    };
+    assert!(client
+        .put(format!("{base}/index.m3u8"))
+        .body(playlist(1))
+        .send()
+        .await
+        .expect("playlist")
+        .status()
+        .is_success());
+    let opened = open_bounded_segment(&root.path().join("segment-000000.ts"), 128)
+        .await
+        .expect("response open");
+    let deletion = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.delete(format!("{base}/segment-000000.ts")).send(),
+    )
+    .await
+    .expect("DELETE must not stall the muxer")
+    .expect("delete");
+    assert_eq!(deletion.status(), reqwest::StatusCode::ACCEPTED);
+    assert!(root.path().join("segment-000000.ts").exists());
+    drop(opened);
+    assert!(client
+        .put(format!("{base}/index.m3u8"))
+        .body(playlist(1))
+        .send()
+        .await
+        .expect("retry promotion")
+        .status()
+        .is_success());
+    assert!(!root.path().join("segment-000000.ts").exists());
+    // A premature FFmpeg DELETE is remembered, since FFmpeg will not retry.
+    assert_eq!(
+        client
+            .delete(format!("{base}/segment-000001.ts"))
+            .send()
+            .await
+            .expect("early delete")
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    let opened = open_bounded_segment(&root.path().join("segment-000001.ts"), 128)
+        .await
+        .expect("response open");
+    assert!(client
+        .put(format!("{base}/index.m3u8"))
+        .body(playlist(2))
+        .send()
+        .await
+        .expect("advance")
+        .status()
+        .is_success());
+    assert!(
+        root.path().join("segment-000001.ts").exists(),
+        "promotion cannot unlink a pinned response"
+    );
+    drop(opened);
+    assert!(client
+        .put(format!("{base}/index.m3u8"))
+        .body(playlist(2))
+        .send()
+        .await
+        .expect("retry promotion")
+        .status()
+        .is_success());
+    assert!(!root.path().join("segment-000001.ts").exists());
 }

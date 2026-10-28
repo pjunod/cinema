@@ -16,6 +16,7 @@ mod avc_qualification;
 mod decode;
 pub mod decoder_inventory;
 mod dolby;
+pub mod dv_fel_qualification;
 pub mod dv_processing;
 pub mod dvconvert;
 mod encoder;
@@ -50,11 +51,13 @@ pub use dolby::{
     StrictDolbyImplementation, StrictDolbyPolicy,
 };
 pub use encoder::{
-    benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for, vaapi_device,
+    benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for,
+    reconstructed_p81_video_kbps, reconstructed_p81_window_encode_args, vaapi_device,
     validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
     vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
-    EncoderCaps, OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc,
-    RateMode, VaapiHdrPolicy, VideoCodec,
+    EncoderCaps, EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
+    QualityRateControlValidation, QualityRc, RateMode, VaapiHdrPolicy, VideoCodec,
+    RECONSTRUCTED_P81_MAX_VIDEO_KBPS, RECONSTRUCTED_P81_RECIPE,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,

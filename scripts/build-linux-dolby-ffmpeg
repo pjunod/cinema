@@ -526,6 +526,14 @@ def shipping_system_objects(package):
     return objects
 
 
+def verify_source_download(path, expected):
+    """Report a mismatch by public input name and hashes only, never by local directory."""
+    actual = sha(path)
+    if actual != expected:
+        raise ValueError("immutable source download checksum mismatch: "
+                         f"{path.name[:128]} expected={expected[:64]} actual={actual}")
+
+
 SOURCE_STORAGE_GUARD = r'''
 import json, os, signal, stat, subprocess, sys, time
 request = json.loads(sys.argv[1])
@@ -654,10 +662,12 @@ def fetch_declared_source_archive(path, url, expected, deadline, provider, commi
                 output.write(chunk)
     if path.stat().st_size > budget or time.monotonic() >= deadline:
         raise ValueError("immutable input download exceeds bounded source budget")
-    actual = sha(path)
-    if actual != expected:
-        raise ValueError("immutable source download checksum mismatch: " + str(path)
-                         + "; url=" + url + "; expected=" + expected + "; actual=" + actual)
+    try:
+        verify_source_download(path, expected)
+    except ValueError as error:
+        # The pipeline owns this download directory; add the exact fetch
+        # context the operator needs to identify which declared offer failed.
+        raise ValueError(str(error) + "; path=" + str(path) + "; url=" + url) from None
     if time.monotonic() >= deadline:
         raise ValueError("immutable source download deadline exceeded during verification")
     return path.stat().st_size

@@ -250,11 +250,11 @@ private fun dynamicRangeFact(
     if (delivered == null) return MediaFact(MediaFactKind.DynamicRange, label, spoken)
 
     val onScreen = rendered ?: delivered
-    if (effectiveProcessing?.matches(activeGeneration, delivered) == true && onScreen == DynamicRange.HDR10) {
+    if (effectiveProcessing?.matches(activeGeneration, delivered) == true && onScreen == delivered) {
         return MediaFact(MediaFactKind.DynamicRange,
-            if (source == DynamicRange.HDR10) "HDR10-E" else label, effectiveProcessing.detail,
+            if (source == delivered) effectiveProcessing.mark else label, effectiveProcessing.detail,
             if (source == DynamicRange.HDR10) FactState.Active else FactState.Downgraded,
-            if (source == DynamicRange.HDR10) null else "HDR10-E")
+            if (source == delivered) null else effectiveProcessing.mark)
     }
     if (onScreen == source) {
         // Same grade — but possibly not the same profile. A Profile 7 disc

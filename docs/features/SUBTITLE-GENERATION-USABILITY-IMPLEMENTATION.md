@@ -1,5 +1,7 @@
 # Subtitle generation — finish setup and make background captions usable
 
+**Completion effort, 2026-10-26:** [current implementation and final qualification](SUBTITLE-COMPLETION-STATUS.md) extends the initial scope with progressive transcription, native clients, multiple audio tracks, additional delivery routes and existing-text translation. The evidence below retains its original candidate and scope. The user owns deployment after the new merge.
+
 **Status:** merged to main through PR #1136 as `220157aba`; remaining
 qualification explicit below · **Written:** 2026-10-15 ·
 **Reviewed implementation tree:** `20589a21` ·

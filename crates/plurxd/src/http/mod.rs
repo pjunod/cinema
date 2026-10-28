@@ -13,7 +13,8 @@ mod background_jobs;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
-mod chapter_thumbs;
+pub(crate) use browse::index_refusal_summary;
+pub(crate) mod chapter_thumbs;
 mod cluster;
 pub(crate) mod cluster_operations;
 pub mod comingsoon;
@@ -25,8 +26,10 @@ pub(crate) mod dvr;
 pub(crate) mod error;
 pub(crate) mod extract;
 pub(crate) mod file_grants;
+pub(crate) mod playback_handoffs;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
+mod https_admin;
 pub(crate) mod images;
 pub(crate) mod index_coverage;
 pub(crate) mod internal_activity;
@@ -58,6 +61,7 @@ pub(crate) mod remote;
 mod scan;
 pub(crate) mod scan_identity;
 pub(crate) mod shared_artwork;
+pub(crate) mod shared_captions;
 pub(crate) mod shared_library;
 pub(crate) mod shared_playback;
 pub(crate) mod shared_receiver_assets;
@@ -323,6 +327,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/subtitles/search"
         | "/api/v1/files/{id}/subtitles/download"
         | "/api/v1/files/{id}/subtitles/transcribe"
+        | "/api/v1/files/{id}/subtitle-text-translation/options"
         | "/api/v1/files/{id}/subtitle-translation/options"
         | "/api/v1/files/{id}/subtitle-translation/assets"
         | "/api/v1/items/{id}/classification"
@@ -438,6 +443,12 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/grants"
         | "/api/v1/grants/{id}"
         | "/api/v1/grants/{token}/content"
+        | "/api/v1/playback-handoffs"
+        | "/api/v1/playback-handoffs/redeem"
+        | "/api/v1/playback-handoffs/self"
+        | "/api/v1/playback-handoffs/self/context"
+        | "/api/v1/playback-handoffs/self/next"
+        | "/api/v1/playback-handoffs/{id}"
         | "/api/v1/files/{id}/stream.mp4"
         | "/api/v1/files/{id}/subs/{subtitle}"
         | "/api/v1/files/{id}/subs/{index}/overlay.json"
@@ -505,6 +516,13 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
         | "/api/v1/subtitle-translation/models"
+        | "/api/v1/subtitle-text-translation/config"
+        | "/api/v1/subtitle-text-translation/models"
+        | "/api/v1/subtitle-text-translation/models/install"
+        | "/api/v1/subtitle-text-translation/models/verify"
+        | "/api/v1/files/{id}/subtitles/{index}/translation"
+        | "/api/v1/subtitle-text-translation/jobs/{id}"
+        | "/api/v1/subtitle-text-translation/jobs/{id}/retry"
         | "/api/v1/subtitle-transcription/managed"
         | "/api/v1/subtitle-transcription/models"
         | "/api/v1/subtitle-transcription/models/{id}/install"
@@ -528,6 +546,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/trakt/link"
         | "/api/v1/trakt/sync"
         | "/api/v1/system"
+        | "/api/v1/system/https"
+        | "/api/v1/system/https/certificate"
         | "/api/v1/system/logs"
         | "/api/v1/system/playback-events"
         | "/api/v1/system/library-shape"
@@ -1531,6 +1551,8 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(auth::me))
         .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
+        .route("/system/https", get(https_admin::get))
+        .route("/system/https/certificate", get(https_admin::certificate))
         .route(
             "/subtitle-transcription",
             get(crate::subtitle_transcription::settings),
@@ -1595,8 +1617,8 @@ pub fn router(state: AppState) -> Router {
         .route("/cluster/media", get(internal_media::directory))
         // Any signed-in user can post a client-side playback error here so it
         // lands in the admin log (browsers that reject a stream produce no
-        // server log on their own).
-        .route("/client-log", post(system::client_log))
+        // server log on their own). A playback handoff token may too.
+        .route("/client-log", post(playback_handoffs::scoped_client_log))
         // Users (admin)
         .route("/users", get(users::list).post(users::create))
         .route("/users/{id}", put(users::update).delete(users::delete))
@@ -1665,7 +1687,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/lists/{list}", get(annotations::list_items))
         // Watch
-        .route("/items/{id}/progress", post(watch::progress))
+        // A playback handoff token may report progress for its file's item.
+        .route(
+            "/items/{id}/progress",
+            post(playback_handoffs::scoped_progress),
+        )
         .route("/items/{id}/scrobble", post(watch::scrobble))
         .route("/items/{id}/unscrobble", post(watch::unscrobble))
         .route(
@@ -1675,11 +1701,12 @@ pub fn router(state: AppState) -> Router {
                 .delete(reading::delete_state)
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
-        // Playback
+        // Playback. The decision also accepts a playback handoff token for
+        // its own file (`playback_handoffs.rs`).
         .route(
             "/files/{id}/decision",
-            get(stream::decision)
-                .post(stream::decision_post)
+            get(playback_handoffs::scoped_decision)
+                .post(playback_handoffs::scoped_decision_post)
                 // A capabilities document is a short list of codecs and a
                 // handful of learned limits; axum's 2 MiB default is four
                 // orders of magnitude of headroom for an authenticated caller
@@ -1692,6 +1719,23 @@ pub fn router(state: AppState) -> Router {
         .route("/files/{id}/offline-options", get(offline::options))
         .route("/files/{id}/grants", post(file_grants::mint))
         .route("/grants/{id}", delete(file_grants::revoke))
+        // Playback handoff: mint with a bearer, redeem with the code alone,
+        // poll the redemption, and let the redeemed token revoke itself.
+        .route("/playback-handoffs", post(playback_handoffs::mint))
+        .route("/playback-handoffs/redeem", post(playback_handoffs::redeem))
+        .route(
+            "/playback-handoffs/self",
+            delete(playback_handoffs::revoke_self),
+        )
+        .route(
+            "/playback-handoffs/self/context",
+            get(playback_handoffs::context),
+        )
+        .route(
+            "/playback-handoffs/self/next",
+            post(playback_handoffs::advance_next),
+        )
+        .route("/playback-handoffs/{id}", get(playback_handoffs::status))
         .route(
             "/offline/packages/{id}",
             get(offline::package_status).delete(offline::delete_package),
@@ -1727,6 +1771,39 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/subtitle-transcription",
             put(crate::subtitle_transcription::update_settings),
+        )
+        .route(
+            "/subtitle-text-translation/config",
+            get(crate::subtitle_text_translation::api::settings)
+                .put(crate::subtitle_text_translation::api::update_settings),
+        )
+        .route(
+            "/subtitle-text-translation/models",
+            get(crate::subtitle_text_translation::api::models),
+        )
+        .route(
+            "/subtitle-text-translation/models/install",
+            post(crate::subtitle_text_translation::api::install),
+        )
+        .route(
+            "/subtitle-text-translation/models/verify",
+            post(crate::subtitle_text_translation::api::verify),
+        )
+        .route(
+            "/files/{id}/subtitle-text-translation/options",
+            get(crate::subtitle_text_translation::api::options),
+        )
+        .route(
+            "/files/{id}/subtitles/{index}/translation",
+            post(crate::subtitle_text_translation::api::create),
+        )
+        .route(
+            "/subtitle-text-translation/jobs/{id}",
+            get(crate::subtitle_text_translation::api::job),
+        )
+        .route(
+            "/subtitle-text-translation/jobs/{id}/retry",
+            post(crate::subtitle_text_translation::api::retry),
         )
         .route(
             "/subtitle-translation",
@@ -1812,6 +1889,10 @@ pub fn router(state: AppState) -> Router {
             get(crate::subtitle_models::api::options).post(crate::subtitle_models::generate),
         )
         .route("/settings", put(system::update_settings))
+        .route(
+            "/system/https",
+            put(https_admin::put).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route(
             "/subtitle-provider",
             put(subtitle_downloads::update_settings),
@@ -2002,7 +2083,8 @@ pub fn router(state: AppState) -> Router {
             get(offline::subtitle),
         )
         .route("/offline/media/{token}/{segment}", get(offline::segment))
-        .route("/files/{id}/direct", get(stream::direct))
+        // A playback handoff token may read its own file (direct play).
+        .route("/files/{id}/direct", get(playback_handoffs::scoped_direct))
         .route("/files/{id}/download", get(stream::download))
         .route("/files/{id}/content", get(stream::book_content))
         .route("/grants/{token}/content", get(file_grants::content))
@@ -2026,12 +2108,17 @@ pub fn router(state: AppState) -> Router {
         .route("/stream/{id}/status", get(stream::stream_status))
         // The final segment accepts both `0` (legacy) and `0.vtt` (the
         // documented sidecar URL); the handler validates the suffix/index.
-        .route("/files/{id}/subs/{subtitle}", get(stream::subtitles_vtt))
+        // A playback handoff token may read its own file's text tracks.
+        .route(
+            "/files/{id}/subs/{subtitle}",
+            get(playback_handoffs::scoped_subtitles_vtt),
+        )
         // Creating a stream spawns a process and supersedes its predecessor,
         // so it is a POST. The GET is a deprecated bridge over the same path.
         .route(
             "/files/{id}/hls/sessions",
-            post(hls::create)
+            // A playback handoff token may create sessions for its own file.
+            post(playback_handoffs::scoped_hls_create)
                 // The web client now sends its capabilities document here as
                 // well, so this route walks exactly what
                 // `/files/{id}/decision` walks and inherits the same bound for
@@ -2434,6 +2521,9 @@ const NODE_MAINTENANCE_JSON: &str = r#"{"code":"node_maintenance","message":"thi
 /// refused, including catalogue browsing that may lead a client to select this
 /// ingress for a new stream.
 fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
+    if https_admin::eligible(method, path) {
+        return true;
+    }
     if method == Method::GET
         && (matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
             || path.starts_with("/assets/")
@@ -2564,7 +2654,8 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
 /// admitted only through the existing serving fence, so a learner also needs
 /// a fresh quorum/apply proof before any node-local work starts.
 fn learner_route_eligible(method: &Method, path: &str) -> bool {
-    if remote::eligible(method, path)
+    if https_admin::eligible(method, path)
+        || remote::eligible(method, path)
         || crate::diagnostics::eligible(method, path)
         || crate::diagnostics_delivery::eligible(method, path)
     {
@@ -2746,15 +2837,40 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     node_local_get || node_local_create || node_local_close || live_keepalive
 }
 
-async fn cluster_capacity_gate(
-    State(state): State<AppState>,
-    request: Request<axum::body::Body>,
-    next: Next,
-) -> Response {
-    let path = request.uri().path();
-    let method = request.method();
-    if state.membership.local_maintenance_active() && !maintenance_route_eligible(method, path) {
-        return (
+fn capacity_role_refusal(
+    role: Option<LocalServingRole>,
+    method: &Method,
+    path: &str,
+) -> Option<Response> {
+    match role {
+        Some(LocalServingRole::Unclustered | LocalServingRole::Voter) => None,
+        Some(LocalServingRole::Learner) if learner_route_eligible(method, path) => None,
+        Some(LocalServingRole::Learner) => Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                LEARNER_ROUTE_INELIGIBLE_JSON,
+            )
+                .into_response(),
+        ),
+        Some(LocalServingRole::Fenced) if matches!(path, "/healthz" | "/metrics") => None,
+        Some(LocalServingRole::Fenced) | None => Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (header::RETRY_AFTER, "1"),
+                ],
+                NODE_REMOVAL_FENCED_JSON,
+            )
+                .into_response(),
+        ),
+    }
+}
+
+fn capacity_maintenance_refusal(active: bool, method: &Method, path: &str) -> Option<Response> {
+    (active && !maintenance_route_eligible(method, path)).then(|| {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             [
                 (header::CONTENT_TYPE, "application/json"),
@@ -2762,32 +2878,27 @@ async fn cluster_capacity_gate(
             ],
             NODE_MAINTENANCE_JSON,
         )
-            .into_response();
+            .into_response()
+    })
+}
+
+async fn cluster_capacity_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if let Some(refusal) = capacity_maintenance_refusal(
+        state.membership.local_maintenance_active(),
+        request.method(),
+        request.uri().path(),
+    ) {
+        return refusal;
     }
-    match state.membership.local_serving_role().await {
-        Ok(LocalServingRole::Unclustered | LocalServingRole::Voter) => next.run(request).await,
-        Ok(LocalServingRole::Learner) if learner_route_eligible(method, path) => {
-            next.run(request).await
-        }
-        Ok(LocalServingRole::Learner) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::CONTENT_TYPE, "application/json")],
-            LEARNER_ROUTE_INELIGIBLE_JSON,
-        )
-            .into_response(),
-        Ok(LocalServingRole::Fenced) if matches!(path, "/healthz" | "/metrics") => {
-            next.run(request).await
-        }
-        Ok(LocalServingRole::Fenced) | Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (header::RETRY_AFTER, "1"),
-            ],
-            NODE_REMOVAL_FENCED_JSON,
-        )
-            .into_response(),
+    let role = state.membership.local_serving_role().await.ok();
+    if let Some(refusal) = capacity_role_refusal(role, request.method(), request.uri().path()) {
+        return refusal;
     }
+    next.run(request).await
 }
 
 fn safe_trace_target(uri: &Uri) -> String {

@@ -840,7 +840,11 @@ final class LiveTvTests: XCTestCase {
             let card = try XCTUnwrap(developer.components(separatedBy: "Section(\"\(title)\")").last, title)
                 .components(separatedBy: "Section(\"")[0]
             XCTAssertTrue(card.contains("Awaiting "), title)
-            XCTAssertTrue(card.contains("graduates ") || card.contains("leaves Developer"), title)
+            if title == "Remote diagnostics · advisory readiness" {
+                XCTAssertTrue(card.contains("graduates from Developer after those checks pass"), title)
+            } else {
+                XCTAssertTrue(card.contains("graduates "), title)
+            }
         }
         for graduated in ["Enable Live TV", "Bounded pause/resume", "Prepared quality handoff"] {
             XCTAssertFalse(developer.contains("Section(\"\(graduated)"), "\(graduated) graduated out of Developer")

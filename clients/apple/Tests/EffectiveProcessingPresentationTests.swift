@@ -8,6 +8,40 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
         EffectiveProcessingReport(generation: generation, hdr10Enhanced: true,
             felContributed: true, appliedOperations: ["PolynomialReshape", "RpuColorConversion"])
     }
+    func testDisplayTargetOperationObjectRetainsCurrentReport() throws {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let wire = """
+        {"generation":"\(generation)","hdr10_enhanced":true,"fel_contributed":false,
+         "applied_operations":["RpuColorConversion","TargetMapping",{"DisplayTargetMapping":{"nits":1600}}]}
+        """
+        let report = try decoder.decode(EffectiveProcessingReport.self, from: Data(wire.utf8))
+        XCTAssertTrue(report.matches(generation: generation, delivered: "hdr10"))
+        XCTAssertTrue(report.appliedOperations.contains("DisplayTargetMapping:1600"))
+    }
+    func testSdrReceiptRequiresItsGradeAndProducesSdrMark() throws {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let wire = """
+        {"generation":"\(generation)","hdr10_enhanced":false,"sdr_processed":true,"fel_contributed":false,
+         "applied_operations":["RpuColorConversion","TargetMapping","Bt709Gamma24Conversion",{"DisplayTargetMapping":{"nits":100}}]}
+        """
+        let report = try decoder.decode(EffectiveProcessingReport.self, from: Data(wire.utf8))
+        XCTAssertTrue(report.matches(generation: generation, delivered: "sdr"))
+        XCTAssertFalse(report.matches(generation: generation, delivered: "hdr10"))
+        let badge = PlayerView.dynamicRangeBadge(hdr: "dolby_vision", hdrFormat: "Dolby Vision Profile 7", delivered: "sdr", displayHDR: false, effectiveProcessing: report, activeGeneration: generation)
+        XCTAssertEqual(badge?.renderedMark, "SDR-E")
+        XCTAssertTrue(report.detail.contains("L1 only"))
+        let trimmedWire = wire
+            .replacingOccurrences(of: "\"sdr_processed\":true,", with: "\"sdr_processed\":true,\"creative_trims_applied\":true,")
+            .replacingOccurrences(of: "\"TargetMapping\",", with: "\"TargetMapping\",\"CreativeTrimApplication\",")
+        let trimmed = try decoder.decode(EffectiveProcessingReport.self, from: Data(trimmedWire.utf8))
+        XCTAssertTrue(trimmed.matches(generation: generation, delivered: "sdr"))
+        XCTAssertTrue(trimmed.detail.contains("BT.709 gamma 2.4, creative trims applied"))
+        XCTAssertFalse(trimmed.detail.contains("L1 only"))
+        let partialWire = wire.replacingOccurrences(of: "\"sdr_processed\":true,", with: "\"sdr_processed\":true,\"creative_trims_partial\":true,")
+        let partial = try decoder.decode(EffectiveProcessingReport.self, from: Data(partialWire.utf8))
+        XCTAssertTrue(partial.matches(generation: generation, delivered: "sdr"))
+        XCTAssertTrue(partial.detail.contains("BT.709 gamma 2.4, creative trims on some shots"))
+    }
     func testEnhancementRequiresActiveReceiptGenerationAndKeepsFelSeparate() {
         let accepted = report()
         let badge = PlayerView.dynamicRangeBadge(hdr: "dolby_vision", hdrFormat: "Dolby Vision Profile 7",

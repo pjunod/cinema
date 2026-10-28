@@ -1347,6 +1347,7 @@ struct LiveTvSession {
 
 struct LiveTvProcess {
     child: tokio::process::Child,
+    sink: Option<crate::scratch_put::PutSink>,
     _job: crate::process_control::ChildJob,
     // Copy and audio-only conversion intentionally own no video permit.
     _admission: Option<crate::transcode::LiveAdmission>,
@@ -4891,6 +4892,10 @@ impl LiveTvManager {
                         if let Some(stderr) = process.stderr.take() {
                             stderr.abort();
                         }
+                        if let Some(sink) = process.sink.take() {
+                            orphan.removal =
+                                Some(self.spawn_orphan_removal(&orphan.directory, Some(sink)));
+                        }
                         // Drops the job and the encoder admission with it.
                         orphan.process = None;
                     }
@@ -4931,18 +4936,33 @@ impl LiveTvManager {
                 None => {}
             }
         }
-        orphan.removal = Some(self.spawn_orphan_removal(&orphan.directory));
+        orphan.removal = Some(self.spawn_orphan_removal(&orphan.directory, None));
         false
     }
 
     /// Start one removal of an orphan's directory on its own task.
-    fn spawn_orphan_removal(&self, directory: &Path) -> OrphanRemoval {
+    fn spawn_orphan_removal(
+        &self,
+        directory: &Path,
+        sink: Option<crate::scratch_put::PutSink>,
+    ) -> OrphanRemoval {
         #[cfg(test)]
         if self.hang_orphan_removals.load(Ordering::Acquire) {
             return tokio::spawn(std::future::pending());
         }
         let directory = directory.to_owned();
-        tokio::spawn(async move { tokio::fs::remove_dir_all(&directory).await })
+        tokio::spawn(async move {
+            if let Some(sink) = sink {
+                sink.drain().await;
+            }
+            if crate::playback_cache::is_pinned(&directory) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "live-TV response still holds cache media",
+                ));
+            }
+            tokio::fs::remove_dir_all(&directory).await
+        })
     }
 
     /// Release the sweeper claim of every orphan that is finished with.
@@ -6834,7 +6854,15 @@ fn classify_live_terminal_error(
 async fn remove_session_directory(path: &Path) -> Result<(), LiveTvError> {
     let deadline = tokio::time::Instant::now() + SESSION_DRAIN_TIMEOUT;
     loop {
-        match tokio::fs::remove_dir_all(path).await {
+        let removal = if crate::playback_cache::is_pinned(path) {
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "live-TV response still holds cache media",
+            ))
+        } else {
+            tokio::fs::remove_dir_all(path).await
+        };
+        match removal {
             Ok(()) => return Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) if tokio::time::Instant::now() < deadline => {
@@ -6870,6 +6898,9 @@ async fn cleanup_session(session: &LiveTvSession, withhold_reap: bool) -> Result
             .map_err(|error| {
                 LiveTvError::StreamFailed(format!("reaping live-TV FFmpeg: {error}"))
             })?;
+        if let Some(sink) = process.sink.take() {
+            sink.drain().await;
+        }
         if let Some(mut stderr) = process.stderr.take() {
             if tokio::time::timeout(Duration::from_millis(250), &mut stderr)
                 .await
@@ -7079,8 +7110,23 @@ async fn run_live_session_inner(
             _ = session.cancel.cancelled() => return Err(LiveTvError::StreamFailed("live-TV start cancelled".into())),
             result = transcode_plan.verify_macos_upload() => result?
         }
-        let (mut child, child_job) =
-            spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
+        let sink = crate::scratch_put::PutSink::bind_live_tv(session.directory.clone()).map_err(
+            |error| LiveTvError::StreamFailed(format!("binding live-TV cache writer: {error}")),
+        )?;
+        let mut command = live_ffmpeg_command_for_output(
+            &owner.system,
+            &transcode_plan,
+            &session.directory,
+            LiveTvFfmpegInput::Tuner,
+            Some(&sink.base_url(0)),
+        )?;
+        let (mut child, child_job) = crate::process_control::spawn_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::realtime("Live TV stream"),
+        )
+        .map_err(|error| {
+            LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}"))
+        })?;
         let stdin = child.stdin.take();
         session
             .source_format_changed
@@ -7101,6 +7147,7 @@ async fn run_live_session_inner(
         let Some(stdin) = stdin else {
             *session.process.lock().await = Some(LiveTvProcess {
                 child,
+                sink: Some(sink),
                 _job: child_job,
                 _admission: admission,
                 stderr,
@@ -7117,6 +7164,7 @@ async fn run_live_session_inner(
         if let Err(error) = session.attach_consumer(Arc::clone(&consumer)) {
             *session.process.lock().await = Some(LiveTvProcess {
                 child,
+                sink: Some(sink),
                 _job: child_job,
                 _admission: admission,
                 stderr,
@@ -7164,6 +7212,11 @@ async fn run_live_session_inner(
                 tick.tick().await;
                 if session.cancel.is_cancelled() {
                     break Ok(None);
+                }
+                if let Some(error) = sink.failure() {
+                    break Err(LiveTvError::StreamFailed(format!(
+                        "live-TV cache writer refused output: {error}"
+                    )));
                 }
                 if let Some(status) = child.try_wait().map_err(|error| {
                     LiveTvError::StreamFailed(format!("waiting for FFmpeg: {error}"))
@@ -7475,6 +7528,7 @@ async fn run_live_session_inner(
                     transport.release_seat();
                     *session.process.lock().await = Some(LiveTvProcess {
                         child,
+                        sink: Some(sink),
                         _job: child_job,
                         _admission: admission,
                         stderr,
@@ -7484,6 +7538,8 @@ async fn run_live_session_inner(
                             .into(),
                     ));
                 }
+                sink.drain().await;
+                drop(sink);
                 #[cfg(test)]
                 linger_after_warm_reap(manager, &transport, &session.capability).await;
                 if let Some(stderr) = stderr {
@@ -7538,6 +7594,7 @@ async fn run_live_session_inner(
         let _ = pump.await;
         *session.process.lock().await = Some(LiveTvProcess {
             child,
+            sink: Some(sink),
             _job: child_job,
             _admission: admission,
             stderr,
@@ -7992,9 +8049,20 @@ async fn probe_live_source(
         ));
     }
     let sample = directory.join("source-probe.ts");
+    let _cache_pin = crate::playback_cache::pin(&sample).map_err(|error| {
+        LiveTvError::StreamFailed(format!("pinning bounded source probe: {error}"))
+    })?;
+    let reservation = crate::playback_cache::reserve(&sample, prefix.len() as u64)
+        .await
+        .map_err(|error| {
+            LiveTvError::StreamFailed(format!("reserving bounded source probe: {error}"))
+        })?;
     tokio::fs::write(&sample, prefix).await.map_err(|error| {
         LiveTvError::StreamFailed(format!("writing bounded source probe: {error}"))
     })?;
+    if let Some(reservation) = reservation {
+        reservation.commit(prefix.len() as u64);
+    }
     let mut command = tokio::process::Command::new(&system.ffprobe);
     command
         .env_clear()
@@ -8235,6 +8303,7 @@ fn live_macos_upload_graph(plan: &LiveTvTranscodePlan) -> Option<MacosProcessing
     Some(graph)
 }
 
+#[cfg(test)]
 fn spawn_live_ffmpeg(
     system: &SystemInfo,
     plan: &LiveTvTranscodePlan,
@@ -8268,12 +8337,33 @@ fn live_ffmpeg_command_for_input(
     directory: &Path,
     input: LiveTvFfmpegInput,
 ) -> Result<tokio::process::Command, LiveTvError> {
-    let playlist = directory.join("index.m3u8");
+    live_ffmpeg_command_for_output(system, plan, directory, input, None)
+}
+
+fn live_ffmpeg_command_for_output(
+    system: &SystemInfo,
+    plan: &LiveTvTranscodePlan,
+    directory: &Path,
+    input: LiveTvFfmpegInput,
+    upload: Option<&str>,
+) -> Result<tokio::process::Command, LiveTvError> {
+    let playlist = upload.map_or_else(
+        || directory.join("index.m3u8").to_string_lossy().into_owned(),
+        |base| format!("{base}/index.m3u8"),
+    );
     let extension = match plan.delivery.packaging {
         LivePackaging::Mpegts => "ts",
         LivePackaging::Fmp4 => "m4s",
     };
-    let segments = directory.join(format!("segment-%06d.{extension}"));
+    let segments = upload.map_or_else(
+        || {
+            directory
+                .join(format!("segment-%06d.{extension}"))
+                .to_string_lossy()
+                .into_owned()
+        },
+        |base| format!("{base}/segment-%06d.{extension}"),
+    );
     let program = plan.macos_upload.as_ref().map_or_else(
         || Path::new(&system.ffmpeg),
         |binding| binding.executable.path.as_path(),
@@ -8285,6 +8375,10 @@ fn live_ffmpeg_command_for_input(
         // because those values happen to live in the parent environment.
         .env_clear()
         .env("LC_ALL", "C")
+        // Driver caches write outside HLS's owned receiver. Disable those
+        // optional writes so every persistent playback byte needs a grant.
+        .env("CUDA_CACHE_DISABLE", "1")
+        .env("MESA_SHADER_CACHE_DISABLE", "true")
         .args(["-hide_banner", "-loglevel", "info", "-nostdin", "-y"]);
     if let Some(binding) = &plan.macos_upload {
         command.args(
@@ -8406,11 +8500,18 @@ fn live_ffmpeg_command_for_input(
         }
     }
     command.args(LIVE_HLS_OUTPUT_ARGS);
-    let hls_flags = if plan.delivery.video_action == LiveTrackAction::Encode {
-        "delete_segments+temp_file+independent_segments+omit_endlist"
-    } else {
-        "delete_segments+temp_file+omit_endlist"
+    let hls_flags = match (
+        upload.is_some(),
+        plan.delivery.video_action == LiveTrackAction::Encode,
+    ) {
+        (true, true) => "delete_segments+independent_segments+omit_endlist",
+        (true, false) => "delete_segments+omit_endlist",
+        (false, true) => "delete_segments+temp_file+independent_segments+omit_endlist",
+        (false, false) => "delete_segments+temp_file+omit_endlist",
     };
+    if upload.is_some() {
+        command.args(["-method", "PUT", "-http_proxy", ""]);
+    }
     command.args(["-hls_flags", hls_flags]);
     if plan.delivery.packaging == LivePackaging::Fmp4 {
         command.args([
@@ -9163,6 +9264,11 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
     let unlisted = final_segments
         .keys()
         .filter(|sequence| !parsed.segments.contains(sequence))
+        .filter(|sequence| {
+            !final_segments
+                .get(sequence)
+                .is_some_and(|(name, _)| crate::playback_cache::is_pinned(&directory.join(name)))
+        })
         .count();
     if parsed.segments.len() > MAX_LISTED_SEGMENTS || unlisted > MAX_DELETION_LAG_SEGMENTS {
         return Err(LiveTvError::StreamFailed(
@@ -9387,16 +9493,24 @@ async fn read_bounded_regular_file(path: &Path, max: u64) -> Result<Vec<u8>, Liv
         .map_err(|_| LiveTvError::StreamFailed("live-TV resource read timed out".into()))?
 }
 
+struct LiveSegmentFile {
+    file: tokio::fs::File,
+    cache_pin: Option<crate::playback_cache::CachePin>,
+}
+
 async fn open_bounded_segment(
     path: &Path,
     expected_len: u64,
-) -> Result<tokio::fs::File, LiveTvError> {
+) -> Result<LiveSegmentFile, LiveTvError> {
     if expected_len > MAX_SESSION_BYTES {
         return Err(LiveTvError::StreamFailed(
             "live-TV segment exceeds its byte budget".into(),
         ));
     }
 
+    let cache_pin = crate::playback_cache::pin(path).map_err(|error| {
+        LiveTvError::CapabilityExpired(format!("live segment is unavailable: {error}"))
+    })?;
     let file = open_regular_file(path).await?;
     let metadata = file
         .metadata()
@@ -9407,7 +9521,7 @@ async fn open_bounded_segment(
             "live segment failed its opened-file inventory check".into(),
         ));
     }
-    Ok(file)
+    Ok(LiveSegmentFile { file, cache_pin })
 }
 
 async fn open_regular_file(path: &Path) -> Result<tokio::fs::File, LiveTvError> {
@@ -9508,7 +9622,7 @@ impl Drop for LocalResourceStream {
 }
 
 fn bounded_segment_body(
-    mut file: tokio::fs::File,
+    opened: LiveSegmentFile,
     expected_len: u64,
     cancel: CancellationToken,
     permit: tokio::sync::OwnedSemaphorePermit,
@@ -9566,6 +9680,11 @@ fn bounded_segment_body(
     });
     let producer_cancel = cancel.clone();
     tokio::spawn(async move {
+        // Hold the disk pin as long as the file descriptor can retain blocks.
+        let LiveSegmentFile {
+            mut file,
+            cache_pin: _cache_pin,
+        } = opened;
         let cancel = producer_cancel;
         let mut sent = 0_u64;
         let mut buffer = vec![0_u8; LOCAL_RESOURCE_CHUNK_BYTES];

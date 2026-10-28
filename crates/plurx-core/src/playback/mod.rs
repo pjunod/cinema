@@ -391,7 +391,7 @@ impl DeviceProfile {
     /// asked for; everything else is routed by `dv_handling` to the conversion
     /// where this node can build one, and to the compatible base layer or a
     /// re-encode where it cannot — all of which decode.
-    fn decodes_dolby_vision_as_copied(&self, file: &MediaFile) -> bool {
+    pub fn decodes_dolby_vision_as_copied(&self, file: &MediaFile) -> bool {
         if dolby_vision_is_dual_layer(file) {
             return self.enumerates_dolby_vision_profile(file);
         }
@@ -1394,20 +1394,15 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
     match dv_handling(file, profile, node, target) {
         DvHandling::None => {}
         DvHandling::Convert => {
-            // Not a transcode and not a strip: the base layer and every
-            // picture byte are copied, and only the per-frame metadata is
-            // rewritten. It takes ffmpeg, so the file cannot be handed over
-            // as-is — but nothing is re-encoded and nothing of the picture is
-            // lost. What *is* lost is the enhancement layer, which is why the
-            // reason says so rather than claiming a free upgrade: on a
-            // full-enhancement-layer source that layer carried real residual
-            // detail. The session's own reasons name which kind it was, once
-            // the first RPU has been read and the answer is known.
+            // The source cannot be handed over as-is. Explain the client's
+            // compatibility here, not the eventual processing: session
+            // admission may reconstruct FEL into a Profile 8.1 encode, and a
+            // later video constraint may require a non-DV transcode instead.
+            // The session's enhancement details describe what it selected.
             c.container_ok = false;
             reasons.push(
-                "Dolby Vision Profile 7 converted to Profile 8.1 for this device; the \
-                 HDR10-compatible base layer is copied untouched and the dual-layer \
-                 enhancement layer, which no consumer decoder takes, is dropped"
+                "Dolby Vision Profile 7 is not supported directly by this device; \
+                 Profile 8.1 is supported"
                     .to_owned(),
             );
         }
@@ -1666,10 +1661,11 @@ pub fn decide_forced(
                 );
             }
             if dv == DvHandling::Convert {
+                // This decision's compatibility reason also survives session
+                // admission; only the session knows whether FEL is rebuilt.
                 reasons.push(
-                    "Dolby Vision Profile 7 converted to Profile 8.1 for this device; the \
-                     HDR10-compatible base layer is copied untouched and the dual-layer \
-                     enhancement layer, which no consumer decoder takes, is dropped"
+                    "Dolby Vision Profile 7 is not supported directly by this device; \
+                     Profile 8.1 is supported"
                         .to_owned(),
                 );
             }

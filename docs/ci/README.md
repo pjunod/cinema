@@ -7,7 +7,9 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [ENGINEERING-KNOWLEDGE.md](ENGINEERING-KNOWLEDGE.md) | Code/diff queries, source-backed record maintenance, advisory PR capture and evidence limits for the bounded knowledge pilot. | open |
 | [DOCKER-HARDWARE-STATUS.md](DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
+| [NATIVE-CI-RECEIPTS.md](NATIVE-CI-RECEIPTS.md) | Authenticated native successes, unchanged source closures, build-specification boundaries and original-run provenance. | built |
 | [PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes: authenticated journals are adopted, anything else simply runs again — history never blocks a PR. | open |
 | [EFFORT-WEB-STATIC-CONTRACTS.md](EFFORT-WEB-STATIC-CONTRACTS.md) | Current-source effort web lint, preserved shape obligations, and explicitly deferred behavioral qualification. | open |
 | [STATUS-HISTORY.md](STATUS-HISTORY.md) | Includes the 2026-09-24/25 sections moved on 2026-10-05. Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
@@ -19,7 +21,7 @@ a document to this folder.
 | [RIPWIRE.md](RIPWIRE.md) | Explicit setup, bounded navigation, output meanings, and coverage limits. | live |
 | [RIPWIRE-STATUS.md](RIPWIRE-STATUS.md) | Ripwire implementation, measured evidence, decisions, and promotion progress. | open |
 | [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) | Fast failures, selective evidence, safe reuse. | open |
-| [APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md) | The M4 Apple primary, M3 Max standby, outage detection and installation. | live |
+| [APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md) | The M4 Apple primary, M3 Max standby, outage detection, installation and job-local DerivedData. | live |
 | [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md) · [review](CI_EXECUTION_ACCELERATION_REVIEW.md) | Persistent caches, native packaging, exact sharding. | open |
 | [AGENT-COMPILE-LOOP.md](AGENT-COMPILE-LOOP.md) | A compiler for a checkout that has none. | live |
 | [PAPERWORK.md](PAPERWORK.md) | Which bookkeeping rules run first — on push and as every pull request's first job — and the fix for each. | live |

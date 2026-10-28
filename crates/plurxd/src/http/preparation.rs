@@ -288,7 +288,9 @@ pub async fn status(
                 "ready",
                 "VOD HLS indexes are ready for every required delivery route",
             )
-        } else if let Some((terminal, reason)) = super::browse::index_refusal_summary(&refused) {
+        } else if let Some((terminal, reason)) =
+            super::browse::index_refusal_summary(&refused, crate::state::clock_ms())
+        {
             fact(if terminal { "attention" } else { "pending" }, reason)
         } else {
             analysis_fact(

@@ -517,6 +517,11 @@ pub struct CandidateExecutionContext {
     /// Private exact artifact chosen using a live measured-cost proof. The
     /// actual dispatch reacquires it; this is never client-supplied authority.
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
+    /// Explicit live-only policy, derived from current admitted caps and the
+    /// fenced complete-title probe and resolved source mastering. The effective
+    /// floor is fixed before preparation identity; ordinary VOD/pre-encode use None.
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    pub(crate) display_target_note: Option<String>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
     pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
     pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,
@@ -1017,6 +1022,19 @@ pub enum SessionKind {
         /// writes. Only ever true when preserving is — there is nothing to
         /// rewrite in a stream the filter removed.
         convert_dolby_vision: bool,
+        /// The reviewed plan hands this client a dual-layer source (Profile 4
+        /// or 7) as copied — its configuration record, RPUs and enhancement
+        /// layer intact — because the client's own capabilities enumerate
+        /// that profile (plurx Player composes the enhancement layer itself).
+        ///
+        /// Without it a copy narrows every dual-layer source it does not
+        /// convert to its base layer (`served_copy_options`). Set only by
+        /// `apply_plan_review`, from the server's derivation, never from a
+        /// wire field; only ever true beside `preserve_dolby_vision` and
+        /// without `convert_dolby_vision`. Omitted when false, so a recipe
+        /// written by this build stays readable by one without the field.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dual_layer_as_copied: bool,
     },
 }
 
@@ -1053,6 +1071,8 @@ pub(super) struct CopySessionOptions {
     /// Rewrite Profile 7 RPUs to Profile 8.1 in the fragments the copy pipe
     /// writes. Only ever set beside `preserve_dolby_vision`.
     pub(super) convert_dolby_vision: bool,
+    /// See `SessionKind::Copy::dual_layer_as_copied`.
+    pub(super) dual_layer_as_copied: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1072,6 +1092,7 @@ impl SessionKind {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
             Self::Transcode { .. } => None,
         }
@@ -1095,7 +1116,7 @@ impl SessionRequest {
         if let Some(destination) = self.dv_processing_destination {
             if self.presentation != Presentation::Vod
                 || !matches!(self.kind, SessionKind::Transcode { height } if (32..=super::MAX_HEIGHT).contains(&height) && height % 2 == 0)
-                || !self.hdr10
+                || !self.hdr10 && destination != DvDestination::Sdr
                 || self.subtitle_burn.is_some()
                 || self.continuous_media.is_some()
             {
@@ -1155,15 +1176,20 @@ impl SessionRequest {
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                dual_layer_as_copied,
             } => {
                 // A converted stream is different bytes, so it must not answer
-                // a replay for an unconverted one. Appended rather than folded
-                // into the existing digits so an unconverted request
-                // fingerprints to exactly the string it always did — a replay
-                // in flight across a deploy still recovers its session.
+                // a replay for an unconverted one, and a dual-layer source
+                // handed over as copied is different bytes from its base
+                // layer. Appended rather than folded into the existing digits
+                // so an unconverted request fingerprints to exactly the string
+                // it always did — a replay in flight across a deploy still
+                // recovers its session.
                 let base = format!("c{}d{}", u8::from(aac), u8::from(preserve_dolby_vision));
                 if convert_dolby_vision {
                     format!("{base}+p81")
+                } else if dual_layer_as_copied {
+                    format!("{base}+dl")
                 } else {
                     base
                 }
@@ -1205,6 +1231,7 @@ impl SessionRequest {
         let kind = if let Some(destination) = self.dv_processing_destination {
             let tag = match destination {
                 plurx_core::transcode::dv_processing::DvDestination::Hdr10 => "hdr10",
+                plurx_core::transcode::dv_processing::DvDestination::Sdr => "processed_sdr",
                 plurx_core::transcode::dv_processing::DvDestination::Profile81 => "profile81",
             };
             format!("{kind}+dv-processing-v1:{tag}")
@@ -1319,6 +1346,7 @@ impl SessionRequest {
             context.normalized_geometry,
             context.grade,
             context.profile,
+            context.display_target,
         ))
         .map_err(|error| error.to_string())?;
         Ok(Sha256::digest(bytes).into())
@@ -1337,6 +1365,10 @@ pub struct StartInfo {
     /// not be consumed, and this session serves the ordinary request it
     /// enhanced instead; the reason, for the create's plan notes.
     pub(crate) degraded_processing: Option<String>,
+    /// Why this start's own processing (a reconstructed 8.1 or HDR10-E the
+    /// ordinary request was eligible for) was declined: the verdict, a busy
+    /// reconstruction slot, a refused window. For the enhancement detail.
+    pub(crate) processing_note: Option<String>,
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
@@ -1384,7 +1416,7 @@ pub(crate) fn continuous_test_candidate_context(
     height: u32,
 ) -> CandidateExecutionContext {
     super::TranscodeManager::candidate_context(&plurx_core::playback::candidate::QualityCandidate {
-        processed_hdr10: false,
+        processed_dv: false,
         id,
         recipe_digest: digest,
         route: plurx_core::playback::candidate::CandidateRoute::Encode,
@@ -1514,6 +1546,7 @@ mod prepared_candidate_tests {
                 aac: false,
                 preserve_dolby_vision: native,
                 convert_dolby_vision: !native,
+                dual_layer_as_copied: false,
             };
             assert!(invalid.dv_processing_route().is_err());
             invalid.dv_processing_destination = None;
@@ -1645,6 +1678,74 @@ mod prepared_candidate_tests {
     }
 
     #[test]
+    fn resolved_source_floor_changes_the_actual_processed_preparation_binding() {
+        use plurx_core::{scan::dv_title::*, transcode::dv_processing::*};
+        let recovery = SessionRecoveryIdentity {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+            incarnation_id: "incarnation-a".into(),
+            recovery_epoch: "epoch-a".into(),
+        };
+        let mut request:SessionRequest = serde_json::from_value(serde_json::json!({
+            "file_id":1,"playback_id":"resolved-floor-binding","request_id":"incarnation-a","automatic":true,
+            "kind":{"kind":"transcode","height":720},"start_seconds":0.0,"audio_offset_ms":0,"hdr10":true,"presentation":"vod"})).expect("request");
+        let mut context = continuous_test_candidate_context(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([3; 32]),
+            [3; 32],
+            720,
+        );
+        context.owner_node_id = Some("node-a".into());
+        context.canonical_caps =
+            Some(serde_json::from_value(serde_json::json!({"v":2})).expect("caps"));
+        context.planning_binding = Some(crate::media_pool::PlanningBinding {
+            generation: 1,
+            source_digest: "source-a".into(),
+        });
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+                index: 0,
+                custom_xy: None,
+            }),
+        };
+        let DvDisplayTargetChoice::Target(proposal) =
+            DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
+        else {
+            panic!("target")
+        };
+        let source = DvSourceMastering {
+            primaries_rgbw: [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
+            min_1e4_nits: 17,
+        };
+        context.display_target = Some(
+            proposal
+                .resolve_source(Some(source))
+                .expect("resolved source floor"),
+        );
+        request.candidate_context = Some(Box::new(context));
+        let source_binding = request
+            .processed_preparation_binding(&recovery)
+            .expect("source binding");
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .display_target = Some(proposal.resolve_source(None).expect("renderer fallback"));
+        assert_ne!(
+            source_binding,
+            request
+                .processed_preparation_binding(&recovery)
+                .expect("fallback binding")
+        );
+    }
+
+    #[test]
     fn processed_preparation_binds_owner_start_tracks_caps_and_planning_and_cannot_serialize_credit(
     ) {
         let recovery = SessionRecoveryIdentity {
@@ -1730,7 +1831,7 @@ mod prepared_candidate_tests {
             .as_mut()
             .expect("context")
             .selected_candidate
-            .processed_hdr10 = true;
+            .processed_dv = true;
         assert_ne!(
             changed
                 .processed_preparation_binding(&recovery)

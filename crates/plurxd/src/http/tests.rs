@@ -12,6 +12,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::*;
 
+mod playback_handoffs;
 mod public_copy_wire;
 mod subtitle_generation;
 
@@ -2033,7 +2034,7 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
     let coverage = compact_handler(
         browse,
         "pub(crate) async fn vod_index_coverage",
-        "pub(super) fn index_refusal_summary",
+        "pub(crate) fn index_refusal_summary",
     );
     assert!(coverage.contains(".cluster_index_availability(&state.catalogue,&lookups)"));
     // Its two display settings are one bounded read, not two Authority
@@ -2435,6 +2436,337 @@ async fn macos_processing_reprobe_requires_admin_and_preserves_saved_choice() {
             .as_deref(),
         Some("1")
     );
+}
+
+#[test]
+fn local_https_route_matrix_is_exact_for_learner_and_maintenance() {
+    for method in [Method::GET, Method::PUT] {
+        assert!(learner_route_eligible(&method, https_admin::PATH));
+        assert!(maintenance_route_eligible(&method, https_admin::PATH));
+    }
+    assert!(learner_route_eligible(
+        &Method::GET,
+        https_admin::CERTIFICATE_PATH
+    ));
+    assert!(maintenance_route_eligible(
+        &Method::GET,
+        https_admin::CERTIFICATE_PATH
+    ));
+    for (method, path) in [
+        (Method::POST, https_admin::PATH),
+        (Method::DELETE, https_admin::PATH),
+        (Method::PATCH, https_admin::PATH),
+        (Method::HEAD, https_admin::PATH),
+        (Method::PUT, https_admin::CERTIFICATE_PATH),
+        (Method::HEAD, https_admin::CERTIFICATE_PATH),
+        (Method::GET, "/api/v1/system/https/other"),
+        (Method::PUT, "/api/v1/system/https/"),
+        (Method::GET, "/api/v1/system/https-other"),
+    ] {
+        assert!(!learner_route_eligible(&method, path), "{method} {path}");
+        assert!(
+            !maintenance_route_eligible(&method, path),
+            "{method} {path}"
+        );
+    }
+}
+
+fn local_https_state(root: &std::path::Path, enabled: bool) -> AppState {
+    let mut state = test_state_without_router();
+    let mut config = plurx_core::config::Config::default();
+    config.storage.data_dir = root.to_path_buf();
+    config.server.https.enabled = enabled;
+    config
+        .resolve_https(Default::default())
+        .expect("local intent");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    let identity = crate::https::Identity::load(&config.server.https, root, now, true)
+        .expect("identity")
+        .map(Arc::new);
+    state.https = Some(Arc::new(
+        crate::https::Control::new(state.node_id.clone(), config, identity).expect("control"),
+    ));
+    state
+}
+
+#[tokio::test]
+async fn local_https_api_requires_admin_and_guards_node_revision_and_input() {
+    let root = crate::test_tempdir().expect("tempdir");
+    let state = local_https_state(root.path(), false);
+    let app = router(state.clone());
+    for path in [https_admin::PATH, https_admin::CERTIFICATE_PATH] {
+        assert_eq!(
+            call(&app, get(path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        call(&app, put(https_admin::PATH, None, json!({}))).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let admin = setup_admin(&app).await;
+    let response = app
+        .clone()
+        .oneshot(get(https_admin::PATH, Some(&admin)))
+        .await
+        .expect("response");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let (status, before) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["revision"], "0");
+    let request = json!({"node_id":before["node_id"],"revision":before["revision"],"desired":before["desired"]});
+    for (field, value, code) in [
+        ("node_id", json!("another-node"), "https_node_conflict"),
+        ("revision", json!("1"), "https_revision_conflict"),
+    ] {
+        let mut wrong = request.clone();
+        wrong[field] = value;
+        let (status, body) = call(&app, put(https_admin::PATH, Some(&admin), wrong)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], code);
+    }
+    for body in [
+        json!({"PRIVATE-PEM-MARKER":true}),
+        json!({"node_id":"x","revision":{"PRIVATE-PEM-MARKER":true},"desired":{}}),
+    ] {
+        let (status, body) = call(&app, put(https_admin::PATH, Some(&admin), body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.to_string().contains("PRIVATE-PEM-MARKER"));
+    }
+    let (status, body) = call(
+        &app,
+        put(
+            https_admin::PATH,
+            Some(&admin),
+            json!({"padding":"PRIVATE-PEM-MARKER".repeat(2000)}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(!body.to_string().contains("PRIVATE-PEM-MARKER"));
+    let mut invalid = request.clone();
+    invalid["desired"]["port"] = json!(0);
+    assert_eq!(
+        call(&app, put(https_admin::PATH, Some(&admin), invalid))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut enable = request.clone();
+    enable["desired"]["enabled"] = json!(true);
+    let ((a, one), (b, two)) = tokio::join!(
+        call(&app, put(https_admin::PATH, Some(&admin), enable.clone())),
+        call(&app, put(https_admin::PATH, Some(&admin), enable))
+    );
+    assert!(
+        (a == StatusCode::OK && b == StatusCode::CONFLICT)
+            || (b == StatusCode::OK && a == StatusCode::CONFLICT),
+        "{a} {one} / {b} {two}"
+    );
+    let (_, after) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(after["revision"], "1");
+    assert_eq!(after["active"]["enabled"], false);
+    assert_eq!(after["desired"]["enabled"], true);
+    assert_eq!(after["restart_required"], true);
+    assert!(!root.path().join("https").exists());
+    assert_eq!(
+        call(&app, get(https_admin::CERTIFICATE_PATH, Some(&admin)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        state
+            .store
+            .get_setting("https")
+            .await
+            .expect("no Store setting"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn local_https_certificate_exports_only_loaded_public_chain_even_after_disk_replacement() {
+    use rustls::pki_types::pem::PemObject;
+    use sha2::Digest;
+    let root = crate::test_tempdir().expect("tempdir");
+    let state = local_https_state(root.path(), true);
+    let app = router(state);
+    let admin = setup_admin(&app).await;
+    let (_, snapshot) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    let source = root
+        .path()
+        .join("https")
+        .join(crate::https::MANAGED_IDENTITY_FILE);
+    std::fs::write(source, "invalid replacement PRIVATE-PEM-MARKER")
+        .expect("replace source after startup");
+    let response = app
+        .clone()
+        .oneshot(get(https_admin::CERTIFICATE_PATH, Some(&admin)))
+        .await
+        .expect("download");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/x-pem-file"
+    );
+    assert!(response.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .expect("attachment")
+        .starts_with("attachment;"));
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let text = std::str::from_utf8(&bytes).expect("PEM");
+    assert!(!text.contains("PRIVATE") && !text.contains("invalid replacement"));
+    let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(&bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("public certificates");
+    assert_eq!(certificates.len(), 1);
+    assert_eq!(
+        hex::encode(sha2::Sha256::digest(&certificates[0])),
+        snapshot["certificate"]["sha256"]
+    );
+    let (_, again) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(again["certificate"], snapshot["certificate"]);
+    let mut desired = snapshot["desired"].clone();
+    desired["enabled"] = json!(false);
+    let (status,disabled)=call(&app,put(https_admin::PATH,Some(&admin),json!({"node_id":snapshot["node_id"],"revision":snapshot["revision"],"desired":desired}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(disabled["saved"]["enabled"], false);
+    assert_eq!(disabled["desired"]["enabled"], false);
+    assert_eq!(disabled["active"]["enabled"], true);
+    assert_eq!(disabled["restart_required"], true);
+    assert_eq!(disabled["certificate"], snapshot["certificate"]);
+    desired["enabled"] = json!(true);
+    assert_eq!(call(&app,put(https_admin::PATH,Some(&admin),json!({"node_id":disabled["node_id"],"revision":disabled["revision"],"desired":desired}))).await.0,StatusCode::BAD_REQUEST);
+    let (_, after) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+    assert_eq!(after["revision"], disabled["revision"]);
+    assert_eq!(after["certificate"], snapshot["certificate"]);
+}
+
+#[tokio::test]
+async fn local_https_admin_auth_survives_exact_learner_and_maintenance_admission() {
+    let root = crate::test_tempdir().expect("tempdir");
+    let state = local_https_state(root.path(), false);
+    let app = router(state.clone());
+    let admin = setup_admin(&app).await;
+    assert_eq!(
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"https-reader","password":"longenough"})
+            )
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, login) = call(
+        &app,
+        post(
+            "/api/v1/auth/login",
+            None,
+            json!({"username":"https-reader","password":"longenough"}),
+        ),
+    )
+    .await;
+    let reader = login["token"].as_str().expect("reader token");
+    // Inject facts at the same shared decision boundary as the production
+    // gate. No second Hiqlite cluster or alternate authorization is used.
+    for (role, maintenance) in [
+        (LocalServingRole::Unclustered, false),
+        (LocalServingRole::Learner, false),
+        (LocalServingRole::Voter, true),
+    ] {
+        let admitted = app.clone().layer(axum::middleware::from_fn(
+            move |request: Request<Body>, next: Next| async move {
+                if let Some(response) = capacity_maintenance_refusal(
+                    maintenance,
+                    request.method(),
+                    request.uri().path(),
+                ) {
+                    return response;
+                }
+                if let Some(response) =
+                    capacity_role_refusal(Some(role), request.method(), request.uri().path())
+                {
+                    return response;
+                }
+                next.run(request).await
+            },
+        ));
+        for path in [https_admin::PATH, https_admin::CERTIFICATE_PATH] {
+            assert_eq!(
+                call(&admitted, get(path, None)).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                call(&admitted, get(path, Some(reader))).await.0,
+                StatusCode::FORBIDDEN
+            );
+            let expected = if path == https_admin::PATH {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            assert_eq!(call(&admitted, get(path, Some(&admin))).await.0, expected);
+        }
+        let (_, snapshot) = call(&admitted, get(https_admin::PATH, Some(&admin))).await;
+        let request = json!({"node_id":snapshot["node_id"],"revision":snapshot["revision"],"desired":snapshot["desired"]});
+        assert_eq!(
+            call(&admitted, put(https_admin::PATH, None, request.clone()))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &admitted,
+                put(https_admin::PATH, Some(reader), request.clone())
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&admitted, put(https_admin::PATH, Some(&admin), request))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        if maintenance || matches!(role, LocalServingRole::Learner) {
+            assert_eq!(
+                call(&admitted, get("/api/v1/settings", Some(&admin)))
+                    .await
+                    .0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+    }
+    // The exception grants nothing to fenced/unknown nodes.
+    for role in [Some(LocalServingRole::Fenced), None] {
+        let response =
+            capacity_role_refusal(role, &Method::GET, https_admin::PATH).expect("fenced");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(body.as_ref(), NODE_REMOVAL_FENCED_JSON.as_bytes());
+    }
 }
 
 fn test_app() -> Router {
@@ -8335,6 +8667,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "chapter_thumbnails",
             "dolby_vision_convert",
             "dolby_vision_hdr_processing",
+            "dolby_vision_display_target",
             "dolby_vision_fel_reencode",
             "source_probe_comparison",
             "output_preparation",
@@ -8483,6 +8816,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "coverage",
             "durable_queue",
             "durable_role",
+            "dv_target_cache",
             // Display-aware Auto on a single node owns every session.
             "local_session_owner",
             // Output preparation and rolling retention: the budget is the
@@ -8993,6 +9327,14 @@ async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion
         );
     }
     assert_eq!(initial["dolby_vision_convert"], true);
+    #[cfg(target_os = "linux")]
+    let fel_helper_installed = crate::vodencode::dv_runtime::ToolSet::capture()
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    #[cfg(not(target_os = "linux"))]
+    let fel_helper_installed = false;
     // Each new preference can be on or off with either conversion permission.
     // Missing backend evidence never changes the saved choices or permission.
     for convert in [false, true] {
@@ -9038,9 +9380,26 @@ async fn dv_processing_preferences_roundtrip_without_qualification_or_conversion
                     let requirements = item["requirements"]
                         .as_array()
                         .expect("readiness requirements");
-                    assert_eq!(requirements.len(), 4);
-                    assert_eq!(requirements[0]["status"], "unmet");
-                    assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    if field == "dolby_vision_fel_reencode" {
+                        // Computed from this node: the helper and the conversion
+                        // permission decide the backend row, never the saved choice.
+                        assert_eq!(requirements.len(), 6);
+                        assert_eq!(
+                            requirements[0]["status"],
+                            if convert && fel_helper_installed {
+                                "met"
+                            } else {
+                                "unmet"
+                            },
+                            "{requirements:?}"
+                        );
+                        assert_eq!(requirements[1]["id"], "dv_fel_worker_budget");
+                        assert_eq!(requirements[2]["id"], "dv_fel_live_slot");
+                    } else {
+                        assert_eq!(requirements.len(), 4);
+                        assert_eq!(requirements[0]["status"], "unmet");
+                        assert!(requirements.iter().all(|row| row["status"] != "met"));
+                    }
                 }
                 assert_eq!(read["dolby_vision_convert"], convert);
                 assert_eq!(state.transcode.dv_convert_enabled().await, convert);
@@ -20414,4 +20773,50 @@ async fn desktop_drain_accounts_internal_proxy_and_post_relay_bodies() {
     drop(read);
     drop(relay);
     assert!(fence.commit_desktop_shutdown(token, 0).await);
+}
+
+#[tokio::test]
+async fn display_target_setting_defaults_off_and_saves_despite_unmet_advice() {
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let (_, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+    assert_eq!(initial["dolby_vision_display_target"], false);
+    for enabled in [true, false] {
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"dolby_vision_display_target": enabled}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["dolby_vision_display_target"], enabled);
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::DV_DISPLAY_TARGET)
+                .await
+                .expect("stored"),
+            Some(if enabled { "1" } else { "0" }.into())
+        );
+        let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+        let item = readiness["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .find(|item| item["id"] == "dolby_vision_display_target")
+            .expect("target item");
+        assert_eq!(item["enabled"], enabled);
+        assert!(item["requirements"]
+            .as_array()
+            .expect("requirements")
+            .iter()
+            .any(|row| row["status"] != "met"));
+        assert_eq!(
+            saved["dolby_vision_hdr_processing"], false,
+            "targeting never silently enables HDR10-E"
+        );
+    }
 }

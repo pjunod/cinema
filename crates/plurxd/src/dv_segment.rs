@@ -551,9 +551,14 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .count()
         != policies.len()
         || policies.len() > 1
-        || policies
-            .first()
-            .is_some_and(|pair| pair[1] != "19" || codecs[0][1] != "hevc_vaapi")
+        || policies.first().is_some_and(|pair| {
+            // The radeonsi policy (19), or the reconstructed 8.1 route's
+            // own recipe (0, VBAQ off): nothing else.
+            let policy = plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq;
+            ![policy.flags()[1], policy.reconstructed_profile81_flags()[1]]
+                .contains(&pair[1].as_str())
+                || codecs[0][1] != "hevc_vaapi"
+        })
     {
         return Err("unsupported or ambiguous completed VAAPI driver policy".into());
     }
@@ -863,13 +868,19 @@ pub(crate) struct SegmentWindow {
     pub(crate) start: (i64, u32),
     pub(crate) end: (i64, u32),
     pub(crate) max_preroll: u16,
+    /// Production always supplies its typed held FORMAT/selected-video origin.
+    /// None is reserved for private legacy observed-zero helper controls.
+    pub(crate) source_origin: Option<plurx_core::transcode::dv_processing::DvSourceOrigin>,
 }
 #[cfg(target_os = "linux")]
 impl SegmentWindow {
     fn args(&self) -> Result<[String; 3], String> {
         let (start, sd) = self.start;
         let (end, ed) = self.end;
-        if start < 0
+        let (origin, od) = self.source_origin.map_or((0, 1), |origin| origin.exact());
+        if od > i32::MAX as u32
+            || i128::from(start) * i128::from(od) < i128::from(origin) * i128::from(sd)
+            || start < 0
             || end < 0
             || sd == 0
             || ed == 0
@@ -888,6 +899,15 @@ impl SegmentWindow {
             self.max_preroll.to_string(),
         ])
     }
+    fn held_origin_args(self) -> Option<[String; 2]> {
+        self.source_origin.map(|origin| {
+            let (numerator, denominator) = origin.exact();
+            [
+                "--held-source-origin".into(),
+                format!("{numerator}/{denominator}"),
+            ]
+        })
+    }
 }
 
 /// Direct timestamped NUT transport. The renderer and encoder run concurrently
@@ -900,32 +920,64 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) renderer_deadline: Instant,
     pub(crate) window: Option<SegmentWindow>,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    /// Where the renderer was admitted to decode its layers. It decides the
+    /// renderer's CPU debit, so it is part of the frozen graph admission.
+    pub(crate) decode: RendererDecode,
     pub(crate) export_raster: Option<(u32, u32)>,
+    /// Explicit producer policy only; this layer never reads client caps.
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
 }
 
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
 pub(crate) const STREAMING_DECODER_THREADS: usize = 4;
 
+/// Where the renderer decodes its source layers.
+///
+/// `segment_decode_render.c` (`open_layer`) gives each layer's decoder four
+/// frame workers only when it opened without a VA-API device; with one, each
+/// layer decodes with `thread_count = 1` and the GPU does the work. Debiting
+/// the software shape for a GPU decode reserved eight decoder threads nobody
+/// runs, and on a 12-thread worker it made every FEL graph (10 + 5 threads
+/// against a budget of 11) unadmittable.
+#[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RendererDecode {
+    /// The renderer is given the VA-API render device and the node measured
+    /// a VA-API HEVC decode. A window that nevertheless opened its decoders
+    /// in software is refused (`dv_runtime`), never served over budget.
+    #[cfg(any(target_os = "linux", plurx_dv_segment_probe))]
+    Gpu,
+    Software,
+}
+
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
 pub(crate) fn streaming_helper_cpu_threads(
     mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    decode: RendererDecode,
 ) -> usize {
-    // Four frame-only decoder workers per native layer, one caller doing
-    // parsing/upload/packing, and one bounded software-Vulkan worker.
-    if mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu {
-        STREAMING_DECODER_THREADS + 2
+    let layers = if mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu {
+        1
     } else {
-        2 * STREAMING_DECODER_THREADS + 2
+        2
+    };
+    // Per layer: four frame-only software decoder workers, or one GPU decode
+    // context. Plus one caller doing parsing/upload/packing and one bounded
+    // software-Vulkan worker.
+    match decode {
+        RendererDecode::Software => layers * STREAMING_DECODER_THREADS + 2,
+        #[cfg(any(target_os = "linux", plurx_dv_segment_probe))]
+        RendererDecode::Gpu => layers + 2,
     }
 }
 
 #[cfg(target_os = "linux")]
 fn check_streaming_budget(
     mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    decode: RendererDecode,
     args: &[String],
     cpu: usize,
 ) -> Result<(), String> {
-    let helper = streaming_helper_cpu_threads(mode);
+    let helper = streaming_helper_cpu_threads(mode, decode);
     let encoder = cpu
         .checked_sub(helper)
         .filter(|threads| *threads >= 3)
@@ -987,7 +1039,12 @@ async fn run_streaming(
     let cpu = held
         .software
         .ok_or("concurrent helper and encoder lack their frozen CPU debit")?;
-    check_streaming_budget(stream.mode, &request.encoder_args, cpu.threads())?;
+    check_streaming_budget(
+        stream.mode,
+        stream.decode,
+        &request.encoder_args,
+        cpu.threads(),
+    )?;
     check_streaming_clock(&request.encoder_args, windowed)?;
     let reservation = request
         .producer
@@ -1061,6 +1118,20 @@ async fn run_streaming(
             height.to_string(),
             "pq-bilinear-yuv420p10-v1".into(),
         ]);
+    }
+    if let Some(target) = stream.display_target {
+        if !windowed || stream.export_raster.is_none() {
+            return Err(
+                "display targeting requires an explicit bounded window/export policy".into(),
+            );
+        }
+        // Helper argv[10]: executable is not part of this Vec. Title endpoints
+        // follow the export policy; no environment-dependent renderer defaults.
+        args[9] = target.output_policy();
+        args.extend(target.endpoint_args());
+    }
+    if let Some(origin_args) = stream.window.and_then(SegmentWindow::held_origin_args) {
+        args.extend(origin_args);
     }
     let renderer_env: Vec<_> = request
         .renderer_env
@@ -1253,7 +1324,10 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
         #[cfg(target_os = "linux")]
         return spawn_streaming(StreamingSegmentRequest {
             export_raster: None,
+            display_target: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
+            // The probe passes no decode device: the renderer decodes in software.
+            decode: RendererDecode::Software,
             request,
             renderer_deadline: Instant::now() + Duration::from_secs(30),
             window: std::env::var("PLURX_DV_SEGMENT_WINDOW_START")
@@ -1272,6 +1346,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
                             &std::env::var("PLURX_DV_SEGMENT_WINDOW_END").expect("window end"),
                         ),
                         max_preroll: 512,
+                        source_origin: None,
                     }
                 }),
         })
@@ -1288,6 +1363,7 @@ fn window_argument_regression() {
         start: (42, 1000),
         end: (167, 1000),
         max_preroll: 512,
+        source_origin: None,
     };
     assert_eq!(
         window.args().expect("bounded original-source window"),
@@ -1297,6 +1373,7 @@ fn window_argument_regression() {
         start: (0, 1),
         end: (48 * 1001, 24000),
         max_preroll: 512,
+        source_origin: None,
     };
     assert!(
         film_entry.args().is_ok(),
@@ -1384,8 +1461,10 @@ pub(crate) async fn physical_probe() {
     use plurx_core::domain::MediaFile;
     let streaming = std::env::var("PLURX_DV_SEGMENT_STREAMING").is_ok_and(|v| v == "1");
     let cpu_threads = if streaming {
-        streaming_helper_cpu_threads(plurx_core::transcode::dv_processing::DvProcessingMode::Fel)
-            + 3
+        streaming_helper_cpu_threads(
+            plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
+            RendererDecode::Software,
+        ) + 3
     } else {
         3
     };
@@ -1904,7 +1983,7 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn reconstructed_vaapi_selection_requires_only_the_upload_proof() {
+    fn reconstructed_intel_preferences_use_only_proved_vaapi_output() {
         use plurx_core::transcode::*;
         let mut source = encoded_recipe_source(true);
         source.width = Some(3840);
@@ -1917,22 +1996,29 @@ mod tests {
             };
             let (plan, _, _, _) = recipe_fixture_parts(&source, &options);
             for proved in [false, true] {
-                for rate in [24, 30, 60] {
-                    let actual = crate::vodencode::dv_runtime::completed_window_encoder(
-                        Encoder::Vaapi,
-                        proved,
-                        &plan,
-                        VodFrameGrid::new(rate, 1).expect("grid"),
-                    );
-                    assert_eq!(
-                        actual,
-                        if proved {
-                            Encoder::Vaapi
-                        } else {
-                            Encoder::Software
-                        },
-                        "{height} {rate} {proved}"
-                    );
+                let intel_output = if proved {
+                    Encoder::Vaapi
+                } else {
+                    Encoder::Software
+                };
+                for (preferred, expected) in [
+                    (Encoder::Qsv, intel_output),
+                    (Encoder::Vaapi, intel_output),
+                    (Encoder::Software, Encoder::Software),
+                    (Encoder::Nvenc, Encoder::Nvenc),
+                ] {
+                    for (numerator, denominator) in [(24, 1), (24000, 1001), (30, 1), (60, 1)] {
+                        let actual = crate::vodencode::dv_runtime::completed_window_encoder(
+                            preferred,
+                            proved,
+                            &plan,
+                            VodFrameGrid::new(numerator, denominator).expect("grid"),
+                        );
+                        assert_eq!(
+                            actual, expected,
+                            "{height} {numerator}/{denominator} {preferred:?} {proved}"
+                        );
+                    }
                 }
             }
         }
@@ -1983,15 +2069,20 @@ mod tests {
                     .collect::<Vec<_>>(),
                 ["19"]
             );
-            for (mode, helper) in [(DvProcessingMode::BaseRpu, 6), (DvProcessingMode::Fel, 10)] {
-                assert_eq!(streaming_helper_cpu_threads(mode), helper);
+            for (mode, decode, helper) in [
+                (DvProcessingMode::BaseRpu, RendererDecode::Software, 6),
+                (DvProcessingMode::Fel, RendererDecode::Software, 10),
+                (DvProcessingMode::BaseRpu, RendererDecode::Gpu, 3),
+                (DvProcessingMode::Fel, RendererDecode::Gpu, 4),
+            ] {
+                assert_eq!(streaming_helper_cpu_threads(mode, decode), helper);
                 let total = helper + if audio { 5 } else { 3 };
                 assert!(
-                    check_streaming_budget(mode, &args, total).is_ok(),
+                    check_streaming_budget(mode, decode, &args, total).is_ok(),
                     "{args:?}"
                 );
                 assert!(
-                    check_streaming_budget(mode, &args, total - 1).is_err(),
+                    check_streaming_budget(mode, decode, &args, total - 1).is_err(),
                     "every scope must fit before producer reservation"
                 );
             }
@@ -2179,6 +2270,10 @@ mod tests {
             duplicated.extend([flag.into(), "19".into()]);
             assert!(check_encoder_budget(&duplicated, 3).is_err());
         }
+        // The reconstructed 8.1 route's recipe (VBAQ off) is the one other
+        // qualified value; without it every 8.1 window was refused here.
+        *qualified.last_mut().expect("policy") = "0".into();
+        assert!(check_encoder_budget(&qualified, 3).is_ok());
         *qualified.last_mut().expect("policy") = "20".into();
         assert!(check_encoder_budget(&qualified, 3).is_err());
         let mut wrong_encoder = nvenc.to_vec();
@@ -2295,6 +2390,51 @@ mod tests {
     #[test]
     fn original_movie_window_uses_exact_bounded_rationals() {
         window_argument_regression();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_origin_window_arguments_bind_the_exact_epoch_before_absolute_bounds() {
+        use plurx_core::transcode::{
+            dv_processing::{DvSourceOrigin, DvTimestamp},
+            VodSourceClock,
+        };
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(1, 8).expect("exact held selected-video origin"),
+            VodSourceClock::ReportedOrigin(125_000),
+        )
+        .expect("matching observed FORMAT/video clock");
+        let mut window = SegmentWindow {
+            start: (1, 8),
+            end: (1063, 500),
+            max_preroll: 512,
+            source_origin: Some(origin),
+        };
+        assert_eq!(
+            window.args().expect("absolute first window"),
+            ["1/8", "1063/500", "512"]
+        );
+        assert_eq!(
+            window.held_origin_args().expect("typed held argument"),
+            ["--held-source-origin", "1/8"]
+        );
+        window.start = (124, 1000);
+        assert!(
+            window.args().is_err(),
+            "membership cannot precede frozen epoch"
+        );
+        window.start = (1, 8);
+        window.end = (i64::MAX, 1);
+        assert!(
+            window.args().is_err(),
+            "large endpoints cannot overflow the three-second bound"
+        );
+        window.end = (1063, 500);
+        window.source_origin = None;
+        assert!(
+            window.held_origin_args().is_none(),
+            "private legacy control never invents held-probe authority"
+        );
     }
 
     #[test]

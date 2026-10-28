@@ -25,6 +25,13 @@ clients/apple/plurx.xcodeproj/
 clients/apple/Support/
 clients/apple/build/
 
+# The plurx Player package build fetches upstream sources and builds into
+# these when run in a checkout instead of its container.
+clients/linux-player/build/
+clients/linux-player/libplacebo/
+clients/linux-player/mpv/
+clients/linux-player/dm/
+
 # perf-report writes its output into the working directory, and the server
 # checkouts are reset to the remote — an untracked report is the one thing in
 # them worth keeping, so name it here rather than sweeping it by hand.
@@ -57,6 +64,10 @@ scripts/*.fleet.json
 # the lockfile beside it is what is committed (THIRD-PARTY-NOTICES §7).
 /tools/web-types/node_modules/
 
+# Node-local public HTTPS identity/intent must never enter source control,
+# including installations that select a data directory other than /data.
+**/https/identity.pem
+**/https-settings.json
 # Local working directories beside the checkout. They hold session output and
 # scratch state, never source, and an unignored 10 GB directory is walked by
 # every `git status` and every search.

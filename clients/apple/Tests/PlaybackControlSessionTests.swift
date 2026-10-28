@@ -13,6 +13,7 @@ private final class ControlExchangeLog: @unchecked Sendable {
     private let lock = NSLock()
     private var requests: [ControlRequest] = []
     private var echoes: [String?] = []
+    private var subtitleResponses: [String: Int] = [:]
 
     func append(_ request: ControlRequest, echo: String?) {
         lock.lock()
@@ -28,11 +29,26 @@ private final class ControlExchangeLog: @unchecked Sendable {
     }
     func firstEcho() -> String? { lock.lock(); defer { lock.unlock() }; return echoes.first ?? nil }
 
+    func recordResponse(_ response: ControlResponse) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let state = response.delivery?.subtitleReadiness, subtitleResponses[state] == nil {
+            subtitleResponses[state] = response.acceptedSequence
+        }
+    }
+
+    func firstResponse(withReadiness state: String) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return subtitleResponses[state]
+    }
+
     func reset() {
         lock.lock()
         defer { lock.unlock() }
         requests = []
         echoes = []
+        subtitleResponses = [:]
     }
 }
 
@@ -206,6 +222,7 @@ private final class ControlExchangeURLProtocol: URLProtocol {
             delivery: controlAnswer.delivery(),
             action: controlAnswer.get()
         )
+        controlExchanges.recordResponse(response)
         let body = (try? PlaybackControl.encoder.encode(response)) ?? Data()
         // Encoded first, so a held response carries the answer that was
         // current when the request arrived rather than when it was released.
@@ -527,6 +544,9 @@ final class PlaybackControlSessionTests: XCTestCase {
         }
         session.begin(bootstrap: sessionBootstrap(), transport: transport,
                       observe: { player.observation() })
+        // The first response is terminal: the held processing callback belongs
+        // to that exact response, after its capture guard and before verdict store.
+        _ = try await waitForExchange { $0.sequence == 1 }
         let deadline = Date().addingTimeInterval(5)
         var held = false
         while !held, Date() < deadline {
@@ -534,6 +554,7 @@ final class PlaybackControlSessionTests: XCTestCase {
             if !held { try await Task.sleep(nanoseconds: 10_000_000) }
         }
         XCTAssertTrue(held)
+        XCTAssertEqual(controlExchanges.firstResponse(withReadiness: "ready"), 1)
         session.end()
         publicationGate.release()
         // Join the reporter before asserting, so nil cannot merely mean that

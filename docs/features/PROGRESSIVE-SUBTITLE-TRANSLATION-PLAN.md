@@ -1,5 +1,7 @@
 # Progressive subtitle translation — build English captions during playback
 
+**Completion effort, 2026-10-26:** [current implementation and final qualification](SUBTITLE-COMPLETION-STATUS.md) extends the initial scope with progressive transcription, native clients, multiple audio tracks, additional delivery routes and existing-text translation. The evidence below retains its original candidate and scope. The user owns deployment after the new merge.
+
 **Status:** first route built and accepted (web direct playback, one audio
 stream, explicit spoken language); native, multi-audio, encoded, fleet,
 long-film and broader human-quality qualification remain open ·

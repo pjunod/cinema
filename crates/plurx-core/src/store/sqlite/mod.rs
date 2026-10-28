@@ -31,6 +31,7 @@ mod live_tv_resource;
 mod media;
 mod offline;
 mod outbox;
+mod playback_handoffs;
 mod pretranscode;
 mod publication;
 mod reading;
@@ -1309,9 +1310,21 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v111: managed subtitle jobs and media-independent model reservations.
     super::subtitle_managed_schema::SCHEMA,
     // v112: independently recognized progressive translation operations and cues.
-    super::subtitle_translation_schema::SCHEMA,
+    super::subtitle_translation_schema::SCHEMA_V1,
     // v113: item ratings and per-person item lists (watchlist, favorites).
     super::library_annotations_schema::SCHEMA,
+    // v114: source-revision title acquisition, independent of ordinary probes.
+    super::dv_title_jobs::SCHEMA,
+    // v115: one-time playback handoff codes and their file-scoped tokens.
+    super::playback_handoffs::SCHEMA,
+    // v116: centrally fenced recomputable text subtitle translation slices.
+    super::subtitle_text_translation_schema::SCHEMA,
+    // v117: grant-bound read-only progressive caption retention.
+    super::shared_caption_schema::SCHEMA,
+    // v118: exact progressive v1 producer-incarnation trigger upgrade, preserving cached assets and leases.
+    super::subtitle_translation_schema::RETARGET_MIGRATION,
+    // v119: explicit playback continuity grants captured by exact range claims.
+    super::subtitle_translation_schema::CONTINUITY_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1840,7 +1853,11 @@ impl SqliteStore {
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
-                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?);
+                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
+                || (version == 118
+                    && super::subtitle_translation_schema::retarget_already_applied(conn)?)
+                || (version == 119
+                    && super::subtitle_translation_schema::continuity_already_applied(conn)?);
             let applied = Self::apply_migration_step(conn, version, sql, already_applied);
             conn.pragma_update(None, "foreign_keys", "ON")?;
             applied?;
@@ -1850,6 +1867,10 @@ impl SqliteStore {
         super::subtitle_managed_schema::verify_sqlite(conn)?;
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
+        super::dv_title_jobs_schema::verify_sqlite(conn)?;
+        super::subtitle_text_translation_schema::verify_sqlite(conn)?;
+        super::shared_caption_schema::verify_sqlite(conn)?;
+        super::playback_handoffs::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

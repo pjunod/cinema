@@ -229,9 +229,20 @@ impl RenditionDir {
 
     /// Write a file so that it is absent or complete and never partial.
     async fn publish_file(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        // Segments reserve at the sink before its manifest lock. Init writes
+        // also enter here, and need their own exact physical reservation.
+        let reservation = if name == INIT_NAME {
+            crate::playback_cache::reserve(self.path(), bytes.len() as u64).await?
+        } else {
+            None
+        };
         let tmp = self.dir.join(format!("{name}.tmp"));
         tokio::fs::write(&tmp, bytes).await?;
-        tokio::fs::rename(&tmp, self.dir.join(name)).await
+        tokio::fs::rename(&tmp, self.dir.join(name)).await?;
+        if let Some(reservation) = reservation {
+            reservation.commit(bytes.len() as u64);
+        }
+        Ok(())
     }
 
     pub async fn write_init(&self, bytes: &[u8]) -> io::Result<()> {
@@ -281,6 +292,9 @@ impl RenditionDir {
     /// them is present. Nothing is unlinked in that case, so a refusal cannot
     /// take the bytes with it.
     pub async fn evict(&self, manifest: &mut Manifest, index: u32) -> io::Result<bool> {
+        if crate::playback_cache::is_pinned(&self.segment_path(index)) {
+            return Ok(false);
+        }
         let Some(state) = manifest.state(index) else {
             return Ok(false);
         };

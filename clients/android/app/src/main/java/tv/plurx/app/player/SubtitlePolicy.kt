@@ -475,7 +475,7 @@ internal fun embeddedTextTrackIndex(
     embeddedLanguages: List<String?>,
 ): Int? = embeddedTrackOrdinal(
     serverIndex,
-    serverTracks.map { it.index to it.language },
+    serverTracks.filter { it.source == "embedded" }.map { it.index to it.language },
     embeddedLanguages,
 )
 
@@ -493,3 +493,6 @@ internal fun normalizedLanguage(code: String?): String? {
         Locale.forLanguageTag(primary).isO3Language.ifBlank { primary }
     }.getOrDefault(primary)
 }
+
+/** Stable renderer identity; downloaded indices never masquerade as embedded ordinals. */
+internal fun downloadedCaptionId(index: Long): String = "plurx-downloaded-$index"

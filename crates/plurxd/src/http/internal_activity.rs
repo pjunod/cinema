@@ -706,6 +706,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                 });
             }
             ActivityCandidate::Vod(session) => {
+                let session = *session;
                 deliveries.push(ActivityDelivery {
                     vod_observation: session.observation.clone(),
                     method: session.method.as_str().to_owned(),
@@ -791,7 +792,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
 #[derive(Debug)]
 enum ActivityCandidate {
     Transcode(crate::transcode::DeliveryCandidate),
-    Vod(crate::vodserve::VodDeliveryInfo),
+    Vod(Box<crate::vodserve::VodDeliveryInfo>),
     Remux(crate::progressive::StreamListing),
     Direct(crate::delivery::Live),
 }
@@ -817,7 +818,10 @@ fn activity_candidates_bounded(
     let mut candidates = transcodes
         .into_iter()
         .map(ActivityCandidate::Transcode)
-        .chain(vod.into_iter().map(ActivityCandidate::Vod))
+        .chain(
+            vod.into_iter()
+                .map(|session| ActivityCandidate::Vod(Box::new(session))),
+        )
         .chain(remuxes.into_iter().map(ActivityCandidate::Remux))
         .chain(direct.into_iter().map(ActivityCandidate::Direct))
         .collect::<Vec<_>>();
@@ -1218,8 +1222,39 @@ mod tests {
         let old_consumer: OldConsumer =
             serde_json::from_value(new).expect("old ignores unknown fields");
         assert_eq!(old_consumer.method, "hls-copy");
-        let snapshot = bounded_snapshot("node-b".into(), vec![delivery], Vec::new());
+        let mut snapshot = bounded_snapshot("node-b".into(), vec![delivery], Vec::new());
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
+        snapshot.deliveries[0]
+            .vod_observation
+            .as_mut()
+            .expect("observations")
+            .display_target = Some(crate::vodserve::DisplayTargetActivity {
+            reported_peak_nits: None,
+            peak_source: None,
+            bucket_nits: Some(100),
+            live_rendering: true,
+            note: "explicit SDR display".into(),
+        });
+        let bytes = serde_json::to_vec(&snapshot).expect("SDR peer snapshot");
+        assert!(matches!(
+            decode_snapshot(&bytes, "node-b"),
+            PeerActivityOutcome::Answered(_)
+        ));
+        for bucket in [0, 99, 101, 399, 5000] {
+            let mut invalid = snapshot.clone();
+            invalid.deliveries[0]
+                .vod_observation
+                .as_mut()
+                .expect("observations")
+                .display_target
+                .as_mut()
+                .expect("target")
+                .bucket_nits = Some(bucket);
+            assert!(matches!(
+                decode_snapshot(&serde_json::to_vec(&invalid).expect("snapshot"), "node-b"),
+                PeerActivityOutcome::InvalidResponse
+            ));
+        }
         let aged = age_dvr_observations(
             PeerActivityOutcome::Answered(snapshot),
             Duration::from_secs(1),

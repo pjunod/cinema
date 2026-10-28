@@ -2,8 +2,7 @@
 
 The index of `docs/streaming/`: every document in this folder, the question it
 answers, and its status. Routed from [the docs index](../README.md), which
-defines the status words. Add a row here, in the same commit, when you add
-a document to this folder.
+defines status words. Add each new document’s row in the same commit.
 
 Everything about what gets sent to a player and why: the VOD presentation
 programme, the capability negotiation that picks a grade, Dolby Vision
@@ -11,6 +10,8 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
+| [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
+| [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Which playback files share `cache.max_gb`, how concurrent writes reserve capacity, and how global eviction protects readers and free disk space. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG backward-seek failure: subtitle reattachment cancelled the Auto request before commit; underlying repair, recovery ownership, quality indicators and remaining live qualification. | open |
 | [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari startup intent corruption, lifecycle ownership and remaining stale-session evidence. | open |
 | [TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md) | Why TCL Auto rejects Android capability counts, the catalog read-budget failure, and the reviewed plan for one catalog per create with legacy-client compatibility. | open |
@@ -146,6 +147,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [HEVC-COLOR-CORRUPTION-REVIEW.md](HEVC-COLOR-CORRUPTION-REVIEW.md) | Independent adversarial review of the HEVC color diagnosis and implementation, with objections, amendments and remaining delivery gates. | open |
 | [DV-P5-APPLE-START-REPAIR.md](DV-P5-APPLE-START-REPAIR.md) | Why a P5 Apple TV start fails before publication, the matching-tuple header repair, per-sample rolling guard, adversarial findings and qualification limits. | built |
 | [DV-DELIVERY-FINDINGS.md](DV-DELIVERY-FINDINGS.md) | Why Dolby Vision titles arrive as HDR10 or lower. | open |
+| [DV-SELECTION-PATHS.md](DV-SELECTION-PATHS.md) | Current DV delivery, enhancement, decoder/encoder, proof and fallback decisions; source/test anchors and acceptance limits. | live |
 | [DV_HDR_PROCESSING_PLAN.md](DV_HDR_PROCESSING_PLAN.md) | FEL-aware DV to HDR10 and Profile 7 to 8.1 proposal: quality measurements, controls and fallbacks. | open |
 | [DV_HDR_PROCESSING_BUILD.md](DV_HDR_PROCESSING_BUILD.md) | Sol 6.1 implementation handoff: backend feasibility, integration contracts, benchmarks and qualification. | open |
 | [DV_HDR_PROCESSING_REVIEW.md](DV_HDR_PROCESSING_REVIEW.md) | Adversarial findings and dispositions for the DV processing proposal and build handoff; cleared for M0 feasibility only. | done |
@@ -153,7 +155,10 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [DV_HDR_M1_CONTRACTS.md](DV_HDR_M1_CONTRACTS.md) | Approved additive M1 type, frame-coverage, graph and recovery-episode contracts; the initial slice kept the production registry empty. | open |
 | [DV_HDR_PROCESSING_STATUS.md](DV_HDR_PROCESSING_STATUS.md) | Implementation ledger: backend and serving integration, HDR10-E, resource measurements, reproducible acceptance fixtures, packaging and remaining qualification. | open |
 | [DV-FOLLOWUPS-HANDOFF.md](DV-FOLLOWUPS-HANDOFF.md) | What is left after the HDR10-E work, for any agent: the Pixel HLS/Animals branch, FEL→8.1 for DV displays, display-targeted PR A, and small open items, with branches, files, tests and merge lines. | open |
-| [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md) | How HDR10-E will be mapped on the server for the viewer's display peak, using per-shot L1 and later L2/L8 trims: buckets, identity, MDCV/CLL, clients, tests and PR order. | planned |
+| [DM-PRECISION-STATUS.md](DM-PRECISION-STATUS.md) | Shader PQ precision repair, rejected CM v2.9 affine experiment, ownership and merge evidence. | done |
+| [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md) | Current A–F implementation and source-pinned qualification matrix, retained checkpoint history, remaining effort promotion, and physical accuracy acceptance. | in progress |
+| [DISPLAY-TARGETED-DV-QUALIFICATION-HISTORY.md](DISPLAY-TARGETED-DV-QUALIFICATION-HISTORY.md) | Historical display-target source checkpoints and qualification records, retained verbatim with original attribution. | historical |
+| [DISPLAY-TARGETED-DV-TRIM-CONTRACT.md](DISPLAY-TARGETED-DV-TRIM-CONTRACT.md) | Superseded stub: the never-merged Annex B.3 RGB trim candidate, replaced by the closed-form display management of the build plan's phase 2. | superseded |
 | [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md) | Which Dolby Vision enhancements are possible but unbuilt (HDR10+ from L1, DV→SDR trims, MEL detection, P5, more routes and profiles, pipeline performance) and what each involves. | open |
 | [DV_HDR_REPAIR_LOG.md](DV_HDR_REPAIR_LOG.md) | Running log of the fleet HDR repair (`effort/dv-hdr-repair`): reproduced failures, repair rounds R1 onward, acceptance still owed. | open |
 | [DV fixture recipes](../evidence/dv-processing-2026-10-09/dv-fixture-reproduction.tar.gz) · [archive receipt](../evidence/dv-processing-2026-10-09/fixture-archive-receipt.json) | Reproduce and verify the synthetic acceptance sources; generated movies and private media are excluded. | built |
@@ -163,6 +168,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [DV_HDR_TIMELINE_CONTROLS.md](DV_HDR_TIMELINE_CONTROLS.md) | Reproduce bounded VFR, real seek/preroll and timestamp-epoch controls with stored-duration, lifecycle and failure-status evidence. | open |
 | [DV_HDR_RPU_REUSE_CONTROLS.md](DV_HDR_RPU_REUSE_CONTROLS.md) | Reviewed explicit mapping reuse, cache/reset refusals, input-bound execution and retained-prerequisite replay. | open |
 | [DV_HDR_COMBINED_CONTROLS.md](DV_HDR_COMBINED_CONTROLS.md) | Reviewed finite P7/FEL source-to-HDR10 chain, actual output/timing, numerical limits and remaining movie integration. | open |
+| [FEL-P81-RECONSTRUCTION.md](FEL-P81-RECONSTRUCTION.md) | Reconstructed Profile 8.1: admission, truthfulness, proofs, route recipe, per-title qualification. | open |
 | [DV_PROCESSING_TOOLS.md](DV_PROCESSING_TOOLS.md) | Build and run the bounded streaming FEL reconstruction and P8.1 authoring helpers; remaining serving limits. | open |
 | [DV_HDR_NONIDENTITY_CONTROLS.md](DV_HDR_NONIDENTITY_CONTROLS.md) | Reproduce reviewed affine FEL reconstruction and P8.1 repeated-reshape controls, separate HDR10-base checks and exact replay provenance. | open |
 | [DV-DISK-CONVERSION-DIAGNOSIS.md](DV-DISK-CONVERSION-DIAGNOSIS.md) | Why the on-disk conversion never completes, and a proposal. | open |

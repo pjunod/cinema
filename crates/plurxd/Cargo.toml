@@ -22,6 +22,7 @@ repository.workspace = true
 cluster-integration-tests = []
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # CPU-only inference, loaded only when semantic search is enabled.
 candle-core = { version = "=0.11.0", default-features = false }
@@ -49,6 +50,7 @@ hyper-util = { version = "0.1", features = [
 ] }
 clap = { workspace = true }
 plurx-core = { path = "../plurx-core", features = ["hiqlite-store"] }
+plurx-worker-control = { path = "../plurx-worker-control" }
 hiqlite = { workspace = true }
 hiqlite-wal = { workspace = true }
 plurx-compat-plex = { path = "../plurx-compat-plex" }
@@ -81,6 +83,13 @@ crc32fast = { workspace = true }
 quick-xml = { workspace = true }
 zip = { workspace = true }
 tempfile = { workspace = true }
+# Public HTTPS has an identity independent of the sharing peer listener.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.14.8", default-features = false, features = ["ring", "pem"] }
+time = "0.3"
+x509-parser = { version = "0.18", default-features = false, features = ["verify"] }
+zeroize = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 plurx-desktop-control = { path = "../plurx-desktop-control" }
@@ -93,6 +102,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_JobObjects",
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -105,7 +115,6 @@ wasmtime = { version = "=49.0.2", default-features = false, features = ["std", "
 dolby_vision = { workspace = true }
 # Invitation seam tests compose the released broker Router and trusted local TLS.
 plurx-notification-broker = { path = "../plurx-notification-broker" }
-async-trait = { workspace = true }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

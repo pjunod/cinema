@@ -161,8 +161,21 @@ history-check: ## Verify every corrective commit has current regression evidence
 operations-check: ## Verify deploy, CI, container, and client shipping contracts
 	@python3 -m unittest discover -s tests/operations -p 'test_*.py'
 
+.PHONY: linux-player-check
+linux-player-check: ## Test the plurx Player launcher against a fake server and a fake mpv (LINUX-PLAYER-PLAN M4); a skipped test fails
+	@python3 -B clients/linux-player/packaging/run-tests clients/linux-player/tests
+
+# Not in CI: it pulls ubuntu:26.10, installs from the pinned apt snapshot,
+# downloads the pinned upstream sources, compiles libplacebo and mpv twice
+# (the second build must be byte-identical) and verifies the package. Output
+# goes to target/linux-player-deb/, or to PLURX_DEB_OUT;
+# clients/linux-player/README.md explains what is bundled.
+.PHONY: linux-player-deb
+linux-player-deb: ## Build and verify the plurx Player .deb with its private mpv/libplacebo in disposable Ubuntu 26.10 containers (LINUX-PLAYER-PLAN M5)
+	@clients/linux-player/packaging/build-deb.sh
+
 .PHONY: check
-check: validation-lint history-check operations-check benchmark-check rust-check ## History + operations + catalog + benchmark + Rust baseline
+check: validation-lint history-check operations-check linux-player-check benchmark-check rust-check ## History + operations + launcher + catalog + benchmark + Rust baseline
 
 .PHONY: spike-lock-check
 spike-lock-check: ## Prove the isolated spike's lockfile still resolves
@@ -1176,7 +1189,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=72 \
+	PLURX_EXPECT_TEST_COUNT=76 \
 	  PLURX_EXPECT_TEST_NAMES='transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly,transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap,transport_recovery::tests::writer_must_cover_the_end_of_recovery,transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline,transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series,transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result,transport_recovery::tests::owned_async_task_growth_has_no_resource_slack' \
 	  scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
@@ -1354,6 +1367,7 @@ validate-help: ## Explain the validation workflow and UI golden commands
 .PHONY: validation-lint
 validation-lint: ## Verify every governed file maps to a valid functionality point
 	@scripts/validate lint
+	@scripts/knowledge lint --scope pilot --body-env
 
 .PHONY: validate-plan
 validate-plan: ## Explain which points and checks the staged diff selects
@@ -1548,7 +1562,9 @@ web-check: web-unit-check ## Test playback policy, embedded JS, and every shippe
 # runs exactly this, so a web pull request executes the same tests web-check
 # does apart from the two real-browser scripts.
 web-unit-check: ## Run every Node web and playback test (no browser)
+	@node --test tests/playback/frame-drop-recorder.test.js
 	@node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
+	@node --test tests/web/cinema-remote-browser-support.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
 	@node --test tests/web/cinema-remote-guard.test.js
@@ -1588,15 +1604,22 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/analysis-coverage.test.js
 	@node tests/web/settings-sections.test.js
 	@node --test tests/web/subtitle-generation.test.js tests/web/subtitle-translation.test.js
+	@node --test tests/web/subtitle-text-translation.test.js tests/web/shared-subtitle-captions.test.js
+	@node --test tests/web/caption-controls.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
+	@node --test tests/web/hdr-display-peak.test.js
+	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
+	@node --test tests/web/hdr-display-change.test.js
+	# Settings → Playback → Open titles in, and the plurx Player handoff (LINUX-PLAYER-PLAN M3).
+	@node --test tests/web/linux-player-handoff.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js
 	# An idle-expired sign-in lands on the login page saying why.
 	@node tests/web/session-expiry.test.js
 	# The Transcoding backend buttons send objects, not pre-serialized strings.
-	@node --test tests/web/transcoder-backend-requests.test.js
+	@node --test tests/web/transcoder-backend-requests.test.js tests/web/system-settings.test.js
 	@node tests/web/read-after.test.js
 	# The validation runner already has this as `web-membership`, but this is
 	# the target a web change reaches for, and the Cluster panel is a web

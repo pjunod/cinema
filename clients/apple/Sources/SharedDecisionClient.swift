@@ -25,6 +25,21 @@ struct SharedDecisionClient {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         ReadAfterHTTP.bind(current, to: &request)
     }
+    /// The committed-caption adapter can issue only GETs under the signed
+    /// Shared subject. It cannot enter a Local file or produce Source work.
+    func captions(context: PlaybackFileContext, resource: String, query: [URLQueryItem] = [], maximumBytes: Int = 65_536) async throws -> Data {
+        try requireCurrent()
+        guard context.reference != nil, resource == "captions" || resource.hasPrefix("captions/"),
+              (1...65_536).contains(maximumBytes), let url = URL(string: origin + (try context.path(resource,query: query))) else { throw APIError.badURL }
+        var request = URLRequest(url:url); request.httpMethod = "GET"; request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        try authorize(&request)
+        let data = try await SharedDecisionReadOperation(request: request, configuration: configuration,
+            maxBytes: maximumBytes, current: { try requireCurrent(); _ = try context.path(resource,query: query) }).read()
+        try requireCurrent(); try Task.checkCancellation()
+        return data
+    }
+
     func decision(context: PlaybackFileContext, selection: PrePlaySelection = .none,
                   quality: PlaybackQuality = .auto, audioOffsetMs: Int = 0,
                   presentationTarget: PresentationTarget? = nil) async throws -> (decision: SharedDecision, caps: DeviceCaps) {

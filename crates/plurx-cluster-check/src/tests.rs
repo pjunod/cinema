@@ -149,6 +149,22 @@ fn singleton_retry_requires_the_explicit_trial_marker() {
 }
 
 #[test]
+fn real_node_identities_satisfy_exact_reduction_transport() {
+    let ids = [1, 2, 3, u64::MAX].map(harness_node_identity);
+    assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+    for (raft_id, target_node_id) in [1, 2, 3, u64::MAX].into_iter().zip(ids) {
+        let reference = hiqlite::ReductionFenceReference {
+            version: 1,
+            target_node_id,
+            target_raft_id: raft_id,
+            attempt_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            barrier_index: 1,
+        };
+        assert!(reference.has_valid_shape(), "{reference:?}");
+    }
+}
+
+#[test]
 fn membership_harness_retries_only_typed_leader_changes() {
     assert!(matches!(
         membership_error_response(MembershipError::LeaderChanged("routing".to_owned())),

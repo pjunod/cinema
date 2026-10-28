@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "scope": "Generic trusted evaluator and synthetic contract source frozen for same-task independent recheck; private gold remains separate.",
+  "source_metadata_sha256": "a26ae4e15cedfc84004b56e0b10f6c8f0fde1b8c3972bcf48404a844ecfad918",
+  "sources": {
+    "isolation_adapter.py": "e63bb56dc3bf7f7427ed931aea46869a4e456b9d8a909beb6e676d0ef82aa1fb",
+    "prerequisite_only.py": "81c79aae6781860776eeea7cc32399dedfd7e2af8e138d031c89cfde24d8d48b",
+    "private_contract_tests.py": "b89ef1e55f9c3363ea6e7c80ddf1a6b4b51b5caab939fdb3a60ffd9424d27b25",
+    "python_byte_outcome_driver.py": "20eef66f85d92c49df86166d929c458b2fd24ec893d3afaf6da5db85577b7748",
+    "runtime_bindings.py": "40830831d4226200a35ff50e4945d2e85c1c4f83283f980ba0a2799ac71f14f5",
+    "trusted_launcher.py": "5290da17e0d7f0995f96dd66eafa8e8cabf91d9524fe1abb6c5d017ec446a1fe"
+  },
+  "acceptance_capability_counts": {
+    "actual_qualified_bundles": 0,
+    "frozen_bundles": 4,
+    "full_study_prerequisites_available": false,
+    "model_spend_refused_until_all_qualify": true,
+    "supported_mechanism": "immutable AST-recognized inert file bytes only",
+    "unsupported_mechanisms": [
+      "candidate Python imports",
+      "candidate Rust compile/test"
+    ],
+    "actual_prior_witness_supported_shapes": 0,
+    "actual_prior_witness_unsupported_shapes": 4,
+    "revised_source_supported_shapes": 1,
+    "revised_source_unsupported_shapes": 3
+  },
+  "qualification": "Actual R4 capability-only witness: unavailable, one supported inert-byte shape and three unsupported shapes; zero provider/count/credential/container/staging/cache calls. No OS/dependency qualification or comparative savings.",
+  "prerequisite_only_witness": "Review-gated capability refusal only; no OS/dependency qualification or paid study evidence.",
+  "observed_qualification": {
+    "source_review_head": "ac0f247b5edfd455a53a3aa35999b9b89cb550ed",
+    "review_report_sha256": "912a062ce439ca2173b9d418bb29dabda03932d947e4e05e201f2044801c0cff",
+    "review_verdict_sha256": "b3c722b90e6d906dbb4bb7f58ec86fcc96390e4021e316408080e72cac5fc273",
+    "capability_report_sha256": "cda82ae7fbb2f7ede900e01e7543eb257b204fc01941d4da6c4a46b327ae8468",
+    "private_synthetic_current_passes": 5,
+    "private_synthetic_unchanged_prior_passes_retained": 7,
+    "cold_index_seconds": 1.295690790982917,
+    "warm_query_sample_max_seconds": 0.6964027499780059,
+    "warm_query_samples": 5,
+    "population_p95_established": false,
+    "full_comparison": "inconclusive: unavailable frozen acceptance families",
+    "token_savings_established": false
+  }
+}

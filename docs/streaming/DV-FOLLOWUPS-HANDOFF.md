@@ -1,6 +1,6 @@
 # Dolby Vision follow-ups: handoff for any agent (2026-10-19)
 
-**Status:** open · **Updated:** 2026-10-19 · **Owner:** unassigned (from Claude session 018Q4JhsMWmMe7WWFAUpqNJz)
+**Status:** open · **Updated:** 2026-10-23 · **Owner:** per section; Task C is direct GPT/root
 
 Repo: Forgejo `noirr/plurx`. Process:
 - Paul's PR lifecycle: draft with a `WIP:` title → one adversarial review → fast lane once → merge via the API as a merge commit, with `Regression-Test: <path>::<name>` lines in the merge message.
@@ -130,6 +130,84 @@ incident and general remote processed requalification remain out of B scope.
    reconstructed". Also check there is no stutter. This remains unverified here.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
+
+**Current (2026-10-23), owner direct GPT/root:** A/#1216 and batched
+integration#1269 are merged into `effort/display-targeted-dv`, latest landing
+`3cc264068`. Smaller#1266/#1267/#1268/#1270 are closed folded records, not separate
+merges. All78 regression fields are verified in the landing. Main promotion is
+open; the [canonical ledger](DISPLAY-TARGETED-DV-BUILD.md) owns current evidence.
+
+P7 driver348 passed1000/1600 on source503619eb with audio, cadence, native BL/EL
+shapes and seek windows. Its17983 valid frames have maximum L1 PQ code3441,
+not3441nits. Earlier P8/unit/shader/helper passes retain their actual sources.
+Changed C inputs require integrated P7/P8 adoption; they do not inherit helper341.
+
+Compile-only gate5889 passed all8 jobs on e6473332f; the effort landing has its
+identical tree. Actual sourceba8df0e7 passed pinned Rust382 and production C
+link384; final-input trim-candidate393 also compiles. All1237 protected runtime
+inputs match. These runs executed zero product tests/controls/media/GPU work.
+The fresh FEL polynomial/MMR admission and receipt fix preserves SDR BT.709
+conversion,100-nit mapping and narrow P8.1 authoring.
+
+Root chose to qualify/promote completed HDR/SDR under standing user authority
+to use judgment while away. E remains unfinished, creative false and “L1 only”
+truthful; this is not A–F completion or creative acceptance. Reference349's42
+vendor commands exited0, but comparisons353 retain large numerical errors.
+User declined Dolby contact. Physical-display acceptance remains open.
+
+Final review, fixes and exact-candidate qualification remain. The user is
+reconciling fast-lane/selective-rerun policy with full manual promotion CI;
+no main merge or validator relaxation is inferred while pending. Current
+main1eb117839 is already an ancestor of the effort.
+
+The separate full-app FEL comparison/interpreter lane remains excluded: C1 has
+a final source-EOF failure without a reviewed production repair (original
+contract §§113–115). No full-clip/general FEL accuracy, physical-display result,
+Apple peak reporting, deployment or restart is claimed by this work.
+
+### Historical qualification record (not current status)
+
+**Latest qualification correction (2026-10-21):** the genuine bright P8 excerpt
+reached complete L1 observation and master preparation, but the exact single
+1000-nit test exited 101 on a missing display-target receipt operation count.
+The base-RPU completion receipt used source metadata operations only, omitting
+the mapping already validated by the daemon. Sol's narrow source repair adds
+only that graph operation without inferring conditional reshape applications.
+Its new master/1000/1600 receipt regression awaits compilation and independent
+targeted closure before new/failed-only tests. No mapped cell passed; 1600 was
+unexecuted. Prior software passes remain retained, not repeated. Coordinator
+owns source-bound native compilation, real-input execution and PR publication;
+the remaining mapped cells, separate FEL integration, fast lane and merge are
+not complete. Historical input failures below remain distinguishable.
+
+**Implementation update (2026-10-19):** Sol 6.1 owns current source on
+`codex/cinema-display-target-a`; coordinator owns native/media/publication.
+Full independent Astra review, F1 publication-intent closure, landed-B integration
+review and fixture-repair closures are retained. Native c93 compilation and only
+the two final failed-fixture retries passed with verified source/binary/count/exit
+receipts: 99 distinct Rust passes, 141 Intel shader cases / 866,304 samples, and
+70 full-helper results from 97 commands, worst independent-oracle error one code.
+The initial helper timing refusal and all failed fixtures remain historical
+failures, not passing evidence. No successful unchanged case is repeated.
+
+Actual first real-source matrix failed prerequisites: eligible P7 stats selected
+`TitleFits` at both targets, P8 scanning failed, and its redundant second attempt
+was stopped. Zero mapped-window passes. Exact P8 stderr capture is coordinator-owned.
+Header/short ffprobe diagnostics do not expose actual L1 min/average/max; source
+PQ endpoints must not be substituted for L1. Existing-tool RPU inspection and
+eligible genuine P7 FEL/P8 excerpts above 1600 nits are needed before mapped cells.
+Neither scanner completeness nor target buckets are relaxed. Current main
+`52e66778e7ce` is merged at `1d2ec2967532` with both changelog topics preserved;
+C core/helper/runtime/regression bodies are unchanged. Exact integrated-source
+compilation, four eligible runtime cells, fast lane and API merge remain.
+
+The accepted explicit Annex B.2/B.3 RGB shader supersedes the original built-in
+libplacebo recipe below: API 374 inspection proved modified knee/adaptive/LMS
+behavior. No built-in ST2094-10, perceptual-equivalence, proprietary Dolby or
+display-accuracy claim. Durable title jobs retain source/scanner generations,
+manual-cancel suppression and bounded ordinary-probe priority handoff. Ordinary
+production entrypoints remain master-only; metadata/settings/client selection
+stay later PRs. Paul deploys; agents do not.
 
 1. **Title L1 scan,** stored with the DV facts:
    - L1-max maximum;

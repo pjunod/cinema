@@ -275,9 +275,13 @@ pub(super) async fn store_identity_observed(
                 .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))
         })
         .transpose()?;
+    let reservation = crate::playback_cache::reserve(path, bytes.len() as u64).await?;
     let tmp = path.with_extension("json.tmp");
     tokio::fs::write(&tmp, &bytes).await?;
     tokio::fs::rename(&tmp, path).await?;
+    if let Some(reservation) = reservation {
+        reservation.commit(bytes.len() as u64);
+    }
     if let Some(pending) = pending {
         pending.commit(false);
     }

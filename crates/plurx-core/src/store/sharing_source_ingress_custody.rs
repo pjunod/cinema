@@ -490,34 +490,53 @@ impl<T: Backend> SharingSourceIngressCustodyStore for T {
         registration: &IngressRegistration,
         confirmation: &str,
     ) -> Result<SourceCustodyWrite, StoreError> {
-        let Some(snapshot) = snapshot(self, assignment).await? else {
+        let Some(mut observed) = snapshot(self, assignment).await? else {
             return Ok(SourceCustodyWrite::Refused);
         };
-        let mut next = snapshot.state.clone();
-        let outcome = next.acknowledge(registration, confirmation);
-        if outcome == CustodyMutation::Refused {
-            if next.fence_closed_registration(registration, confirmation)
-                == CustodyMutation::Refused
-            {
-                return Ok(SourceCustodyWrite::Refused);
-            }
-            // Same-write owner/snapshot CAS installs or confirms a fence before
-            // any delayed Register can admit this closed ordinal.
-            return match replace_closed(self, assignment, &snapshot, &next).await? {
-                SourceCustodyWrite::Applied => Ok(SourceCustodyWrite::ReconciledClosed),
-                _ => Err(invalid()),
+        for _ in 0..4 {
+            let mut next = observed.state.clone();
+            let outcome = next.acknowledge(registration, confirmation);
+            let result = if outcome == CustodyMutation::Refused {
+                if next.fence_closed_registration(registration, confirmation)
+                    == CustodyMutation::Refused
+                {
+                    return Ok(SourceCustodyWrite::Refused);
+                }
+                // Same-write owner/snapshot CAS installs or confirms a fence
+                // before any delayed Register can admit this closed ordinal.
+                match replace_closed(self, assignment, &observed, &next).await {
+                    Ok(SourceCustodyWrite::Applied) => Ok(SourceCustodyWrite::ReconciledClosed),
+                    Ok(_) => Err(invalid()),
+                    Err(error) => Err(error),
+                }
+            } else {
+                match replace_closed(self, assignment, &observed, &next).await {
+                    Ok(SourceCustodyWrite::Applied) => Ok(if outcome == CustodyMutation::Replay {
+                        SourceCustodyWrite::ExactReplay
+                    } else {
+                        SourceCustodyWrite::Applied
+                    }),
+                    Ok(_) => Err(invalid()),
+                    Err(error) => Err(error),
+                }
             };
-        }
-        match outcome {
-            CustodyMutation::Applied => replace_closed(self, assignment, &snapshot, &next).await,
-            CustodyMutation::Replay => {
-                match replace_closed(self, assignment, &snapshot, &next).await? {
-                    SourceCustodyWrite::Applied => Ok(SourceCustodyWrite::ExactReplay),
-                    _ => Err(invalid()),
+            match result {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) => {
+                    // Seal or another exact closure ACK may move this ledger
+                    // after the read. Recompute only when its revision moved;
+                    // every attempt retains the same owner and receipt guards.
+                    let Some(current) = snapshot(self, assignment).await? else {
+                        return Err(error);
+                    };
+                    if current.revision == observed.revision {
+                        return Err(error);
+                    }
+                    observed = current;
                 }
             }
-            CustodyMutation::Refused => Ok(SourceCustodyWrite::Refused),
         }
+        Err(invalid())
     }
     async fn current_source_ingress_owner(
         &self,

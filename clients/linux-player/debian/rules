@@ -1,0 +1,60 @@
+#!/usr/bin/make -f
+# plurx-player bundles a private mpv (with libplacebo linked in) under /usr/lib/plurx-player
+# beside the Python launcher. The source package carries them as the
+# libplacebo and mpv component orig tarballs (packaging/fetch-sources.sh);
+# packaging/build-private.sh patches and builds them offline.
+# packaging/build-deb.sh makes the source package and builds this from it in
+# a disposable Ubuntu 26.10 container.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export PYTHONDONTWRITEBYTECODE = 1
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/buildflags.mk
+include /usr/share/dpkg/buildopts.mk
+
+JOBS = $(or $(DEB_BUILD_OPTION_PARALLEL),1)
+PRIVATE = usr/lib/plurx-player
+STAGE = build/stage/$(PRIVATE)
+PKG = debian/plurx-player
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	JOBS=$(JOBS) packaging/build-private.sh .
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	# The source package has the launcher but not the server's caps.rs, so
+	# the caps drift check is the one skip allowed here; make
+	# linux-player-check and the package verification run it, and fail on
+	# any skip.
+	python3 -B packaging/run-tests tests \
+	  --allow-skip test_caps_and_trust.CapsTests.test_every_field_is_a_caps_rs_field
+	lua5.2 tests/test_cinema.lua plurx_player/scripts/cinema.lua
+	meson test -C build/libplacebo --print-errorlogs --num-processes $(JOBS)
+endif
+
+# Only the runtime piece of the private build: the mpv binary, which has
+# libplacebo linked in (no headers, static library, pkg-config, man pages, or
+# mpv's own .desktop file, which would compete with the system mpv's).
+override_dh_auto_install:
+	install -D -m 0755 $(STAGE)/bin/mpv $(PKG)/$(PRIVATE)/bin/mpv
+	install -D -m 0644 build/private-build.txt $(PKG)/usr/share/doc/plurx-player/private-build.txt
+	install -m 0644 /usr/share/doc/glslang-dev/copyright $(PKG)/usr/share/doc/plurx-player/copyright.glslang
+	install -m 0644 /usr/share/doc/spirv-tools-dev/copyright $(PKG)/usr/share/doc/plurx-player/copyright.spirv-tools
+
+# libplacebo links glslang and SPIRV-Tools statically (Ubuntu ships only
+# their static libraries), so the package records exactly which ones.
+override_dh_gencontrol:
+	dh_gencontrol -- "-Vplurx:Built-Using=$$(dpkg-query -W -f '$${source:Package} (= $${source:Version})\n' glslang-dev spirv-tools-dev | paste -sd, - | sed 's/,/, /g')"
+
+# The launcher's modules live in a private directory. dh_python3 byte-compiles
+# them at install and its prerm removes every .pyc, including any a root run
+# of the launcher wrote, so dpkg -r leaves nothing behind. These generated
+# maintainer scripts are the package's only ones, and they register no MIME
+# handler (dpkg's desktop-database trigger does that).
+override_dh_python3:
+	dh_python3 /$(PRIVATE)

@@ -125,6 +125,15 @@ final class AttemptScopesTests: XCTestCase {
         .preparedCommit: [.viewerAction],
         // `self.viewerActionEpoch == actionEpoch` after the intent report.
         .retainedQualityRestart: [.viewerAction],
+        .subtitleReopenCompletion: [.viewerAction],
+        .progressiveCaptionCleanup: [.viewerAction],
+        .progressiveCaptionAfterControl: [.viewerAction],
+        .progressiveCaptionAfterSubtitleRemoval: [.viewerAction],
+        .progressiveAssetCleanup: [.viewerAction],
+        .progressiveAssetAfterControl: [.viewerAction],
+        .progressiveAssetAfterSubtitleRemoval: [.viewerAction],
+        .translatedCaptionDecision: [.viewerAction],
+        .translatedCaptionFailure: [.viewerAction],
     ]
 
     func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid() {
@@ -215,6 +224,15 @@ final class AttemptScopesTests: XCTestCase {
             .preparedPipelineRollback: .lifecycle,
             .preparedCommit: .viewerAction,
             .retainedQualityRestart: .viewerAction,
+            .subtitleReopenCompletion: .viewerAction,
+            .progressiveCaptionCleanup: .viewerAction,
+            .progressiveCaptionAfterControl: .viewerAction,
+            .progressiveCaptionAfterSubtitleRemoval: .viewerAction,
+            .progressiveAssetCleanup: .viewerAction,
+            .progressiveAssetAfterControl: .viewerAction,
+            .progressiveAssetAfterSubtitleRemoval: .viewerAction,
+            .translatedCaptionDecision: .viewerAction,
+            .translatedCaptionFailure: .viewerAction,
         ]
         for fence in AttemptFence.allCases {
             // The intent fences are intentionally scoped to the seek and

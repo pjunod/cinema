@@ -6,6 +6,48 @@ import XCTest
 /// fixture owns a loopback-only API; no server credentials or app test mode.
 @MainActor
 final class LibraryRowsNavigationTests: XCTestCase {
+    func testPortraitLiveGuideShowsMultipleChannelsDespiteLegacySchedulePreference() throws {
+        let server = try LibraryRowsServer()
+        let origin = try server.start()
+        defer { server.stop() }
+        XCUIDevice.shared.orientation = .portrait
+        let app = appAtLogin(origin: origin, launchArguments: [
+            "-plurx.liveTvMobileGuide", "schedule", "-plurx.liveTvView", "list"
+        ])
+        defer { app.terminate() }
+        signInToFixture(app)
+        let live = app.viewerTab("Live TV")
+        XCTAssertTrue(live.waitForExistence(timeout: 15), app.debugDescription)
+        live.tap()
+        let view = app.buttons["Live TV view, On now"]
+        XCTAssertTrue(view.waitForExistence(timeout: 10), app.debugDescription)
+        view.tap()
+        app.buttons["Guide"].tap()
+
+        let grid = app.scrollViews["live-guide-grid"]
+        XCTAssertTrue(grid.waitForExistence(timeout: 10), app.debugDescription)
+        let news = grid.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "live-guide-programme:news:")).firstMatch
+        let film = grid.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "live-guide-programme:film:")).firstMatch
+        XCTAssertTrue(news.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(film.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(news.isHittable && film.isHittable,
+                      "Portrait Guide must show programmes from multiple stations together; "
+                      + "news=\(news.frame), film=\(film.frame), grid=\(grid.frame)\n\(app.debugDescription)")
+        XCTAssertGreaterThan(film.frame.midY, news.frame.midY,
+                             "Stations must occupy separate rows of the time grid")
+        XCTAssertFalse(app.buttons["Grid"].exists, "Guide must open directly as a grid")
+        XCTAssertFalse(app.buttons["Selected channel schedule"].exists)
+        XCTAssertFalse(app.buttons["Channel"].exists, "The single-channel picker must be absent")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "portrait-live-guide-grid-legacy-preference"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        news.tap()
+        XCTAssertTrue(app.buttons["Watch"].waitForExistence(timeout: 5),
+                      "A grid programme must still open its programme actions")
+    }
+
     func testSignInCanReturnToServerPickerAndConnectAgain() throws {
         let server = try LibraryRowsServer()
         let origin = try server.start()
@@ -80,11 +122,12 @@ final class LibraryRowsNavigationTests: XCTestCase {
         return app
     }
 
-    private func appAtLogin(origin: String) -> XCUIApplication {
+    private func appAtLogin(origin: String, launchArguments: [String] = []) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments += ["-plurx.libraryPresentation", "rows",
                                 "-plurx.libraryGrouping", "category"]
+        app.launchArguments += launchArguments
         app.launch()
         let manual = app.buttons["Add server manually"]
         let changeServer = app.buttons["Use a different server"]
@@ -231,6 +274,23 @@ private final class LibraryRowsServer: @unchecked Sendable {
         case "/api/v1/me": value = user
         case "/api/v1/server": value = ["name": "Library fixture", "instance_id": "library-fixture"]
         case "/api/v1/libraries": value = [["id": 1, "name": "Movies", "kind": "movie"]]
+        case "/api/v1/live-tv/channels":
+            value = ["channels": [
+                ["id": "news", "guide_number": "12.1", "guide_name": "Evening News", "favorite": false, "drm": false, "support": "ready"],
+                ["id": "film", "guide_number": "27", "guide_name": "Film", "favorite": false, "drm": false, "support": "ready"]
+            ], "freshness": "fresh", "age_seconds": 0]
+        case "/api/v1/live-tv/guide":
+            let now = Int(Date().timeIntervalSince1970)
+            value = ["source": "fixture", "freshness": "fresh", "age_seconds": 0,
+                     "window": ["start": now - 3600, "end": now + 7200],
+                     "channels": [
+                         ["id": "news", "guide_number": "12.1", "programmes": [
+                             ["start": now - 300, "end": now + 3300, "title": "Fixture evening news"]
+                         ]],
+                         ["id": "film", "guide_number": "27", "programmes": [
+                             ["start": now - 300, "end": now + 3300, "title": "Fixture film"]
+                         ]]
+                     ]]
         case "/api/v1/libraries/1/items":
             let query = Dictionary(uniqueKeysWithValues: (url.queryItems ?? []).map { ($0.name, $0.value ?? "") })
             let offset = Int(query["offset"] ?? "0") ?? 0

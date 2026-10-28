@@ -34,16 +34,30 @@ use crate::domain::ScanType;
 pub enum ReconstructedPqInput {
     /// BT.2020 NCL limited-range 4:2:0 10-bit PQ, converted on the GPU.
     Yuv420p10Bt2020NclPq,
+    /// Display-targeted BT.709, pure gamma 2.4, limited-range 10-bit.
+    Yuv420p10Bt709Gamma24,
 }
 impl ReconstructedPqInput {
     pub fn pixel_format(self) -> &'static str {
         "yuv420p10le"
     }
     pub fn transfer(self) -> &'static str {
-        "smpte2084"
+        match self {
+            Self::Yuv420p10Bt2020NclPq => "smpte2084",
+            Self::Yuv420p10Bt709Gamma24 => "bt709",
+        }
     }
     pub fn primaries(self) -> &'static str {
-        "bt2020"
+        match self {
+            Self::Yuv420p10Bt2020NclPq => "bt2020",
+            Self::Yuv420p10Bt709Gamma24 => "bt709",
+        }
+    }
+    pub fn matrix(self) -> &'static str {
+        match self {
+            Self::Yuv420p10Bt2020NclPq => "bt2020nc",
+            Self::Yuv420p10Bt709Gamma24 => "bt709",
+        }
     }
     pub(super) fn pairs_with(self, encoder: Encoder) -> bool {
         matches!(encoder, Encoder::Software | Encoder::Nvenc | Encoder::Vaapi)

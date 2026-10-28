@@ -1873,7 +1873,7 @@ fn source_native_presentation(
         let file = encoded_vod_presentation_file(
             facts.file,
             encoding.options.target_height,
-            encoding.options.pipeline.output_grade(),
+            encoding.delivered_output_grade(),
             Some(encoding.plan.output_contract()),
         );
         let mut codecs = super::ladder::transcoded_hls_codecs_for_plan(&encoding.plan);
@@ -1904,6 +1904,7 @@ fn source_native_presentation(
                 transcode_audio: facts.aac,
                 preserve_dolby_vision: facts.preserve_dolby_vision,
                 convert_dolby_vision: facts.convert_dolby_vision,
+                dual_layer_as_copied: false,
             },
             Some(probe),
         );

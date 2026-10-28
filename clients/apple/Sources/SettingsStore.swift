@@ -41,7 +41,6 @@ struct SettingsStore {
         static let boundedResume = "plurx.boundedResume"
         static let liveTvLayout = "plurx.liveTvLayout"
         static let tvHomeLayout = "plurx.tvHomeLayout"
-        static let liveTvMobileGuide = "plurx.liveTvMobileGuide"
     }
 
     /// Read-only on purpose. Every write goes through `setServer`, which is
@@ -228,11 +227,6 @@ struct SettingsStore {
     var tvHomeLayout: TvHomeLayout {
         get { TvHomeLayout(rawValue: defaults.string(forKey: Key.tvHomeLayout) ?? "") ?? .classic }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.tvHomeLayout) }
-    }
-
-    var liveTvMobileGuideUsesGrid: Bool {
-        get { defaults.string(forKey: Key.liveTvMobileGuide) == "grid" }
-        nonmutating set { defaults.set(newValue ? "grid" : "schedule", forKey: Key.liveTvMobileGuide) }
     }
 
     /// Drop the token (sign out) but keep the origin so login stays pre-filled.

@@ -89,6 +89,12 @@ class LibraryRowsNavigationTest {
             compose.onNode(hasText("Incomplete library: controlled failure") and hasAnyAncestor(isDialog())).assertIsDisplayed()
             compose.onNode(hasText("Retry") and hasAnyAncestor(isDialog())).performClick()
             compose.waitUntil(5_000) { pager.state.value.complete }
+            // Grouping runs on Dispatchers.Default after the pager publishes its
+            // final page. Wait for that projection to reach the still-open sheet.
+            compose.waitUntil(5_000) {
+                compose.onAllNodes(hasText("A · 421") and hasAnyAncestor(isDialog()))
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
             compose.onNode(hasText("A · 421") and hasAnyAncestor(isDialog())).assertIsDisplayed()
         } finally { scope.cancel() }
     }

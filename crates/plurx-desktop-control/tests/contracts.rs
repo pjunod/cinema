@@ -1444,3 +1444,32 @@ fn source_bootstrap_is_an_explicit_cli_route_with_finite_arguments() {
     ])
     .is_err());
 }
+
+#[test]
+fn unresolved_transaction_refusal_names_phase_and_explicit_recovery() {
+    let mut j = journal();
+    ensure_resolved(None).expect("no transaction");
+    for phase in [
+        Phase::Prepared,
+        Phase::ShutdownCommitted,
+        Phase::CleanStop,
+        Phase::Installing,
+        Phase::CandidateInstalled,
+        Phase::Restoring,
+        Phase::RecoveryRequired,
+    ] {
+        j.phase = phase;
+        let error = ensure_resolved(Some(&j)).expect_err("unresolved transaction");
+        assert_eq!(error.code, ErrorCode::Busy);
+        assert!(error.message.contains(&format!("at {phase:?}")));
+        assert!(error.message.contains(&format!(
+            "plurx-recovery --transaction {}",
+            j.transaction_id
+        )));
+        assert_eq!(j.phase, phase, "preflight never changes transaction state");
+    }
+    for phase in [Phase::Committed, Phase::Cancelled] {
+        j.phase = phase;
+        ensure_resolved(Some(&j)).expect("terminal transaction");
+    }
+}

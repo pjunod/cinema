@@ -1028,6 +1028,7 @@ async fn vod_segment_response_before(
     // time it runs.
     let delivery = std::sync::Arc::clone(&ready.delivery);
     let retained_lease = ready.retained_lease;
+    let cache_pin = ready.cache_pin;
     let observed_media_duration_ms = ready.observed_media_duration_ms;
     let reader = tokio_util::io::ReaderStream::with_capacity(
         tokio::io::AsyncReadExt::take(ready.file, len),
@@ -1086,6 +1087,7 @@ async fn vod_segment_response_before(
         },
         move || {
             let _retained_lease = retained_lease;
+            let _cache_pin = cache_pin;
             let (manager, session, authorization, complete_object, permit) = completion;
             settle_streamed_response_completion(
                 manager,
