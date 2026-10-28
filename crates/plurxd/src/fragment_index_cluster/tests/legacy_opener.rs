@@ -77,7 +77,9 @@ async fn assert_unknown(serving: &ServingFence, admissions: u64) {
             },
         }
     );
-    assert!(status.new_admissions_blocked);
+    // Unknown retains this operation and blocks restart drain; open intake
+    // still follows normal capacity and phase fences.
+    assert!(!status.new_admissions_blocked);
     assert!(!status.drained);
     assert_eq!(status.admissions_in_flight, admissions);
 }

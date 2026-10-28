@@ -2465,6 +2465,8 @@ async fn build_real_source_start_fixture(
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
+    crate::canonicalize_storage_roots(&mut config)
+        .expect("production non-destructive storage preflight before Store ownership");
     let startup_clock =
         advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
     let mut selected = if let Some(clock) = &startup_clock {

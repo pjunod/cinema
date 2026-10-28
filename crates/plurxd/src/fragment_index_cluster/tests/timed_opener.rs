@@ -73,7 +73,9 @@ async fn assert_same_unknown(serving: &ServingFence) -> crate::serving_fence::Re
         }
     );
     assert!(!status.drained);
-    assert!(status.new_admissions_blocked);
+    // Unknown retains this operation and blocks restart drain; open intake
+    // still follows normal capacity and phase fences.
+    assert!(!status.new_admissions_blocked);
     status
 }
 

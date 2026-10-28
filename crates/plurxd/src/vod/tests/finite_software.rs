@@ -48,9 +48,16 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
+    crate::canonicalize_storage_roots(&mut config)
+        .expect("production non-destructive storage preflight before Store ownership");
     let mut selected_store = crate::sharing_fixture_clock::select_applied_singleton(&config)
         .await
         .expect("actual selected local voter");
+    selected_store
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+        .await
+        .expect("save Source enablement before this fixture's real schema startup");
     assert!(
         Box::pin(selected_store.prepare_source_schema_before_serving())
             .await
@@ -640,9 +647,16 @@ async fn finite_cancellation_fixture() -> FiniteCancellationFixture {
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
+    crate::canonicalize_storage_roots(&mut config)
+        .expect("production non-destructive storage preflight before Store ownership");
     let mut selected_store = crate::sharing_fixture_clock::select_applied_singleton(&config)
         .await
         .expect("actual selected local voter");
+    selected_store
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+        .await
+        .expect("save Source enablement before this fixture's real schema startup");
     assert!(
         Box::pin(selected_store.prepare_source_schema_before_serving())
             .await

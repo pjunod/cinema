@@ -218,17 +218,22 @@ async fn source_copy_preadmission_fixture_with_restart(
     config.storage.data_dir = directory.path().join("database");
     (config.cluster.raft_bind, config.cluster.api_bind) = source_fixture_addresses();
     config.cluster.advertise_host = "localhost".into();
+    crate::canonicalize_storage_roots(&mut config)
+        .expect("production non-destructive storage preflight before Store ownership");
     let mut selected = source_fixture_store(&config)
         .await
         .expect("actual standalone voter");
+    eprintln!("Source fixture: actual standalone voter selected");
     selected
         .store
         .put_setting(keys::SHARING_ENABLED, "true")
         .await
         .expect("saved Source choice before startup");
+    eprintln!("Source fixture: saved Source choice");
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual Source startup coordinator"));
+    eprintln!("Source fixture: Source schema prepared");
     #[cfg(target_os = "linux")]
     let fixed_runtime =
         if fixed_case.is_some() || (12..=20).contains(&mode) || (80..=83).contains(&mode) {
@@ -246,6 +251,7 @@ async fn source_copy_preadmission_fixture_with_restart(
         fixed_case.is_none(),
         "fixed Source P fixture requires Linux"
     );
+    eprintln!("Source fixture: original resource runtime opened or not selected");
     let client = selected.local_client().expect("actual local client");
     let master = Arc::clone(&selected.credential_key);
     let membership = selected.membership_manager();
@@ -253,6 +259,7 @@ async fn source_copy_preadmission_fixture_with_restart(
         .prepare_purpose_master(Arc::clone(&master))
         .await
         .expect("actual selected master");
+    eprintln!("Source fixture: original purpose master prepared");
     let mut state = source_fixture_state();
     let state_mut = Arc::get_mut(&mut state).expect("sole fixture state");
     eprintln!("Source fixture: state constructed without Router");
