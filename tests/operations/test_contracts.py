@@ -2027,7 +2027,10 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertNotIn("../badges-ci/ci.svg", readme)
         self.assertNotIn("../badges-lint/lint.svg", readme)
-        self.assertIn("Coverage refreshes automatically on pushes to `main`", readme)
+        self.assertIn(
+            "Coverage refreshes through a manual `coverage` workflow run on `main`",
+            readme,
+        )
         self.assertIn("measurement date (UTC)", readme)
         self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
@@ -2280,7 +2283,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('RUST_TEST_THREADS: "2"', coverage)
         steps = workflow_step_blocks(coverage)
         install = steps["Install coverage prerequisites"]
-        for package in ("git", "jq", "nodejs", "python3", "build-essential", "clang"):
+        for package in (
+            "git", "jq", "nodejs", "python3", "build-essential", "clang",
+            "libssl-dev", "libgtk-4-dev", "libdbus-1-dev",
+        ):
             self.assertRegex(install, rf"\b{package}\b")
         self.assertLess(
             coverage.index("Install coverage prerequisites"),
