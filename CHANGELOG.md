@@ -113,6 +113,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Live TV keeps playing while the HTTP output writer uploads a segment or
+  waits to publish its next playlist; valid temporary upload files no longer
+  terminate the stream a few seconds after startup.
+
 - Restrict the Linux external player preference to Dolby Vision files on Linux;
   other formats and operating systems retain web playback, including mixed-version titles.
 
