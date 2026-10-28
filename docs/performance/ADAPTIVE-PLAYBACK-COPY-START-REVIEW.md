@@ -138,8 +138,7 @@ review does not close those obligations.
 
 
 The authored-source map leaves these cases explicitly incomplete: actual
-post-root budget refusal (R8), actual syscall EBADF rather than checked-close
-result loss (R9), cancellation at the literal take-start mutex wait (R10),
+actual syscall EBADF rather than checked-close result loss (R9),
 every possible cleanup await/certainty combination (R19), and actual wait failure/non-ESRCH driver
 signal failure (R20). R11 now authors real drain refusal of the original latch.
 R21 covers a committed settlement with its original reply delayed, not an
@@ -295,3 +294,21 @@ The user subsequently directed continuous completion through qualification and
 merge, and explicitly authorized required behavioral tests after the fixes.
 Earlier execution holds above are historical. No behavior pass, main promotion,
 deployment or restart is inferred from that authorization.
+
+## 9. Additional copy boundaries — source work, 2026-10-28
+
+R8 now authors a real post-root parser-budget refusal: a deliberate growth of
+the same retained fixture payload exceeds its unchanged reservation, and the
+actual adapter refuses before registering a writer. The same root, fixed image
+and work remain retained; root-only closure and actual last-alias release gate
+the eventual refund. This negative fixture establishes no valid memory profile.
+
+R10 now authors cancellation while the actual `take_copy_start` call waits on
+the original membership mutex. An opaque fixture holder neither seals the graph
+nor takes its one-shot sender. A boundary gate and one pending poll establish
+the literal wait; after caller cancellation, the same task and observation
+naturally join as NeverEntered, with acquired-task facts and alias barriers.
+
+Both bodies are authored; execution and mutation validation are pending. The
+new mutex capability and boundary gate exist only in test/fixtures builds. R9,
+R20 and remaining actual pending joins/outcome certainty remain open.

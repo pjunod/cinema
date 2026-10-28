@@ -723,6 +723,9 @@ impl NodeResourceRuntime {
         if copy.start_released {
             return Ok(());
         }
+        #[cfg(all(test, feature = "fixtures"))]
+        self.fixture_copy_stage(CopyStartFixtureStage::BeforeTaskStartLock)
+            .await;
         let start = role
             .graph
             .as_ref()

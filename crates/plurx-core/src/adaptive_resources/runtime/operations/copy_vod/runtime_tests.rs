@@ -289,6 +289,156 @@ async fn copy_armed_uninvoked_task_uses_actual_root_only_witness_and_typed_never
     retire_with_actual_alias_barriers(runtime, owner, preparation, false).await;
 }
 
+// R8: grow the SAME retained fixture payload, so the real parser adapter
+// rejects its charged memory budget after root entry, before writer acquisition.
+// This deliberate negative fault is not a valid profile or native-peak claim.
+#[tokio::test]
+async fn copy_post_root_actual_parser_budget_refusal_preserves_root_and_refunds_after_close() {
+    let root = tempfile::tempdir().expect("actual post-root parser budget fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::TaskArmed).await;
+    let charge = runtime.accounting().expect("original full R").used;
+    let original_root = {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        let copy = role.copy_vod.as_mut().expect("same original copy");
+        assert!(copy.entered && copy.task.is_none() && copy.fixed_image.is_some());
+        let payload = &mut copy
+            .work
+            .as_mut()
+            .expect("unentered original parser work")
+            .diagnostic_id;
+        let excess = usize::try_from(charge.peak_memory_bytes)
+            .expect("fixture memory fits usize")
+            .checked_add(1)
+            .expect("fixture capacity increment");
+        payload
+            .try_reserve_exact(excess)
+            .expect("negative payload-growth fixture");
+        assert!(
+            payload.capacity() > usize::try_from(charge.peak_memory_bytes).expect("same bound")
+        );
+        *role
+            .roots
+            .get(&copy.root_member)
+            .expect("original entered root")
+    };
+    let error = runtime
+        .start_copy_vod(&preparation, 0, deadline())
+        .await
+        .expect_err("actual adapter budget must refuse before registration");
+    assert!(matches!(&error, OperationError::Physical(error)
+        if error.to_string() == "physical graph adapters exceed charged budget"));
+    {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        let copy = role.copy_vod.as_ref().expect("same refused original copy");
+        assert_eq!(role.roots.get(&copy.root_member), Some(&original_root));
+        assert!(copy.task.is_none() && copy.work.is_some() && copy.fixed_image.is_some());
+        assert!(
+            role.armed.contains(&copy.task_member) && !role.invoked.contains(&copy.task_member)
+        );
+        // Seal only now, after the actual refusal, as ordinary cleanup does.
+        role.sealed = Some(role.graph.take().expect("same unsealed root graph").seal());
+        let snapshot = role.sealed.as_ref().expect("same graph").snapshot().await;
+        assert_eq!((snapshot.roots, snapshot.writers), (1, 0));
+    }
+    assert_eq!(
+        runtime.accounting().expect("refusal retains same R").used,
+        charge
+    );
+    retire_with_actual_alias_barriers(runtime, owner, preparation, false).await;
+}
+
+// R10: cancel at the literal take_copy_start membership-mutex await, without
+// sealing first or taking the one-shot sender on behalf of its real driver.
+#[tokio::test]
+async fn copy_cancelled_start_at_original_members_lock_joins_same_never_entered_task() {
+    use std::future::Future;
+    use std::task::Poll;
+    let root = tempfile::tempdir().expect("actual start-latch mutex fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::TaskObserved).await;
+    let charge = runtime.accounting().expect("original full R").used;
+    let (holder, original_task) = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role
+            .copy_vod
+            .as_ref()
+            .expect("same registered original copy");
+        assert!(copy.task_observed_committed && !copy.start_released);
+        (
+            role.graph
+                .as_ref()
+                .expect("unsealed original graph")
+                .fixture_copy_members(),
+            (copy.task, copy.task_observation),
+        )
+    };
+    let entered = tokio::sync::Notify::new();
+    let release = tokio::sync::Notify::new();
+    let mut members = Box::pin(holder.hold(&entered, &release));
+    tokio::select! {
+        ()=&mut members=>panic!("original members lock unexpectedly released"),
+        ()=entered.notified()=>{},
+        ()=tokio::time::sleep(Duration::from_secs(15))=>panic!("original mutex acquisition watchdog"),
+    }
+    let boundary = runtime.fixture_pause_copy_start(CopyStartFixtureStage::BeforeTaskStartLock);
+    let mut start = Box::pin(runtime.start_copy_vod(&preparation, 0, deadline()));
+    tokio::select! {
+        result=&mut start=>panic!("start returned before original mutex await: {result:?}"),
+        ()=boundary.reached()=>{},
+        ()=tokio::time::sleep(Duration::from_secs(15))=>panic!("original start-lock boundary watchdog"),
+    }
+    drop(boundary);
+    // There is no suspension between this released boundary and the actual
+    // take_copy_start mutex await. One poll establishes real contention.
+    std::future::poll_fn(|cx| {
+        assert!(
+            start.as_mut().poll(cx).is_pending(),
+            "start must await the held original mutex"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    drop(start);
+    release.notify_one();
+    members.await;
+    drop(holder); // No fixture alias survives native closure or ledger release.
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("cancelled waiter retains R")
+            .used,
+        charge
+    );
+    {
+        let bundle = preparation.state.lock().await;
+        let copy = bundle.roles[0]
+            .copy_vod
+            .as_ref()
+            .expect("same retained registered task");
+        assert_eq!((copy.task, copy.task_observation), original_task);
+        assert!(!copy.start_released && copy.terminal.is_none());
+    }
+    let result = tokio::time::timeout_at(deadline().into(), owner.stop_producer(false))
+        .await
+        .expect("same original task join watchdog; timeout is not a witness")
+        .expect("same parked task joined after sender destruction");
+    assert!(!result.completed);
+    {
+        let bundle = preparation.state.lock().await;
+        let copy = bundle.roles[0]
+            .copy_vod
+            .as_ref()
+            .expect("same naturally joined task");
+        assert_eq!((copy.task, copy.task_observation), original_task);
+        assert_eq!(copy.terminal, Some(CopyTaskTerminal::NeverEntered));
+    }
+    retire_with_actual_alias_barriers(runtime, owner, preparation, true).await;
+}
+
 // R12/R13 + R22 S3: pending or not-yet-issued ORIGINAL named observation.
 async fn registered_unreleased(stage: CopyStartFixtureStage) {
     let root = tempfile::tempdir().expect("actual registered unreleased copy fixture");

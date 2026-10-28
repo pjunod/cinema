@@ -18,6 +18,7 @@ pub(in crate::adaptive_resources::runtime) enum CopyStartFixtureStage {
     TaskRegistered,
     TaskObservationQueued,
     TaskObserved,
+    BeforeTaskStartLock,
     OutputWindowFull,
 }
 struct Delay {

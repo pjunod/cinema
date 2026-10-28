@@ -911,6 +911,33 @@ impl SealedPhysicalGraph {
     }
 }
 
+// Fixture-only contention capability: it can hold the original membership
+// mutex, but cannot seal the graph, take a latch or manufacture native facts.
+#[cfg(all(test, feature = "fixtures"))]
+pub(in crate::adaptive_resources) struct CopyMembersFixture {
+    custody: Arc<GraphCustody>,
+}
+#[cfg(all(test, feature = "fixtures"))]
+impl OwnedPhysicalGraph {
+    pub(in crate::adaptive_resources) fn fixture_copy_members(&self) -> CopyMembersFixture {
+        CopyMembersFixture {
+            custody: Arc::clone(self.custody()),
+        }
+    }
+}
+#[cfg(all(test, feature = "fixtures"))]
+impl CopyMembersFixture {
+    pub(in crate::adaptive_resources) async fn hold(
+        &self,
+        entered: &tokio::sync::Notify,
+        release: &tokio::sync::Notify,
+    ) {
+        let _members = self.custody.members.lock().await;
+        entered.notify_one();
+        release.notified().await;
+    }
+}
+
 // These seams mutate only the SAME retained record for authored failure
 // fixtures. They create no native fact, receipt, task, or replacement owner.
 #[cfg(all(test, feature = "fixtures"))]
