@@ -222,6 +222,27 @@ fn scratch_v2_old_reader_rejects_new_operation_and_sql_shape_is_unchanged() {
         RetiredWithAssets(RetirementAck),
     }
     let mut f = growth();
+    let version_before: i64 = f
+        .storage
+        .connection
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    let catalog_before = f
+        .storage
+        .connection
+        .prepare("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
     let (handle, member, plan) = arm(&mut f);
     let command = io_arm(&f, &handle, member, &plan);
     execute(&mut f.storage, &command, f.owner).unwrap();
@@ -240,7 +261,24 @@ fn scratch_v2_old_reader_rejects_new_operation_and_sql_shape_is_unchanged() {
         .connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, version_before);
+    let catalog_after = f
+        .storage
+        .connection
+        .prepare("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(catalog_after, catalog_before);
+
     let adapter: (String, i64) = f
         .storage
         .connection
