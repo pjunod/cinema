@@ -26,7 +26,11 @@ pub(super) struct BootstrapMember {
     #[cfg(unix)]
     publication: Option<native::publication::Publication>,
     #[cfg(unix)]
+    publication_registered: bool,
+    #[cfg(unix)]
     sync: Option<native::sync::Sync>,
+    #[cfg(unix)]
+    sync_registered: bool,
     #[cfg(unix)]
     readers: BTreeMap<Uuid, readers::ReaderEntry>,
     #[cfg(unix)]
@@ -36,6 +40,36 @@ pub(super) struct BootstrapMember {
 }
 
 impl BootstrapMember {
+    // Sticky registration provenance, not native success. A run is stored
+    // synchronously before any Arm/worker/native entry. Missing issued owners
+    // remain inconsistent; only a genuinely dormant slot may be absent.
+    #[cfg(unix)]
+    fn native_io_slots_consistent(&self) -> bool {
+        self.publication_registered == self.publication.is_some()
+            && self.sync_registered == self.sync.is_some()
+    }
+
+    #[cfg(unix)]
+    fn native_io_ready(&self) -> bool {
+        self.native_io_slots_consistent()
+            && self
+                .publication
+                .as_ref()
+                .is_none_or(|run| run.ready_for_transfer())
+            && self
+                .sync
+                .as_ref()
+                .is_none_or(|run| run.ready_for_transfer())
+    }
+
+    #[cfg(unix)]
+    fn native_io_dormant(&self) -> bool {
+        !self.publication_registered
+            && !self.sync_registered
+            && self.publication.is_none()
+            && self.sync.is_none()
+    }
+
     #[cfg_attr(
         not(target_os = "linux"),
         allow(
@@ -107,7 +141,9 @@ impl PreparedBootstrapTransfer {
             next_arm: None,
             native_root: source.native_root.take(),
             publication: source.publication.take(),
+            publication_registered: source.publication_registered,
             sync: source.sync.take(),
+            sync_registered: source.sync_registered,
             readers: std::mem::take(&mut source.readers),
             retirement: source.retirement.take(),
             prefix_removal: source.prefix_removal.take(),
@@ -144,11 +180,7 @@ impl BootstrapMember {
             || self.next_arm.is_some()
             || self.prefix_removal.is_some()
             || state.asset.totals.pending_jobs != 0
-            || self
-                .publication
-                .as_ref()
-                .is_some_and(|p| !p.ready_for_transfer())
-            || self.sync.as_ref().is_some_and(|s| !s.ready_for_transfer())
+            || !self.native_io_ready()
         {
             return Ok(false);
         }
@@ -189,6 +221,7 @@ impl BootstrapMember {
             || self.next_arm.is_some()
             || self.retirement.is_some()
             || self.prefix_removal.is_some()
+            || !self.native_io_ready()
         {
             return Err(OperationError::State);
         }
@@ -246,8 +279,7 @@ impl BootstrapMember {
         if self.root_arm.is_none() {
             if armed
                 || self.native_root.is_some()
-                || self.publication.is_some()
-                || self.sync.is_some()
+                || !self.native_io_dormant()
                 || !self.readers.is_empty()
                 || self.retirement.is_some()
                 || state.asset.head.is_some()
@@ -301,7 +333,9 @@ impl BootstrapMember {
             next_arm: None,
             native_root: Some(native_root),
             publication: None,
+            publication_registered: false,
             sync: None,
+            sync_registered: false,
             readers: BTreeMap::new(),
             retirement: None,
             prefix_removal: None,
@@ -398,6 +432,7 @@ impl BootstrapMember {
             .native_root
             .as_ref()
             .is_some_and(|root| root.retained_child_ready(&expected_directories))
+            || !self.native_io_slots_consistent()
             || !self
                 .publication
                 .as_ref()
@@ -425,7 +460,8 @@ impl BootstrapMember {
     pub(super) async fn join_registered_native(&mut self) -> Result<(), OperationError> {
         #[cfg(unix)]
         {
-            let mut first_error = None;
+            let mut first_error =
+                (!self.native_io_slots_consistent()).then_some(OperationError::State);
             if let Some(root) = self.native_root.as_mut() {
                 if let Err(error) = root.join_registered().await {
                     first_error = Some(error);
@@ -570,7 +606,11 @@ impl NodeResourceRuntime {
                     #[cfg(unix)]
                     publication: None,
                     #[cfg(unix)]
+                    publication_registered: false,
+                    #[cfg(unix)]
                     sync: None,
+                    #[cfg(unix)]
+                    sync_registered: false,
                     #[cfg(unix)]
                     readers: BTreeMap::new(),
                     #[cfg(unix)]

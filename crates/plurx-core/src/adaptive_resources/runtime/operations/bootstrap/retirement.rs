@@ -644,8 +644,7 @@ impl NodeResourceRuntime {
                 if !budget_closed
                     || bootstrap.change.is_some()
                     || bootstrap.next_arm.is_some()
-                    || bootstrap.publication.is_some()
-                    || bootstrap.sync.is_some()
+                    || !bootstrap.native_io_dormant()
                     || !bootstrap.readers.is_empty()
                     || !bootstrap
                         .native_root
@@ -760,6 +759,24 @@ impl NodeResourceRuntime {
                 .bootstrap
                 .get_mut(&member)
                 .ok_or(OperationError::State)?;
+            let state = bootstrap
+                .fold
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .state();
+            let baseline = [
+                state
+                    .bootstrap
+                    .current
+                    .as_ref()
+                    .map(|directory| &directory.observed),
+                state
+                    .bootstrap
+                    .parent
+                    .as_ref()
+                    .map(|directory| &directory.observed),
+                state.asset.directory.as_ref(),
+            ];
             let Some(CleanupPending::Io(io)) = bootstrap
                 .retirement
                 .as_mut()
@@ -774,6 +791,7 @@ impl NodeResourceRuntime {
                     .native_root
                     .as_mut()
                     .ok_or(OperationError::State)?,
+                &baseline,
             )?;
             io.launched = true;
             let _ = enter.send(());
@@ -931,31 +949,19 @@ impl NodeResourceRuntime {
                     .ok_or(OperationError::State)?
                     .no_original_handles()
                 || !bootstrap.readers.is_empty()
-                || (partial_close && (bootstrap.publication.is_some() || bootstrap.sync.is_some()))
+                || (partial_close && !bootstrap.native_io_dormant())
                 || (!partial_close
                     && bootstrap
                         .native_root
                         .as_ref()
                         .is_some_and(|root| root.imported_retained())
-                    && (bootstrap.publication.is_some() || bootstrap.sync.is_some()))
+                    && !bootstrap.native_io_dormant())
                 || (!partial_close
                     && !bootstrap
                         .native_root
                         .as_ref()
                         .is_some_and(|root| root.imported_retained())
-                    && !bootstrap
-                        .publication
-                        .as_ref()
-                        .is_some_and(|publication| publication.ready_for_transfer()))
-                || (!partial_close
-                    && !bootstrap
-                        .native_root
-                        .as_ref()
-                        .is_some_and(|root| root.imported_retained())
-                    && !bootstrap
-                        .sync
-                        .as_ref()
-                        .is_some_and(|sync| sync.ready_for_transfer()))
+                    && !bootstrap.native_io_ready())
                 || state.asset.lifecycle != ScratchLifecycleV1::RetiredClosed
                 || state.asset.directory.is_some()
                 || !bootstrap

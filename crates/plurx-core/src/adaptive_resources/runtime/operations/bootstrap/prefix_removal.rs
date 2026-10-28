@@ -69,14 +69,7 @@ impl NodeResourceRuntime {
                 || bootstrap.change.is_some()
                 || bootstrap.retirement.is_some()
                 || bootstrap.next_arm.is_some()
-                || bootstrap
-                    .publication
-                    .as_ref()
-                    .is_some_and(|cell| !cell.ready_for_transfer())
-                || bootstrap
-                    .sync
-                    .as_ref()
-                    .is_some_and(|cell| !cell.ready_for_transfer())
+                || !bootstrap.native_io_ready()
             {
                 return Err(OperationError::State);
             }

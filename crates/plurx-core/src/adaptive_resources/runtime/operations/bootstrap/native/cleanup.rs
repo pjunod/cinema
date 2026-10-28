@@ -215,6 +215,7 @@ impl CleanupCell {
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn launch(
         &mut self,
         root: &mut RootCell,
+        baseline: &[Option<&DirectoryObservedV1>; 3],
     ) -> Result<tokio::sync::oneshot::Sender<()>, OperationError> {
         if self.launched || self.pending.is_some() || self.result.is_some() || self.failed_join {
             return Err(invalid());
@@ -222,7 +223,7 @@ impl CleanupCell {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let action = self.action.clone();
         let observed = self.observed.clone();
-        let directories = root.lend_observed_directories(&self.observed)?;
+        let directories = root.lend_observed_directories(&self.observed, baseline)?;
         let (enter, registered) = tokio::sync::oneshot::channel();
         self.pending = Some(runtime.spawn_blocking(move || {
             if registered.blocking_recv().is_err() {

@@ -210,11 +210,7 @@ impl NodeResourceRuntime {
             || state.asset.totals.pending_jobs != 0
             || bootstrap.change.is_some()
             || bootstrap.next_arm.is_some()
-            || bootstrap
-                .publication
-                .as_ref()
-                .is_some_and(|p| !p.acknowledged())
-            || bootstrap.sync.as_ref().is_some_and(|s| !s.acknowledged)
+            || !bootstrap.native_io_ready()
         {
             return Err(OperationError::State);
         }
@@ -279,10 +275,13 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
+        let observe = new_id()?;
+        let join = new_id()?;
+        bootstrap.sync_registered = true;
         bootstrap.sync = Some(Sync {
             io,
-            observe: new_id()?,
-            join: new_id()?,
+            observe,
+            join,
             files: ids,
             request: Some(request),
             pending: None,

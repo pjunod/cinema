@@ -240,18 +240,19 @@ impl RootCell {
         Ok(())
     }
 
-    /// Lend an exact set of original charged directory Files to one cleanup
-    /// worker. Every identity is checked before the first File is moved.
+    /// Validate the complete original directory inventory, then lend only the
+    /// action's exact subset. Unused originals remain here throughout the job.
     pub(super) fn lend_observed_directories(
         &mut self,
         observed: &[v2::scratch::DirectoryObservedV1],
+        baseline: &[Option<&v2::scratch::DirectoryObservedV1>; 3],
     ) -> Result<BTreeMap<v2::Id, File>, OperationError> {
         if self.pending.is_some() || self.failed_join || observed.is_empty() {
             return Err(OperationError::State);
         }
         let held = self.result.as_mut().ok_or(OperationError::State)?;
         let last_known = held.audit.outcome == v2::scratch::NativeOutcomeV1::Completed
-            && held.audit.acquired.as_ref() == observed.last();
+            && held.audit.acquired.as_ref() == baseline.iter().rev().flatten().copied().next();
         let never_entered = held.audit.outcome == v2::scratch::NativeOutcomeV1::NeverEntered
             && held.audit.acquired.is_none()
             && held.audit.closed_copy_ids.is_empty()
@@ -260,12 +261,13 @@ impl RootCell {
         // A cancelled next-step latch reports NeverEntered but leaves the
         // preceding original directory File in this cell. Its exact copy ID
         // and native identity are checked below before any File is moved.
-        if (!last_known && !never_entered) || held.files.len() != observed.len() {
+        if (!last_known && !never_entered) || held.files.len() != baseline.iter().flatten().count()
+        {
             return Err(OperationError::State);
         }
         let domain = &observed[0].native_object.filesystem_domain;
         let mut copies = std::collections::BTreeSet::new();
-        for directory in observed {
+        for directory in baseline.iter().flatten() {
             if directory.held_copy_ids.len() != 1
                 || &directory.native_object.filesystem_domain != domain
             {
@@ -292,6 +294,19 @@ impl RootCell {
                     (v2::NativeValue::Known { value }, v2::NativeValue::Known { value: actual })
                         if *value == actual
                 )
+            {
+                return Err(OperationError::State);
+            }
+        }
+        // Subset membership includes the whole observed identity, not merely
+        // a copy ID. Validate all requested moves before taking any File.
+        copies.clear();
+        for directory in observed {
+            if !baseline
+                .iter()
+                .flatten()
+                .any(|expected| *expected == directory)
+                || !copies.insert(directory.held_copy_ids[0])
             {
                 return Err(OperationError::State);
             }

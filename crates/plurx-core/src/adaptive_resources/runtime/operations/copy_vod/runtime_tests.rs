@@ -192,9 +192,14 @@ async fn retire_with_retained_aliases<L>(
                 .bootstrap
                 .values()
                 .map(|bootstrap| {
-                    bootstrap
-                        .fold()
-                        .map(|fold| format!("{:?}", fold.state().bootstrap.phase))
+                    bootstrap.fold().map(|fold| {
+                        format!(
+                            "phase={:?}, lifecycle={:?}, pending_jobs={}",
+                            fold.state().bootstrap.phase,
+                            fold.state().asset.lifecycle,
+                            fold.state().asset.totals.pending_jobs
+                        )
+                    })
                 })
                 .collect();
             let source_closed: Vec<_> = role
@@ -202,11 +207,19 @@ async fn retire_with_retained_aliases<L>(
                 .values()
                 .map(|source| source.parent_closed())
                 .collect();
-            panic!("original per-state physical closure: {error:?}; phase={:?}, transition={}, sealed={}, closing={}, never_root={}, root_only={}, joined={}, source_closed={source_closed:?}, bootstrap={prefix_phases:?}, pending_close={}, permanent={:?}, retryable={:?}",
-                role.phase, role.transition.is_some(), role.sealed.is_some(), copy.closing,
-                copy.never_root_closure.is_some(), copy.root_only_closure.is_some(),
-                copy.process_closure.is_some(), role.pending_finite_close.is_some(),
-                copy.permanent_hold, copy.retryable_hold);
+            panic!(
+                "original per-state physical closure: {error:?}; phase={:?}, transition={}, sealed={}, closing={}, never_root={}, root_only={}, joined={}, source_closed={source_closed:?}, bootstrap={prefix_phases:?}, pending_close={}, permanent={:?}, retryable={:?}",
+                role.phase,
+                role.transition.is_some(),
+                role.sealed.is_some(),
+                copy.closing,
+                copy.never_root_closure.is_some(),
+                copy.root_only_closure.is_some(),
+                copy.process_closure.is_some(),
+                role.pending_finite_close.is_some(),
+                copy.permanent_hold,
+                copy.retryable_hold
+            );
         }
     };
     let command = pending_command(&preparation, task_acquired).await;

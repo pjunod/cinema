@@ -43,9 +43,6 @@ impl Publication {
             .and_then(|bytes| bytes.checked_add(self.content_binding.capacity()))
             .ok_or(OperationError::State)
     }
-    pub(super) fn acknowledged(&self) -> bool {
-        self.acknowledged
-    }
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn ready_for_transfer(
         &self,
     ) -> bool {
@@ -246,11 +243,7 @@ impl NodeResourceRuntime {
             || state.asset.totals.pending_jobs != 0
             || bootstrap.change.is_some()
             || bootstrap.next_arm.is_some()
-            || bootstrap
-                .publication
-                .as_ref()
-                .is_some_and(|p| !p.acknowledged)
-            || bootstrap.sync.as_ref().is_some_and(|s| !s.acknowledged)
+            || !bootstrap.native_io_ready()
             || !bootstrap.plan.outputs.contains(&output)
         {
             return Err(OperationError::State);
@@ -350,6 +343,7 @@ impl NodeResourceRuntime {
             PublicationRequest::for_operation(&name, std::mem::take(payload), io_id.uuid())
         }
         .expect("same already-validated name/id and bounded payload length");
+        bootstrap.publication_registered = true;
         bootstrap.publication = Some(Publication {
             io_id,
             observe_id,
