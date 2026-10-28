@@ -2180,6 +2180,76 @@ impl Oracle {
         })
     }
 
+    /// Independent bounded-reference fixture writer restored from the SAME
+    /// actual Init image. No production rows or raw identities are reseeded.
+    pub(super) async fn from_captured_image(
+        path: &Path,
+        capture: &InitialCapture,
+        limits: &paged::BackupLimits,
+    ) -> Result<Self, String> {
+        let expected = (capture.image_bytes, capture.image_sha256.clone());
+        if paged::hash_file(path, limits.max_bytes, limits.deadline)
+            .map_err(|error| error.to_string())?
+            != expected
+        {
+            return Err("InitialImage: captured fixture bytes changed".into());
+        }
+        let store =
+            SqliteStore::async_refinement_from_image(path, limits.max_bytes, limits.deadline)
+                .map_err(|error| error.to_string())?;
+        let jobs: [String; 2] = serde_json::from_value(capture.raw_fixture["jobs"].clone())
+            .map_err(|error| error.to_string())?;
+        let fixture = Fixture {
+            store,
+            jobs,
+            library: capture.raw_fixture["library_id"]
+                .as_i64()
+                .ok_or("InitialImage: captured library")?,
+            omitted_dv_sequence: capture.raw_fixture["omitted"]["sequence"].clone(),
+        };
+        check_paged_initial_class(&fixture).await?;
+        let episode = Episode::initial();
+        invariants(&fixture, &episode).await?;
+        let observed = BoundaryObservation::observe(&fixture, &episode).await?;
+        let view = projection(&fixture, &episode, 0, &observed.canonical).await;
+        let inputs = actions(&fixture, &episode).await;
+        let schema = schema_bindings(&fixture).await;
+        if schema != capture.schema
+            || observed.canonical != capture.observed.canonical
+            || observed.omitted_dv != capture.observed.omitted_dv
+            || json!(view) != capture.raw_fixture["initial_projection"]
+            || json!(inputs) != capture.raw_fixture["initial_inputs"]
+            || paged::hash_file(path, limits.max_bytes, limits.deadline)
+                .map_err(|error| error.to_string())?
+                != expected
+        {
+            return Err("InitialImage: independent actual fixture restore mismatch".into());
+        }
+        let key = observed.canonical;
+        Ok(Self {
+            fixture,
+            persistent: None,
+            diagnostics: OracleDiagnostics::default(),
+            prefix: Vec::new(),
+            root_savepoint: false,
+            materialization_failed: false,
+            reuse_certificates: true,
+            states: vec![OracleState {
+                canonical: key.clone(),
+                episode,
+                view,
+                parent: None,
+                inputs,
+                certified: true,
+            }],
+            edges: Vec::new(),
+            index: HashMap::from([(key, 0)]),
+            cache: HashMap::new(),
+            schema,
+            failure: None,
+            mutation: Value::Null,
+        })
+    }
     pub(super) async fn capture_initial_image(
         &mut self,
         path: &Path,

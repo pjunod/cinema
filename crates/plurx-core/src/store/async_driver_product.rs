@@ -552,7 +552,8 @@ impl Worker {
         }
     }
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Valuation {
     sql: StoreHandle,
     w: [Worker; 2],
@@ -595,7 +596,8 @@ fn contexts() -> Vec<Context> {
     })
     .collect()
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Branch {
     family: String,
     worker: Option<usize>,
@@ -3242,6 +3244,280 @@ impl RuntimeDiagnostics {
         }
     }
 }
+fn catalog_result<T>(value: paged::CatalogResult<T>) -> Result<T, String> {
+    value.map_err(|error| error.to_string())
+}
+fn decode_paged_product(record: &paged::Record) -> Result<Valuation, String> {
+    require(record.kind == "Product", "PagedProductKind")?;
+    catalog_result(record.validate())?;
+    let mut payload = catalog_result(paged::strict_json(
+        catalog_result(paged::string(&record.record, "canonical_utf8"))?.as_bytes(),
+    ))?;
+    let context = payload
+        .as_object_mut()
+        .ok_or("PagedProductPayload")?
+        .remove("context")
+        .ok_or("PagedProductContext")?;
+    require(
+        context == record.record["context"],
+        "PagedProductContextIdentity",
+    )?;
+    let value: Valuation =
+        serde_json::from_value(payload).map_err(|error| format!("PagedProductPayload: {error}"))?;
+    require(
+        value
+            .sql
+            .checked_add(1)
+            .is_some_and(|id| record.record["store_id"] == id),
+        "PagedProductStoreIdentity",
+    )?;
+    Ok(value)
+}
+fn restore_actual_drivers(
+    catalog: &paged::Catalog,
+    product: &paged::Record,
+    driver: &Driver,
+    deadline: Instant,
+) -> Result<Valuation, String> {
+    let mut value = decode_paged_product(product)?;
+    for n in 0..2 {
+        if value.w[n].stage != "driver" {
+            continue;
+        }
+        let mut cursor = product.clone();
+        let mut replies = Vec::new();
+        loop {
+            require(
+                Instant::now() < deadline,
+                "ResourceIncomplete: driver replay deadline",
+            )?;
+            let edge_id = catalog_result(paged::number(&cursor.record, "predecessor_edge"))?;
+            let edge = catalog_result(catalog.get_id("ProductEdge", edge_id))?;
+            let from = catalog_result(paged::number(&edge.record, "from_product"))?;
+            require(
+                edge.record["to_product"] == cursor.record["id"]
+                    && from < catalog_result(paged::number(&cursor.record, "id"))?,
+                "PagedDriverDiscoveryChain",
+            )?;
+            let branch: Branch =
+                serde_json::from_str(catalog_result(paged::string(&edge.record, "branch_utf8"))?)
+                    .map_err(|error| format!("PagedDriverBranch: {error}"))?;
+            let parent = catalog_result(catalog.get_id("Product", from))?;
+            if branch.worker == Some(n) {
+                if branch.family == "DriverReturn" {
+                    let previous = decode_paged_product(&parent)?;
+                    let reply = previous.w[n]
+                        .adapter_reply
+                        .clone()
+                        .ok_or("MissingHistoricalActualAdapterReply")?;
+                    require(
+                        previous.w[n].call == "replied" && previous.w[n].reply == reply.tag,
+                        "HistoricalActualAdapterReplyAgreement",
+                    )?;
+                    replies.push(reply);
+                    // This is a checked bound from the actual finite driver DAG,
+                    // not a bound on product history, clocks, or source Next.
+                    require(
+                        replies.len() <= driver.states.len(),
+                        "ActualDriverDAGReplayBound",
+                    )?;
+                }
+                if branch.family == "ClaimReturn" {
+                    require(
+                        decode_paged_product(&cursor)?.w[n].stage == "driver"
+                            && decode_paged_product(&parent)?.w[n].stage == "claim",
+                        "HistoricalActualDriverStart",
+                    )?;
+                    break;
+                }
+            }
+            cursor = parent;
+        }
+        let mut real = RealDriver::new();
+        for reply in replies.iter().rev() {
+            real.drive(concrete_reply(reply)?)
+                .map_err(|_| "HistoricalActualDriverRejectedReply")?;
+        }
+        value.real_drivers[n] = Some(real);
+    }
+    verify_real(&value, driver)?;
+    Ok(value)
+}
+#[derive(Default)]
+struct PredecessorRecords {
+    candidates: Vec<u64>,
+    demands: Vec<u64>,
+    outcomes: Vec<u64>,
+    seen_outcomes: BTreeSet<u64>,
+}
+struct PredecessorSource<'a> {
+    catalog: &'a paged::Catalog,
+    context: &'a Context,
+    product: paged::ProductId,
+}
+impl PredecessorRecords {
+    async fn oracle_demand(
+        &mut self,
+        source: &PredecessorSource<'_>,
+        oracle: &mut Oracle,
+        spec: DemandSpec,
+        exclusion: Option<Value>,
+        dependencies: &[u64],
+    ) -> Result<Demand, String> {
+        let catalog = source.catalog;
+        let context = source.context;
+        let predecessor = source.product.get();
+        let classification = if exclusion.is_none() {
+            "eligible"
+        } else if exclusion
+            .as_ref()
+            .is_some_and(|value| value["kind"] == "sample")
+        {
+            "excluded_sample"
+        } else {
+            "excluded_domain"
+        };
+        let reason = exclusion.as_ref().map(canonical);
+        let choice = json!({"oracle_from":spec.oracle_from,"role":spec.role,"input":spec.input,"capture":spec.capture,"sample":spec.sample});
+        let descriptor = json!({"kind":"oracle_demand","family":spec.family,"worker":spec.worker,"oracle_from":spec.oracle_from,"role":spec.role,"input":spec.input,"capture":spec.capture,"sample":spec.sample});
+        let candidate = catalog_result(catalog.allocate("Candidate"))?;
+        catalog_result(catalog.append_record("Candidate",json!({"id":candidate,"context":context.id,"predecessor":predecessor,"ordinal":self.candidates.len(),"family":spec.family,"worker":spec.worker,"choice_utf8":canonical(&choice),"descriptor_utf8":canonical(&descriptor),"classification":classification,"reason":reason})))?;
+        self.candidates.push(candidate);
+        let edge = if exclusion.is_none() {
+            Some(
+                oracle
+                    .apply(
+                        spec.oracle_from,
+                        spec.input.as_ref().ok_or("MissingEligibleDemandInput")?,
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let outcome = edge.map(|id| id as u64 + 1);
+        if let Some(outcome) = outcome {
+            if self.seen_outcomes.insert(outcome) {
+                self.outcomes.push(outcome);
+            }
+        }
+        let role = match spec.family {
+            "EnvironmentResolve" => "dependent_resolve",
+            "ClaimRecoverRead" => "dependent_read",
+            "ClaimRecoverCancel" => "dependent_cancel",
+            _ => spec.role,
+        };
+        let id = catalog_result(catalog.allocate("Demand"))?;
+        catalog_result(catalog.append_record("Demand",json!({"id":id,"candidate":candidate,"ordinal":0,"from_store":spec.oracle_from as u64+1,"family":spec.family,"worker":spec.worker,"role":role,"input_utf8":canonical(&spec.input),"capture":spec.capture,"sample":spec.sample,"classification":classification,"reason":reason,"outcome_id":outcome,"depends_on":dependencies})))?;
+        self.demands.push(id);
+        Ok(Demand { spec, edge })
+    }
+}
+/// One complete original predecessor expansion. Capacity-only outcomes and all
+/// dependent demands are retained even when no selected product edge uses them.
+async fn expand_paged_predecessor(
+    catalog: &paged::Catalog,
+    oracle: &mut Oracle,
+    driver: &Driver,
+    unit: u64,
+    deadline: Instant,
+) -> Result<(), String> {
+    let (ticket, product) =
+        catalog_result(catalog.oldest_pending())?.ok_or("NoPendingPredecessor")?;
+    let source = catalog_result(catalog.get_id("Product", product.get()))?;
+    let context = contexts()
+        .into_iter()
+        .find(|context| source.record["context"] == context.id)
+        .ok_or("UnknownPagedContext")?;
+    let value = restore_actual_drivers(catalog, &source, driver, deadline)?;
+    let transaction = catalog_result(catalog.begin_expansion(ticket, product, unit))?;
+    let result=async {
+        require(Instant::now()<deadline,"ResourceIncomplete: complete predecessor deadline")?;
+        // Collect AND classify the whole primary structural demand set before
+        // any production lookup can add a cached or novel outcome.
+        let primary=enumerate_candidates(&context,&value,driver,oracle)?.into_iter().map(|spec|{
+            let excluded=classify_demand(&context,driver,&value,&spec,oracle)?;Ok((spec,excluded))
+        }).collect::<Result<Vec<_>,String>>()?;
+        let source=PredecessorSource {catalog,context:&context,product};
+        let mut records=PredecessorRecords::default();let mut demands=Vec::new();
+        for (spec,exclusion) in primary {
+            require(Instant::now()<deadline,"ResourceIncomplete: primary demand deadline")?;
+            demands.push(records.oracle_demand(&source,oracle,spec,exclusion,&[]).await?);
+        }
+        let primary_count=demands.len();
+        let mut renewal=Vec::<(StoreHandle,Action,BTreeSet<u64>)>::new();
+        for (index,demand) in demands.iter().enumerate() {
+            if demand.spec.family!="Environment" {continue;}let Some(id)=demand.edge else{continue;};let edge=oracle.edge(id);
+            let Action::Renew {job,token}=edge.action else{continue;};
+            let matching=value.w.iter().any(|worker|same_claim(worker,job,token,oracle,value.sql));
+            let needs=edge.result=="refused"||(edge.result=="renewed"&&value.w.iter().any(|worker|same_claim(worker,job,token,oracle,value.sql)&&!worker.fault_used));
+            if matching&&needs {
+                let action=Action::Resolve {job,token};
+                if let Some((_,_,parents))=renewal.iter_mut().find(|(from,input,_)|*from==edge.to&&*input==action) {parents.insert(records.demands[index]);}
+                else{renewal.push((edge.to,action,BTreeSet::from([records.demands[index]])));}
+            }
+        }
+        for (from,input,parents) in renewal {
+            let spec=DemandSpec {oracle_from:from,family:"EnvironmentResolve",worker:None,role:"apply",input:Some(input),capture:None,sample:None};
+            let exclusion=classify_demand(&context,driver,&value,&spec,oracle)?;
+            require(exclusion.is_none(),"MissingRenewalResolutionInput")?;
+            demands.push(records.oracle_demand(&source,oracle,spec,exclusion,&parents.into_iter().collect::<Vec<_>>()).await?);
+        }
+        let mut recovery=Vec::new();
+        for (index,demand) in demands.iter().take(primary_count).enumerate() {
+            if demand.spec.family!="ClaimRecover" {continue;}let Some(id)=demand.edge else{continue;};let edge=oracle.edge(id);let n=demand.spec.worker.ok_or("RecoveryDemandWorker")?;let job=value.w[n].job as usize;
+            let next=match edge.result.as_str(){"running"=>Some(("ClaimRecoverRead",Action::ReadClaimJob {job})),"cancel_requested"=>Some(("ClaimRecoverCancel",Action::Settle {job,token:edge.resolved_token.ok_or("MissingActualCancellationCapture")?,disposition:2})),_=>None};
+            if let Some((family,input))=next {recovery.push((edge.to,n,family,input,records.demands[index]));}
+        }
+        // Preserve original recovery-demand occurrence order. Each occurrence
+        // carries the complete union of matching primary triggers.
+        for (from,n,family,input,_) in &recovery {
+            let parents=recovery.iter().filter(|(parent,worker,kind,action,_)|parent==from&&worker==n&&kind==family&&action==input).map(|(_,_,_,_,id)|*id).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+            let spec=DemandSpec {oracle_from:*from,family,worker:Some(*n),role:"apply",input:Some(input.clone()),capture:None,sample:None};
+            let exclusion=classify_demand(&context,driver,&value,&spec,oracle)?;
+            require(exclusion.is_none(),"MissingInitialRecoveryDependentInput")?;
+            demands.push(records.oracle_demand(&source,oracle,spec,exclusion,&parents).await?);
+        }
+        require(Instant::now()<deadline,"ResourceIncomplete: successor deadline")?;
+        let steps=successors(&context,&value,driver,oracle,&demands)?;
+        let mut branches=BTreeSet::new();let mut pairs=BTreeMap::<u64,BTreeSet<String>>::new();let mut edges=Vec::new();let mut target_stores=BTreeSet::new();
+        for step in steps {
+            require(Instant::now()<deadline,"ResourceIncomplete: successor append deadline")?;
+            let candidate=catalog_result(catalog.allocate("Candidate"))?;
+            catalog_result(catalog.append_record("Candidate",json!({"id":candidate,"context":context.id,"predecessor":product.get(),"ordinal":records.candidates.len(),"family":step.branch.family,"worker":step.branch.worker,"choice_utf8":canonical(&step.branch.choice),"descriptor_utf8":canonical(&json!({"kind":"product_step","branch":step.branch})),"classification":"eligible","reason":null})))?;
+            records.candidates.push(candidate);
+            let store=catalog_result(paged::StoreId::new(step.value.sql as u64+1))?;
+            let to=catalog_result(catalog.intern_product(context.id,&canonical(&product_payload(&context,&step.value)),store))?;
+            require(branches.insert((canonical(&step.branch),to.get())),"ProductSuccessors: duplicate finite branch/target")?;
+            pairs.entry(to.get()).or_default().extend(memberships(&step,&value,&context,oracle));target_stores.insert(store.get());
+            let edge=catalog_result(catalog.append_product_edge(json!({"context":context.id,"from_product":product.get(),"to_product":to.get(),"candidate":candidate,"branch_utf8":canonical(&step.branch),"primary_edge":step.edge.map(|id|id as u64+1),"resolution_edge":step.resolution_edge.map(|id|id as u64+1),"read_edge":step.read_edge.map(|id|id as u64+1),"cleanup_edge":step.cleanup_edge.map(|id|id as u64+1)})))?;
+            edges.push(edge.get());
+        }
+        let mut fair_pairs=Vec::new();let mut enabled=BTreeSet::new();
+        for (to,labels) in pairs {
+            if to!=product.get(){enabled.extend(labels.iter().cloned());}
+            fair_pairs.push(catalog_result(catalog.union_fair_pair(context.id,product,catalog_result(paged::ProductId::new(to))?,&labels.into_iter().collect::<Vec<_>>()))?);
+        }
+        let enabled=catalog_result(catalog.append_enabledness(json!({"context":context.id,"product_id":product.get(),"full_graph_labels":enabled})))?;
+        let mut capacity=BTreeSet::new();for demand in &demands {if demand.spec.role=="capacity" {if let Some(id)=demand.edge {capacity.insert(oracle.edge(id).to as u64+1);}}}
+        let capacity=capacity.difference(&target_stores).copied().collect::<Vec<_>>();
+        Ok::<_,String>(json!({"id":catalog_result(transaction.expansion_id())?.get(),"context":context.id,"predecessor":product.get(),"fifo_ticket":ticket.get(),"candidates":records.candidates,"demands":records.demands,"oracle_evidence":records.outcomes,"product_edges":edges,"fair_pairs":fair_pairs,"enabledness":enabled,"discovered_products":transaction.discovered_products(),"capacity_only_stores":capacity,"unit_ordinal":unit,"complete":true}))
+    }.await;
+    // Restore while private witness handles still exist. An actual rollback or
+    // endpoint failure poisons the Oracle; it is never classified as a demand.
+    let restored = oracle.restore_root().await;
+    match (result, restored) {
+        (Ok(seal), Ok(())) => catalog_result(transaction.seal(seal)).map(|_| ()),
+        (result, restored) => {
+            catalog_result(transaction.abort())?;
+            match restored {
+                Err(reason) => Err(format!("PoisonedOracle: {reason}")),
+                Ok(()) => Err(result.expect_err("failed predecessor")),
+            }
+        }
+    }
+}
+
 async fn close_product(
     driver: &Driver,
     driver_bytes: &[u8],
@@ -3882,6 +4158,124 @@ pub(super) fn initialize_paged_catalog(
         .seal_initial(image.clone(), &roots)
         .map_err(|e| e.to_string())?;
     Ok(image)
+}
+
+/// Bounded backend equivalence and atomic resource rollback, never a closed
+/// product proof. Every selected predecessor is expanded with its COMPLETE D.
+#[tokio::test]
+#[ignore = "requires the registered actual driver graph input"]
+async fn product_paged_disk_and_reference_complete_predecessors_agree() {
+    let (driver, _) = driver_input().expect("actual source-bound driver DAG");
+    let directory = tempfile::tempdir().expect("owned persistent fixture scratch");
+    let path = directory.path().join("initial-image.sqlite");
+    let limits = paged::BackupLimits {
+        max_bytes: paged::PAGE_BYTES,
+        deadline: Instant::now() + Duration::from_secs(300),
+    };
+    let mut actual = Oracle::new(None)
+        .await
+        .expect("actual fresh source constructor");
+    let capture = actual
+        .capture_initial_image(&path, &limits)
+        .await
+        .expect("one exact raw Init image");
+    let mut reference = Oracle::from_captured_image(&path, &capture, &limits)
+        .await
+        .expect("same actual image, no fresh UUIDs");
+    let config = paged::fixture_configuration(directory.path().join("catalog.sqlite"));
+    let disk = paged::Catalog::disk(config.clone()).expect("SQLite catalog");
+    let memory = paged::Catalog::memory(config.clone(), 4096, 16 * 1024 * 1024)
+        .expect("bounded independent reference");
+    initialize_paged_catalog(&mut actual, &disk, &capture).expect("actual SQLite Init roots");
+    initialize_paged_catalog(&mut reference, &memory, &capture)
+        .expect("same actual reference Init roots");
+    for expected in 1..=2 {
+        assert_eq!(
+            disk.oldest_pending()
+                .expect("disk FIFO")
+                .expect("pending")
+                .1
+                .get(),
+            expected
+        );
+        assert_eq!(
+            disk.oldest_pending().expect("disk FIFO"),
+            memory.oldest_pending().expect("reference FIFO")
+        );
+        expand_paged_predecessor(&disk, &mut actual, &driver, 1, limits.deadline)
+            .await
+            .expect("complete actual SQLite predecessor");
+        expand_paged_predecessor(&memory, &mut reference, &driver, 1, limits.deadline)
+            .await
+            .expect("complete reference predecessor");
+        let a = disk
+            .pin_read_snapshot(disk.current_transaction().expect("disk sequence"))
+            .expect("disk snapshot");
+        let b = memory
+            .pin_read_snapshot(memory.current_transaction().expect("reference sequence"))
+            .expect("reference snapshot");
+        assert_eq!(
+            a.counts().expect("disk counts"),
+            b.counts().expect("reference counts")
+        );
+        assert_eq!(
+            a.logical_digest().expect("disk full bytes"),
+            b.logical_digest().expect("reference full bytes")
+        );
+        assert!(
+            a.counts().expect("prefix counts")["frontier"]
+                .as_u64()
+                .expect("frontier")
+                > 0,
+            "a bounded comparison prefix is never closure"
+        );
+        a.close().expect("close disk snapshot");
+        b.close().expect("close reference snapshot");
+    }
+    let mut constrained = config;
+    let mut plan = constrained.resource_plan.record.clone();
+    plan["unit_record_allowance"] = json!(16);
+    let provisional: paged::Record =
+        serde_json::from_value(json!({"schema_version":6,"kind":"ResourcePlan","record":plan}))
+            .expect("operational fixture shape");
+    let mut plan = provisional.record.clone();
+    plan["plan_sha256"] = json!(provisional.sha256());
+    constrained.resource_plan =
+        paged::Record::new("ResourcePlan", plan).expect("fixed small operational quota");
+    let limited =
+        paged::Catalog::memory(constrained, 4096, 16 * 1024 * 1024).expect("bounded quota fixture");
+    let mut limited_oracle = Oracle::from_captured_image(&path, &capture, &limits)
+        .await
+        .expect("same exact initial image");
+    initialize_paged_catalog(&mut limited_oracle, &limited, &capture)
+        .expect("Init fits the immutable operational quota");
+    let initial = limited
+        .pin_read_snapshot(limited.current_transaction().expect("Init commit"))
+        .expect("pin Init");
+    let before = initial.logical_digest().expect("Init identity");
+    initial.close().expect("close Init");
+    let frontier = limited.oldest_pending().expect("initial FIFO");
+    let failure =
+        expand_paged_predecessor(&limited, &mut limited_oracle, &driver, 1, limits.deadline)
+            .await
+            .expect_err("whole predecessor exceeds the immutable operational quota");
+    assert!(
+        failure.starts_with("ResourceIncomplete"),
+        "unexpected first failure: {failure}"
+    );
+    assert_eq!(limited.oldest_pending().expect("retained FIFO"), frontier);
+    let after = limited
+        .pin_read_snapshot(limited.current_transaction().expect("unchanged commit"))
+        .expect("pin rollback");
+    assert_eq!(
+        before,
+        after.logical_digest().expect("full rollback identity")
+    );
+    after.close().expect("close rollback");
+    limited_oracle
+        .restore_root()
+        .await
+        .expect("actual root remains usable after catalog rollback");
 }
 
 pub(super) fn catalog_fixture_payload(id: &str) -> Value {
