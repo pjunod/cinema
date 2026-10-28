@@ -1713,9 +1713,38 @@ async fn copy_entered_parser_full_window_retirement_wakes_and_joins_before_deadl
         .start(deadline())
         .await
         .expect("actual original native parser entry");
-    tokio::time::timeout(Duration::from_secs(30), gate.reached())
+    if tokio::time::timeout(Duration::from_secs(30), gate.reached())
         .await
-        .expect("FAILURE watchdog: original sink never reached its real full window");
+        .is_err()
+    {
+        // Read only the same completion slot. This never starts, seals, joins,
+        // replaces or fabricates a parser or grants any native closure proof.
+        let terminal = runtime
+            .wait_copy_parser_result(&preparation, 0, Instant::now() + Duration::from_millis(50))
+            .await;
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role
+            .copy_vod
+            .as_ref()
+            .expect("original failed window owner");
+        let prefix = role
+            .bootstrap
+            .values()
+            .next()
+            .and_then(|entry| entry.fold())
+            .map(|fold| {
+                let state = fold.state();
+                (
+                    state.bootstrap.phase.clone(),
+                    state.asset.lifecycle.clone(),
+                    state.asset.totals.clone(),
+                )
+            });
+        panic!("FAILURE watchdog: original sink never reached real full window; actual terminal={terminal:?}, prefix={prefix:?}, phase={:?}, transition={}, closing={}, custody_closing={}",
+            role.phase, role.transition.is_some(), copy.closing,
+            role.copy_cleanup.as_ref().is_none_or(|custody| custody.closing()));
+    }
     let (observation, root_member) = {
         let bundle = preparation.state.lock().await;
         let role = &bundle.roles[0];

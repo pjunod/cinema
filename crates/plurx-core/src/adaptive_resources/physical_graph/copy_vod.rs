@@ -371,6 +371,10 @@ async fn original_copy_task(
         )
         .await;
         if !matches!(&outcome, Outcome::Completed(_)) {
+            // Failure-only fixture diagnostics preserve the real parser/sink
+            // outcome before its public terminal projection discards details.
+            #[cfg(all(test, feature = "fixtures"))]
+            eprintln!("original copy parser/sink outcome: {outcome:?}");
             // Before awaiting diagnostics: a live root may ignore EPIPE and
             // keep stderr open forever. Post-task-join kill cannot solve it.
             request_failed_copy_stop(control, &finished, &completion);
@@ -380,6 +384,8 @@ async fn original_copy_task(
     let diagnostics = async {
         let result = drain_diagnostics(pipes.stderr).await;
         if result.is_err() {
+            #[cfg(all(test, feature = "fixtures"))]
+            eprintln!("original copy diagnostics read failed: {result:?}");
             request_failed_copy_stop(control, &finished, &completion);
         }
         result

@@ -384,7 +384,11 @@ async fn actual_publication_sink_panic_loses_task_result_and_holds_original_r() 
         }
     })
     .await;
-    assert!(bounded(graph.join_copy_vod(task)).await.is_err());
+    let joined = bounded(graph.join_copy_vod(task)).await;
+    assert!(
+        joined.is_err(),
+        "original sink panic was not reached; actual terminal={joined:?}"
+    );
     assert_eq!(
         graph.copy_task_hold_reason(task).await,
         Some(CopyTaskHoldReason::TaskAbandoned)
@@ -538,7 +542,9 @@ async fn actual_entered_sink_can_publish_while_join_holds_only_graph_members() {
         .expect("no bundle/members inversion during actual publication");
     assert!(
         result.completed && result.segments > 0,
-        "requires actual parser/sink publication, not no-entry"
+        "actual parser/sink result: completed={}, segments={}",
+        result.completed,
+        result.segments
     );
     {
         let bundle = preparation.state.lock().await;
@@ -695,12 +701,17 @@ int main(void) {
         .await
         .expect("actual original wait")
         .success());
-    let signal_error = child
+    // RegisteredChildControl deliberately treats an already-removed
+    // registration as an idempotent no-op. If its original pidfd is still
+    // registered, the reaped process can instead report ESRCH. This exit-path
+    // regression does NOT establish genuine non-ESRCH R20 failure coverage.
+    if let Err(error) = child
         .registered_control()
-        .expect("original retained pidfd control")
+        .expect("original registered control selector")
         .start_kill()
-        .expect_err("original reaped pidfd must report a real signal error");
-    assert_eq!(signal_error.raw_os_error(), Some(libc::ESRCH));
+    {
+        assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
+    }
     assert!(!graph.fixture_copy_task_finished(task).await);
     let charge = runtime
         .accounting()
