@@ -12,7 +12,8 @@ owns delivery and file ownership. [paged-proof.schema.json](paged-proof.schema.j
 defines the closed schema 6 envelopes; [paged-catalog.sql](paged-catalog.sql)
 defines the separate harness catalog. Neither is a production Store migration.
 The [finite inventory](finite-inventory.json) is a source-reviewed construction
-argument awaiting independent conformance, not an executed closure certificate.
+argument with source-only finite-generation design conformance; the amended
+schema/API still awaits design recheck. It is not an executed closure certificate.
 
 ## Exact records and concrete Rust interfaces
 
@@ -57,13 +58,14 @@ pub enum StoreCertification { ActualInitChecked, NovelActualStateChecked }
 pub enum CatalogError {
     CorruptRecord, SourceMismatch, InitialImageMismatch, SchemaMismatch,
     MissingDependency, IncompleteExpansion, ConflictingOutcome, PoisonedOracle,
-    NumericDomain, ResourceIncomplete, Io,
+    NumericDomain, ResourceIncomplete, SnapshotUnavailable, SnapshotMismatch, Io,
 }
 pub type CatalogResult<T> = Result<T, CatalogError>;
 ```
 
 ```rust
 pub enum RecordKey { Numeric(u64), Text(String) }
+pub struct Obligation { pub node: u8, pub job: u8, pub claim_id: uuid::Uuid }
 pub struct RecordRange {
     pub kind: RecordKind, pub after: Option<RecordKey>,
     pub through_transaction: TransactionId,
@@ -117,6 +119,7 @@ field sets; additional private cache fields cannot affect equality or wire data.
 ```rust
 pub trait Catalog {
     type Expansion<'a>: ExpansionTransaction where Self: 'a;
+    type Snapshot<'a>: CatalogReadSnapshot where Self: 'a;
     fn initialize(&mut self, value: CheckedInitialState) -> CatalogResult<InitialImageRecord>;
     fn get_store(&self, id: StoreId) -> CatalogResult<StoreRecord>;
     fn get_product(&self, id: ProductId) -> CatalogResult<ProductRecord>;
@@ -127,16 +130,28 @@ pub trait Catalog {
     fn checkpoint(&mut self, unit: &WorkUnit) -> CatalogResult<CheckpointRecord>;
     fn resume(&mut self, checkpoint: &CheckpointRecord, source: &SourceIdentity,
         plan: &ResourcePlan) -> CatalogResult<()>;
+    fn current_transaction(&self) -> CatalogResult<TransactionId>;
+    fn pin_read_snapshot(&self, expected: TransactionId)
+        -> CatalogResult<Self::Snapshot<'_>>;
+}
+pub trait CatalogReadSnapshot {
+    fn transaction(&self) -> TransactionId;
+    fn logical_digest(&self) -> CatalogResult<Sha256>;
+    fn counts(&self) -> CatalogResult<Counts>;
+    fn context_snapshots(&self) -> CatalogResult<Vec<ContextRoot>>;
     fn read_records(&self, range: RecordRange, limits: ReadLimits)
         -> CatalogResult<RecordBatch>;
     fn export_page(&self, range: CommittedRange, limits: PageLimits)
         -> CatalogResult<PageDescriptor>;
+    fn close(self) -> CatalogResult<()>;
 }
 pub trait ExpansionTransaction {
     fn intern_physical(&mut self, value: ExactUtf8) -> CatalogResult<PhysicalRowsId>;
     fn intern_episode(&mut self, value: ExactUtf8) -> CatalogResult<EpisodeId>;
     fn intern_checked_store(&mut self, record: CheckedStore) -> CatalogResult<StoreId>;
     fn intern_product(&mut self, key: ProductKey, store: StoreId) -> CatalogResult<ProductId>;
+    fn append_checked_boundary(&mut self, value: CheckedBoundary) -> CatalogResult<BoundaryId>;
+    fn append_enabledness(&mut self, value: EnablednessRecord) -> CatalogResult<()>;
     fn append_candidate(&mut self, value: NewCandidate) -> CatalogResult<CandidateId>;
     fn append_demand(&mut self, value: NewDemand) -> CatalogResult<DemandId>;
     fn append_oracle_evidence(&mut self, value: NewOracleEvidence) -> CatalogResult<OracleEdgeId>;
@@ -149,14 +164,32 @@ pub trait ExpansionTransaction {
 
 `NewCandidate`, `NewDemand`, `NewOracleEvidence` and `NewProductEdge` have
 exactly their corresponding schema record fields except generated `id`; the
-transaction alone allocates that field. `CheckedStore` likewise carries the
-checked Store payload before generated ID assignment. No caller selects or
-reuses a committed global ID.
+transaction alone allocates that field. `CheckedStore` carries the checked Store payload excluding catalog-assigned
+`id` and `replay_parent_edge`; `CheckedBoundary` carries the complete
+BoundaryObservation excluding its assigned `id`. Only the actual oracle can
+construct either checked input. Enabledness appends its complete context/product
+and full-graph label value, returning success only for one exact consistent
+record. No caller selects or reuses a committed global ID.
 
 `initialize` atomically persists the actual checked Init image, rows/Episode and
 seven ordered initial context/product/frontier records, once only. Later
 interning occurs solely inside an expansion transaction; returned provisional
 IDs stay private until commit and become invalid on rollback.
+New noninitial Store/Product identity slots may have unbound creating/discovery
+links **only while uncommitted**. `append_oracle_evidence` assigns its newly
+allocated edge as the first creating edge of a newly interned target Store;
+`append_product_edge` assigns the first discovery edge of a newly interned
+target Product. Later edges targeting the same provisional identity preserve
+that first link. Existing committed links never change. Seal validates exact
+source/target/context and actual witness agreement and that every new noninitial
+Store/Product has a rooted creating/discovery chain from its initialized root;
+missing, cyclic-unrooted or inconsistent links abort the whole transaction.
+Only initialization creates linkless roots. Deferred SQL foreign keys permit
+these private assignments before commit; they grant no mutation of committed
+records. No provisional slot may be read by an external snapshot or exported.
+All actual before/after/rollback checked observations are appended and linked
+before the evidence can seal; their presence never substitutes for real reads.
+
 `CheckedStore` is constructible only by the actual oracle after initial/novel
 state checks; loading an interned record cannot manufacture it. `ReadLimits`
 and `PageLimits` carry nonzero byte/record ceilings. A batch returns records,
@@ -166,6 +199,46 @@ Episodes, boundaries and oracle evidence can be read through the same typed
 record-batch operation; callers check envelope kind and ID. `ExactUtf8` preserves
 the current Rust canonical serialization, rather than sorting/reencoding its
 inner keys. Digests index candidates; full bytes determine equality.
+
+## Commit sequence and pinned read lifecycle
+
+`TransactionId` is the monotone **catalog commit sequence**, not a per-table ID.
+Initialization commits sequence1. Every atomic source expansion or temporal
+catalog write appends `current+1` to `catalog_commits` and updates
+`catalog_meta.current_commit` in that same transaction. Rollback advances neither.
+One phase-exclusive writer owns this rule across Rust source and Python temporal
+writers; no temporal phase invents a separate sequence. Controller/page bookkeeping
+is outside semantic-record equality, logical digest and counts, and cannot mutate
+committed semantic records. Actual production Store savepoint/writer state remains
+a different boundary entirely.
+
+`pin_read_snapshot(expected)` opens the catalog's read transaction and reads the
+commit sequence as its first query. It succeeds only for that exact currently
+available sequence; an older/newer/unavailable request returns SnapshotUnavailable
+or SnapshotMismatch. The first version pauses semantic writers for the entire
+read-snapshot lifetime. All batches/exports share that one snapshot and ranges
+must name its exact high-water. Snapshot counts/context views and logical digest
+refer to those same rows; no later committed record can leak into a batch. Direct
+Catalog get operations serve the owning writer's current replay; verifier/export
+consumers use only the pinned snapshot interface.
+
+`close(self)` consumes the read handle, ends its read transaction and releases
+the writer pause. Drop/error also closes and publishes no checkpoint/page.
+A released handle cannot resume a cursor. A reader reopens a cursor only after
+successfully pinning its original exact high-water, otherwise it must use an
+explicitly restored exact checkpoint catalog and revalidate it. This is not
+arbitrary historical-version reconstruction or permission to promote a stale
+cursor to the current database. `ProgressCursor.after_key` uses RecordKey and
+is exclusive exactly like RecordRange.after; null means the typed start of that
+stage/range. Stage/record kind/context/family and case index determine whether
+that cursor is at a stage boundary; an unrelated null cannot reset progress.
+
+Checkpoint creation occurs with no expansion active: internally pin the current
+sequence, export committed pages and compute inline counts/context snapshots and
+logical digest at that same snapshot, close it, then record the authenticated
+checkpoint/controller bookkeeping. No semantic writer interleaves during that
+operation. Resume requires the exact persisted/restored catalog, sequence, digest,
+source/Init/plan and page closure; it never infers a snapshot from table IDs.
 
 ## Eight frozen boundaries
 
@@ -225,6 +298,16 @@ must contain identical full bytes. The record-key map is external to payloads
 without an `id`; transport hashes index full bytes and never authorize equality
 by digest alone.
 
+Counts, ContextRoot and Outcome retain these singleton keys but are **final-only
+immutable data-page records**. Counts/ContextRoot publish only after their relevant
+complete final counts are frozen; each Outcome publishes only once its semantic
+family result is sealed. `final_records` stores those exact immutable payloads.
+A checkpoint's changing counts/context snapshots remain inline in Checkpoint,
+not DataEnvelope publication. Pending/incomplete family tracking stays in controller
+progress and cannot reuse an Outcome family key in a page. A verifier checks this
+publication phase and rejects conflicting or premature singleton copies. Future
+checkpoint/page fixtures must exercise this distinction; no fixture ran in M0.
+
 Exact inner canonical UTF-8 strings are opaque preserved bytes; decoded semantics
 and byte counts are independently checked. Outer canonical JSON uses UTF-8,
 sorted object keys, compact separators, no NaN and no string normalization.
@@ -240,6 +323,18 @@ against the full actual encoded member, including envelope overhead. PhysicalRow
 and Episode `utf8_bytes` count their exact inner UTF-8 bytes. No self-referential
 hash or size calculation is required.
 
+`SourceIdentity.proof_contract_sha256` hashes the canonical sorted array of
+`[repository_relative_path, sha256(exact_file_bytes)]` for PAGED-CONTRACT.md,
+paged-proof.schema.json, paged-catalog.sql, finite-inventory.json and
+paged-outcomes.json under this directory. It binds the proof-record contract,
+not the production database. `Store.sqlite_schema_sha256` instead hashes the
+canonical sorted actual migrated SQLite schema inventory (installed schema objects
+and migration identities); `InitialImage.schema_inventory` references that exact
+inventory. Neither may substitute for the other. Initial image bytes have their
+separate image digest. The coordinator must rebind finite/source inventory hashes
+to actual final Rust/Python/TLA sources after implementation; the7431 finite-ledger
+source review remains historical design advice, not a permanent acceptance pin.
+
 A page references only already committed immutable records and its **previous**
 checkpoint. Its descriptor hashes the page bytes and ordered dependency list.
 The new checkpoint references the newly exported manifest root; pages never
@@ -249,7 +344,10 @@ counts. Fanout and page bounds limit transport, never global graph size.
 
 All readers reject absolute paths, `.`/`..` components, traversal, duplicate
 members, symlinks, conflicting IDs, unreferenced hidden payloads and references
-outside the authenticated session/source closure. ZIP and extracted size/member
+outside the authenticated session/source closure. Every path component starts
+with a safe alphanumeric/underscore/hyphen and may then contain dots; root
+`driver-graph.json`, `initial-image.sqlite` and `catalog.sqlite` are valid shapes.
+Dot/dotdot components and all aliases remain rejected semantically. ZIP and extracted size/member
 limits apply before loading; every dependency is authenticated and transitively
 available, not merely named. `ArtifactReceipt` binds actual API IDs and upload
 logs to exact members/checkpoint roots. Counts are recomputed from unique global
@@ -263,7 +361,7 @@ writer and repeating/transient path. Proposed source envelopes are `Bw=61`,
 `Bm=984`, visited wall `1000..44641000`, monotonic `0..29550985`; they are
 consequences to validate, **never guards in Next**. Raw initial/fixed-offset
 values outside a visited-clock interval remain unchanged. Refused renewal,
-repeated AdapterSample, bind/release cycles, availability toggles, claim-loss
+guarded AdapterSample, bind/release cycles, availability toggles, claim-loss
 keys, delayed recovery and all mutation branches must satisfy the ledger.
 Any counterpath invalidates the finite certificate and session before dispatch.
 
@@ -319,10 +417,26 @@ reachable suffixes with `seen_goal=false`; cleanup searches suffixes permanently
 `pending=true`, with `capacity_ok=true` for conditional cleanup. Recurring
 pending alone is insufficient; completion goal stability is not assumed.
 
-Each SCC certificate covers every monitor node exactly once, has actual-edge
-forward and reverse rooted arborescences, and a strictly increasing rank on
-cross-component edges. The independent checker verifies all original edges,
-including outgoing dependencies, and exact partition maximality. SCCs are
+`Scc.obligation` is null for seen_goal_false; pending_true and
+capacity_ok_pending_true require one closed exact `(node,job,claim_id)` Obligation.
+Its full view key is canonical `[context,property,obligation]`, never just a hash.
+For that fixed triple, the induced graph contains precisely all globally reachable
+monitor nodes whose pending_attempts includes it (and capacity_ok where required),
+with every original monitor edge whose endpoints lie in the set. The completion
+view instead contains reachable seen_goal=false nodes. Each view has its own
+complete maximal SCC partition: a node pending two obligations can belong to both
+partitions without conflicting membership keys. The checker regenerates and checks
+**every relevant obligation view**, not a supplied subset; identity cannot switch
+around a cycle. Monitor pending triples are unique and sorted by node/job/claim ID.
+
+Within each view, each SCC certificate covers its members exactly once, has
+actual-edge forward and reverse rooted arborescences and strictly increasing rank
+for every cross-component induced edge. SQL component_members is keyed by full
+view_key plus monitor_id and binds the matching component/view. Counterexample's
+component reference binds this same fixed obligation. All original outgoing edges
+leaving a view/component still contribute to global enabledness/fairness; they
+are not artificial boundary sinks. Partition maximality and dependencies are
+independently verified over the selected induced graph. SCCs are
 indivisible; an oversized SCC fails incomplete. Fairness is evaluated from
 **full original graph** enabledness and original `<A>_vars` occurrences:
 `WF = GF(~En) \\/ GF(Occ)`; `SF = FG(~En) \\/ GF(Occ)`. An original state-selfloop
@@ -331,8 +445,10 @@ including at a reachable deadlock; no past-action flag counts during stutter.
 
 Counterexample.prefix and cycle contain ordered MonitorEdge IDs projected to
 actual original edges. A nonempty cycle has stutter_at=null; an empty cycle
-requires stutter_at equal to its reachable terminal monitor node and the original
-implicit-stutter fairness checks. Finite invariant/nonvacuity and sparse boundary
+requires stutter_at equal to the endpoint of its valid original-Init prefix and
+the original implicit-stutter fairness checks. That endpoint may have outgoing
+nonfair edges; stutter is not restricted to graph deadlocks. Full original
+fairness determines whether the infinite stutter is a valid witness. Finite invariant/nonvacuity and sparse boundary
 control traces use source-bound causal/TLC receipt members instead of fabricating
 a temporal component. Fair counterexamples carry the actual original-Init prefix, monitor transitions,
 and an actual fair recurrent walk/cycle (or stutter witness), with action
@@ -349,21 +465,36 @@ come after M0 and final independent source review.
 admitted → running → checkpointed_incomplete (repeat) → closed_unqualified →
 qualified → complete; resource_blocked, semantic_invalid and completion_rejected
 are explicit nonacceptance states. A failed work unit never advances a checkpoint.
-Each unit has stage, a closed ProgressCursor (context, record kind/next ID, FIFO
+Each unit has stage, a closed ProgressCursor (context, record kind/exclusive after_key, FIFO
 ticket, component ID, family and case index; irrelevant slots null), registered
 cases, ordinal, expected prior
 checkpoint, source/Init/plan identity, authenticated run/job/task and attempt 1.
 Stages are expansion, semantic verification, monitor/SCC verification, temporal
 components, backend qualification and final completion as named in the schema.
 
-The only new entry is the separately registered `async-proof-session.yml`
-`workflow_dispatch` protocol with modes `unit` and `complete`. The trusted
-controller validates repository, PR/open/ready state as applicable, raw event
-base, exact head/tree/source closure, workflow digest, runner/toolchain,
+The proposed separately registered entry is `async-proof-session.yml`
+`workflow_dispatch` with modes `unit` and `complete`. **M4 admission prerequisite:**
+establish on the actual Forgejo service that the exact candidate workflow/ref
+can be dispatched, or bind this same strict new session protocol to one already
+dispatchable workflow path as permitted by the sealed architecture. M0 performs
+no network probe and asserts neither route works. An unqualified bootstrap merge
+is forbidden. M1/M3 consume the fixed workflow/source identity fields without
+assuming candidate-only dispatch capability.
+
+The selected producer path, event, modes, exact workflow bytes, candidate source
+and source-archive execution must all be pinned in one exact registration. If
+M4 needs the existing-dispatchable-path route, it hands that exact registration
+and WorkUnit.workflow_id constant to the sole schema owner **before protocol
+code freezes**. No generic workflow allowlist, ordinary attempt waiver, dummy
+commit or manual Main bypass is allowed. The schema's current constant names the
+proposed target, not an authenticated installed-service capability.
+
+The trusted controller validates repository, PR/open/ready state as applicable,
+raw event base, exact head/tree/source closure, workflow digest, runner/toolchain,
 session/plan, ordered predecessor checkpoint, stage/cases and fresh actual
-run/job/task attempt 1. Source and Oracle never receive API credentials.
-Existing ordinary positive/current gates keep their strict attempt-1 authority;
-no compatibility adapter or exception accepts a partial session.
+run/job/task attempt1. Source and Oracle never receive API credentials. Existing
+ordinary positive/current gates keep strict attempt1 authority; no compatibility
+adapter or exception accepts a partial session.
 
 The registered successor alone may resume a checkpoint, after checking catalog
 logical digest, full dependency closure, actual Init image and exact sources.

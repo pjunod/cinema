@@ -343,11 +343,14 @@
     "mutation_families": "exactly original source configs, independently checked"
   },
   "scc_certificate": {
-    "membership": "total disjoint cover of every relevant reachable monitor node",
+    "membership": "total disjoint maximal partition for every relevant full (context,property,obligation) view; the same node may occur in different fixed-obligation views",
     "connectivity": "actual-edge forward and reverse rooted arborescences",
     "maximality": "strictly increasing condensation rank for every cross-component edge",
     "witness": "actual original-Init prefix and fair recurrent walk/cycle or valid implicit-stutter witness; independently replay monitor and fairness obligations",
-    "indivisible": "component exceeding admitted bound fails incomplete"
+    "indivisible": "component exceeding admitted bound fails incomplete",
+    "obligation": "null for seen_goal_false; exact fixed (node,job,claim_id) for pending_true/capacity_ok_pending_true, regenerated for every relevant obligation",
+    "induced_graph": "all globally reachable monitor nodes matching that fixed pending triple (and capacity_ok where required), or seen_goal=false completion nodes; every original monitor edge with both endpoints in the set",
+    "full_graph_dependencies": "original outgoing edges leaving the view/component still determine enabledness/fairness; no boundary sink"
   },
   "required_comparison_fixture_semantics": [
     "action enabled only by an outgoing component edge",

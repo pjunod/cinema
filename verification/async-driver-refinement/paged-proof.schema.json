@@ -630,7 +630,7 @@
     },
     "RelativePath": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)*$",
+      "pattern": "^[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$",
       "description": "Additional semantic path checks reject dot/dotdot components, absolute paths, aliases and symlinks."
     },
     "Ref": {
@@ -715,13 +715,13 @@
         "finite_inventory_sha256": {
           "$ref": "#/$defs/Sha256"
         },
-        "schema_sha256": {
-          "$ref": "#/$defs/Sha256"
-        },
         "toolchain_sha256": {
           "$ref": "#/$defs/Sha256"
         },
         "workflow_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "proof_contract_sha256": {
           "$ref": "#/$defs/Sha256"
         }
       },
@@ -731,7 +731,7 @@
         "source_closure_sha256",
         "driver_sha256",
         "finite_inventory_sha256",
-        "schema_sha256",
+        "proof_contract_sha256",
         "toolchain_sha256",
         "workflow_sha256"
       ],
@@ -806,9 +806,6 @@
         "initial_image_id": {
           "$ref": "#/$defs/Sha256"
         },
-        "schema_sha256": {
-          "$ref": "#/$defs/Sha256"
-        },
         "omitted_observation_id": {
           "$ref": "#/$defs/Id"
         },
@@ -827,6 +824,9 @@
             "actual_init_checked",
             "novel_actual_state_checked"
           ]
+        },
+        "sqlite_schema_sha256": {
+          "$ref": "#/$defs/Sha256"
         }
       },
       "required": [
@@ -836,7 +836,7 @@
         "canonical_utf8",
         "sha256",
         "initial_image_id",
-        "schema_sha256",
+        "sqlite_schema_sha256",
         "omitted_observation_id",
         "replay_parent_edge",
         "certification"
@@ -1479,7 +1479,8 @@
         "components",
         "boundaries"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "$comment": "Immutable data-page publication is final-only. Checkpoint/controller snapshots remain inline mutable progress and do not publish this singleton key."
     },
     "ContextRoot": {
       "type": "object",
@@ -1507,7 +1508,8 @@
         "expanded_products",
         "frontier"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "$comment": "Immutable data-page publication is final-only. Checkpoint/controller snapshots remain inline mutable progress and do not publish this singleton key."
     },
     "InitialImage": {
       "type": "object",
@@ -2158,7 +2160,8 @@
           "$ref": "#/$defs/Commit"
         },
         "workflow_id": {
-          "const": "async-proof-session.yml"
+          "const": "async-proof-session.yml",
+          "description": "Proposed exact registration target; M4 must prove candidate-ref dispatch capability or hand an exact already-dispatchable path back to the sole schema owner before registration/code freeze. No capability result is asserted by this schema."
         },
         "event_name": {
           "const": "workflow_dispatch"
@@ -2278,29 +2281,9 @@
         "pending_attempts": {
           "type": "array",
           "items": {
-            "type": "object",
-            "properties": {
-              "node": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 1
-              },
-              "job": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 1
-              },
-              "claim_id": {
-                "$ref": "#/$defs/Uuid"
-              }
-            },
-            "required": [
-              "node",
-              "job",
-              "claim_id"
-            ],
-            "additionalProperties": false
-          }
+            "$ref": "#/$defs/Obligation"
+          },
+          "uniqueItems": true
         }
       },
       "required": [
@@ -2382,6 +2365,16 @@
           "items": {
             "$ref": "#/$defs/Ref"
           }
+        },
+        "obligation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Obligation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2393,9 +2386,35 @@
         "forward_tree",
         "reverse_tree",
         "condensation_rank",
-        "outgoing_dependencies"
+        "outgoing_dependencies",
+        "obligation"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "property": {
+                "const": "seen_goal_false"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "obligation": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "obligation": {
+                "$ref": "#/$defs/Obligation"
+              }
+            }
+          }
+        }
+      ]
     },
     "Counterexample": {
       "type": "object",
@@ -2509,7 +2528,8 @@
         "invocation_count",
         "witness"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "$comment": "Immutable data-page publication is final-only. Checkpoint/controller snapshots remain inline mutable progress and do not publish this singleton key."
     },
     "Completion": {
       "type": "object",
@@ -3241,16 +3261,6 @@
             }
           ]
         },
-        "next_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "fifo_ticket": {
           "anyOf": [
             {
@@ -3284,12 +3294,22 @@
         },
         "case_index": {
           "$ref": "#/$defs/Nat"
+        },
+        "after_key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecordKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "context",
         "record_kind",
-        "next_id",
+        "after_key",
         "fifo_ticket",
         "component_id",
         "family",
@@ -3307,6 +3327,30 @@
           "minLength": 1
         }
       ]
+    },
+    "Obligation": {
+      "type": "object",
+      "properties": {
+        "node": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "job": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "claim_id": {
+          "$ref": "#/$defs/Uuid"
+        }
+      },
+      "required": [
+        "node",
+        "job",
+        "claim_id"
+      ],
+      "additionalProperties": false
     }
   }
 }

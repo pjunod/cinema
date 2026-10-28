@@ -52,10 +52,10 @@ Astra provides design advice and a fresh, separate final adversarial review.
 
 | Milestone / owner | Exact owned surfaces | Delivery and current state |
 |---|---|---|
-| M0 · primary lower Sol; coordinator integrates | `verification/async-driver-refinement/PAGED-CONTRACT.md`, `paged-proof.schema.json`, `paged-catalog.sql`, `paged-resource-plan.example.json`, `finite-inventory.json`, `paged-outcomes.json`; this proposal and canonical contract/README/status/index/backlog amendments | Freeze concrete records, SQL, Rust APIs, finite source lemma, monitors, resource/session protocol and ownership. Constructed; design conformance pending. No runtime stubs. |
+| M0 · primary lower Sol; coordinator integrates | `verification/async-driver-refinement/PAGED-CONTRACT.md`, `paged-proof.schema.json`, `paged-catalog.sql`, `paged-resource-plan.example.json`, `finite-inventory.json`, `paged-outcomes.json`; this proposal and canonical contract/README/status/index/backlog amendments | Freeze concrete records, SQL, Rust APIs, finite source lemma, monitors, resource/session protocol and ownership. Constructed; finite-ledger conformance received, schema/API C1–C6 amendments await design recheck. No runtime stubs. |
 | M1 + M2 · one primary lower Sol owner | `crates/plurx-core/src/store/async_driver_catalog.rs`, `async_driver_catalog/{records,sqlite,memory}.rs`, `async_driver_refinement.rs`, `async_driver_product.rs`, `store/mod.rs`; associated Rust fixtures in those modules | Persistent exact catalog/Oracle then complete atomic product expansion/frontier/page production. One owner for both existing async-driver files; implementation pending. |
 | M3 · verifier lower lane | `verification/async-driver-refinement/checker.py`, `AsyncDriverRefinement.tla`, new `paged_codec.py`, `paged_checker.py`, `paged_scc.py`, `PagedOneStep.tla`, `PagedComponent.tla`, `PropertyMonitors.tla`; paged verifier Python fixtures under `tests/operations/` | Independent streamed global semantic/numeric/D/Next/demand/fair-pair checks, monitor/SCC certificates, exact original-Init witnesses and component TLC aggregation. Implementation pending. Existing boundary controls/config semantics preserved. |
-| M4 · orchestration lower lane | `scripts/check-async-driver-refinement`, new `validation/async_refinement_session.py`, `.github/workflows/async-proof-session.yml`, relevant Main workflow integration, `validation/async_refinement_resume.py` and `validation/async_refinement_provenance.py`, corresponding receipt/session fixtures | Registered authenticated unit/completion protocol, immutable resource admission, dependency artifact transport and exact-head Main root. Implementation pending. Ordinary gate authority remains strict. |
+| M4 · orchestration lower lane | `scripts/check-async-driver-refinement`, new `validation/async_refinement_session.py`, `.github/workflows/async-proof-session.yml`, relevant Main workflow integration, `validation/async_refinement_resume.py` and `validation/async_refinement_provenance.py`, corresponding receipt/session fixtures | Before admission, establish exact candidate-ref workflow dispatch capability or hand an exact already-dispatchable path/event/bytes registration to the sole schema owner. No capability is assumed or bootstrap merge allowed. Then implement authenticated unit/completion protocol, immutable admission, dependency transport and exact-head Main root. Implementation pending; ordinary gate authority remains strict. |
 | Shared registry · M4 sole writer after handoff | `verification/async-driver-refinement/store-tests.json` and runner invocation descriptors | M1/M2/M3 supply actual method/case/source requirements; M4 integrates once. Preserve existing ten invocation source contracts and existing backend fixtures unless a reviewed schema 6 necessity changes them. No duplicate concurrent edits. |
 | Shared policy/docs · coordinator sole integrator | `validation/points.toml`, knowledge records, canonical docs/index/backlog and source registries outside the rows above | Integrate necessary source-backed descriptors after lane handoffs; no fabricated semantic pins or empty-coverage waiver. |
 | M5 · fresh independent actual Astra; coordinator | Frozen complete source and exact evidence packet | Final adversarial source review, corrections and renewed freeze. Only after approval: affected tests/compile/backend/temporal qualification and complete exact-head Main acceptance; then merge, docs closeout and owned-storage cleanup. Pending. |
@@ -100,3 +100,17 @@ actual complete qualification. Preserve all prior semantic obligations and old
 receipts with their original source applicability. The final delivery includes
 current Main acceptance, review/evidence links, merged documentation and storage
 cleanup preserving unique commits, active leases and rollback material.
+
+## M0 schema/API amendment — design recheck pending
+
+The separate M0 amendment preserves the original91a packet and finite ledger
+unchanged. It adds fixed cleanup-obligation component views, actual boundary and
+enabledness append paths with private late-linked identities, a shared monotone
+commit sequence and pinned read lifecycle, final-only singleton page records,
+safe root artifact filenames and the M4 dispatch prerequisite above. Source
+proof-contract hashes are distinct from actual installed SQLite schema inventory
+hashes. An empty-cycle stutter witness uses its original prefix endpoint and full
+original fairness even if outgoing edges exist. These are interface corrections,
+not runtime implementation or execution results. Schema ownership stays with the
+sole M0 integrator; M4 must return any exact workflow-path substitution there
+before shared protocol code freezes. No coding lane starts before design recheck.

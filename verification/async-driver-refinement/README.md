@@ -7,7 +7,8 @@ remain historical; no complete product/TLC acceptance exists. The target
 [PAGED-CONTRACT.md](PAGED-CONTRACT.md) and [delivery ledger](../../docs/cluster/PAGED-ASYNC-PROOF-IMPLEMENTATION.md)
 freeze persistent exact records, complete predecessor transactions, independent
 component qualification and authenticated session completion. The source-backed
-[finite inventory](finite-inventory.json) awaits independent design conformance.
+[finite inventory](finite-inventory.json) has source-only finite-generation design
+conformance; amended schema/API design recheck remains pending.
 Current schema 5 runtime/commands below remain in place until implementation;
 the schema 6 resource policy is a target amendment, not a passed result.
 
