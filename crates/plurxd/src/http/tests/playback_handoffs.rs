@@ -578,6 +578,15 @@ async fn handoff_code_expires_after_120s_and_token_after_6h() {
 
 async fn add_episode(state: &AppState, seed: &Seed, season: i64, number: i32) -> (i64, i64) {
     use plurx_core::domain::{ItemKind, NewItem, ProbeResult};
+    // Catalogue ordering compares season_number before episode_number.
+    // Fixtures must carry the same parent-season facts as scanned episodes.
+    let season_number = state
+        .store
+        .get_item(season)
+        .await
+        .expect("season read")
+        .expect("parent season")
+        .season_number;
     let item = state
         .store
         .insert_item(&NewItem {
@@ -586,7 +595,7 @@ async fn add_episode(state: &AppState, seed: &Seed, season: i64, number: i32) ->
             parent_id: Some(season),
             title: format!("Episode {number}"),
             year: None,
-            season_number: None,
+            season_number,
             episode_number: Some(number),
         })
         .await

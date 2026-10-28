@@ -28,14 +28,18 @@ and restarts. Early EOF cannot mark a whole film watched or trigger Next.
 
 | Evidence | State |
 |---|---|
-| Linux launcher scenarios | 97 passed, including attachment-event ownership and early EOF/error handling |
-| Lua 5.2 overlay scenarios | 30 passed, including Retry and popup ownership |
-| Scoped server compiler, lint and store/HTTP regressions | Running on pinned Linux Rust 1.97.1 |
-| Debian build, fresh install/render/removal, negative checksum self-test | Pending |
-| Byte-identical second package build | Pending |
-| ROG prior package and rollback receipt | Installed baseline inspected: 0.3.2; rollback package pending |
+| Linux launcher scenarios | 99 passed in fresh package verification; none skipped |
+| Lua 5.2 overlay scenarios | 32 passed against the installed overlay, including selected-quality no-ops |
+| Scoped server compiler, lint and store/HTTP regressions | Pinned Linux Rust 1.97.1 workspace Clippy passed; scoped advance contract passed on SQLite/three-voter hiqlite; 35 SQL-census tests passed; both scoped HTTP authorization/order cases passed after correcting the fixture's missing season number |
+| Debian build, fresh install/render/removal, negative checksum self-test | Passed; private gpu-next/Vulkan and installed overlay verified |
+| Byte-identical second package build | Passed for all six binary/source artifacts |
+| ROG prior package and rollback receipt | 0.3.2 rollback Debian package saved and checksummed; 0.4.0 release staged/checksummed on ROG |
 | ROG package installation and installed-file checks | Pending |
 | Physical HDR viewing and end-to-end web launch | Pending |
+
+The original implementation is commit `ab880ed254a09b5f822e7048f8b3248528e31b29`
+under [PR #1307](http://forge.lan:3000/noirr/plurx/pulls/1307). Later receipt/fixture
+changes do not change the qualified native package payload.
 
 Release outputs, source identities, checksum manifests, logs and rollback
 material belong outside compiler/cache directories. The release includes the
