@@ -1584,6 +1584,7 @@ impl DvTitleScanInput {
 }
 
 /// Judge the companion scan's output exactly as the title job judges its own.
+#[cfg(target_os = "linux")]
 fn dv_title_aggregate(
     output: &plurx_core::process::bounded::Output,
     scanner_current: bool,
