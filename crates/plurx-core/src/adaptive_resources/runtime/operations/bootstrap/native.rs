@@ -55,6 +55,21 @@ pub(super) fn directory_metadata_bytes(
         .checked_add(native_metadata_bytes(&directory.native_object)?)
 }
 impl RootCell {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_job_identity(&self) -> (Uuid, Uuid, Uuid, Option<tokio::task::Id>) {
+        (
+            self.io_id.uuid(),
+            self.observe_id.uuid(),
+            self.join_id.uuid(),
+            self.pending.as_ref().map(JoinHandle::id),
+        )
+    }
+
     pub(super) fn retained_heap_bytes(&self) -> Result<usize, OperationError> {
         if self.pending.is_some() || self.failed_join {
             return Err(OperationError::State);
@@ -388,8 +403,39 @@ impl RootCell {
                     },
                 };
             }
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            {
+                let result = open_root(domain, io, copy, observe_id);
+                super::super::native_result_fixture::after_result(
+                    super::super::native_result_fixture::Kind::BootstrapRoot,
+                    io.uuid(),
+                );
+                result
+            }
+            #[cfg(not(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )))]
             open_root(domain, io, copy, observe_id)
         });
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        super::super::native_result_fixture::bind_job(
+            super::super::native_result_fixture::Kind::BootstrapRoot,
+            io.uuid(),
+            pending.id(),
+        );
         let cell = Self {
             io_id: io,
             observe_id,

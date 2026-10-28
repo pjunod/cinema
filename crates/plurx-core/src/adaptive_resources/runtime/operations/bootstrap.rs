@@ -48,6 +48,30 @@ pub(super) enum OriginalNativeIoFixture {
 }
 
 impl BootstrapMember {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_root_arm_operation(&self) -> Option<Uuid> {
+        self.root_arm.map(|(io, _)| io.uuid())
+    }
+
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_root_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>)> {
+        self.native_root
+            .as_ref()
+            .map(native::RootCell::fixture_job_identity)
+    }
+
     #[cfg(all(test, target_os = "linux", feature = "fixtures"))]
     pub(super) fn fixture_take_original_native_io(
         &mut self,

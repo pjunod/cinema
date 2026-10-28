@@ -1543,6 +1543,13 @@ impl SourceCell {
                 }
             };
             let (enter, registered) = tokio::sync::oneshot::channel();
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            let close_operation = self.parent_close_operation_id;
             let task = runtime.spawn_blocking(move || {
                 if registered.blocking_recv().is_err() {
                     return ParentCloseOutcome::NotEntered;
@@ -1551,14 +1558,53 @@ impl SourceCell {
                 // SAFETY: this worker owns the original File allocation, has
                 // converted it to a raw descriptor, and calls close once.
                 let result = unsafe { libc::close(raw_fd) };
-                if result == 0 {
-                    ParentCloseOutcome::Closed
-                } else if let Some(errno) = std::io::Error::last_os_error().raw_os_error() {
-                    ParentCloseOutcome::Failed(errno)
-                } else {
-                    ParentCloseOutcome::Unknown
+                #[cfg(all(
+                    test,
+                    feature = "fixtures",
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ))]
+                {
+                    let outcome = if result == 0 {
+                        ParentCloseOutcome::Closed
+                    } else if let Some(errno) = std::io::Error::last_os_error().raw_os_error() {
+                        ParentCloseOutcome::Failed(errno)
+                    } else {
+                        ParentCloseOutcome::Unknown
+                    };
+                    super::native_result_fixture::after_result(
+                        super::native_result_fixture::Kind::SourceParentClose,
+                        close_operation,
+                    );
+                    outcome
+                }
+                #[cfg(not(all(
+                    test,
+                    feature = "fixtures",
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )))]
+                {
+                    if result == 0 {
+                        ParentCloseOutcome::Closed
+                    } else if let Some(errno) = std::io::Error::last_os_error().raw_os_error() {
+                        ParentCloseOutcome::Failed(errno)
+                    } else {
+                        ParentCloseOutcome::Unknown
+                    }
                 }
             });
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            super::native_result_fixture::bind_job(
+                super::native_result_fixture::Kind::SourceParentClose,
+                close_operation,
+                task.id(),
+            );
             self.parent_close = ParentCloseState::Registered {
                 task,
                 enter: Some(enter),
@@ -1702,6 +1748,19 @@ impl SourceCell {
 
     pub(super) fn parent_closed(&self) -> bool {
         matches!(&self.parent_close, ParentCloseState::Closed)
+    }
+
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_parent_close_job(&self) -> Option<tokio::task::Id> {
+        match &self.parent_close {
+            ParentCloseState::Registered { task, .. } => Some(task.id()),
+            _ => None,
+        }
     }
 
     #[cfg(test)]

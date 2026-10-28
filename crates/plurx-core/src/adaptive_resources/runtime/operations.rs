@@ -35,6 +35,13 @@ mod finite_terminal;
 #[cfg(unix)]
 mod finite_vod;
 mod live_settlement;
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod native_result_fixture;
 mod pipe_drains;
 #[cfg(target_os = "linux")]
 pub(in crate::adaptive_resources::runtime) mod planning_collector;

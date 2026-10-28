@@ -2677,4 +2677,191 @@ int main(void) { alarm(20); for (;;) pause(); }
         // then emits acquired-task owner facts and waits both original aliases.
         retire_with_retained_aliases(runtime, owner, preparation, true, output, application).await;
     }
+
+    #[tokio::test]
+    async fn copy_entered_source_close_worker_cancellation_keeps_original_native_result_and_r() {
+        use super::super::super::native_result_fixture::{Gate, Kind};
+        let root = tempfile::tempdir().expect("actual source-close result fixture");
+        let (runtime, mut owner, preparation) = original(root.path()).await;
+        original_prefix(&runtime, &mut owner, &preparation).await;
+        let charge = runtime.accounting().unwrap().used;
+        let ids = original_ids(&preparation).await;
+        let output = owner.output();
+        let application = owner
+            .take_application_lease(1024)
+            .expect("original pre-close app alias");
+        let (member, operation) = {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            let member = role.copy_vod.as_ref().unwrap().source_members[0];
+            (member, role.sources[&member].parent_close_operation_id())
+        };
+        let gate = Gate::install(Kind::SourceParentClose, operation);
+        let mut close = Box::pin(owner.prepare_retirement(true, deadline()));
+        let job = tokio::select! {
+            result = &mut close => panic!("original cleanup returned before post-native source result: {}", result.is_ok()),
+            result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) => result.expect("original close syscall/result watchdog"),
+        };
+        drop(close); // only the borrowed cleanup; real result stays in SAME worker.
+        {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            let source = &role.sources[&member];
+            assert_eq!(source.fixture_parent_close_job(), Some(job));
+            assert_eq!(source.parent_close_operation_id(), operation);
+            assert!(
+                !source.parent_closed(),
+                "native success is not delivered until original join"
+            );
+            assert!(role.pending_finite_close.is_none() && !role.refunded);
+        }
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(gate);
+        {
+            let bundle = preparation.state.lock().await;
+            assert_eq!(
+                bundle.roles[0].sources[&member].fixture_parent_close_job(),
+                Some(job)
+            );
+        }
+        let ticket = owner
+            .prepare_retirement(true, deadline())
+            .await
+            .expect("same original source worker resumes");
+        {
+            let bundle = preparation.state.lock().await;
+            let Mutation::SettleTyped(closed) = &bundle.roles[0]
+                .pending_finite_close
+                .as_ref()
+                .unwrap()
+                .mutation
+            else {
+                panic!("same original typed close");
+            };
+            assert!(closed.settlement.members.iter().any(|member_fact| matches!(member_fact,
+                v2::MemberDisposition::Closed { member_id, fact: v2::ClosedFact::SourceV1 { copies, .. } }
+                if member_id.uuid() == member && copies.iter().any(|copy| matches!(copy,
+                    v2::CopyClosed::ActualOwnedClose { operation_id, .. } if operation_id.uuid() == operation)))));
+        }
+        finish_aliases(
+            runtime,
+            owner,
+            preparation,
+            output,
+            application,
+            ticket,
+            (charge, ids.3),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn copy_entered_bootstrap_root_worker_cancellation_keeps_original_fd_result_and_r() {
+        use super::super::super::native_result_fixture::{Gate, Kind};
+        let root = tempfile::tempdir().expect("actual root-open result fixture");
+        let (runtime, mut owner, preparation) = original(root.path()).await;
+        owner
+            .prepare_inputs(deadline())
+            .await
+            .expect("actual original sources");
+        let member = output_member(&preparation).await;
+        runtime
+            .arm_scratch_bootstrap(&preparation, 0, member, deadline())
+            .await
+            .expect("same original root arm");
+        let charge = runtime.accounting().unwrap().used;
+        let ids = original_ids(&preparation).await;
+        let output = owner.output();
+        let application = owner
+            .take_application_lease(1024)
+            .expect("original pre-close app alias");
+        let operation = preparation.state.lock().await.roles[0].bootstrap[&member]
+            .fixture_root_arm_operation()
+            .expect("same original root IO id");
+        let gate = Gate::install(Kind::BootstrapRoot, operation);
+        let mut open =
+            Box::pin(runtime.open_scratch_bootstrap_root(&preparation, 0, member, deadline()));
+        let job = tokio::select! {
+            result = &mut open => panic!("original open returned before post-native root result: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) => result.expect("original open syscall/result watchdog"),
+        };
+        drop(open); // result with its ACTUAL File stays in original blocking worker.
+        let identity = {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            let prefix = &role.bootstrap[&member];
+            let identity = prefix
+                .fixture_root_job_identity()
+                .expect("same original native root cell");
+            assert_eq!(identity.0, operation);
+            assert_eq!(identity.3, Some(job));
+            assert_eq!(prefix.fold().unwrap().state().asset.totals.pending_jobs, 1);
+            assert!(role.pending_finite_close.is_none() && !role.refunded);
+            identity
+        };
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(gate);
+        {
+            let bundle = preparation.state.lock().await;
+            assert_eq!(
+                bundle.roles[0].bootstrap[&member].fixture_root_job_identity(),
+                Some(identity)
+            );
+        }
+        runtime
+            .open_scratch_bootstrap_root(&preparation, 0, member, deadline())
+            .await
+            .expect("join SAME original root result and observation");
+        {
+            let bundle = preparation.state.lock().await;
+            let prefix = &bundle.roles[0].bootstrap[&member];
+            let joined = prefix.fixture_root_job_identity().unwrap();
+            assert_eq!(
+                (joined.0, joined.1, joined.2),
+                (identity.0, identity.1, identity.2)
+            );
+            assert!(joined.3.is_none());
+            let state = prefix.fold().unwrap().state();
+            assert_eq!(state.asset.totals.pending_jobs, 0);
+            let actual = state
+                .bootstrap
+                .current
+                .as_ref()
+                .expect("actual acquired namespace prefix");
+            assert_eq!(actual.observed.acquisition_io_id.uuid(), operation);
+        }
+        assert_eq!(
+            runtime.accounting().unwrap().used,
+            charge,
+            "original native open/join is no refund"
+        );
+        let ticket = owner
+            .prepare_retirement(true, deadline())
+            .await
+            .expect("actual same acquired prefix retirement");
+        {
+            let bundle = preparation.state.lock().await;
+            let Mutation::SettleTyped(closed) = &bundle.roles[0]
+                .pending_finite_close
+                .as_ref()
+                .unwrap()
+                .mutation
+            else {
+                panic!("same original typed close");
+            };
+            assert!(closed.settlement.members.iter().any(|member_fact| matches!(member_fact,
+                v2::MemberDisposition::Closed { member_id, fact: v2::ClosedFact::ScratchAssetsV3 { .. } } if member_id.uuid() == member)),
+                "actual acquired prefix must close at exact head, never become NeverAcquired");
+        }
+        finish_aliases(
+            runtime,
+            owner,
+            preparation,
+            output,
+            application,
+            ticket,
+            (charge, ids.3),
+        )
+        .await;
+    }
 }
