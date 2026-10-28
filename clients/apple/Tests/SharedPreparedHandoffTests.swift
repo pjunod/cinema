@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import XCTest
 @testable import plurx
@@ -238,4 +239,33 @@ final class SharedPreparedHandoffTests: XCTestCase {
         XCTAssertNil(off.subtitle); XCTAssertNil(off.nativeSubtitles); XCTAssertEqual(off.copy, true); XCTAssertEqual(off.qualityAuto, false)
         XCTAssertThrowsError(try SharedPreparedHandoff.successorRequest(plan.request, selection: .object(["quality": .object(["mode": .string("burn")])]), positionMs: 0))
     }
+    func testRefusedSharedBurnRemovalCannotSelectPublishedCaptions() async throws {
+        let (playback,plan,client)=try await started()
+        var request=plan.request;request.copy=false;request.subtitleBurn=3;request.audio=1
+        let burned=try SharedPlaybackPlan(subject:plan.subject,decision:plan.decision,caps:plan.caps,request:request)
+        let controller=SharedPlayerController(testConfiguration:configuration)
+        let item=AVPlayerItem(asset:AVMutableComposition())
+        let asset=String(repeating:"a",count:64),profile=String(repeating:"b",count:64)
+        let metadata:[String:Any]=["asset_id":asset,"profile_id":profile,"model_id":"small","model_sha256":String(repeating:"c",count:64),
+            "content_revision":String(repeating:"d",count:64),"audio_index":1,"spoken_language":"de","output_language":"en","task":"translate","duration_ms":600000]
+        let bytes=try JSONSerialization.data(withJSONObject:metadata)
+        let decoder=JSONDecoder();decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let caption=try decoder.decode(SharedCaptionAsset.self,from:bytes)
+        var captionWrites=0
+        PreparedHTTP.answer={ request,_ in
+            if request.url!.path.hasSuffix("/captions") { return (200,try JSONSerialization.data(withJSONObject:["version":1,"assets":[metadata],"next_asset":NSNull()])) }
+            if request.url!.path.hasSuffix("/control") { return (403,Data("{}".utf8)) }
+            if request.url!.path.contains("caption"),request.httpMethod != "GET" { captionWrites+=1 }
+            return (409,Data("{}".utf8))
+        }
+        try controller.seedCaptionPlaybackForTesting(plan:burned,playback:playback,client:client,item:item)
+        await controller.selectCaption(caption)
+        XCTAssertNil(controller.captions.selected)
+        XCTAssertTrue(controller.player.currentItem===item,"refused Off retains the incumbent burned presentation")
+        XCTAssertNotNil(controller.plan?.request.subtitleBurn)
+        XCTAssertTrue(controller.notice?.contains("subtitle removal did not attach")==true)
+        XCTAssertEqual(captionWrites,0)
+        await controller.stop()
+    }
+
 }

@@ -8,6 +8,7 @@ a document to this folder.
 | File | Answers | |
 |---|---|---|
 | [PROJECT-BACKLOG.md](PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
+| [SUBTITLE-COMPLETION-STATUS.md](SUBTITLE-COMPLETION-STATUS.md) | Live ownership, implementation and acceptance ledger for completing progressive generation, translation, native delivery and existing-file translation. | built |
 | [ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md](ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md) | Independent Fable plan-review findings, author corrections, source answers and exact-candidate approval. | done |
 | [ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md](ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md) | Bounded graph pilot connecting code to governing intent, review obligations and scoped execution evidence; implementation, skill enforcement and comparative evaluation. | open |
 | [ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md) | Live M0–M5 owners, independent curation/sealing, evidence and batched PR progress. | open |

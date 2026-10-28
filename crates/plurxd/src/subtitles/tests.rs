@@ -365,6 +365,7 @@ async fn downloaded_captions_rebuild_cache_without_embedded_streams_or_provider(
         ..Default::default()
     }];
     file.downloaded_subtitles = vec![plurx_core::domain::DownloadedSubtitle {
+        text_translation: None,
         source_size: file.size,
         source_mtime: file.mtime,
         provider_file_id: 1,

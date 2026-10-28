@@ -2636,6 +2636,7 @@ mod tests {
                 aac: false,
                 preserve_dolby_vision: false,
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             },
             start_seconds: 0.0,
             audio_index: None,
@@ -3025,6 +3026,7 @@ mod tests {
                     aac: false,
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
+                    dual_layer_as_copied: false,
                 },
                 |request| request.kind,
             ),
@@ -3932,6 +3934,7 @@ mod tests {
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         let owned = Arc::get_mut(&mut rendition).expect("unshared");
         owned.source = Some(source);
@@ -4069,6 +4072,7 @@ mod tests {
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         assert!(serve
             .measured_candidate_cost(&candidate, &altered, source)

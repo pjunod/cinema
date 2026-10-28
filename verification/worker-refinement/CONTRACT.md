@@ -279,3 +279,18 @@ all fourteen expected outcomes are still required for qualification.
 The next phase extracts the existing post-claim lifecycle into the shared Rust controller described in [worker-control](../worker-control/README.md) and its [effect correspondence](../worker-control/CORRESPONDENCE.md). Local controller safety is a separate obligation: it covers emitted process/cleanup decisions, rather than SQL, asynchronous effect completion or scheduler fairness. Source anchors and whole-file hashes are refreshed for the driver extraction; the TLA model/configuration bytes and historical model results retain their original identity.
 
 The durable source-I/O claim-enabledness mismatch above remains open. The controller does not establish fair trace inclusion, a complete Rust simulation, or cluster-wide deadlock freedom. A release-completed event records a returned local attempt, including ambiguous failure; it is not evidence of durable absence.
+
+## Subtitle completion construction correspondence
+
+The 2026-10-26 correspondence refresh uses `origin/main` at
+`087e836d369eb2b8f94ec1d0454ea6c157612df9` as its construction base. Changes in
+`background_jobs.rs` add text-slice publication and optional cue progress;
+the mapped selected-library claim, queue-token heartbeat, completion,
+heartbeat join and retirement actions retain their existing source bodies.
+The action ledger retains every trust label, schedule gap, held-resource
+annotation and conformance-test identity. Caption producer/read protocols
+and their resource competition are not added to the worker model.
+
+These refreshed whole-file hashes identify source correspondence only.
+Final adversarial review and current-source execution remain pending; no
+prior receipt is promoted into evidence for these source bytes.

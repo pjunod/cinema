@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 pub const INDEX_RETRY_BASE_MS: i64 = 30 * 60 * 1_000;
 pub const INDEX_RETRY_MAX_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const INDEX_RETRY_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
-pub const INDEX_FAILURE_POLICY_REVISION: u32 = 1;
+/// 2: a retry after `index_budget_exceeded` is budgeted from what the failed
+/// attempt measured, and a retryable row past its window is terminal. Budget
+/// failures recorded under 1 are due once more, in a fresh window.
+pub const INDEX_FAILURE_POLICY_REVISION: u32 = 2;
 pub const MAX_INDEX_DIAGNOSTIC_BYTES: usize = 8 * 1_024;
 pub const MAX_INDEX_STDERR_BYTES: usize = 4 * 1_024;
 pub const MAX_INDEX_STDERR_LINES: usize = 16;

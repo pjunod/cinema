@@ -616,12 +616,18 @@ impl Pipeline<'_> {
             return Err(StoreError::Task("worker_interrupted".into()));
         }
         if let Some(attempt) = &self.managed {
-            if !attempt
-                .state
-                .transcode
-                .fragment_worker_idle(attempt.admission)
-                || !attempt.fence.observe_subtitle(phase).await?
-            {
+            let available = if self.purpose == Purpose::SelfTest {
+                attempt
+                    .state
+                    .transcode
+                    .speech_capacity_available(attempt.admission)
+            } else {
+                attempt
+                    .state
+                    .transcode
+                    .fragment_worker_idle(attempt.admission)
+            };
+            if !available || !attempt.fence.observe_subtitle(phase).await? {
                 return Err(StoreError::Task("worker_interrupted".into()));
             }
         }
@@ -1016,7 +1022,15 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         )
     })?;
     let wav = scratch.path().join("audio.wav");
+    let decode_threads = if input.purpose == Purpose::SelfTest {
+        "1"
+    } else {
+        "2"
+    };
     let mut decode = tokio::process::Command::new(decoder);
+    if input.purpose == Purpose::SelfTest {
+        decode.args(["-filter_threads", "1"]);
+    }
     decode.args([
         "-nostdin",
         "-v",
@@ -1030,7 +1044,7 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         "-protocol_whitelist",
         "file,pipe",
         "-threads",
-        "2",
+        decode_threads,
         "-i",
     ]);
     #[cfg(unix)]
@@ -1054,7 +1068,7 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
             "-af",
             PCM_CLOCK_FILTER,
             "-threads",
-            "2",
+            decode_threads,
             "-ac",
             "1",
             "-ar",
@@ -1349,6 +1363,7 @@ fn model_supports_language(model: &Model, language: &str) -> bool {
 }
 
 async fn managed_pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
+    let self_test = input.purpose == Purpose::SelfTest;
     let cancel = input.cancel.clone();
     let attempt = input.managed.as_ref().expect("managed attempt");
     let state = attempt.state;
@@ -1357,7 +1372,7 @@ async fn managed_pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
     tokio::pin!(operation);
     tokio::select! {
         result = &mut operation => result,
-        () = watch_capacity(&state.transcode, admission) => { cancel.cancel(); operation.await }
+        () = watch_capacity_until(|| if self_test { state.transcode.speech_capacity_available(admission) } else { state.transcode.fragment_worker_idle(admission) }) => { cancel.cancel(); operation.await }
     }
 }
 
@@ -1459,6 +1474,7 @@ pub(crate) async fn transcribe_managed(
     }
     managed_source(file, Some(source.object_version())).await?;
     Ok(DownloadedSubtitle {
+        text_translation: None,
         source_size: *source_size,
         source_mtime: *source_mtime,
         provider_file_id: 0,
@@ -1708,6 +1724,14 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 false
             }
         };
+        let translating_text =
+            match crate::subtitle_text_translation::manager::worker_pass(&state, &shutdown).await {
+                Ok(active) => active,
+                Err(error) => {
+                    tracing::debug!(%error,"text subtitle worker pass stopped");
+                    false
+                }
+            };
         if tokio::time::Instant::now() >= slow_due {
             if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
                 tracing::debug!(%error, "managed subtitle worker pass stopped");
@@ -1719,7 +1743,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         }
         // Live translation demand is served each second; otherwise the loop
         // sleeps until the 15 s passes are due or a translation mutation wakes it.
-        let idle = if translating {
+        let idle = if translating || translating_text {
             Duration::from_secs(1)
         } else {
             slow_due.saturating_duration_since(tokio::time::Instant::now())
@@ -1922,6 +1946,7 @@ async fn pass(
             match result {
                 Ok(vtt) => {
                     let caption = DownloadedSubtitle {
+                        text_translation: None,
                         source_size,
                         source_mtime,
                         provider_file_id: 0,
@@ -1989,13 +2014,23 @@ pub(crate) async fn watch_capacity(
     transcode: &crate::transcode::TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
 ) {
+    watch_capacity_until(|| transcode.fragment_worker_idle(admission)).await
+}
+pub(crate) async fn watch_speech_capacity(
+    transcode: &crate::transcode::TranscodeManager,
+    admission: &crate::transcode::FragmentAdmission,
+) {
+    watch_capacity_until(|| transcode.speech_capacity_available(admission)).await
+}
+async fn watch_capacity_until(available: impl Fn() -> bool) {
     loop {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        if !transcode.fragment_worker_idle(admission) {
+        if !available() {
             return;
         }
     }
 }
+
 async fn automatic_page(
     state: &AppState,
     config: &Settings,

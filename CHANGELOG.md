@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Progressive text subtitle translation can create and observe durable jobs,
+  and shared playback can read committed caption assets from the Source under
+  its existing import grant. Apple build 277, Android versionCode 182.
+
 - Optional HTTPS, off by default, serves the existing public router with a
   persistent generated self-signed identity or supplied PEM certificate/key
   files. Enable it in Settings → Developer; saved changes apply after restart.

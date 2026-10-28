@@ -71,6 +71,8 @@ private struct Refusal: Decodable {
 /// models stay idiomatic.
 struct PlurxAPI {
     let origin: String
+    /// Caption owners pin a principal across detached demand releases/retries.
+    var captionAuthorizationGeneration: UInt64? = nil
     #if DEBUG
     var testTransport: URLSession? = nil
     #endif
@@ -792,5 +794,100 @@ struct PlurxAPI {
                 method: recordedAt == nil ? method : nil
             )
         )
+    }
+}
+
+
+struct CaptionHTTPReply<T> {
+    let value: T
+    let response: HTTPURLResponse
+    let elapsedMs: Int
+}
+
+struct CaptionServiceError: LocalizedError {
+    let status: Int
+    let code: String
+    var ambiguous: Bool { status == 408 || status >= 500 }
+    var errorDescription: String? { Self.message(code) }
+    static func message(_ code: String?) -> String {
+        switch code {
+        case "disabled": return "Enable progressive captions in Settings → Playback."
+        case "model_missing", "missing_model", "model_not_installed": return "Download and test the selected model in Settings → Playback."
+        case "translation_unverified", "model_unverified": return "Test the selected model in Settings → Playback."
+        case "waiting_for_capacity", "waiting_for_playback_capacity": return "Waiting for server capacity while playback continues."
+        case "waiting_for_worker", "worker_source_unavailable": return "Waiting for a qualified worker with access to this movie."
+        case "source_changed": return "The movie source changed. Reopen the title before requesting captions."
+        case "source_clock_unsupported": return "This source timeline cannot currently produce progressive captions."
+        case "delivery_unsupported": return "This playback route cannot currently produce progressive captions."
+        case "direct_audio_selection_unverified": return "Choose the actual spoken audio track before requesting captions."
+        case "operation_stopped": return "Caption generation is stopped. Published captions remain available."
+        case "epoch_conflict", "demand_conflict": return "Caption work changed elsewhere. Refresh status before an explicit retry."
+        case "permission_denied": return "You do not have permission to request caption work. Published captions remain readable."
+        case "output_invalid": return "The caption output failed validation. Check the job and retry explicitly."
+        case "translation_snapshot_expired": return "Caption coverage changed. Refreshing this window."
+        case "inference_failed", "worker_interrupted": return "Caption generation failed for this range. Retry when available."
+        case "quota_exceeded": return "The server caption storage or request limit has been reached."
+        case "configuration_conflict": return "Settings changed elsewhere. Refresh the saved revision; your controls were kept."
+        case "source_language_unsupported": return "Choose one of this model's advertised source languages."
+        case "subtitle_not_text": return "Choose a complete text subtitle. Bitmap subtitles can use speech generation instead."
+        case "subtitle_too_large": return "This subtitle exceeds the translation model's input limit."
+        case "insufficient_disk": return "The selected worker needs more free disk space for the model."
+        case "model_download_failed": return "The model download failed. Refresh its job before retrying."
+        case "model_verification_failed": return "The model test failed. Check the worker job before retrying."
+        case "engine_unavailable": return "The packaged caption engine is unavailable on this worker."
+        default: return "Caption status is unavailable. Refresh status; playback continues."
+        }
+    }
+}
+
+extension PlurxAPI {
+    func captionOwner(generation: UInt64) -> PlurxAPI {
+        var copy = self
+        copy.captionAuthorizationGeneration = generation
+        return copy
+    }
+
+    /// Typed caption endpoints share the normal bearer and read-after boundary.
+    func caption<T: Decodable>(_ path: String, method: String = "GET",
+                               body: [String: CaptionValue]? = nil,
+                               query: [URLQueryItem] = [], headers: [String: String] = [:],
+                               maximumBytes: Int = 65_536) async throws -> CaptionHTTPReply<T> {
+        let raw = try await captionBytes(path, method: method, body: body, query: query,
+                                         headers: headers, maximumBytes: maximumBytes)
+        return CaptionHTTPReply(value: try Self.decoder.decode(T.self, from: raw.value),
+                                response: raw.response, elapsedMs: raw.elapsedMs)
+    }
+
+    func captionBytes(_ path: String, method: String = "GET",
+                      body: [String: CaptionValue]? = nil, query: [URLQueryItem] = [],
+                      headers: [String: String] = [:], maximumBytes: Int = 65_536) async throws -> CaptionHTTPReply<Data> {
+        guard let url = makeURL(path, query: query) else { throw APIError.badURL }
+        let authorization = Session.shared.playbackAuthorization
+        guard captionAuthorizationGeneration == nil || captionAuthorizationGeneration == authorization.generation else { throw CancellationError() }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
+        if let body {
+            request.httpBody = try JSONEncoder().encode(body)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        Session.shared.authorize(&request)
+        guard authorization.generation == Session.shared.playbackAuthorization.generation else { throw CancellationError() }
+        let start = ProcessInfo.processInfo.systemUptime
+        let (data, response) = try await ReadAfterHTTP.shared.boundedData(for: request, using: session, maximumBytes: maximumBytes)
+        guard authorization.generation == Session.shared.playbackAuthorization.generation else { throw CancellationError() }
+        guard let http = response as? HTTPURLResponse else { throw CaptionProtocolError.invalid }
+        guard (200..<300).contains(http.statusCode) else {
+            struct Failure: Decodable { let code: String? }
+            let failure = try? Self.decoder.decode(Failure.self, from: data)
+            throw CaptionServiceError(status: http.statusCode, code: failure?.code ?? "network_error")
+        }
+        guard http.statusCode == 204 || http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("application/json") == true else {
+            throw CaptionProtocolError.invalid
+        }
+        return CaptionHTTPReply(value: data, response: http,
+                                elapsedMs: Int(max(0, ProcessInfo.processInfo.systemUptime - start) * 1000))
     }
 }

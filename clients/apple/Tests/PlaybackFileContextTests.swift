@@ -151,4 +151,80 @@ final class PlaybackFileContextTests: XCTestCase {
             XCTAssertThrowsError(try context.path(resource))
         }
     }
+    func testPublishedCaptionReadsKeepOpaqueGrantContextAndRejectWorkPaths() async throws {
+        Session.shared.setCredentials(origin: "https://b.test", token: "fixture-bearer")
+        let context = try await fetch(base)
+        let hash=String(repeating:"a",count:64), lease="44444444-4444-4444-8444-444444444444"
+        XCTAssertEqual(try context.path("captions"),base+"/captions")
+        XCTAssertEqual(try context.path("captions/\(hash)/manifest",query:[URLQueryItem(name:"position_ms",value:"90000")]),base+"/captions/\(hash)/manifest?position_ms=90000")
+        XCTAssertNoThrow(try context.path("captions/\(hash)/segments/\(hash)",query:[URLQueryItem(name:"lease",value:lease)]))
+        for resource in ["captions/\(hash)/stop","subtitle-translation/options","captions/../manifest"] { XCTAssertThrowsError(try context.path(resource)) }
+        for position in ["-1","01","14400001"] { XCTAssertThrowsError(try context.path("captions/\(hash)/manifest",query:[URLQueryItem(name:"position_ms",value:position)])) }
+        XCTAssertThrowsError(try PlaybackFileContext.local(7).path("captions"))
+        let configuration=URLSessionConfiguration.ephemeral;configuration.protocolClasses=[FileContextHTTP.self]
+        let client=try SharedDecisionClient(testConfiguration:configuration)
+        FileContextHTTP.body=Data("{\"version\":1,\"assets\":[],\"next_asset\":null}".utf8)
+        _ = try await client.captions(context:context,resource:"captions")
+        XCTAssertEqual(FileContextHTTP.lastRequest?.httpMethod,"GET")
+        XCTAssertEqual(FileContextHTTP.lastRequest?.url?.path,base+"/captions")
+        XCTAssertEqual(FileContextHTTP.lastRequest?.value(forHTTPHeaderField:"Authorization"),"Bearer fixture-bearer")
+        FileContextHTTP.beforeResponse={ Session.shared.setCredentials(origin:"https://other.test",token:"other") }
+        do { _ = try await client.captions(context:context,resource:"captions");XCTFail("retired account exposed caption bytes") } catch {}
+        FileContextHTTP.beforeResponse=nil;FileContextHTTP.lastRequest=nil
+        do { _ = try await client.captions(context:context,resource:"captions");XCTFail("retired context sent request") } catch {}
+        XCTAssertNil(FileContextHTTP.lastRequest)
+    }
+
+    @MainActor
+    func testSharedCaptionReadOwnerRejectsHashMixingAndExpiresRetainedText() async throws {
+        Session.shared.setCredentials(origin:"https://b.test",token:"fixture-bearer")
+        let context=try await fetch(base)
+        let configuration=URLSessionConfiguration.ephemeral;configuration.protocolClasses=[FileContextHTTP.self]
+        let client=try SharedDecisionClient(testConfiguration:configuration)
+        let asset=String(repeating:"a",count:64),profile=String(repeating:"b",count:64),source=String(repeating:"c",count:64),model=String(repeating:"d",count:64),segment=String(repeating:"e",count:64)
+        func data(_ value:Any)->Data { try! JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]) }
+        let segmentBytes=data(["version":1,"asset_id":asset,"segment_id":segment,"core_index":2,"start_ms":60000,"end_ms":90000,
+           "cues":[["cue_id":String(repeating:"f",count:64),"start_ms":64000,"end_ms":67000,"text":"Shared literal <caption>"]],
+           "provenance":["engine_sha256":String(repeating:"1",count:64),"model_sha256":model,"operation_epoch":"9007199254740993","platform":"fixture","profile_id":profile,"source_sha256":source,"worker_fence":"9007199254740995"]])
+        let metadata:[String:Any]=["asset_id":asset,"profile_id":profile,"model_id":"small","model_sha256":model,"content_revision":source,"audio_index":2,"spoken_language":"de","output_language":"de","task":"transcribe","duration_ms":120000]
+        var corrupt=false,expiry=30000,requests:[URLRequest]=[]
+        FileContextHTTP.beforeResponse={
+            let request=FileContextHTTP.lastRequest!;requests.append(request)
+            if request.url!.path.hasSuffix("/captions") { FileContextHTTP.body=data(["version":1,"assets":[metadata],"next_asset":NSNull()]);return }
+            if request.url!.path.contains("/segments/") { FileContextHTTP.body=segmentBytes;return }
+            var manifest=metadata;manifest.removeValue(forKey:"model_id");manifest.removeValue(forKey:"model_sha256")
+            manifest["version"]=1;manifest["manifest_revision"]="9007199254740993";manifest["state"]="partial";manifest["reason"]=NSNull()
+            manifest["snapshot"]=["lease_id":"44444444-4444-4444-8444-444444444444","revision":"9007199254740993","expires_in_ms":expiry]
+            manifest["coverage"]=[["start_ms":60000,"end_ms":90000]]
+            manifest["segments"]=[["segment_id":segment,"digest":corrupt ? String(repeating:"0",count:64) : CaptionValidation.sha256(segmentBytes),"start_ms":60000,"end_ms":90000]]
+            FileContextHTTP.body=data(manifest)
+        }
+        let owner=SharedCaptionReadSession();defer { owner.retire() }
+        var sourcePosition=65000
+        owner.configure(client:client,context:context,audio:2,clock:{sourcePosition},current:{true})
+        for _ in 0..<100 where owner.assets.isEmpty { try await Task.sleep(for:.milliseconds(10)) }
+        let published=try XCTUnwrap(owner.eligibleAssets.first);owner.choose(published)
+        for _ in 0..<100 where owner.window?.cues.isEmpty != false { try await Task.sleep(for:.milliseconds(10)) }
+        XCTAssertEqual(owner.window?.cues.first?.text,"Shared literal <caption>")
+        sourcePosition=95000;owner.mediaChanged(seekTo:sourcePosition)
+        XCTAssertTrue(owner.window?.cues.isEmpty ?? true,"seek removes old text before a fresh grant read; an empty window is a valid clear")
+        for _ in 0..<100 where !requests.contains(where:{ $0.url?.query?.contains("position_ms=95000")==true }) { try await Task.sleep(for:.milliseconds(10)) }
+        XCTAssertTrue(requests.contains{ $0.url?.query?.contains("position_ms=95000")==true })
+        for _ in 0..<100 where owner.window?.cues.isEmpty != false { try await Task.sleep(for:.milliseconds(10)) }
+        XCTAssertFalse(owner.window?.cues.isEmpty ?? true,"a fresh authorized snapshot completed after the seek")
+        XCTAssertFalse((owner.window?.cues ?? []).contains { cue in
+            CaptionRenderWindow.itemInterval(cue,baseMs:0,offsetMs:0)?.contains(sourcePosition) == true
+        },"retained neighboring cues cannot render at the new source position")
+        corrupt=true;owner.refresh()
+        for _ in 0..<100 where owner.window != nil { try await Task.sleep(for:.milliseconds(10)) }
+        XCTAssertNil(owner.window,"mixed immutable digest never publishes cached text")
+        corrupt=false;expiry=500;owner.refresh()
+        for _ in 0..<100 where owner.window==nil { try await Task.sleep(for:.milliseconds(10)) }
+        XCTAssertNotNil(owner.window)
+        try await Task.sleep(for:.milliseconds(650));XCTAssertNil(owner.window,"a read lease cannot keep rendering after TTL")
+        XCTAssertTrue(requests.allSatisfy{ $0.httpMethod=="GET" && $0.url!.path.hasPrefix(base+"/captions") })
+        Session.shared.setCredentials(origin:"https://other.test",token:"other");owner.refresh()
+        try await Task.sleep(for:.milliseconds(30));XCTAssertNil(owner.window)
+    }
+
 }

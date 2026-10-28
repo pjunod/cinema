@@ -123,12 +123,23 @@ macro_rules! subtitle_advanced_admission { () => { r#"EXISTS (SELECT 1 FROM sett
 // Translation admission linearizes saved disable, Stop, source revision and
 // shared live demand with the ordinary queue transaction. One viewer's seek
 // does not cancel another viewer's still-live interest in the same core.
+macro_rules! text_admission {
+    ($payload:literal, $now:literal) => { concat!(r#"EXISTS(SELECT 1 FROM users WHERE id=json_extract("#,$payload,r#",'$.admin_user_id') AND is_admin=1)
+    AND (json_extract("#,$payload,r#",'$.kind')='subtitle_text_model_operation' OR (
+    EXISTS(SELECT 1 FROM files WHERE id=json_extract("#,$payload,r#",'$.file_id') AND size=json_extract("#,$payload,r#",'$.source_size') AND mtime=json_extract("#,$payload,r#",'$.source_mtime') AND probe_json IS NOT NULL)
+    AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.text_translation.config.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.enabled')=1 ELSE 0 END)))"#) };
+}
+
 macro_rules! translation_admission {
-    ($payload:literal,$now:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
+    ($payload:literal,$now:literal,$job:literal) => { concat!(r#"EXISTS (SELECT 1 FROM subtitle_translation_operations op JOIN files f ON f.id=op.file_id
       JOIN settings config ON config.key='subtitles.translation.config.v1'
       WHERE op.id=COALESCE(json_extract("#,$payload,r#",'$.operation_id'),json_extract("#,$payload,r#",'$.recipe.operation_id'))
       AND op.operation_epoch=COALESCE(json_extract("#,$payload,r#",'$.operation_epoch'),json_extract("#,$payload,r#",'$.recipe.operation_epoch'))
       AND op.stopped=0 AND op.state NOT IN ('failed','stopped','complete')
+      AND op.target_node_id=json_extract("#,$payload,r#",'$.target_node_id')
+      AND ((json_extract("#,$payload,r#",'$.kind')='subtitle_translation_prepare' AND op.preparation_job_id="#,$job,r#")
+        OR (json_extract("#,$payload,r#",'$.kind')='subtitle_translation_range'
+          AND op.preparation_job_id=json_extract("#,$payload,r#",'$.producer_preparation_job_id')))
       AND f.id=json_extract("#,$payload,r#",'$.file_id') AND f.probe_json IS NOT NULL
       AND f.size=json_extract(op.source_json,'$.source_size') AND f.mtime=json_extract(op.source_json,'$.source_mtime')
       AND CASE WHEN json_valid(config.value) THEN json_extract(config.value,'$.version')=1
@@ -235,7 +246,8 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
       AND NOT ("#,
     translation_admission!(
         "json_extract(body,'$.payload')",
-        "json_extract(body,'$.now_ms')"
+        "json_extract(body,'$.now_ms')",
+        "json_extract(body,'$.id')"
     ),
     r#") THEN 'no_demand'
     WHEN json_extract(body, '$.payload.kind') = 'subtitle_extract' AND (
@@ -308,6 +320,14 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND active_job IS NULL
       AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'media_probe' AND state IN ('queued','running','cancelling')
         AND json_extract(payload_json,'$.coordinator') = json_extract(body,'$.payload.coordinator')) >= 128 THEN 'queue_full'
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_text_translate','subtitle_text_model_operation') AND NOT ("#,
+    text_admission!(
+        "json_extract(body,'$.payload')",
+        "json_extract(body,'$.now_ms')"
+    ),
+    r#") THEN 'producer_fenced'
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_text_translate','subtitle_text_model_operation') AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind IN ('subtitle_text_translate','subtitle_text_model_operation') AND state IN ('queued','running','cancelling'))>=32 THEN 'queue_full'
     WHEN json_extract(body,'$.payload.kind')='subtitle_transcribe_managed' AND NOT ("#,
     subtitle_managed_admission!(),
     r#") THEN 'producer_fenced'
@@ -501,10 +521,14 @@ WHERE id = json_extract($1, '$.job_id')
     AND d.file_id=json_extract(background_jobs.payload_json,'$.file_id') AND d.terminal=0
     AND d.scanner_digest=json_extract(background_jobs.payload_json,'$.scanner_digest')
     AND f.size=json_extract(background_jobs.payload_json,'$.source_size') AND f.mtime=json_extract(background_jobs.payload_json,'$.source_mtime')))
+  AND (kind NOT IN ('subtitle_text_translate','subtitle_text_model_operation') OR ("#,
+    text_admission!("payload_json", "json_extract($1,'$.now_ms')"),
+    r#"))
   AND (kind NOT IN ('subtitle_translation_prepare','subtitle_translation_range') OR ("#,
     translation_admission!(
         "background_jobs.payload_json",
-        "json_extract($1,'$.now_ms')"
+        "json_extract($1,'$.now_ms')",
+        "background_jobs.id"
     ),
     r#"))
   AND (kind!='subtitle_transcribe_managed' OR ("#,
@@ -713,6 +737,8 @@ pub enum JobKind {
     SubtitleModelOperation,
     SubtitleTranslationPrepare,
     SubtitleTranslationRange,
+    SubtitleTextTranslate,
+    SubtitleTextModelOperation,
     LibraryScan,
     MetadataRefresh,
     ArtifactVerify,
@@ -737,6 +763,8 @@ impl JobKind {
             | Self::SubtitleModelOperation
             | Self::SubtitleTranslationPrepare
             | Self::SubtitleTranslationRange
+            | Self::SubtitleTextTranslate
+            | Self::SubtitleTextModelOperation
             | Self::SubtitleExtract
             | Self::ArtifactVerify
             | Self::ArtworkDerivative
@@ -964,6 +992,36 @@ pub enum JobPayload {
         file_id: i64,
         recipe: super::subtitle_translation::RangeRecipe,
         target_node_id: String,
+        /// Current mutable producer incarnation; never part of immutable recipe IDs.
+        /// Empty only when decoding a pre-incarnation legacy job. Such jobs
+        /// remain inspectable but cannot pass enqueue/claim/publication guards.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        producer_preparation_job_id: String,
+    },
+    SubtitleTextTranslate {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        subtitle_index: i64,
+        input_sha256: String,
+        source_language: String,
+        target_language: String,
+        engine_sha256: String,
+        model_id: String,
+        model_sha256: String,
+        adapter_contract: String,
+        target_node_id: String,
+        admin_user_id: i64,
+    },
+    SubtitleTextModelOperation {
+        action: super::background_jobs_transcription::ModelAction,
+        model_id: String,
+        catalog_revision: String,
+        model_sha256: String,
+        adapter_contract: String,
+        target_node_id: String,
+        target_boot_id: String,
+        admin_user_id: i64,
     },
     SubtitleModelOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1027,6 +1085,8 @@ impl JobPayload {
             Self::SubtitleModelOperation { .. } => JobKind::SubtitleModelOperation,
             Self::SubtitleTranslationPrepare { .. } => JobKind::SubtitleTranslationPrepare,
             Self::SubtitleTranslationRange { .. } => JobKind::SubtitleTranslationRange,
+            Self::SubtitleTextTranslate { .. } => JobKind::SubtitleTextTranslate,
+            Self::SubtitleTextModelOperation { .. } => JobKind::SubtitleTextModelOperation,
             Self::LibraryScan { .. } => JobKind::LibraryScan,
             Self::MetadataRefresh { .. } => JobKind::MetadataRefresh,
             Self::ArtifactVerify { .. } => JobKind::ArtifactVerify,
@@ -1045,7 +1105,9 @@ impl JobPayload {
             | Self::ArtifactVerify { target_node_id, .. }
             | Self::SubtitleModelOperation { target_node_id, .. }
             | Self::SubtitleTranslationPrepare { target_node_id, .. }
-            | Self::SubtitleTranslationRange { target_node_id, .. } => Some(target_node_id),
+            | Self::SubtitleTranslationRange { target_node_id, .. }
+            | Self::SubtitleTextTranslate { target_node_id, .. }
+            | Self::SubtitleTextModelOperation { target_node_id, .. } => Some(target_node_id),
             _ => None,
         }
     }
@@ -1216,7 +1278,7 @@ impl JobPayload {
                     && uuid::Uuid::parse_str(operation_id).is_ok()
                     && *operation_epoch > 0
                     && profile.validate().is_ok()
-                    && *audio_index == 0
+                    && (0..=255).contains(audio_index)
                     && super::background_jobs_transcription::whisper_language(spoken_language)
                     && (1..=super::subtitle_translation::MAX_TRANSLATION_DURATION_MS)
                         .contains(duration_ms)
@@ -1226,11 +1288,65 @@ impl JobPayload {
                 file_id,
                 recipe,
                 target_node_id,
+                producer_preparation_job_id,
             } => {
                 *file_id == recipe.source.file_id
-                    && recipe.audio_index == 0
+                    && (0..=255).contains(&recipe.audio_index)
                     && recipe.validate().is_ok()
                     && identifier(target_node_id)
+                    && (producer_preparation_job_id.is_empty()
+                        || uuid::Uuid::parse_str(producer_preparation_job_id).is_ok())
+            }
+            Self::SubtitleTextTranslate {
+                file_id,
+                source_size,
+                subtitle_index,
+                input_sha256,
+                source_language,
+                target_language,
+                engine_sha256,
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                admin_user_id,
+                ..
+            } => {
+                *file_id > 0
+                    && *source_size > 0
+                    && (0..=1023).contains(subtitle_index)
+                    && digest(input_sha256)
+                    && digest(engine_sha256)
+                    && super::background_jobs_transcription::valid_language(source_language)
+                    && !matches!(source_language.as_str(), "en" | "und")
+                    && target_language == "en"
+                    && model_id == "opus-mt-mul-en"
+                    && digest(model_sha256)
+                    && adapter_contract == "candle-marian-0.11-v1"
+                    && identifier(target_node_id)
+                    && *admin_user_id > 0
+            }
+            Self::SubtitleTextModelOperation {
+                action,
+                model_id,
+                catalog_revision,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                target_boot_id,
+                admin_user_id,
+            } => {
+                matches!(
+                    action,
+                    super::background_jobs_transcription::ModelAction::Install
+                        | super::background_jobs_transcription::ModelAction::Verify
+                ) && model_id == "opus-mt-mul-en"
+                    && identifier(catalog_revision)
+                    && digest(model_sha256)
+                    && adapter_contract == "candle-marian-0.11-v1"
+                    && identifier(target_node_id)
+                    && uuid::Uuid::parse_str(target_boot_id).is_ok()
+                    && *admin_user_id > 0
             }
             Self::SubtitleModelOperation {
                 action,
@@ -1871,6 +1987,21 @@ RETURNING result_json
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
     async fn maintain_translation_cache(&self, now_ms: i64) -> Result<(), StoreError>;
+    async fn text_translation_request_receipt(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        digest: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError>;
+    async fn publish_text_translation_slice(
+        &self,
+        input: super::subtitle_text_translation::PublishTextSlice,
+    ) -> Result<bool, StoreError>;
+    async fn read_text_translation_cues(
+        &self,
+        source: JobPayload,
+    ) -> Result<Vec<super::subtitle_text_translation::TextTranslationCue>, StoreError>;
+
     async fn write_translation_settings(
         &self,
         request: super::subtitle_translation_settings::TranslationSettingsWrite,
@@ -1878,6 +2009,10 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn read_subtitle_translation(
         &self,
         request: super::subtitle_translation_read::TranslationRead,
+    ) -> Result<Vec<serde_json::Value>, StoreError>;
+    async fn read_shared_captions(
+        &self,
+        request: super::shared_caption_read::GrantCaptionRead,
     ) -> Result<Vec<serde_json::Value>, StoreError>;
     async fn acquire_translation_lease(
         &self,
@@ -2241,6 +2376,28 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn text_translation_request_receipt(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        digest: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        super::subtitle_text_translation::receipt(self, user_id, request_id, digest).await
+    }
+
+    async fn publish_text_translation_slice(
+        &self,
+        input: super::subtitle_text_translation::PublishTextSlice,
+    ) -> Result<bool, StoreError> {
+        super::subtitle_text_translation::publish(self, input).await
+    }
+    async fn read_text_translation_cues(
+        &self,
+        source: JobPayload,
+    ) -> Result<Vec<super::subtitle_text_translation::TextTranslationCue>, StoreError> {
+        super::subtitle_text_translation::read(self, &source).await
+    }
+
     async fn maintain_translation_cache(&self, now_ms: i64) -> Result<(), StoreError> {
         super::subtitle_translation_read::maintain(self, now_ms).await
     }
@@ -2255,6 +2412,12 @@ impl<T: QueueSql> BackgroundJobStore for T {
         request: super::subtitle_translation_read::TranslationRead,
     ) -> Result<Vec<serde_json::Value>, StoreError> {
         super::subtitle_translation_read::read(self, request).await
+    }
+    async fn read_shared_captions(
+        &self,
+        request: super::shared_caption_read::GrantCaptionRead,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        super::shared_caption_read::read(self, request).await
     }
     async fn acquire_translation_lease(
         &self,
@@ -3192,6 +3355,7 @@ LIMIT 1
     }
 
     async fn maintain_jobs(&self, now_ms: i64) -> Result<bool, StoreError> {
+        super::subtitle_text_translation::maintain(self, now_ms).await?;
         if now_ms < 0 {
             return Err(invalid("invalid background maintenance time"));
         }

@@ -71,6 +71,8 @@ pub use invitations::InvitationStore;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_invitations;
 pub mod remote;
+pub mod shared_caption_read;
+mod shared_caption_schema;
 pub mod subtitle_translation;
 pub mod subtitle_translation_mutation;
 pub mod subtitle_translation_publication;
@@ -273,6 +275,8 @@ pub mod replicated;
 mod resource_settings_schema;
 pub use planning_capacity::{CapacityInstallation, PlanningCapacity};
 mod subtitle_managed_schema;
+pub mod subtitle_text_translation;
+mod subtitle_text_translation_schema;
 mod subtitle_translation_schema;
 pub mod watched_drain;
 

@@ -4,6 +4,21 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Current main and adaptive effort source binding — 2026-10-28
+
+The merge of current main `77e985827` into effort `48eccfd74` preserves both
+source audits below. The selected library controller retains its original
+heartbeat registration/join and token-state retirement mutex; failed joins and
+ambiguous settlement keep their recorded Unknown limits. Main's caption-kind
+queue predicates and independent schema extensions do not change selected
+library kinds. Speech and the queued fragment index pass remain competitors
+on the shared heavy gate, outside the model's admission fairness assumptions.
+The mapped unextended `admit_fragment` body remains try-only. Exact source
+hashes follow the merged files. Models, configurations, selected actions,
+checks, test inventories and validators are unchanged. This source-only
+reconciliation runs no model or behavioral tests and grants no native closure,
+last-alias release, global progress or new qualification.
+
 ## HTTPS and adaptive effort source binding — 2026-10-26
 
 This source audit covers the resolved union of effort `8eee8a897` and Main
@@ -28,6 +43,27 @@ receipt fix supplies no title-race proof. Models, configurations, action/check
 and test inventories, validators and qualification claims are unchanged. This
 metadata resolution runs no model or behavioral tests and claims no native
 closure, last-alias release, global progress or new acceptance.
+
+## VOD index recovery — scoped refresh on 2026-10-27
+
+`construct.rs` adds `admit_fragment_queued`, a FIFO wait on the shared heavy
+gate followed by the same `admit_source_work_with_heavy` refusal, used only by
+the node-local fragment index pass, plus `fragment_must_yield` and
+`background_yield_reason` predicates for that pass. The gate has one permit
+and other heavy workers only try-acquire it, so a waiter takes the next turn
+ahead of all of them: the pass waits once per pass, holds the gate for one
+file at a time, and otherwise try-acquires like the rest (a queued speech pass
+goes first). Like the speech queue, it is a competitor on the heavy gate,
+outside this model, and establishes no admission fairness for the selected
+library worker. `admit_fragment`
+(Table 41) is byte-identical and still try-only. `state.rs` changes the local
+index pass, the analysis-request resolver (learners resolve targeted
+requests) and copy-preparation priority; `membership.rs` retires a removed
+node's analysis requests in `finalize_node_removal`. None of them touches the
+selected library claim, renewal, binding, wait/lock order, settlement or
+fenced publication, `schedule_loop`, `background_work_loop` or the mapped
+`may_run_cluster_jobs` authority arms. Hashes refreshed; anchors, model,
+configurations and worker correspondence unchanged.
 
 ## HTTPS and Linux-player integration — 2026-10-26
 

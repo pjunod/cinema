@@ -989,6 +989,7 @@ impl TranscodeManager {
                     // while the source's own record says 7. Passing `false`
                     // here would advertise `dvh1.07.06` for that media.
                     convert_dolby_vision: facts.convert_dolby_vision,
+                    dual_layer_as_copied: false,
                 },
                 probe_json.as_deref(),
             );

@@ -2921,6 +2921,7 @@ fn compatibility_finite_budget_contains_native_audio_and_video_peak_and_changes_
         aac: true,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     request.finite_bitrate_limit_bps = Some(750_000);
     assert!(super::manager_create::validate_finite_copy_rate(&request, &file).is_err());
@@ -2962,20 +2963,40 @@ fn a_gpu_decoded_fel_graph_fits_a_twelve_thread_worker() {
     let budget = 12 - 1; // crate::admission::software_budget() on 12 threads
     let audio_encoder = 5;
     let fel = |decode| streaming_helper_cpu_threads(DvProcessingMode::Fel, decode) + audio_encoder;
-    assert!(fel(RendererDecode::Gpu) <= budget, "{}", fel(RendererDecode::Gpu));
-    assert!(fel(RendererDecode::Software) > budget, "software decode keeps its full debit");
+    assert!(
+        fel(RendererDecode::Gpu) <= budget,
+        "{}",
+        fel(RendererDecode::Gpu)
+    );
+    assert!(
+        fel(RendererDecode::Software) > budget,
+        "software decode keeps its full debit"
+    );
     // What the node reports (and the preparation debits) follows the same
     // decision from the same inputs.
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("rt");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
     let base = crate::test_tempdir().expect("runtime");
     let store: Arc<dyn Store> =
         Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("isolated store"));
-    let manager =
-        TranscodeManager::new(store, base.path().join("runtime"), EncoderCaps::default(), Pipeline::Cpu);
+    let manager = TranscodeManager::new(
+        store,
+        base.path().join("runtime"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
     let facts = rt.block_on(manager.live_reconstruction_facts());
-    let decode = TranscodeManager::processed_renderer_decode(facts.device_present, facts.main10_vaapi_decode);
+    let decode = TranscodeManager::processed_renderer_decode(
+        facts.device_present,
+        facts.main10_vaapi_decode,
+    );
     assert_eq!(facts.gpu_decode, decode == RendererDecode::Gpu);
-    assert_eq!(facts.renderer_threads, streaming_helper_cpu_threads(DvProcessingMode::Fel, decode));
+    assert_eq!(
+        facts.renderer_threads,
+        streaming_helper_cpu_threads(DvProcessingMode::Fel, decode)
+    );
 }
 
 /// A runtime recipe (the processed graph's lifetime: the encoding and its
@@ -3024,7 +3045,13 @@ async fn graph_holding(
         .expect("epoch")
         .as_secs() as i64;
     let id = store
-        .upsert_file(item, path.to_str().expect("path"), metadata.len() as i64, mtime, &ProbeResult::default())
+        .upsert_file(
+            item,
+            path.to_str().expect("path"),
+            metadata.len() as i64,
+            mtime,
+            &ProbeResult::default(),
+        )
         .await
         .expect("file");
     let file = store.get_file(id).await.expect("file").expect("file");
@@ -3043,7 +3070,9 @@ async fn graph_holding(
     )
     .expect("backend");
     crate::vodencode::dv_runtime::RuntimeRecipe {
-        tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(backend)),
+        tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(
+            backend,
+        )),
         source,
         source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
         display_target: None,
@@ -3157,8 +3186,15 @@ async fn a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_
     let slot = manager
         .try_qualification_slot(preempt.clone())
         .expect("free slot");
-    assert!(manager.try_qualification_slot(tokio_util::sync::CancellationToken::new()).is_none());
-    assert!(manager.live_reconstruction_facts().await.held_by_qualification);
+    assert!(manager
+        .try_qualification_slot(tokio_util::sync::CancellationToken::new())
+        .is_none());
+    assert!(
+        manager
+            .live_reconstruction_facts()
+            .await
+            .held_by_qualification
+    );
     // The qualification lets go when told (its stages kill and reap).
     let releaser = tokio::spawn({
         let preempt = preempt.clone();
@@ -3174,7 +3210,12 @@ async fn a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_
         .expect("taken from the qualification");
     assert!(live.is_some() && preempt.is_cancelled());
     releaser.await.expect("releaser");
-    assert!(!manager.live_reconstruction_facts().await.held_by_qualification);
+    assert!(
+        !manager
+            .live_reconstruction_facts()
+            .await
+            .held_by_qualification
+    );
     drop(live);
     // One that ignores the signal: the play waits the bounded yield, then
     // says the slot was held by a qualification.
@@ -3186,7 +3227,10 @@ async fn a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_
         .acquire_reconstruction_slot(DvDestination::Profile81)
         .await
         .expect_err("held past the yield");
-    assert_eq!(refused, TranscodeManager::reconstruction_slot_held_by_qualification());
+    assert_eq!(
+        refused,
+        TranscodeManager::reconstruction_slot_held_by_qualification()
+    );
     assert_ne!(refused, TranscodeManager::reconstruction_slot_busy());
     drop(stubborn);
 }
@@ -3199,7 +3243,9 @@ async fn a_live_play_takes_the_slot_from_a_qualification_or_says_it_was_held_by_
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise_says_why() {
-    use plurx_core::domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::domain::{
+        DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult,
+    };
     use plurx_core::transcode::dv_fel_qualification::{self as q, FelVerdict, VerdictState};
     let base = crate::test_tempdir().expect("runtime");
     let store: Arc<dyn Store> =
@@ -3242,10 +3288,17 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
         raw_json: Some(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#.into()),
         ..Default::default()
     };
-    let id = store.upsert_file(item, "/fel.mkv", 10, 20, &probe).await.expect("file");
+    let id = store
+        .upsert_file(item, "/fel.mkv", 10, 20, &probe)
+        .await
+        .expect("file");
     let file = store.get_file(id).await.expect("file").expect("file");
     let scanner = "a".repeat(64);
-    let identity = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE, "encoder");
+    let identity = q::identity(
+        &scanner,
+        plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
+        "encoder",
+    );
     let verdict = |admitted| FelVerdict {
         schema: q::SCHEMA,
         identity: identity.clone(),
@@ -3281,14 +3334,24 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
         .fel_route_decision(&file, Some(&document(&verdict(false))), &scanner, &identity)
         .await
         .expect_err("refused");
-    assert!(refused.contains("adds less than re-encoding loses for this title"), "{refused}");
-    assert!(refused.contains("2.90 reconstructed vs 1.79 without the EL"), "{refused}");
+    assert!(
+        refused.contains("adds less than re-encoding loses for this title"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("2.90 reconstructed vs 1.79 without the EL"),
+        "{refused}"
+    );
     // A verdict for another encoder is no verdict: measure, and say so. The
     // request rotates the title's scan demand (here already bound to the
     // scanner, as after a scan); a second play inside the throttle window
     // does not rotate it again.
     let revision = |demands: Vec<plurx_core::store::dv_title_jobs::TitleDemand>| {
-        demands.into_iter().find(|d| d.file_id == id).map(|d| d.probe_revision).expect("demand")
+        demands
+            .into_iter()
+            .find(|d| d.file_id == id)
+            .map(|d| d.probe_revision)
+            .expect("demand")
     };
     let unbound = revision(store.dv_title_demands(&scanner, 0).await.expect("demand"));
     let bound = store
@@ -3296,7 +3359,11 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
         .await
         .expect("bind")
         .expect("bound");
-    let other = q::identity(&scanner, plurx_core::transcode::RECONSTRUCTED_P81_RECIPE, "another GPU");
+    let other = q::identity(
+        &scanner,
+        plurx_core::transcode::RECONSTRUCTED_P81_RECIPE,
+        "another GPU",
+    );
     let measure = || async {
         manager
             .fel_route_decision(&file, Some(&document(&verdict(true))), &scanner, &other)

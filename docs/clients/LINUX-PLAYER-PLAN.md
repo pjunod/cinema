@@ -1,6 +1,6 @@
 # Linux player — Dolby Vision on Linux through plurx
 
-**Status:** plan, owner-approved direction; M1–M5 in progress on `effort/linux-player`, M6 (acceptance on the ROG) next; Fable review folded in (2026-10-25) · **Owner:** Claude
+**Status:** open: M6 (acceptance on the ROG) next. M1–M5 are in (#1295), and package 0.3.1 with its server change fixes the four faults the owner's first real playback found (2026-10-26) · **Owner:** Claude
 (Opus 5.5, Linux Dolby Vision session) · **Written:** 2026-10-25
 
 Companion to [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) (the browser half) and
@@ -308,7 +308,11 @@ The private build is libplacebo 7.387.0 and mpv master `e59d90c84`
 (2026-10-26), the first with FEL composition (§3.3), with two upstreamable
 fixes before it: 0001 sends no zero MaxCLL/MaxFALL in the Wayland image
 description (Weston 16 ends the connection on one), and 0002 splits the EL
-without FFmpeg 9's `dovi_split` BSF (Ubuntu ships FFmpeg 8.1).
+without FFmpeg 9's `dovi_split` BSF (Ubuntu ships FFmpeg 8.1). A third,
+0004 (2026-10-26), starts Wayland Vulkan swapchains pass-through: the NVIDIA
+615 driver gives an sRGB swapchain a colour surface of its own and keeps it
+after the swapchain is gone, so mpv's own request, made when HDR video
+arrives in an already open window, ended the Wayland connection.
 
 libplacebo is linked into mpv statically, its global symbols renamed
 `plurx_pl_*` and hidden. Ubuntu's FFmpeg (`libavfilter`) loads the system

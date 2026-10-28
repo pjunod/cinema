@@ -677,12 +677,19 @@
   function initialRoute({
     method,
     selectedAudioIndex = 0,
+    audioTrackCount = 1,
+    actualDefaultAudioProven = false,
     nativeHls = false,
     segmentedRemux = false,
     requiresHls = false,
     hlsAvailable = false,
   }) {
     if (method === "transcode") return "transcode_hls";
+    // A decision default is the requested selection, not proof of the raw
+    // container default. Bind any ambiguous multi-audio source in delivery.
+    if (method === "direct_play" && audioTrackCount > 1 && !actualDefaultAudioProven) {
+      return nativeHls || segmentedRemux ? "copy_hls" : "progressive_remux";
+    }
     if (method === "remux" && requiresHls) {
       return hlsAvailable ? "copy_hls" : "unsupported_hevc_delivery";
     }
