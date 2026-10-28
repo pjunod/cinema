@@ -39,7 +39,49 @@ pub(super) struct BootstrapMember {
     prefix_removal: Option<prefix_removal::LiveRemoval>,
 }
 
+// Negative fixture custody only: each variant retains the actual acknowledged
+// owner taken from the original slot. This type cannot create a run or receipt.
+#[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+pub(super) enum OriginalNativeIoFixture {
+    Publication(native::publication::Publication),
+    Sync(native::sync::Sync),
+}
+
 impl BootstrapMember {
+    #[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+    pub(super) fn fixture_take_original_native_io(
+        &mut self,
+        publication: bool,
+    ) -> OriginalNativeIoFixture {
+        assert!(self.native_io_ready(), "only actual acknowledged owners");
+        let original = if publication {
+            assert!(self.publication_registered);
+            OriginalNativeIoFixture::Publication(
+                self.publication.take().expect("original publication owner"),
+            )
+        } else {
+            assert!(self.sync_registered);
+            OriginalNativeIoFixture::Sync(self.sync.take().expect("original sync owner"))
+        };
+        assert!(!self.native_io_slots_consistent());
+        original
+    }
+
+    #[cfg(all(test, target_os = "linux", feature = "fixtures"))]
+    pub(super) fn fixture_restore_original_native_io(&mut self, original: OriginalNativeIoFixture) {
+        assert!(!self.native_io_slots_consistent());
+        match original {
+            OriginalNativeIoFixture::Publication(run) => {
+                assert!(self.publication_registered && self.publication.is_none());
+                self.publication = Some(run);
+            }
+            OriginalNativeIoFixture::Sync(run) => {
+                assert!(self.sync_registered && self.sync.is_none());
+                self.sync = Some(run);
+            }
+        }
+        assert!(self.native_io_ready(), "same acknowledged owner restored");
+    }
     // Sticky registration provenance, not native success. A run is stored
     // synchronously before any Arm/worker/native entry. Missing issued owners
     // remain inconsistent; only a genuinely dormant slot may be absent.

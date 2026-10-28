@@ -2029,3 +2029,80 @@ async fn copy_runtime_missing_task_with_actual_registered_writer_is_sticky_held(
         .drain()
         .expect("durable held journal, no refund");
 }
+
+// Native filesystem/journal lifecycle coverage, not media-decoder qualification.
+// Both operations enter through the actual runtime APIs and retain their real
+// acknowledged owners; the fixture never fabricates readiness or a close fact.
+async fn missing_registered_native_io_keeps_original_charge(publication: bool) {
+    let root = tempfile::tempdir().expect("actual original native IO custody fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    original_prefix(&runtime, &mut owner, &preparation).await;
+    let member = output_member(&preparation).await;
+    let charge = runtime.accounting().expect("same original R").used;
+    // A real ftyp box is enough for this native Init publication boundary;
+    // no parser or FFmpeg outcome is inferred from its bytes.
+    let mut payload = b"\0\0\0\x18ftypisom\0\0\0\0isomiso6".to_vec();
+    let publication_id = runtime
+        .queue_scratch_publication(
+            &preparation,
+            0,
+            member,
+            v2::scratch::OutputKey::Init,
+            &mut payload,
+        )
+        .expect("queue original actual init publication");
+    assert!(
+        payload.is_empty(),
+        "original runtime adopted the same payload"
+    );
+    runtime
+        .publish_scratch_output(&preparation, 0, member, publication_id, deadline())
+        .await
+        .expect("actual original publication and durable observation");
+    let sync_id = runtime
+        .queue_scratch_sync(&preparation, 0, member, &[v2::scratch::OutputKey::Init])
+        .expect("queue original actual init sync");
+    runtime
+        .sync_scratch_outputs(&preparation, 0, member, sync_id, deadline())
+        .await
+        .expect("actual original sync and durable observation");
+    let retained_original = {
+        let mut bundle = preparation.state.lock().await;
+        bundle.roles[0]
+            .bootstrap
+            .get_mut(&member)
+            .expect("same original native prefix")
+            .fixture_take_original_native_io(publication)
+    };
+    let Err(error) = owner.prepare_retirement(true, deadline()).await else {
+        panic!("a missing registered original IO owner must refuse closure");
+    };
+    assert!(!error.definitely_before_reservation());
+    assert_eq!(
+        runtime.accounting().expect("original full R held").used,
+        charge
+    );
+    {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        assert!(!role.refunded && role.pending_finite_close.is_none());
+        assert!(role.copy_vod.is_some(), "same close selector retained");
+        role.bootstrap
+            .get_mut(&member)
+            .expect("original prefix survives refusal")
+            .fixture_restore_original_native_io(retained_original);
+    }
+    // Existing helper proves pending command stability, both original alias
+    // barriers, one refund, rich bundle destruction and original journal drain.
+    retire_with_actual_alias_barriers(runtime, owner, preparation, false).await;
+}
+
+#[tokio::test]
+async fn copy_missing_registered_publication_owner_holds_r_until_same_owner_restored() {
+    missing_registered_native_io_keeps_original_charge(true).await;
+}
+
+#[tokio::test]
+async fn copy_missing_registered_sync_owner_holds_r_until_same_owner_restored() {
+    missing_registered_native_io_keeps_original_charge(false).await;
+}
