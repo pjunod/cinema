@@ -1690,6 +1690,10 @@ async fn copy_entered_parser_full_window_retirement_wakes_and_joins_before_deadl
     // These are valid immutable pre-R payload limits, as in the existing real
     // positive-publication fixture. Do not widen the five-file window itself.
     request.parser_limits.max_bytes = 4 * 1024 * 1024;
+    // The real stream needs more than the negative fixture's two fragments
+    // before a cut. Reserve the existing production eight-slot shape before R;
+    // keep the original 256MiB demand and the immutable five-file window.
+    request.max_pending_fragments = 8;
     request.reader_bounds.unit_bytes = 4 * 1024 * 1024;
     request.reader_bounds.buffer_bytes = 4 * 1024 * 1024;
     request.output.one_io_payload_bytes = 4 * 1024 * 1024;

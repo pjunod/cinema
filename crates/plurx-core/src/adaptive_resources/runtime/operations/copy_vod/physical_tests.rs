@@ -4,7 +4,7 @@ use super::*;
 use crate::adaptive_resources::physical_graph::copy_vod::{
     CopyFixtureFault, CopyStartDisposition, CopyTaskHoldReason, CopyTaskTerminal,
 };
-use crate::adaptive_resources::runtime::copy_vod::{CopyPipeCommand, CopyVodOwner};
+use crate::adaptive_resources::runtime::copy_vod::{CopyPipeCommand, CopyVodOwner, CopyVodRequest};
 use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
@@ -27,6 +27,29 @@ async fn original(root: &Path) -> (Arc<NodeResourceRuntime>, CopyVodOwner, Owned
     let preparation = NodeResourceRuntime::fixture_copy_original_preparation(&owner);
     (runtime, owner, preparation)
 }
+// Positive native publication needs room for the actual source's mdat and
+// several FFmpeg fragments before the presentation cut. The shared negative
+// fixture deliberately keeps 64KiB units/two pending slots; retain those controls.
+// Change only this request before actual admission under the SAME 256MiB R.
+async fn positive_publication_request(root: &Path) -> (Arc<NodeResourceRuntime>, CopyVodRequest) {
+    let (runtime, mut request) =
+        NodeResourceRuntime::fixture_actual_copy_request(root, false).await;
+    request.parser_limits.max_bytes = 4 * 1024 * 1024;
+    request.reader_bounds.unit_bytes = 4 * 1024 * 1024;
+    request.reader_bounds.buffer_bytes = 4 * 1024 * 1024;
+    // Production selected copy already reserves eight pending fragment slots.
+    // Two slots reject this real stream before it can reach the target cut.
+    request.max_pending_fragments = 8;
+    request.output.one_io_payload_bytes = 4 * 1024 * 1024;
+    request.output.one_file_logical_bytes = 4 * 1024 * 1024;
+    request.output.resident_file_objects = request.max_segments + 3;
+    request.output.resident_logical_bytes = 48 * 1024 * 1024;
+    request.output.resident_memory_bytes = 8 * 1024 * 1024;
+    assert!(request.reader_bounds.validate().is_ok());
+    assert!(request.output.resident_logical_bytes < request.output.reserved_storage_bytes);
+    (runtime, request)
+}
+
 async fn cancel_at(
     runtime: &NodeResourceRuntime,
     owner: &mut CopyVodOwner,
@@ -360,7 +383,11 @@ async fn registered_writer_cannot_be_reclassified_as_root_only_when_selector_los
 #[tokio::test]
 async fn actual_publication_sink_panic_loses_task_result_and_holds_original_r() {
     let root = tempfile::tempdir().expect("fixture root");
-    let (runtime, mut owner, preparation) = original(root.path()).await;
+    let (runtime, request) = positive_publication_request(root.path()).await;
+    let mut owner = bounded(runtime.prepare_copy_vod(request, deadline()))
+        .await
+        .expect("actual positive parser profile under original R");
+    let preparation = NodeResourceRuntime::fixture_copy_original_preparation(&owner);
     {
         let mut bundle = preparation.state.lock().await;
         bundle.roles[0]
@@ -510,22 +537,8 @@ async fn parser_failure_kills_same_epipe_ignoring_root_before_stderr_join() {
 #[tokio::test]
 async fn actual_entered_sink_can_publish_while_join_holds_only_graph_members() {
     let root = tempfile::tempdir().expect("fixture root");
-    let (runtime, mut request) =
-        NodeResourceRuntime::fixture_actual_copy_request(root.path(), false).await;
-    // Positive publication uses a distinct immutable pre-R profile. The
-    // shared 12-second 640x360 source can exceed the negative fixtures' 64KiB
-    // ceilings. Retain room for ALL eight indices plus init and playlist
-    // overlap: this no-consumer test must not block on a full rolling window.
-    request.parser_limits.max_bytes = 4 * 1024 * 1024;
-    request.reader_bounds.unit_bytes = 4 * 1024 * 1024;
-    request.reader_bounds.buffer_bytes = 4 * 1024 * 1024;
-    request.output.one_io_payload_bytes = 4 * 1024 * 1024;
-    request.output.one_file_logical_bytes = 4 * 1024 * 1024;
-    request.output.resident_file_objects = request.max_segments + 3;
-    request.output.resident_logical_bytes = 48 * 1024 * 1024;
-    request.output.resident_memory_bytes = 8 * 1024 * 1024;
-    assert!(request.reader_bounds.validate().is_ok());
-    assert!(request.output.resident_logical_bytes < request.output.reserved_storage_bytes);
+    // This no-consumer case retains all eight names plus init/playlist overlap.
+    let (runtime, request) = positive_publication_request(root.path()).await;
     // Actual constructor recomputes its known requested Rust storage from
     // this exact request against the unchanged 256MiB admitted demand. This
     // neither qualifies allocator/native peaks nor changes capacity authority.

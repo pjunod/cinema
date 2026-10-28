@@ -6,6 +6,7 @@ use crate::resource_custody::InstallationContext;
 use crate::transcode::*;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::os::unix::fs::MetadataExt;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
@@ -220,8 +221,22 @@ fn original_owner_at_generation(
             &executable_digest,
         )
         .expect("actual executable plan"),
+        // Engine path versions use their existing seven-field metadata
+        // format; SourceIdentity's s1 wire prefix belongs to source custody.
         FiniteEngineSnapshot::from_captured(
-            &[(executable_path, executable_identity.render_s1())],
+            &[(
+                executable_path,
+                format!(
+                    "{}:{}:{}:{}:{}:{}:{}",
+                    executable_metadata.dev(),
+                    executable_metadata.ino(),
+                    executable_metadata.size(),
+                    executable_metadata.mtime(),
+                    executable_metadata.mtime_nsec(),
+                    executable_metadata.ctime(),
+                    executable_metadata.ctime_nsec(),
+                ),
+            )],
             None,
         )
         .expect("actual engine metadata fence"),
