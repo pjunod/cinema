@@ -4,10 +4,6 @@
 [![PR lint](../badges-pr-lint/lint.svg)](docs/VALIDATION.md)
 [![unit coverage](../badges/coverage.svg)](docs/VALIDATION.md)
 
-The PR badges show the latest passing ready-PR gate and Rust lint result.
-Coverage refreshes through a manual `coverage` workflow run on `main`; the
-badge includes the last successful measurement date (UTC).
-
 A self-hosted media server for movies, TV, anime, ebooks, audiobooks, home
 videos, and photos. Cinema combines a Rust server, a browser player and admin
 UI, and native Apple and Android clients. Your library stays on your hardware;
