@@ -2309,8 +2309,10 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
     let mut args: Vec<String> = Vec::new();
     args.push("-c:v".into());
     args.push("copy".into());
-    // Safari only decodes HEVC when the sample entry is tagged `hvc1`; MKV HEVC
-    // is commonly `hev1`, which renders black. Harmless if already hvc1.
+    // Keep the sample-entry contract shared by HLS admission and its CODECS
+    // declaration. Retaining source updates does not authorize hev1/dvhe on
+    // a client that only admits hvc1/dvh1; strict init validation still
+    // refuses a retaining stream that cannot satisfy this contract.
     if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         args.push("-tag:v".into());
         args.push(hevc_copy_tag_for_source(source, options.preserve_dolby_vision).into());

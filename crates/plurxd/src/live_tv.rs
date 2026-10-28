@@ -9141,6 +9141,23 @@ struct ScratchScan {
     init: Option<(String, u64)>,
 }
 
+/// The owned PUT receiver stages `<object>.<request sequence>.tmp` before
+/// atomically renaming it. Those bytes count against scratch, but a staging
+/// file is never a published segment or init.
+fn is_put_scratch_temporary(name: &str) -> bool {
+    let Some((object, sequence)) = name.strip_suffix(".tmp").and_then(|s| s.rsplit_once('.'))
+    else {
+        return false;
+    };
+    if sequence.is_empty()
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+        || sequence.parse::<u64>().is_err()
+    {
+        return false;
+    }
+    matches!(object, "index.m3u8" | "init.mp4") || parse_segment_name(object, false).is_some()
+}
+
 /// The directory walk of `inspect_scratch`, synchronous, so that one
 /// `spawn_blocking` runs all of it: one `read_dir` and one `symlink_metadata`
 /// per entry on the thread that already holds the directory, rather than a
@@ -9205,7 +9222,9 @@ fn scan_scratch_directory(directory: &Path) -> Result<Option<ScratchScan>, LiveT
             _ => {
                 if let Some(sequence) = parse_segment_name(&name, false) {
                     final_segments.insert(sequence, (name, metadata.len()));
-                } else if parse_segment_name(&name, true).is_some() {
+                } else if parse_segment_name(&name, true).is_some()
+                    || is_put_scratch_temporary(&name)
+                {
                     temporary_count += 1;
                 } else {
                     return Err(LiveTvError::StreamFailed(

@@ -12795,3 +12795,7 @@ fn error_status(message: &str) -> ScanStatus {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "state/backfill_tests.rs"]
+mod backfill_tests;

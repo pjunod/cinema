@@ -153,6 +153,16 @@ pub(crate) struct SegmentEvidence {
 }
 #[cfg(target_os = "linux")]
 impl SegmentEvidence {
+    #[cfg(test)]
+    pub(crate) fn from_test_directory(directory: tempfile::TempDir) -> Result<Self, String> {
+        let held = plurx_core::fs_secure::open_directory_nofollow_blocking(directory.path())
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            directory: Arc::new(directory),
+            held: Arc::new(held),
+        })
+    }
+
     fn open(
         directory: &std::fs::File,
         name: &std::ffi::CStr,

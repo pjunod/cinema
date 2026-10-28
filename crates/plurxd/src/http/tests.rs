@@ -8715,6 +8715,8 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
     // which a ride-along test in this binary may have driven either way.
     // The local-cache row depends on the host filesystem and whether its
     // classifier is implemented on this platform.
+    // The live FEL slot is reported only on Linux workers. This idle fixture
+    // owns no reconstruction, so its single slot must be available there.
     let green = seen
         .iter()
         .filter(|(_, status)| status.as_str() == "met")
@@ -8737,9 +8739,30 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
                     | "output_node_idle"
                     | "output_storage_ownership"
                     | "retention_same_filesystem"
+                    | "dv_fel_live_slot"
             )
         })
         .collect::<Vec<_>>();
+    let live_slot = items
+        .iter()
+        .find(|item| item["id"] == "dolby_vision_fel_reencode")
+        .expect("live FEL card")["requirements"]
+        .as_array()
+        .expect("live FEL requirements")
+        .iter()
+        .find(|row| row["id"] == "dv_fel_live_slot")
+        .expect("live FEL slot requirement");
+    let slot_evidence = live_slot["evidence"].as_str().expect("slot evidence");
+    if cfg!(target_os = "linux") {
+        assert_eq!(live_slot["status"], "met");
+        assert!(
+            slot_evidence.starts_with("0 of 1 live FEL reconstruction slot"),
+            "the idle fixture has its live reconstruction slot: {slot_evidence}"
+        );
+    } else {
+        assert_eq!(live_slot["status"], "unavailable");
+        assert!(slot_evidence.contains("Linux playback workers only"));
+    }
     // Startup inventory may settle between the two readiness requests.
     // Its status must report the same snapshot as its evidence; this
     // empty fixture owns no preparation media or pending cleanup.

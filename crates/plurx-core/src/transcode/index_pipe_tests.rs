@@ -35,6 +35,66 @@ fn hevc_dv() -> MediaFile {
     }
 }
 
+#[test]
+fn retained_parameter_sets_keep_hls_sample_entries_and_preserve_needed_updates() {
+    for (hdr, label, compatibility, preserve, sample_entry) in [
+        (None, None, None, false, "hvc1"),
+        (
+            Some("dolby_vision"),
+            Some("Profile 5"),
+            Some(0),
+            true,
+            "dvh1",
+        ),
+        (
+            Some("dolby_vision"),
+            Some("Profile 5"),
+            Some(0),
+            false,
+            "hvc1",
+        ),
+        (
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+            Some(1),
+            true,
+            "hvc1",
+        ),
+    ] {
+        let mut file = hevc_dv();
+        file.hdr = hdr.map(str::to_owned);
+        file.hdr_format = label.map(str::to_owned);
+        file.dolby_vision.bl_compat_id = compatibility;
+        file.dolby_vision.profile = compatibility.map(|compat| if compat == 0 { 5 } else { 8 });
+        let ordinary = CopyVideoOptions::new(false, preserve);
+        let retained = ordinary.with_parameter_set_retention(true);
+        let ordinary_args = copy_video_args(&file, ordinary);
+        assert!(
+            contains_run(&ordinary_args, &["-tag:v".to_owned(), sample_entry.to_owned()]),
+            "ordinary sample entry follows the source's authoritative compatibility {compatibility:?}: {ordinary_args:?}"
+        );
+        for args in [
+            copy_video_args(&file, retained),
+            copy_index_pipe_args(&file, retained),
+            copy_pipe_args_with_dolby_vision(&file, 0.0, None, true, Pacing::unpaced(), retained),
+        ] {
+            assert!(
+                contains_run(&args, &["-tag:v".to_owned(), sample_entry.to_owned()]),
+                "retention cannot silently change the HLS sample-entry promise: {args:?}"
+            );
+            assert!(
+                !args.iter().any(|arg| arg.contains("remove_types=32-34")),
+                "retention must preserve the updates required to decode the original pixels: {args:?}"
+            );
+        }
+        assert_ne!(
+            crate::segplan::argv_fingerprint(&ordinary_args),
+            crate::segplan::argv_fingerprint(&copy_video_args(&file, retained)),
+            "a retaining recipe cannot alias destructive header stripping"
+        );
+    }
+}
+
 /// The index and the production pipe must agree about the video, because
 /// the index is a list of output byte counts and the landing matcher
 /// compares them. A drift here is not a stale index, it is a wrong one.

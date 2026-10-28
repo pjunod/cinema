@@ -7,6 +7,7 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [UNIT-COVERAGE-REPAIR.md](UNIT-COVERAGE-REPAIR.md) | The 24 baseline failures, owned fixes, added behavioral tests, and the 85–90% coverage target and evidence. | open |
 | [ENGINEERING-KNOWLEDGE.md](ENGINEERING-KNOWLEDGE.md) | Code/diff queries, source-backed record maintenance, advisory PR capture and evidence limits for the bounded knowledge pilot. | open |
 | [DOCKER-HARDWARE-STATUS.md](DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
 | [NATIVE-CI-RECEIPTS.md](NATIVE-CI-RECEIPTS.md) | Authenticated native successes, unchanged source closures, build-specification boundaries and original-run provenance. | built |

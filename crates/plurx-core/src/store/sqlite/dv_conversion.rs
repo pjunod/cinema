@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 71] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 75] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1733,6 +1733,13 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS dv_title_jobs_schema",
             // v115: the same strict empty-extension rewind removes handoffs.
             "CREATE TABLE IF NOT EXISTS playback_handoffs_schema",
+            // v116/v117: strict empty-caption rewind removes both extensions.
+            "CREATE TABLE subtitle_text_translation_schema",
+            "CREATE TABLE shared_caption_schema",
+            // v118/v119: the complete translation rewind removes replacement
+            // triggers and continuity tables before replaying their migrations.
+            "DROP TRIGGER subtitle_translation_mutate",
+            "CREATE TABLE subtitle_translation_range_continuities",
         ];
 
         assert!(

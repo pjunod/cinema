@@ -3040,7 +3040,7 @@ fn split_children_log_under_their_parent_target() {
                 let call = format!("tracing::{level}!(");
                 for (at, _) in source.match_indices(&call) {
                     let arguments = source[at + call.len()..].trim_start();
-                    // Two diagnostic channels are deliberately separate from
+                    // These diagnostic channels are deliberately separate from
                     // their parent target so an operator can enable them
                     // alone: the hashed retained-output reuse facts
                     // (CONTINUOUS-QUALITY-BUILD) and the typed Auto
@@ -3051,6 +3051,7 @@ fn split_children_log_under_their_parent_target() {
                     let dedicated = [
                         ("plurxd::retained_reuse", "transcode/manager/create.rs"),
                         ("plurxd::retained_reuse", "vod/retained.rs"),
+                        ("plurxd::dv", "transcode/manager/create.rs"),
                         ("plurxd::auto_prepare", "http/hls/create.rs"),
                         ("plurxd::auto_prepare", "http/hls/preparation.rs"),
                     ]

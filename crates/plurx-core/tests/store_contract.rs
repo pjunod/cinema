@@ -67,6 +67,8 @@ mod sharing_source_sessions;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/source_contract.rs"]
 mod source_contract;
+#[path = "store_contract/subtitle_text.rs"]
+mod subtitle_text;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/subtitle_translation_upgrade.rs"]
 mod subtitle_translation_upgrade;
@@ -608,6 +610,12 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "probe_can_preempt_title",
     // Progressive translation's actual source-bind/publication/Stop/read-lease
     // contract below exercises these on every backend, including three voters.
+    // Text publication/receipt fences and read-only grant projection are
+    // exercised by subtitle_text_contract_preserves_receipts_and_immutable_cues.
+    "publish_text_translation_slice",
+    "read_text_translation_cues",
+    "text_translation_request_receipt",
+    "read_shared_captions",
     "maintain_translation_cache",
     "write_translation_settings",
     "read_subtitle_translation",
@@ -12860,6 +12868,52 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
+    async fn extension_counts(client: &Client, shape: &[(String, String)]) -> Vec<(String, i64)> {
+        let mut counts = Vec::new();
+        for (name, sql) in shape {
+            if sql.starts_with("CREATE TABLE") {
+                let rows: Vec<I64Value> = client
+                    .query_consistent_map(
+                        format!("SELECT count(*) AS value FROM {name}"),
+                        hiqlite::params!(),
+                    )
+                    .await
+                    .expect("extension data inventory");
+                assert_eq!(rows.len(), 1);
+                counts.push((name.clone(), rows[0].value));
+            }
+        }
+        counts
+    }
+    let caption_shape = extension_shape(client, queue_fixture::CAPTION_FIXTURE_SHAPE_SQL).await;
+    assert_eq!(
+        caption_shape,
+        queue_fixture::caption_fixture_shape(),
+        "exact caption shape required before inventory"
+    );
+    let caption_counts = extension_counts(client, &caption_shape).await;
+    let text_jobs: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM background_jobs WHERE kind='subtitle_text_translate'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("accepted text translation work");
+    assert_eq!(text_jobs.len(), 1);
+    let caption_drops = queue_fixture::validated_empty_caption_rewind(
+        &caption_shape,
+        &caption_counts,
+        text_jobs[0].value,
+    );
+    let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
+    assert_eq!(
+        handoff_shape,
+        queue_fixture::handoff_fixture_shape(),
+        "exact handoff shape required before inventory"
+    );
+    let handoff_counts = extension_counts(client, &handoff_shape).await;
+    let handoff_drops =
+        queue_fixture::validated_empty_handoff_rewind(&handoff_shape, &handoff_counts);
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -12967,8 +13021,10 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
                 .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
         })
         .expect("published predecessor resource view");
-    let mut statements: Vec<_> = title_drops
+    let mut statements: Vec<_> = caption_drops
         .into_iter()
+        .chain(handoff_drops)
+        .chain(title_drops)
         .chain(annotations_drops)
         .chain(translation_drops)
         .map(|sql| (sql, hiqlite::params!()))
@@ -20837,7 +20893,7 @@ fn contract_inventory_matches_every_store_method() {
     // +5: source-revision title demand/readiness, binding, fenced publication
     // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
     // +3: source-fenced FEL verdict write, requalification and verdict counts.
-    assert_eq!(declared.len(), 511, "review the Store method count");
+    assert_eq!(declared.len(), 517, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

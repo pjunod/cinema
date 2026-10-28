@@ -2122,6 +2122,10 @@ mod fel_mapping_tests {
 }
 
 #[cfg(all(test, target_os = "linux"))]
+#[path = "dv_runtime/observe_tests.rs"]
+mod observe_tests;
+
+#[cfg(all(test, target_os = "linux"))]
 mod source_origin_tests {
     use super::validate_window_origin;
     use plurx_core::transcode::{

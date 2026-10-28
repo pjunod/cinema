@@ -113,6 +113,19 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Progressive subtitle decoding resolves the normal PATH-based media tools to
+  canonical executables before launching its clean, descriptor-bound children.
+
+- Cluster maintenance commits its release intent with the elected coordinator's
+  exact lease, acknowledges the current process, and counts active sessions
+  before allowing maintenance exit.
+
+- Recording lists bind paging, state filters, and capture boundaries independently
+  instead of returning a database error.
+- Live TV accepts bounded atomic upload staging files during startup.
+- Model and media-tool verification detects immediate same-size byte changes
+  even when filesystem timestamps coincide.
+
 - Restrict the Linux external player preference to Dolby Vision files on Linux;
   other formats and operating systems retain web playback, including mixed-version titles.
 

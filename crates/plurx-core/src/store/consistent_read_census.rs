@@ -37,8 +37,8 @@ use super::placeholder_census::STORE_SOURCES;
 /// Consistent-read call sites per replicated slice, production code only.
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Translation, annotations, title jobs and handoffs validate committed
-    // extension shape and singleton authority: eight consistent reads.
-    ("hiqlite.rs", 56),
+    // extension shape and singleton authority; text/shared captions add four reads.
+    ("hiqlite.rs", 60),
     // Two rating-cache reads and three person-owned list membership/page reads.
     ("hiqlite_annotations.rs", 5),
     // Managed bootstrap validates committed shape and the singleton marker.
@@ -49,7 +49,7 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_durable.rs", 29),
     ("hiqlite_dv_conversion.rs", 13),
     ("hiqlite_dvr.rs", 19),
-    ("hiqlite_fragment_index_cluster.rs", 34),
+    ("hiqlite_fragment_index_cluster.rs", 35),
     ("hiqlite_import.rs", 4),
     ("hiqlite_remote.rs", 4),
     ("hiqlite_invitations.rs", 22),

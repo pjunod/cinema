@@ -82,6 +82,31 @@ fn qsv_main10_probes_take_their_graph_from_the_proof_builder() {
     }
 }
 
+#[test]
+fn unsettled_reporter_metadata_cannot_reuse_changed_bytes_or_replace_an_older_pin() {
+    use super::*;
+    let directory = tempfile::tempdir().expect("reporter directory");
+    let path = directory.path().join("reporter");
+    std::fs::write(&path, b"new reporter").expect("reporter");
+    let version = engine_path_version(&path).expect("object version");
+    let old_digest = Sha256::digest(b"old reporter").to_vec();
+    let pinned = pinned_engine_object_version(&version, &hex::encode(&old_digest));
+    // A coalesced timestamp returns the same version for old and new bytes.
+    // The first verification has not yet earned metadata-only reuse.
+    remember_engine_digest(&path, &version, &old_digest, false);
+    assert!(!engine_object_is_current(&path, &pinned));
+    let new_digest = Sha256::digest(b"new reporter").to_vec();
+    remember_engine_digest(&path, &version, &new_digest, true);
+    assert!(engine_object_is_current(
+        &path,
+        &pinned_engine_object_version(&version, &hex::encode(new_digest))
+    ));
+    assert!(
+        !engine_object_is_current(&path, &pinned),
+        "a newer capture must never authorize an older byte pin"
+    );
+}
+
 #[tokio::test]
 async fn held_clock_reporter_bytes_enter_existing_engine_identity_and_publication_fence() {
     use super::*;
