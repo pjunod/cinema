@@ -715,3 +715,70 @@ fn v7_schema_is_exact_and_rejects_extra_shape() {
         .unwrap();
     assert!(validate(&db).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn historical_v1_and_v2_snapshots_read_only_their_declared_ownership_domains() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = storage::Storage::open(&options(
+        root.path(),
+        owner(),
+        InstallationContext::FirstInstallation,
+    ))
+    .unwrap();
+    for version in [1, 2] {
+        let mut db = Connection::open_in_memory().unwrap();
+        populated_v1(&mut db, &storage.witness);
+        if version == 2 {
+            migration::upgrade_v1_to_v2(&mut db, &storage.witness).unwrap();
+        }
+        validate(&db).unwrap();
+        let has_asset_table: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='retained_asset_owners')",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(has_asset_table, version >= 2);
+        let before = logical_rows(&db, "operations");
+        let snapshot = transaction::snapshot(&db, &storage.witness).unwrap();
+        assert_eq!(snapshot.total, vector(u64::MAX));
+        assert_eq!(snapshot.obligations.len(), 1);
+        assert_eq!(snapshot.families.len(), 1);
+        assert_eq!(snapshot.trial_groups.len(), 1);
+        assert!(snapshot.retained_assets.is_empty());
+        assert_eq!(logical_rows(&db, "operations"), before);
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            version
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn historical_v1_and_v2_snapshots_refuse_active_debt_without_its_original_family() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = storage::Storage::open(&options(
+        root.path(),
+        owner(),
+        InstallationContext::FirstInstallation,
+    ))
+    .unwrap();
+    for version in [1, 2] {
+        let mut db = Connection::open_in_memory().unwrap();
+        populated_v1(&mut db, &storage.witness);
+        if version == 2 {
+            migration::upgrade_v1_to_v2(&mut db, &storage.witness).unwrap();
+        }
+        let before = logical_rows(&db, "obligations");
+        db.execute("DELETE FROM family_roles WHERE obligation_id IN(SELECT obligation_id FROM obligations WHERE phase!='settled')", []).unwrap();
+        let error = transaction::snapshot(&db, &storage.witness).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UnreadableAuthority,
+            "missing family is invalid authority, never an optional-table SQL failure or empty debt");
+        assert_eq!(logical_rows(&db, "obligations"), before);
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            version
+        );
+    }
+}

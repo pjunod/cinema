@@ -447,10 +447,9 @@ async fn cancelled_original_source_root_observation_resumes_before_parent_file_c
         .prepare_inputs(deadline())
         .await
         .expect("same actual source/executable Files");
-    owner
-        .open_output(deadline())
-        .await
-        .expect("actual original output prefix");
+    // start() owns the original output bootstrap before native root entry.
+    // Pre-opening it here would re-enter arm_scratch_bootstrap after SinkReady,
+    // whose original pending root job has already been acknowledged.
     let gate = Gate::install(owner.source_members[0]);
     {
         let start = owner.start(deadline());

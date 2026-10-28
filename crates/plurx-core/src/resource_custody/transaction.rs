@@ -463,12 +463,19 @@ pub(super) fn snapshot(
     if trials.len() > 1 {
         return Err(codec::invalid());
     }
+    // Exact v1 has only family-owned obligations. The retained asset table
+    // first exists in v2; select by the already-recognized schema version,
+    // never by treating a missing/failed table read as empty authority.
+    let ownership_query = if schema_version == 1 {
+        "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1),0"
+    } else {
+        "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1),EXISTS(SELECT 1 FROM retained_asset_owners WHERE obligation_id=?1)"
+    };
     for record in &obligations {
-        let (family, asset): (bool, bool) = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1),EXISTS(SELECT 1 FROM retained_asset_owners WHERE obligation_id=?1)",
-            [record.obligation_id.as_bytes()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (family, asset): (bool, bool) =
+            connection.query_row(ownership_query, [record.obligation_id.as_bytes()], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
         if family == asset {
             return Err(codec::invalid());
         }
