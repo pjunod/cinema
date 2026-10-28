@@ -172,7 +172,8 @@ pub(super) async fn actual_request(
             // No hook injects its known rollback or manufactures a close fact.
             live_handles: if rejected { 1 } else { 8 },
             reader_leases: 4,
-            resident_memory_bytes: 1024 * 1024,
+            // Bootstrap, maximum payload, and bounded sync/publication workspace.
+            resident_memory_bytes: 3 * 1024 * 1024,
             allocation_unit_bytes: 4096,
             per_object_reserve_bytes: 4096,
             child_directory_reserve_bytes: 4096,

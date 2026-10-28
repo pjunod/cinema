@@ -363,3 +363,12 @@ zero-generation regressions check BeforeReservation, empty original accounting
 and journal drain. Existing accepted and known-rollback software fixtures keep
 their original bounds. Source review found no mismatch; compilation and
 behavioral qualification of this repair remain pending.
+
+The same validator/native-workspace audit found that accepted copy/software
+fixtures reserved exactly1MiB for both scratch and bootstrap. Retained bootstrap
+handles consume that partition, while actual sync/publication adds workspace
+and payload. Their scratch partition is now3MiB: bootstrap, maximum1MiB payload
+and native workspace. Total original R stays256MiB, and intentional rejection
+fields stay unchanged. Production profiles already reserve128MiB scratch memory
+with1MiB bootstrap and are unchanged. Actual admission still bounds readers and
+other overlaps; this correction establishes no full native/allocator peak.
