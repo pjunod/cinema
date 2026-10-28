@@ -28,10 +28,13 @@ cases were rerun. Preflight retained 2,104 compatible Python passes and reran
 the two failed ownership-inventory methods successfully. Four type-only DOM
 casts resolve the remaining web compilation diagnostics.
 
-Qualification is blocked by a receipt live-identity check that still compares
-the moving main tip, contrary to the main fast lane's documented head-only
-execution policy. A narrow correction is under review; source closures,
-authenticated origins, exact PR head and readiness checks remain required.
+The main fast lane's live-identity guard now follows its documented head-only
+execution policy; adversarial review and the new identity regression passed.
+Source closures, authenticated origins, exact PR head and readiness checks
+remain required. Current-main integration also changes the whole-file hash of
+a mapped server source without changing its selected worker behavior. The
+reviewed mappings are being rebound before final qualification; model
+properties, bounds and authority claims remain unchanged.
 No production database edits, service restart or agent deployment has occurred.
 
 The physical Apple TV responds through its existing Companion pairing;

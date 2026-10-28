@@ -541,31 +541,31 @@
       },
       {
         "anchor": "    async fn run_targeted(",
-        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "sha256": "dcbe31c292849d78f4e25ac44a45864863a22eac4cae99bd4b3b84a7eb27846b",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5172"
       },
       {
         "anchor": "        };\n        let Some(lease) = self.acquire_job(\"provider:artwork\".to_owned()).await? else {\n            return Err(StoreError::Task(",
-        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "sha256": "dcbe31c292849d78f4e25ac44a45864863a22eac4cae99bd4b3b84a7eb27846b",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5478"
       },
       {
         "anchor": "    async fn run_scan(",
-        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "sha256": "dcbe31c292849d78f4e25ac44a45864863a22eac4cae99bd4b3b84a7eb27846b",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5856"
       },
       {
         "anchor": "        match self.acquire_job(\"provider:artwork\".to_owned()).await {",
-        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "sha256": "dcbe31c292849d78f4e25ac44a45864863a22eac4cae99bd4b3b84a7eb27846b",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6430"
       },
       {
         "anchor": "        let lease = match self.acquire_job(\"provider:genres\".to_owned()).await {",
-        "sha256": "15c0479eeca61d3a123e4ffeca9d1927296150104e4624905b8d33c0d0c2d8cb",
+        "sha256": "dcbe31c292849d78f4e25ac44a45864863a22eac4cae99bd4b3b84a7eb27846b",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6517"
       },
