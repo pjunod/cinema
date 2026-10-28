@@ -2058,6 +2058,9 @@ pub trait BackgroundJobStore: Send + Sync {
         binding: &str,
     ) -> Result<bool, StoreError>;
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError>;
+    /// Settled FEL titles whose verdict another FEL identity measured.
+    async fn dv_fel_stale_titles(&self, identity: &str, limit: u32)
+        -> Result<Vec<i64>, StoreError>;
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -2072,6 +2075,12 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: super::dv_title_jobs::PublishTitleJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    /// Offer a content-analysis pass's complete-title aggregate to the
+    /// title's current demand.
+    async fn publish_dv_title_from_analysis(
+        &self,
+        output: super::dv_title_jobs::AnalysisTitleOutput,
+    ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -2617,6 +2626,13 @@ LIMIT 1
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError> {
         super::dv_title_jobs::fel_verdict_counts(self, identity).await
     }
+    async fn dv_fel_stale_titles(
+        &self,
+        identity: &str,
+        limit: u32,
+    ) -> Result<Vec<i64>, StoreError> {
+        super::dv_title_jobs::stale_fel_titles(self, identity, limit).await
+    }
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -2636,6 +2652,12 @@ LIMIT 1
         request: super::dv_title_jobs::PublishTitleJob,
     ) -> Result<JobPublishOutcome, StoreError> {
         super::dv_title_jobs::publish(self, request).await
+    }
+    async fn publish_dv_title_from_analysis(
+        &self,
+        output: super::dv_title_jobs::AnalysisTitleOutput,
+    ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError> {
+        super::dv_title_jobs::publish_from_analysis(self, output).await
     }
     async fn probe_can_preempt_title(
         &self,

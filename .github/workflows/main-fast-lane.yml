@@ -467,6 +467,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
@@ -474,14 +475,32 @@ jobs:
           grep -Fxq "Xcode 27.1" <<< "$xcode_version"
           grep -Fxq "Build version 27A9275" <<< "$xcode_version"
           xcrun --find swift
+      - name: Authenticate compatible original native test receipts
+        id: native_receipts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.native_receipts
+      - name: Preserve native adoption provenance
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .main-preflight-receipts/native/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Build and test native macOS server tray
         if: needs.scope.outputs.desktop_macos == 'true'
         # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
         # The complete native output is preserved independently, including failures.
         run: |
           mkdir -p target/validation
-          make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
-          echo "Native macOS server tray build and unit checks passed."
+          if [ "${{ steps.native_receipts.outputs.desktop_macos }}" = "true" ]; then
+            echo "Native macOS server tray builds and tests adopted from authenticated original evidence; see native-adoption artifact." > target/validation/desktop-macos-check.log
+            echo "Native macOS server tray builds and tests adopted; original provenance is preserved in native-adoption artifact."
+          else
+            make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
+            echo "Native macOS server tray build and unit checks passed."
+          fi
       - name: Preserve native macOS server tray check output
         if: always() && needs.scope.outputs.desktop_macos == 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -495,15 +514,15 @@ jobs:
         run: |
           test "$(xcodegen --version)" = "Version: 2.46.0"
       - name: Compile iOS and tvOS without running simulator tests
-        if: needs.scope.outputs.apple == 'true'
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         run: make apple-build
       - name: Require native TV navigation journeys
-        if: needs.scope.outputs.apple == 'true'
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
-        if: always() && needs.scope.outputs.apple == 'true'
+        if: always() && needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}

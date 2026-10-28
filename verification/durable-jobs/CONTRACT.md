@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`5eacfd4c6b83a6f036627a0bfb80c60d0d59cba9` · **Scope:** bound `library_scan` and
+`7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,30 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Metadata-only title analysis — scoped refresh on 2026-10-28
+
+Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.
+The two title-only trait/delegation additions expose stale-FEL selection and
+analysis publication. The latter validates source identity, scanner and demand
+generation, preserves another scanner's active job, and uses the existing
+`publish_dv_title` trigger with `job_id` NULL. Only title probe JSON receives
+the aggregate; no queue or waiter settlement row matches that NULL identity.
+Title demand binding and FEL requalification remain separate from the selected
+library-worker authority. The schema and trigger definitions are unchanged.
+
+`state.rs` adds bounded fresh-title timing, local-index mode and the analysis
+result offer. It changes no selected library claim, binding, renewal,
+cancellation, settlement, fenced item publication or token/publication lock
+order. Store-contract edits add title method names and examples; the exact
+`formal_publication` registration and selected examples are unchanged.
+
+Nineteen whole-file pins are refreshed after this source disposition; every
+existing anchor remains unique. Title scanning, local index waiting and both
+title publication paths remain excluded. Models, configurations, bounds,
+properties, toolchain pins and historical explanatory source anchors retain
+their identities. This review is source correspondence, not new execution or
+qualification; fresh affected smoke receipts are separate evidence.
 
 ## HTTPS and Linux-player integration — 2026-10-26
 
@@ -149,9 +173,11 @@ extension and verify its shape through
 [dv_title_jobs_schema.rs](../../crates/plurx-core/src/store/dv_title_jobs_schema.rs).
 The mapping now tracks these dependencies so later drift requires review.
 
-The [title publisher](../../crates/plurx-core/src/store/dv_title_jobs.rs)
+The [job title publisher](../../crates/plurx-core/src/store/dv_title_jobs.rs)
 requires a `dv_title_scan` job and uses its own queue-fenced command, outside
-`insert_item_fenced`. Its source generations, JSON attachment, cancellation
+`insert_item_fenced`. The separate analysis publisher uses source, scanner and
+demand-generation checks with the existing title trigger and `job_id` NULL;
+it attaches title probe JSON without settling a queue job or waiter. Its source generations, JSON attachment, cancellation
 suppression, scheduling/preemption and replay/retry behavior are **excluded
 from this model**. The existing
 [title contract examples](../../crates/plurx-core/tests/store_contract/dv_title_jobs.rs)

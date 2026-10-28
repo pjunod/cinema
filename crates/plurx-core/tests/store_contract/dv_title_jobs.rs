@@ -806,6 +806,25 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
                 .expect("counts"),
             (0, 0)
         );
+        // A verdict measured under this identity is current; under any other
+        // it is what a renderer change re-qualifies.
+        assert!(
+            store
+                .dv_fel_stale_titles(&identity, 16)
+                .await
+                .expect("current")
+                .is_empty(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .dv_fel_stale_titles(&"b".repeat(64), 16)
+                .await
+                .expect("stale"),
+            vec![file.id],
+            "{backend}"
+        );
+        assert!(store.dv_fel_stale_titles(&identity, 0).await.is_err());
         // The settled title has no demand until a play asks for it again.
         assert!(store
             .dv_title_demands(&scanner, 0)
@@ -856,6 +875,144 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
         );
         assert!(store
             .put_dv_fel_verdict(file.id, file.size, file.mtime, &serde_json::json!([]))
+            .await
+            .is_err());
+    })
+    .await;
+}
+
+fn analysis(file: &MediaFile, scanner: &str) -> AnalysisTitleOutput {
+    AnalysisTitleOutput {
+        file_id: file.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        scanner_digest: scanner.into(),
+        stats: stats(),
+    }
+}
+
+async fn stored_aggregate(store: &Arc<dyn Store>, file: i64) -> Option<DvTitleStats> {
+    let document = store
+        .get_file_probe_json(file)
+        .await
+        .expect("probe")
+        .expect("probe");
+    DvTitleStats::from_probe_json(&document)
+}
+
+/// The content-analysis pass's aggregate lands on the title's current
+/// demand only: bound to the pass's scanner like a job's, refused for a
+/// source the catalogue no longer describes, dropped with its generation when
+/// another scanner binds, and left open for the job to settle without a read.
+#[tokio::test]
+async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed(&store, "title-analysis").await;
+        let before = demand(&store, file.id, &scanner).await;
+
+        let mut stale = analysis(&file, &scanner);
+        stale.source_size += 1;
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(stale)
+                .await
+                .expect("stale"),
+            AnalysisTitleOutcome::NoDemand,
+            "{backend}"
+        );
+        assert_eq!(stored_aggregate(&store, file.id).await, None, "{backend}");
+
+        // An unbound demand is bound to the pass's scanner, then receives it.
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .await
+                .expect("publish"),
+            AnalysisTitleOutcome::Published,
+            "{backend}"
+        );
+        assert_eq!(
+            stored_aggregate(&store, file.id).await,
+            Some(stats()),
+            "{backend}"
+        );
+        // Still open, same generation: the title worker's own bind changes
+        // nothing, which is what lets its job reuse the aggregate.
+        let open = demand(&store, file.id, &scanner).await;
+        assert_eq!(open.probe_revision, before.probe_revision, "{backend}");
+        assert_eq!(
+            DvTitleStats::from_probe_json(&open.probe_json),
+            Some(stats()),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .bind_dv_title_demand(open.probe_revision, &scanner)
+                .await
+                .expect("rebind"),
+            Some(open.probe_revision),
+            "{backend}"
+        );
+        assert_eq!(
+            stored_aggregate(&store, file.id).await,
+            Some(stats()),
+            "{backend}"
+        );
+
+        // Another scanner rotates the generation away with its aggregate.
+        let other = "b".repeat(64);
+        let rotated = store
+            .bind_dv_title_demand(open.probe_revision, &other)
+            .await
+            .expect("rotate")
+            .expect("rotated");
+        assert_ne!(rotated, open.probe_revision, "{backend}");
+        assert_eq!(stored_aggregate(&store, file.id).await, None, "{backend}");
+
+        // That scanner's queued job keeps its generation: the pass does not
+        // rotate it away, and the job publishes its own answer.
+        let other_demand = demand(&store, file.id, &other).await;
+        assert!(matches!(
+            enqueue(&store, &other_demand, &other, 4_000).await,
+            EnqueueOutcome::Accepted { .. }
+        ));
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .await
+                .expect("busy"),
+            AnalysisTitleOutcome::Busy,
+            "{backend}"
+        );
+        assert_eq!(
+            demand(&store, file.id, &scanner).await.probe_revision,
+            rotated,
+            "{backend}: not rotated"
+        );
+
+        // A job's completed answer for this scanner is not replaced.
+        let (job_demand, job) = active(&store, file.id, &scanner, 5_000).await;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&job_demand, &job, &scanner, 5_001))
+                .await
+                .expect("job publication"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert_eq!(
+            store
+                .publish_dv_title_from_analysis(analysis(&file, &scanner))
+                .await
+                .expect("settled"),
+            AnalysisTitleOutcome::Current,
+            "{backend}"
+        );
+        assert!(store
+            .publish_dv_title_from_analysis(AnalysisTitleOutput {
+                scanner_digest: "not a digest".into(),
+                ..analysis(&file, &scanner)
+            })
             .await
             .is_err());
     })

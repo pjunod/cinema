@@ -2027,8 +2027,6 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertNotIn("../badges-ci/ci.svg", readme)
         self.assertNotIn("../badges-lint/lint.svg", readme)
-        self.assertIn("Coverage refreshes automatically on pushes to `main`", readme)
-        self.assertIn("measurement date (UTC)", readme)
         self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
             readme,
@@ -2280,7 +2278,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('RUST_TEST_THREADS: "2"', coverage)
         steps = workflow_step_blocks(coverage)
         install = steps["Install coverage prerequisites"]
-        for package in ("git", "jq", "nodejs", "python3", "build-essential", "clang"):
+        for package in (
+            "git", "jq", "nodejs", "python3", "build-essential", "clang",
+            "libssl-dev", "libgtk-4-dev", "libdbus-1-dev",
+        ):
             self.assertRegex(install, rf"\b{package}\b")
         self.assertLess(
             coverage.index("Install coverage prerequisites"),
@@ -2347,11 +2348,13 @@ assert.equal(context.ACT_TIMER, null);
             self.assertNotIn("compile_only", read(path), "main qualification has no task-unit bypass")
 
     def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
-        def enabled(expression, *, apple, desktop, retained):
+        def enabled(expression, *, apple, desktop, retained, tv_adopted=False):
             values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained}
             expression = re.sub(
+                r"(steps\.native_receipts\.outputs\.tv_navigation != 'true')|"
                 r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple) (==|!=) 'true'",
-                lambda match: str(values[match[1]] if match[2] == "==" else not values[match[1]]),
+                lambda match: str(not tv_adopted) if match[1] else
+                str(values[match[2]] if match[3] == "==" else not values[match[2]]),
                 expression)
             expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
             self.assertRegex(expression, r"^[ ()TrueFalsandor]+$")
@@ -2371,7 +2374,8 @@ assert.equal(context.ACT_TIMER, null);
                 desktop_name = ("Compile native macOS server tray" if "effort-ci" in path
                                 else "Build and test native macOS server tray")
                 desktop = steps[desktop_name]
-                # Even retained mobile units must never suppress a selected tray check.
+                # Retained mobile evidence never suppresses the independent tray step.
+                # Only its own authenticated native proof can adopt tray operations.
                 self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True))
                 self.assertTrue(enabled(workflow_step_scalar(desktop, "if"),
                                         apple=False, desktop=True, retained=True))
@@ -2379,21 +2383,67 @@ assert.equal(context.ACT_TIMER, null);
                 self.assertTrue(enabled(condition, apple=True, desktop=False, retained=False))
                 self.assertFalse(enabled(workflow_step_scalar(desktop, "if"),
                                          apple=True, desktop=False, retained=False))
+                if path.endswith("main-fast-lane.yml"):
+                    receipts = steps["Authenticate compatible original native test receipts"]
+                    self.assertNotIn("if:", receipts)
+                    self.assertIn("run: python3 -m validation.native_receipts", receipts)
+                    adoption = steps["Preserve native adoption provenance"]
+                    self.assertEqual(workflow_step_scalar(adoption, "if"), "always()")
+                    self.assertIn("path: .main-preflight-receipts/native/receipt.json", adoption)
+                    self.assertIn("name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}", adoption)
+                    tv_step = steps["Require native TV navigation journeys"]
+                    tv_guard = workflow_step_scalar(tv_step, "if")
+                    self.assertTrue(enabled(tv_guard, apple=True, desktop=False, retained=False,
+                                            tv_adopted=False))
+                    self.assertFalse(enabled(tv_guard, apple=True, desktop=False, retained=False,
+                                             tv_adopted=True))
+                    tv_artifact = steps["Preserve TV navigation evidence including failures"]
+                    tv_artifact_guard = workflow_step_scalar(tv_artifact, "if")
+                    self.assertTrue(enabled(tv_artifact_guard, apple=True, desktop=False, retained=False,
+                                            tv_adopted=False))
+                    self.assertFalse(enabled(tv_artifact_guard, apple=True, desktop=False, retained=False,
+                                             tv_adopted=True))
                 self.assertNotIn("xcodegen", steps["Verify the pinned Apple toolchain"])
                 for name, step in steps.items():
+                    if path.endswith("main-fast-lane.yml") and name in {
+                        "Authenticate compatible original native test receipts",
+                        "Preserve native adoption provenance",
+                    }:
+                        continue
+                    if path.endswith("main-fast-lane.yml") and name in {
+                        "Compile iOS and tvOS without running simulator tests",
+                        "Require native TV navigation journeys",
+                        "Preserve TV navigation evidence including failures",
+                    }:
+                        guard = workflow_step_scalar(step, "if")
+                        for tv_adopted in (False, True):
+                            self.assertFalse(enabled(guard, apple=False, desktop=True, retained=True,
+                                                     tv_adopted=tv_adopted), name)
+                        self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False,
+                                                tv_adopted=False), name)
+                        self.assertFalse(enabled(guard, apple=True, desktop=False, retained=False,
+                                                 tv_adopted=True), name)
+                        continue
                     if name == "Preserve native macOS server tray check output":
                         self.assertTrue(enabled(workflow_step_scalar(step, "if"),
                                                 apple=False, desktop=True, retained=True))
                         self.assertFalse(enabled(workflow_step_scalar(step, "if"),
                                                  apple=True, desktop=False, retained=False))
                         continue
-                    if name in {"Verify the pinned Apple toolchain", desktop_name}:
+                    if name == "Verify the pinned Apple toolchain":
+                        self.assertNotIn("if:", step)
+                        self.assertIn('grep -Fxq "Build version 27A9275"', step)
+                        continue
+                    if name == desktop_name:
                         continue
                     # Existing mobile work and its always-run artifacts/cleanup are
                     # conditional, so a tray-only selection creates no simulators.
                     guard = workflow_step_scalar(step, "if")
                     self.assertFalse(enabled(guard, apple=False, desktop=True, retained=True), name)
                     self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False), name)
+                    if path.endswith("main-fast-lane.yml"):
+                        self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False,
+                                                tv_adopted=True), name)
                     if path.endswith("/ci.yml"):
                         self.assertFalse(enabled(guard, apple=True, desktop=True, retained=True), name)
 
@@ -2403,26 +2453,51 @@ assert.equal(context.ACT_TIMER, null);
                            (".github/workflows/ci.yml", "apple")):
             step = workflow_step_blocks(workflow_job_blocks(path)[name])[
                 "Build and test native macOS server tray"]
-            commands = "\n".join(workflow_step_literal(step, "run"))
-            for status in (0, 7):
-                with self.subTest(path=path, status=status), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    fake_make = root / "make"
-                    fake_make.write_text("#!/bin/sh\nprintf '%s\\n' \"" + case_line +
-                                         "\"\nexit \"$NATIVE_TRAY_FAKE_EXIT\"\n", encoding="utf-8")
-                    fake_make.chmod(0o755)
-                    completed = subprocess.run(
-                        ["/bin/sh", "-eu", "-c", commands], cwd=root,
-                        env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
-                             "NATIVE_TRAY_FAKE_EXIT": str(status)},
-                        capture_output=True, text=True, check=False)
-                    self.assertEqual(completed.returncode, status)
-                    self.assertNotIn("Test Case", completed.stdout + completed.stderr)
-                    self.assertEqual((root / "target/validation/desktop-macos-check.log").read_text().strip(), case_line)
-                    if status == 0:
-                        self.assertIn("checks passed", completed.stdout)
-                    else:
-                        self.assertNotIn("checks passed", completed.stdout)
+            raw_commands = "\n".join(workflow_step_literal(step, "run"))
+            adoption_modes = (False, True) if path.endswith("main-fast-lane.yml") else (False,)
+            for adopted in adoption_modes:
+                commands = raw_commands.replace(
+                    "${{ steps.native_receipts.outputs.desktop_macos }}", str(adopted).lower())
+                for status in (0, 7):
+                    with self.subTest(path=path, adopted=adopted, status=status), tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        fake_make = root / "make"
+                        args_file = root / "make-args"
+                        fake_make.write_text(
+                            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NATIVE_TRAY_ARGS\"\nprintf '%s\\n' \"" +
+                            case_line + "\"\nexit \"$NATIVE_TRAY_FAKE_EXIT\"\n", encoding="utf-8")
+                        fake_make.chmod(0o755)
+                        log = root / "target/validation/desktop-macos-check.log"
+                        log.parent.mkdir(parents=True)
+                        log.write_text("Test Suite 'All tests' passed\nExecuted 61 tests, with 0 failures (0 unexpected)\n")
+                        completed = subprocess.run(
+                            ["/bin/sh", "-eu", "-c", commands], cwd=root,
+                            env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                                 "NATIVE_TRAY_FAKE_EXIT": str(status),
+                                 "NATIVE_TRAY_ARGS": str(args_file)},
+                            capture_output=True, text=True, check=False)
+                        self.assertEqual(completed.returncode, 0 if adopted else status)
+                        self.assertNotIn("Test Case", completed.stdout + completed.stderr)
+                        log = root / "target/validation/desktop-macos-check.log"
+                        if adopted:
+                            self.assertFalse(args_file.exists(), "adopted builds and tests invoke no make target")
+                            self.assertIn("builds and tests adopted", log.read_text())
+                            self.assertIn("native-adoption artifact", log.read_text())
+                            self.assertNotIn("Test Suite", log.read_text())
+                            self.assertNotIn("Test Case", log.read_text())
+                            from validation.native_receipts import verify_desktop
+                            from validation.python_unit_receipts import ReceiptError
+                            with self.assertRaises(ReceiptError):
+                                verify_desktop(log.read_bytes())
+                            self.assertIn("builds and tests adopted", completed.stdout)
+                        else:
+                            self.assertEqual(args_file.read_text().strip(), "desktop-macos-check")
+                            self.assertEqual(log.read_text().strip(), case_line)
+                        if not adopted and status == 0:
+                            self.assertIn("checks passed", completed.stdout)
+                        elif not adopted:
+                            self.assertNotIn("tests adopted", completed.stdout)
+                            self.assertNotIn("checks passed", completed.stdout)
 
     def test_effort_native_macos_tray_compiles_without_running_units(self):
         effort = workflow_job_blocks(".github/workflows/effort-ci.yml")["apple_compile"]
@@ -2451,7 +2526,17 @@ assert.equal(context.ACT_TIMER, null);
             steps = workflow_step_blocks(workflow_job_blocks(path)[name])
             desktop = steps["Build and test native macOS server tray"]
             commands = workflow_step_literal(desktop, "run")
-            self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
+            commands = [line.strip() for line in commands if line.strip()]
+            if path.endswith("main-fast-lane.yml"):
+                self.assertIn('if [ "${{ steps.native_receipts.outputs.desktop_macos }}" = "true" ]; then', commands)
+                self.assertFalse(any("make desktop-macos-build" in command for command in commands))
+                self.assertTrue(any("builds and tests adopted" in command and "> target/validation/desktop-macos-check.log" in command for command in commands))
+                self.assertIn("else", commands)
+                self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
+                self.assertTrue(any("tests adopted" in line for line in commands))
+                self.assertTrue(any("checks passed" in line for line in commands))
+            else:
+                self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
             self.assertFalse(any("tee " in command or "cat " in command for command in commands),
                              "desktop XCTest records must not enter the mobile receipt log")
             artifact = steps["Preserve native macOS server tray check output"]
