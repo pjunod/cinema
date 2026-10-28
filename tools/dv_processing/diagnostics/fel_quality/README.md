@@ -9,6 +9,8 @@ locations. Media, decoded frames and binaries stay outside Git.
 
 | Tool | Purpose |
 |---|---|
+| `capture_metadata.c` | Executed native-metadata observer source; 48 raw-RPU-bound frame records, with RGB lattice validation still pending. |
+| `portable_comparison.py` | Produce the all-arm selected-frame result table with root aliases and measurement-derived admission reasons. |
 | `capture_layers.c` | Local decoder-only source-layer capture with independent BL/EL software decoders, canonical planes and original clocks/RPUs. |
 | `verify_layer_capture.py` | Rehash every captured plane/RPU and bind it to both retained events and case receipt; source identity only. |
 | `four_model_audit.py` | Hash-bound selected-frame R/F/C comparison in four explicit composition/colour models; not normative Dolby conformance. |

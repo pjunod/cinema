@@ -1,6 +1,6 @@
 # Shadow loss — encoder diagnosis and offline fix tests
 
-**Status:** open — offline diagnosis and controls complete; strict shadow-tail fix unqualified · **Date:** 2026-10-26
+**Status:** open — handed off to Claude; qg8 encoded but unqualified; strict shadow-tail fix unqualified · **Date:** 2026-10-28
 
 Companion to the [DV processing ledger](DV_HDR_PROCESSING_STATUS.md).
 This is the canonical offline picture-quality investigation record for P02.
@@ -192,7 +192,7 @@ records exact source-copy hashes, the earlier 2,731-file calibration manifest,
 and the complete shadow result table hash. Private raw artifacts live under
 `~/.local/state/plurx-fel-quality/20261026-measurement-calibration/` and
 `~/.local/state/plurx-fel-quality/20261026-shadow-followup/`.
-The latter archive is being sealed at this checkpoint. Original requests and
+The latter archive is sealed; the evidence index records its manifest. Original requests and
 receipts keep their source paths and hashes; location maps describe relocation.
 Raw media, binaries and large decoded arrays are deliberately not Git blobs.
 The commit preserves code and findings, not an off-machine backup of that media.
@@ -300,3 +300,21 @@ pre-initial-random-access non-output AUs outside the requested window; their
 classification is by timestamp, not a proven RASL NAL type. A clean C build
 and five admission/refusal checks pass. This establishes source identity for
 broader offline measurements; no full-window pixel-quality score follows yet.
+
+## Claude continuation checkpoint
+
+The [Claude handoff](FEL-CLAUDE-HANDOFF.md) records exact next commands and
+unfinished validation. Both predeclared qg8 encodes completed successfully,
+and their encoded hashes match the saved recipes. Authoring, native-frame
+qualification, QP-group syntax verification and quality scoring are not run;
+container-average122.835/129.514Mb/s is not the authored packet-rate screen.
+All48 M1800 native metadata associations also replay and match the retained
+parsed0/24 semantics; no sampled RGB evaluator or all48 metrics ran.
+
+The complete current task evidence is cloned to the durable private
+`20261026-shadow-rate-control` bundle:329 files,8,277,823,723bytes; manifest
+SHA256 `cafd8a069a434edb200ae1ced6793578438bef921e272d553a329443fa2dee4e`.
+Original files match their archived copies. The bundle retains experimental
+sources, original paths, receipts, binaries and media; Git retains portable
+findings and tools. No worker, live playback or packaging change accompanies
+this handoff. No diagnostic child or encode job remains pending.

@@ -12,9 +12,13 @@
   },
   "shadow_followup": {
     "directory": "20261026-shadow-followup",
-    "status": "Archive sealing follows this checkpoint; working evidence retained separately.",
+    "status": "Sealed.",
     "combined_results": "shadow-stage-comparison-v4.json",
-    "combined_results_sha256": "6f82852a828ed932d01a36edf562ab9e1e1a1dc9d624857aa5fc498809f8cf28"
+    "combined_results_sha256": "6f82852a828ed932d01a36edf562ab9e1e1a1dc9d624857aa5fc498809f8cf28",
+    "manifest": "MANIFEST.shadow-batch.json",
+    "manifest_sha256": "b8bed6fc10cb44b037b3b22c46fd346932982083a8e7b5e71400dbd03fda8e2b",
+    "files": 828,
+    "bytes": 19508352774
   },
   "source_copies": [
     {
@@ -136,7 +140,7 @@
     "tool_sha256": "c1772345fbf6298100c2f8c383a2df3e292dd7aefd6e9ec2a9ae3f2180d43931",
     "protocol": "protocol-spatial-20261026.json",
     "protocol_sha256": "7f303eb515d05845c78820db4afafeed84e83a6959c708416db8ff417d87e023",
-    "status": "Fixed before outputs; pending. No live or packaging change."
+    "status": "Both encodes complete; hashes checked. Authoring/native0/24/syntax/quality qualification NOT_RUN. See Claude handoff."
   },
   "two_pass_results": {
     "file": "results/twopass-20261026.json",
@@ -149,5 +153,29 @@
     "receipts": "results/layer-capture-20261026.json",
     "receipts_sha256": "87868a5aecc3651a5fe280de1c4eb425ceee04fd0f69fecc72684a9cdfffa144",
     "status": "48/48 canonical BL/EL/RPU/packet/clock matches M1800 retainedtrace; sourceidentity only."
-  }
+  },
+  "rate_control_archive": {
+    "directory": "20261026-shadow-rate-control",
+    "manifest": "MANIFEST.rc-batch.json",
+    "sha256": "cafd8a069a434edb200ae1ced6793578438bef921e272d553a329443fa2dee4e",
+    "files": 329,
+    "bytes": 8277823723,
+    "status": "Sealed matching snapshot. Qg8encoded but unqualified; all48 sampledRGB/metrics NOT_RUN. Original source paths retained, location map included."
+  },
+  "portable_comparison": {
+    "file": "results/rc-comparison-20261026.json",
+    "sha256": "a3387926f7f0a4047a33a56b063392588422952d88257b6f26816d8243be80ae",
+    "producer": "portable_comparison.py",
+    "producer_sha256": "111d2c0d193f412592383d710577f36104144363d1eab96267ae596d82305628",
+    "executed_source_change": "none"
+  },
+  "metadata_observer": {
+    "source": "capture_metadata.c",
+    "sha256": "ca032c44fe8a99dfe8c4c0905e687e6548986d373e219afbc0ae1a743e028c7f",
+    "executed_source_change": "none",
+    "private_receipt": "lattice-michael1800/metadata-qualification.json",
+    "private_receipt_sha256": "7b34b20973496801e798b03a3397f3f37b25251963dfe2eddfb9649eda5e0a0b",
+    "scope": "All48 native metadata rawRPUbound;0/24semanticsmatch. No latticeRGB orcandidate metrics."
+  },
+  "handoff": "docs/streaming/FEL-CLAUDE-HANDOFF.md"
 }
