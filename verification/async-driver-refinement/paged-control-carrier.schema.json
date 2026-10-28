@@ -1,0 +1,405 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "paged-control-carrier.schema.json",
+  "title": "Authenticated acyclic post-upload session control",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "async_session_control"
+    },
+    "role": {
+      "enum": [
+        "unit_checkpoint",
+        "completion"
+      ]
+    },
+    "registration_sha256": {
+      "$ref": "paged-proof.schema.json#/$defs/Sha256"
+    },
+    "source_archive_sha256": {
+      "$ref": "paged-proof.schema.json#/$defs/Sha256"
+    },
+    "source": {
+      "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+    },
+    "session_id": {
+      "$ref": "paged-proof.schema.json#/$defs/Uuid"
+    },
+    "unit_ordinal": {
+      "$ref": "paged-proof.schema.json#/$defs/Nat"
+    },
+    "origin": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "pr": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "event_base": {
+          "$ref": "paged-proof.schema.json#/$defs/Commit"
+        },
+        "workflow_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event_name": {
+          "const": "workflow_dispatch"
+        },
+        "mode": {
+          "enum": [
+            "unit",
+            "complete"
+          ]
+        },
+        "operation": {
+          "const": "execute"
+        },
+        "run": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "job": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "task": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "attempt": {
+          "const": 1
+        }
+      },
+      "required": [
+        "repository",
+        "pr",
+        "event_base",
+        "workflow_id",
+        "event_name",
+        "mode",
+        "operation",
+        "run",
+        "job",
+        "task",
+        "attempt"
+      ],
+      "additionalProperties": false
+    },
+    "previous_control_sha256": {
+      "anyOf": [
+        {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expected_prior_checkpoint": {
+      "anyOf": [
+        {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "checkpoint": {
+      "$ref": "paged-proof.schema.json#/$defs/Ref"
+    },
+    "work_unit": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "WorkUnit"
+        },
+        "record": {
+          "$ref": "paged-proof.schema.json#/$defs/WorkUnit"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    "artifact_receipts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 6
+          },
+          "kind": {
+            "const": "ArtifactReceipt"
+          },
+          "record": {
+            "$ref": "paged-proof.schema.json#/$defs/ArtifactReceipt"
+          }
+        },
+        "required": [
+          "schema_version",
+          "kind",
+          "record"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "completion": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Completion"
+            },
+            "record": {
+              "$ref": "paged-proof.schema.json#/$defs/Completion"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "postcheck": {
+      "type": "object",
+      "properties": {
+        "checked_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "source_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Commit"
+        },
+        "current_base": {
+          "$ref": "paged-proof.schema.json#/$defs/Commit"
+        },
+        "pr_state": {
+          "const": "open"
+        },
+        "draft": {
+          "const": false
+        },
+        "archived_fresh_head": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "main_receipts": {
+          "type": "array",
+          "items": {
+            "$ref": "paged-proof.schema.json#/$defs/Ref"
+          }
+        },
+        "main_conditions_sha256": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "semantic_verification": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "part_ordinal": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 31
+                },
+                "member_path": {
+                  "$ref": "paged-proof.schema.json#/$defs/RelativePath"
+                },
+                "bytes": {
+                  "$ref": "paged-proof.schema.json#/$defs/Nat"
+                },
+                "sha256": {
+                  "$ref": "paged-proof.schema.json#/$defs/Sha256"
+                }
+              },
+              "required": [
+                "part_ordinal",
+                "member_path",
+                "bytes",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "checked_at",
+        "source_commit",
+        "current_base",
+        "pr_state",
+        "draft",
+        "archived_fresh_head",
+        "main_receipts",
+        "main_conditions_sha256",
+        "semantic_verification"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "role",
+    "registration_sha256",
+    "source_archive_sha256",
+    "source",
+    "session_id",
+    "unit_ordinal",
+    "origin",
+    "previous_control_sha256",
+    "expected_prior_checkpoint",
+    "checkpoint",
+    "work_unit",
+    "artifact_receipts",
+    "completion",
+    "postcheck"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "unit_checkpoint"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "origin": {
+            "properties": {
+              "mode": {
+                "const": "unit"
+              }
+            }
+          },
+          "completion": {
+            "type": "null"
+          },
+          "postcheck": {
+            "properties": {
+              "archived_fresh_head": {
+                "type": "null"
+              },
+              "main_receipts": {
+                "maxItems": 0
+              },
+              "main_conditions_sha256": {
+                "type": "null"
+              },
+              "semantic_verification": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "origin": {
+            "properties": {
+              "mode": {
+                "const": "complete"
+              }
+            }
+          },
+          "completion": {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "const": 6
+              },
+              "kind": {
+                "const": "Completion"
+              },
+              "record": {
+                "$ref": "paged-proof.schema.json#/$defs/Completion"
+              }
+            },
+            "required": [
+              "schema_version",
+              "kind",
+              "record"
+            ],
+            "additionalProperties": false
+          },
+          "postcheck": {
+            "properties": {
+              "archived_fresh_head": {
+                "$ref": "paged-proof.schema.json#/$defs/Ref"
+              },
+              "main_conditions_sha256": {
+                "$ref": "paged-proof.schema.json#/$defs/Sha256"
+              },
+              "semantic_verification": {
+                "type": "object",
+                "properties": {
+                  "part_ordinal": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 31
+                  },
+                  "member_path": {
+                    "$ref": "paged-proof.schema.json#/$defs/RelativePath"
+                  },
+                  "bytes": {
+                    "$ref": "paged-proof.schema.json#/$defs/Nat"
+                  },
+                  "sha256": {
+                    "$ref": "paged-proof.schema.json#/$defs/Sha256"
+                  }
+                },
+                "required": [
+                  "part_ordinal",
+                  "member_path",
+                  "bytes",
+                  "sha256"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

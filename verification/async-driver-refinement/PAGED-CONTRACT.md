@@ -325,8 +325,11 @@ hash or size calculation is required.
 
 `SourceIdentity.proof_contract_sha256` hashes the canonical sorted array of
 `[repository_relative_path, sha256(exact_file_bytes)]` for PAGED-CONTRACT.md,
-paged-proof.schema.json, paged-catalog.sql, finite-inventory.json and
-paged-outcomes.json under this directory. It binds the proof-record contract,
+paged-proof.schema.json, paged-catalog.sql, finite-inventory.json,
+paged-outcomes.json, paged-catalog-transport.schema.json,
+paged-verifier-continuation.schema.json, paged-verifier-state.sql,
+source-bound-formulas.json, source-bound-receipt.schema.json and
+paged-control-carrier.schema.json under this directory. It binds the proof-record contract,
 not the production database. `Store.sqlite_schema_sha256` instead hashes the
 canonical sorted actual migrated SQLite schema inventory (installed schema objects
 and migration identities); `InitialImage.schema_inventory` references that exact
@@ -380,8 +383,8 @@ per-unit predecessor/record/byte allowances before dispatch.
 
 Admission computes source-derived per-record encoded-width bounds `B_k` from
 field/row vocabularies and measures index/WAL/scratch/manifest overhead and live
-artifact retention. For operational record allowances `n_k`, require
-`sum(n_k*B_k)+index+WAL+scratch+retained_artifacts <= admitted_disk` and
+artifact retention. For operational record count/byte allocations `n_k,b_k`, require
+`sum(n_k*b_k)+index+WAL+scratch+retained+duplicate_backups <= admitted_disk` and
 `retained_artifacts <= admitted_artifact_total`. These allowances bound resource
 use, never the accepted graph: exceeding one leaves the session incomplete.
 Separately report the finite worst-case cardinality expression `sum(N_k*B_k)`
@@ -503,3 +506,239 @@ unit artifacts/receipts, all eleven families, all seven contexts, global closure
 existing Rust/backend/source registries and current Main requirements. It emits
 one complete root consumed by exact-head Main aggregation. An incomplete old
 PR job is never relabeled success; no dummy source commit continues a session.
+
+
+## Catalog backup transport adjunct
+
+The closed auxiliary [catalog transport schema](paged-catalog-transport.schema.json)
+uses schema_version 1 and exactly `catalog_backup` and `catalog_chunk_index`
+kinds. It changes neither schema6 semantic records nor the eight interfaces.
+Its bytes are included in the explicit proof_contract_sha256 preimage above.
+
+M1 takes a SQLite backup API snapshot in bounded page steps, with all source,
+temporal and bookkeeping writers paused, after the produced Checkpoint is
+recorded and before upload receipts exist (`post_checkpoint_pre_upload`).
+The standalone backup includes committed WAL contents, private IDs, FIFO,
+allocator state and indexes; copying live database/WAL files or reconstructing
+private catalog state from semantic pages is not permitted. The checkpoint
+never references its backup. The fixed `catalog-backup/root.json` in part0
+references that already fixed checkpoint, source, raw Init, plan, semantic
+manifest/high-water/logical digest and complete backup byte digest.
+
+M4 streams the entire backup into chunks of exactly 256 MiB except the final
+positive remainder. Closed index nodes contain at most 256 children and at most
+8 MiB canonical metadata. Each node covers consecutive ordinal and byte
+intervals exactly; higher nodes reference children exactly one level lower.
+The root covers every chunk and byte, with no gap, overlap, duplicate, cycle,
+alias or conflicting member. A disk index bounds descriptor memory. Chunk
+paths and part ordinals are authenticated by all current-unit ArtifactReceipt
+members; no new Ref kind, WorkUnit field or future ZIP self-reference is added.
+Every expected part is required before the checkpoint is resumable.
+
+The registered workflow contains a finite pinned sequence of runner-native
+`uses: upload-artifact` slots in the same producer job/task. Each used slot
+has one deterministic name `async-proof-<session>-<unit>-part-<ordinal>` and
+validated member inventory. Actual part count must fit the registered slot
+count before any upload. No direct action-bundle execution, separate uploader
+task, dynamic matrix, partial-part acceptance or runtime slot increase is
+authorized. Each member is at most 256 MiB (metadata at most 8 MiB); every
+part independently respects 300 members and 512 MiB extracted/retained ZIP
+limits, including ZIP overhead. The actual registered workflow/ref/native-slot
+capability must be established before admission; the declaration proves none.
+
+Restore authenticates all part receipts and the complete index, then streams
+consecutive chunks into a fresh owned staging file, verifying per-chunk and
+whole-file bytes/hash. M1 checks SQLite integrity/foreign keys, exact installed
+catalog schema, source/session/raw Init/plan/checkpoint, commit sequence, ID and
+allocator relationships, FIFO/expansion correspondence and rooted witnesses.
+M3 independently recomputes streamed logical digest, counts, all seven context
+snapshots and semantic manifest correspondence. Only after both checks and
+closed validation handles may M4 atomically install the staged catalog with no
+active writer. Failure preserves the previous valid catalog/checkpoint.
+Production Init restoration and actual API replay remain mandatory; the backup
+is neither a live Store endpoint certificate nor semantic acceptance.
+
+The immutable admitted resource plan accounts for peak live catalog, standalone
+backup, chunk staging, packed/downloaded artifacts, restore scratch, metadata
+and retained prior artifacts. A full backup is transferred per checkpoint;
+cross-unit delta reuse is not authorized. A unit/slot/time/disk/RSS overrun
+remains incomplete and preserves prior progress. No automatic quota increase,
+source change, pruning or partial upload can satisfy continuation or Main.
+
+
+## Authenticated verifier continuation adjunct
+
+The closed [verifier continuation schema](paged-verifier-continuation.schema.json)
+has exactly five schema_version 1 envelope kinds: verifier_backup,
+verifier_chunk_index, verifier_unit_progress, verifier_check_result and
+verifier_evidence_index. Its bytes and the exact M3-owned
+[paged-verifier-state.sql](paged-verifier-state.sql) join the explicit proof
+contract preimage above. Existing schema6 records and reference kinds are unchanged.
+
+The separate verifier workDB preserves its private operation state, atomic
+execution sequence, DFS/reachability queues, results and credit links. It does
+not enter M1's authoritative catalog or allocate semantic IDs/commit sequences.
+Copied checked bits alone grant no credit. Actual authenticated executions of
+the reviewed independent checker, exact ordered input inventories and committed
+CheckResult records grant individually attributable continuation credit. An
+active quantum commits only after its full obligations succeed; interruption
+or a semantic error rolls it back. Source/temporal publication still uses M1's
+single authoritative writer and final-only singleton rules.
+
+Every verifier envelope binds exact source/session/unit/checkpoint. UnitProgress
+at verifier-progress/unit.json binds the actual attempt1 producer origin,
+input snapshot/highwater/counts/contexts, previous authenticated progress/backup,
+private before/after sequence/logical digests/cursors and bounded result root.
+The first before state is deterministic empty private schema initialization at
+commit0. Later before state equals the last authenticated after state, even
+across intervening M1-only units. Cursor operations follow M3's explicit legal
+transition graph and typed scope/input ordering; scalar ordering cannot skip
+algorithm work. No committed progress is resource_blocked unless an already
+admitted different stage has actual work. WorkUnit.progress mirrors only the
+after_cursor.position and is never coverage authority.
+
+VerifierCheckResult coverage binds exact enumerated record inputs and actual
+committed quanta; endpoints alone do not assert coverage. algorithm_checkpoint
+preserves unfinished algorithm state without semantic/SCC/TLC completion. TLC
+credit requires an exact invocation tuple over family/scope, all module/config/
+generated-table/map/runtime identities and normalized fixed argv, plus retained
+actual log/receipt bytes. Resume compares that tuple and reparses the real log
+under the original strict expected-failure rules; tags, timeout or complete:true
+metadata cannot substitute.
+
+Bounded EvidenceIndex trees have at most256 children and8MiB per metadata member.
+They bind exact current or historical unit/part/member identities, typed record
+keys, contiguous result sequences and ordered inventories. Empty roots are null
+with zero count; cycles, gaps, duplicate ownership, hidden inputs or forged
+member references fail. Restore reconciles every credit/progress row with the
+authenticated result chain and exact input preimages. Paths are rebound only
+from verified member references; derivative path indexes carry no checked credit.
+
+After committed result reconciliation, M3 computes its source-pinned table/PK
+ordered domain-separated logical digest, emits progress, then takes a bounded
+consistent SQLite backup with all writers paused. verifier-backup/root.json in
+part0 binds progress and exact workDB bytes, never a future upload receipt.
+The private SQL defines all durable digest tables, including sqlite_sequence,
+and the only allowed relocatable/external-bookkeeping exclusions. The separate
+verifier chunk/index ordinal space shares the complete current-unit part set
+and exact part count with catalog backup. Both streams, evidence, source pages
+and all retained TLC bytes fit the same32 fixed native same-task upload slots
+and immutable total resources; no extra task or automatic slot/quota increase.
+
+Before atomic installation, M3 validates the staged verifier schema/integrity/
+foreign keys/private sequence/logical digest and reconciles the authenticated
+result/coverage chain, append-only source snapshots and retained TLC invocations.
+A stale/missing/swapped result or altered checked flag rejects the snapshot,
+without selective clearing as acceptance. M1 private catalog checks and M3
+independent catalog/page checks remain separate. Final aggregation consumes
+authenticated coverage/result roots and all semantic/backend/Main conditions,
+not the last workDB's checked flags.
+
+
+## Source-bound admission certificate
+
+The explicit proof-contract preimage also includes the reviewed construction
+[source-bound-formulas.json](source-bound-formulas.json) and closed
+[source-bound receipt schema](source-bound-receipt.schema.json). M3 derives the
+complete record width/cardinality FormulaDAG from pinned source/schema/finite
+vocabulary inputs before Init creation. M4 independently checks every pinned
+operand/anchor, exact full kind inventory and closed topological arithmetic
+graph. Caller quotas cannot provide or reduce width/cardinality facts.
+
+The receipt explicitly states premise_class=reviewed_source_lemmas,
+machine_sqlite_rust_proof=false and acceptance=false. It is deterministic
+arithmetic under reviewed source lemmas, not a machine proof of SQLite/Rust or
+an empirical maximum. Every encoded contribution, escaping layer, array/row
+count, raw identifier and timestamp range needs its source derivation. Missing
+per-field work or an incomplete specification refuses admission; no i64/page
+limit or sampled fixture substitutes. Actual unit0 validates the reviewed
+Init-class premises against its migrated DB/raw settings/IDs/rows before
+expansion; mismatch invalidates the session without normalization or clipping.
+
+ResourcePlan.source_bounds_utf8 uses only the version2 canonical wrapper
+{schema_version:2,accounting_rule:operational_encoded_caps_v1,source_receipt,
+record_allowances,overhead,accounting_method_sha256,measurement_sha256}. Each
+record_allowances entry is closed {records,max_encoded_bytes}; overhead is
+closed {index_bytes,wal_bytes,scratch_bytes,retained_bytes,duplicate_backup_bytes}.
+Source receipt/specification report_role is source_global_symbolic. Global
+B_k/N_k formulas are independently checked and reported symbolically; no
+B_k<=b_k condition or n_k*B_k operational reservation remains. Operational
+counts/caps/overheads are immutable allocations under a source-pinned method,
+with explicit lifetimes/copy counts and nonsemantic mappings. Fresh measured
+overheads never claim to prove all future SQLite growth. Checked arbitrary-precision arithmetic
+retains symbolic finite-cardinality DAGs where exact expansion is impractical;
+a proven greater-than comparison never prints a truncated value as exact.
+All catalog/verifier backup, chunk, artifact, restore scratch and prior
+retention peaks remain within the one immutable admitted plan. No practical
+closure/indivisible-component fit is inferred from the certificate.
+
+The specification binds non-self source/schema operands and rule references,
+never its own final proof-contract digest. The generated receipt carries final
+SourceIdentity but is an admission input outside its own source preimage.
+Registration pins the specification, derivation algorithm and receipt schema.
+
+
+## Operational encoded-cap resource amendment
+
+This rule explicitly supersedes the earlier n_k*source-global-B_k admission
+formula and unfinished wrapper; no session was admitted under them and no
+compatibility waiver accepts both meanings. Complete global symbolic width/
+cardinality reports remain required source-coverage evidence under reviewed
+lemmas, not a tight-width theorem or practical memory reservation. In particular
+Scc arrays and Outcome component receipts may have enormous sound global bounds
+without forcing that allocation for every actual record.
+
+Admission uses n_k*b_k plus every named overhead/backup/restore/retention peak.
+The exact accounting method is pinned by registration and enumerates canonical
+records, catalog rows, private index/algorithm state, SQL index/WAL, pages,
+packing, downloads and restore copies; nonsemantic logs/scratch/backup bytes
+carry explicit operational mappings rather than fabricated source cardinalities.
+The unadmitted example intentionally leaves source receipt/measurement/method
+values null and cannot pass admission.
+
+Producers/readers enforce b_k on the full canonical outer record, including
+headers and every escaping layer, plus separate decoded-working-set/RSS limits.
+They reserve an entire atomic predecessor/private quantum before publication.
+An overrun rolls back the active transaction, leaves required demands/frontier
+unexpanded and grants no new coverage/TLC credit. Earlier safe committed
+quanta may remain unqualified progress; unuploaded local writes never advance
+the authenticated chain. Whole SCC/Outcome records and TLC components remain
+indivisible: no truncation/slicing/omitted receipt or semantic refusal hides
+resource exhaustion. n_k uses the registered unique/retained lifetime boundary;
+required graph/history/results cannot be garbage-collected to reclaim quota.
+
+Reducing operational b_k/n_k may only produce incomplete/resource_blocked, never
+a new accepted execution. No zero-progress automatic retry, silent resource
+increase, source mutation or domain/fairness change is authorized. Combined
+source/verifier backup/result staging still fits the same32 pinned native slots
+and existing256MiB member/8MiB metadata/512MiB artifact limits. Actual service
+capability and fresh owned resources remain prerequisites after final review.
+
+
+### Post-upload session control
+
+The closed [control carrier schema](paged-control-carrier.schema.json) carries
+only final WorkUnit, ArtifactReceipt and optional Completion envelopes after
+all native uploads in their actual producer task. Current ZIP members never
+contain their own final control envelopes. The canonical control has no self
+hash; its digest binds the next executed unit. A running or unsuccessful task
+never grants continuation or completion authority.
+
+The registered synchronous last required finalizer emits the unique bounded
+BEGIN/chunk/END frame between its bound FINALIZER-BEGIN and FINALIZER-DONE
+markers. Canonical base64 chunks are 2048 characters except the last; decoded
+canonical JSON is at most 8 MiB and also satisfies its admitted smaller cap.
+Consumers require exact source/event/task/attempt identity and terminal SUCCESS
+before and after retrieval, reconstruct every native artifact receipt, then
+recheck checkpoint/proof/Main and current ready PR head/base identities.
+
+For this protocol only, upload_log_sha256 hashes ASCII
+`plurx-async-upload-transaction-v1\0` followed by the validated timestamp-normalized
+native transaction lines joined by newline with one final newline. The ZIP
+hash remains separate. The transaction excludes the later control frame;
+ordinary historical receipt interpretation is unchanged. Only WorkUnit,
+ArtifactReceipt and Completion may be materialized from this carrier as
+explicit authenticated resolver roots; all other references remain uploaded
+immutable constituent members. Control framing, raw logs, base64 expansion and
+decoded working memory are operational resources, with no invented semantic
+source cardinalities.

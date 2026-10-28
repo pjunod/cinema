@@ -1,0 +1,1109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "paged-verifier-continuation.schema.json",
+  "title": "Authenticated verifier execution continuation adjunct",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/VerifierBackup"
+    },
+    {
+      "$ref": "#/$defs/VerifierChunkIndex"
+    },
+    {
+      "$ref": "#/$defs/VerifierUnitProgress"
+    },
+    {
+      "$ref": "#/$defs/VerifierCheckResult"
+    },
+    {
+      "$ref": "#/$defs/VerifierEvidenceIndex"
+    }
+  ],
+  "$defs": {
+    "VerifierBackup": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "verifier_backup"
+        },
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "previous_checkpoint_sha256": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "catalog_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "catalog_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "semantic_manifest_root": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "verifier_schema_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "verifier_algorithm_version": {
+          "const": 1
+        },
+        "verifier_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "verifier_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "previous_verifier_progress_sha256": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "progress_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "snapshot_boundary": {
+          "const": "post_verifier_commit_pre_upload"
+        },
+        "format": {
+          "const": "sqlite3"
+        },
+        "backup_method": {
+          "const": "sqlite_backup_api_v1"
+        },
+        "work_db_bytes": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "work_db_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "chunk_bytes_limit": {
+          "const": 268435456
+        },
+        "chunk_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "artifact_part_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "index_root": {
+          "$ref": "paged-catalog-transport.schema.json#/$defs/IndexRef"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "checkpoint_sha256",
+        "previous_checkpoint_sha256",
+        "resource_plan_sha256",
+        "initial_image_sha256",
+        "catalog_commit",
+        "catalog_logical_digest",
+        "semantic_manifest_root",
+        "verifier_schema_sha256",
+        "verifier_algorithm_version",
+        "verifier_commit",
+        "verifier_logical_digest",
+        "previous_verifier_progress_sha256",
+        "progress_sha256",
+        "snapshot_boundary",
+        "format",
+        "backup_method",
+        "work_db_bytes",
+        "work_db_sha256",
+        "chunk_bytes_limit",
+        "chunk_count",
+        "artifact_part_count",
+        "index_root"
+      ],
+      "additionalProperties": false
+    },
+    "VerifierChunkIndex": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "verifier_chunk_index"
+        },
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "level": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "first_chunk": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "chunk_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "offset": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "bytes": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "checkpoint_sha256",
+        "level",
+        "first_chunk",
+        "chunk_count",
+        "offset",
+        "bytes",
+        "entries"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "level": {
+                "const": 0
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "entries": {
+                "items": {
+                  "$ref": "paged-catalog-transport.schema.json#/$defs/ChunkDescriptor"
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "entries": {
+                "items": {
+                  "$ref": "paged-catalog-transport.schema.json#/$defs/IndexRef"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "VerifierUnitProgress": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "verifier_unit_progress"
+        },
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "previous_progress_sha256": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previous_backup_manifest_sha256": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "$ref": "paged-proof.schema.json#/$defs/Id"
+            },
+            "pr": {
+              "$ref": "paged-proof.schema.json#/$defs/Id"
+            },
+            "event_base": {
+              "$ref": "paged-proof.schema.json#/$defs/Commit"
+            },
+            "workflow_id": {
+              "const": "async-proof-session.yml"
+            },
+            "event_name": {
+              "const": "workflow_dispatch"
+            },
+            "mode": {
+              "enum": [
+                "unit",
+                "complete"
+              ]
+            },
+            "run": {
+              "$ref": "paged-proof.schema.json#/$defs/Id"
+            },
+            "job": {
+              "$ref": "paged-proof.schema.json#/$defs/Id"
+            },
+            "task": {
+              "$ref": "paged-proof.schema.json#/$defs/Id"
+            },
+            "attempt": {
+              "const": 1
+            },
+            "stage": {
+              "enum": [
+                "semantic_verify",
+                "monitor_scc_verify",
+                "temporal_components"
+              ]
+            }
+          },
+          "required": [
+            "repository",
+            "pr",
+            "event_base",
+            "workflow_id",
+            "event_name",
+            "mode",
+            "run",
+            "job",
+            "task",
+            "attempt",
+            "stage"
+          ],
+          "additionalProperties": false
+        },
+        "input_checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "input_catalog_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "input_catalog_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "input_manifest_root": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "input_inline_counts_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "input_contexts_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "source_closure_checkpoint_sha256": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_inventory_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verifier_schema_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "verifier_algorithm_version": {
+          "const": 1
+        },
+        "before_verifier_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "after_verifier_commit": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "before_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "after_logical_digest": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "before_cursor": {
+          "$ref": "#/$defs/Cursor"
+        },
+        "after_cursor": {
+          "$ref": "#/$defs/Cursor"
+        },
+        "result_index_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "first_result_sequence": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "result_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "committed_quantum_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "disposition": {
+          "enum": [
+            "checkpointed_incomplete",
+            "closed_unqualified"
+          ]
+        },
+        "stage_complete": {
+          "type": "boolean"
+        },
+        "acceptance": {
+          "const": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "checkpoint_sha256",
+        "resource_plan_sha256",
+        "initial_image_sha256",
+        "previous_progress_sha256",
+        "previous_backup_manifest_sha256",
+        "origin",
+        "input_checkpoint_sha256",
+        "input_catalog_commit",
+        "input_catalog_logical_digest",
+        "input_manifest_root",
+        "input_inline_counts_sha256",
+        "input_contexts_sha256",
+        "source_closure_checkpoint_sha256",
+        "input_inventory_root",
+        "verifier_schema_sha256",
+        "verifier_algorithm_version",
+        "before_verifier_commit",
+        "after_verifier_commit",
+        "before_logical_digest",
+        "after_logical_digest",
+        "before_cursor",
+        "after_cursor",
+        "result_index_root",
+        "first_result_sequence",
+        "result_count",
+        "committed_quantum_count",
+        "disposition",
+        "stage_complete",
+        "acceptance"
+      ],
+      "additionalProperties": false
+    },
+    "VerifierCheckResult": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "verifier_check_result"
+        },
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "result_sequence": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "resource_plan_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "initial_image_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "input_root": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "before_cursor": {
+          "$ref": "#/$defs/Cursor"
+        },
+        "after_cursor": {
+          "$ref": "#/$defs/Cursor"
+        },
+        "first_quantum": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "quantum_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "claim": {
+          "enum": [
+            "semantic_range_checked",
+            "monitor_range_checked",
+            "scc_scope_checked",
+            "algorithm_checkpoint",
+            "temporal_publication_checked",
+            "tlc_completed"
+          ]
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "record_kind": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "lower_exclusive": {
+              "anyOf": [
+                {
+                  "$ref": "paged-proof.schema.json#/$defs/RecordKey"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "upper_inclusive": {
+              "anyOf": [
+                {
+                  "$ref": "paged-proof.schema.json#/$defs/RecordKey"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "count": {
+              "$ref": "paged-proof.schema.json#/$defs/Nat"
+            },
+            "scope": {
+              "$ref": "#/$defs/Scope"
+            }
+          },
+          "required": [
+            "record_kind",
+            "lower_exclusive",
+            "upper_inclusive",
+            "count",
+            "scope"
+          ],
+          "additionalProperties": false
+        },
+        "input_inventory_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_inventory_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tlc": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "invocation_key": {
+                  "$ref": "paged-proof.schema.json#/$defs/Sha256"
+                },
+                "family": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "module": {
+                  "$ref": "paged-proof.schema.json#/$defs/RelativePath"
+                },
+                "module_closure_root": {
+                  "$ref": "#/$defs/EvidenceRef"
+                },
+                "config_sha256": {
+                  "$ref": "paged-proof.schema.json#/$defs/Sha256"
+                },
+                "generated_inputs_root": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/EvidenceRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "local_id_map_sha256": {
+                  "$ref": "paged-proof.schema.json#/$defs/Sha256"
+                },
+                "java_sha256": {
+                  "$ref": "paged-proof.schema.json#/$defs/Sha256"
+                },
+                "jar_sha256": {
+                  "$ref": "paged-proof.schema.json#/$defs/Sha256"
+                },
+                "argv_sha256": {
+                  "$ref": "paged-proof.schema.json#/$defs/Sha256"
+                },
+                "heap_bytes": {
+                  "const": 4294967296
+                },
+                "workers": {
+                  "const": 1
+                },
+                "maximum_seconds": {
+                  "const": 1800
+                },
+                "exit_code": {
+                  "type": "integer"
+                },
+                "first_failure": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "complete": {
+                  "const": true
+                },
+                "receipt_member": {
+                  "$ref": "#/$defs/Member"
+                },
+                "log_member": {
+                  "$ref": "#/$defs/Member"
+                }
+              },
+              "required": [
+                "invocation_key",
+                "family",
+                "module",
+                "module_closure_root",
+                "config_sha256",
+                "generated_inputs_root",
+                "local_id_map_sha256",
+                "java_sha256",
+                "jar_sha256",
+                "argv_sha256",
+                "heap_bytes",
+                "workers",
+                "maximum_seconds",
+                "exit_code",
+                "first_failure",
+                "complete",
+                "receipt_member",
+                "log_member"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "checkpoint_sha256",
+        "result_sequence",
+        "resource_plan_sha256",
+        "initial_image_sha256",
+        "input_root",
+        "before_cursor",
+        "after_cursor",
+        "first_quantum",
+        "quantum_count",
+        "claim",
+        "coverage",
+        "input_inventory_root",
+        "output_inventory_root",
+        "tlc"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "claim": {
+                "const": "tlc_completed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "tlc": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "tlc": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "VerifierEvidenceIndex": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "verifier_evidence_index"
+        },
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "session_id": {
+          "$ref": "paged-proof.schema.json#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "checkpoint_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "purpose": {
+          "enum": [
+            "inputs",
+            "outputs",
+            "results"
+          ]
+        },
+        "level": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "first_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "item_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "source",
+        "session_id",
+        "unit_ordinal",
+        "checkpoint_sha256",
+        "purpose",
+        "level",
+        "first_ordinal",
+        "item_count",
+        "entries"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "level": {
+                "const": 0
+              }
+            }
+          },
+          "then": {
+            "if": {
+              "properties": {
+                "purpose": {
+                  "const": "results"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "entries": {
+                  "items": {
+                    "$ref": "#/$defs/ResultEntry"
+                  }
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "entries": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/$defs/RecordEntry"
+                      },
+                      {
+                        "$ref": "#/$defs/MemberEntry"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "entries": {
+                "items": {
+                  "$ref": "#/$defs/EvidenceRef"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Member": {
+      "type": "object",
+      "properties": {
+        "unit_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "part_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "member_path": {
+          "$ref": "paged-proof.schema.json#/$defs/RelativePath"
+        },
+        "bytes": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "unit_ordinal",
+        "part_ordinal",
+        "member_path",
+        "bytes",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "EvidenceRef": {
+      "type": "object",
+      "properties": {
+        "member": {
+          "$ref": "#/$defs/Member"
+        },
+        "level": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "first_ordinal": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        },
+        "item_count": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        }
+      },
+      "required": [
+        "member",
+        "level",
+        "first_ordinal",
+        "item_count"
+      ],
+      "additionalProperties": false
+    },
+    "Scope": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Context"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "property": {
+          "anyOf": [
+            {
+              "enum": [
+                "seen_goal_false",
+                "pending_true",
+                "capacity_ok_pending_true"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "obligation": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Obligation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_root": {
+          "anyOf": [
+            {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "family": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "context",
+        "property",
+        "obligation",
+        "input_root",
+        "family"
+      ],
+      "additionalProperties": false
+    },
+    "Cursor": {
+      "type": "object",
+      "properties": {
+        "stage": {
+          "enum": [
+            "semantic_verify",
+            "monitor_scc_verify",
+            "temporal_components"
+          ]
+        },
+        "operation": {
+          "enum": [
+            "materialize_store",
+            "materialize_oracle",
+            "materialize_product",
+            "seed_fifo",
+            "check_expansion",
+            "source_reachability",
+            "source_finish",
+            "produce_monitor",
+            "check_monitor_node",
+            "check_monitor_edge",
+            "check_monitor_successors",
+            "monitor_reachability",
+            "select_view",
+            "dfs_forward",
+            "dfs_reverse",
+            "condensation_rank",
+            "build_tree",
+            "check_scc",
+            "fair_search",
+            "publish_temporal",
+            "one_step_tlc",
+            "component_tlc",
+            "boundary_tlc",
+            "family_finish",
+            "stage_finish"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "position": {
+          "$ref": "paged-proof.schema.json#/$defs/ProgressCursor"
+        },
+        "quantum": {
+          "$ref": "paged-proof.schema.json#/$defs/Nat"
+        }
+      },
+      "required": [
+        "stage",
+        "operation",
+        "scope",
+        "position",
+        "quantum"
+      ],
+      "additionalProperties": false
+    },
+    "RecordEntry": {
+      "type": "object",
+      "properties": {
+        "entry_kind": {
+          "const": "record"
+        },
+        "record_kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "key": {
+          "$ref": "paged-proof.schema.json#/$defs/RecordKey"
+        },
+        "sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "entry_kind",
+        "record_kind",
+        "key",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "MemberEntry": {
+      "type": "object",
+      "properties": {
+        "entry_kind": {
+          "const": "member"
+        },
+        "member": {
+          "$ref": "#/$defs/Member"
+        }
+      },
+      "required": [
+        "entry_kind",
+        "member"
+      ],
+      "additionalProperties": false
+    },
+    "ResultEntry": {
+      "type": "object",
+      "properties": {
+        "entry_kind": {
+          "const": "result"
+        },
+        "result_sequence": {
+          "$ref": "paged-proof.schema.json#/$defs/Id"
+        },
+        "member": {
+          "$ref": "#/$defs/Member"
+        }
+      },
+      "required": [
+        "entry_kind",
+        "result_sequence",
+        "member"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

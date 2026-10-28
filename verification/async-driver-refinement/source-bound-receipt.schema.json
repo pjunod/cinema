@@ -1,0 +1,390 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source-bound-receipt.schema.json",
+  "title": "Reviewed source-lemma width and finite-cardinality derivation",
+  "$defs": {
+    "SourceBoundReceipt": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "source_bound_receipt"
+        },
+        "source": {
+          "$ref": "paged-proof.schema.json#/$defs/SourceIdentity"
+        },
+        "specification_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "finite_inventory_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "record_schemas": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "$ref": "paged-proof.schema.json#/$defs/RelativePath"
+              },
+              "sha256": {
+                "$ref": "paged-proof.schema.json#/$defs/Sha256"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "algorithm_version": {
+          "const": 1
+        },
+        "premise_class": {
+          "const": "reviewed_source_lemmas"
+        },
+        "machine_sqlite_rust_proof": {
+          "const": false
+        },
+        "init_class": {
+          "type": "object",
+          "properties": {
+            "specification_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "specification_sha256": {
+              "$ref": "paged-proof.schema.json#/$defs/Sha256"
+            },
+            "predicates": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "specification_id",
+            "specification_sha256",
+            "predicates"
+          ],
+          "additionalProperties": false
+        },
+        "primitive_bindings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rule_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_path": {
+                "$ref": "paged-proof.schema.json#/$defs/RelativePath"
+              },
+              "source_sha256": {
+                "$ref": "paged-proof.schema.json#/$defs/Sha256"
+              },
+              "anchor": {
+                "type": "string",
+                "minLength": 1
+              },
+              "value": {
+                "type": "string",
+                "pattern": "^(?:0|[1-9][0-9]*)$"
+              }
+            },
+            "required": [
+              "id",
+              "rule_id",
+              "source_path",
+              "source_sha256",
+              "anchor",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "formulas": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "op": {
+                    "const": "literal"
+                  },
+                  "value": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$"
+                  }
+                },
+                "required": [
+                  "id",
+                  "op",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "op": {
+                    "const": "ref"
+                  },
+                  "primitive_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "op",
+                  "primitive_id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "op": {
+                    "enum": [
+                      "add",
+                      "multiply",
+                      "max"
+                    ]
+                  },
+                  "args": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "op",
+                  "args"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "op": {
+                    "const": "power"
+                  },
+                  "base": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "exponent": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "op",
+                  "base",
+                  "exponent"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "records": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "record_kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "encoded_width_formula": {
+                "type": "string",
+                "minLength": 1
+              },
+              "finite_cardinality_formula": {
+                "type": "string",
+                "minLength": 1
+              },
+              "premise_ids": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "required": [
+              "record_kind",
+              "encoded_width_formula",
+              "finite_cardinality_formula",
+              "premise_ids"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "complete_kind_inventory_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "acceptance": {
+          "const": false
+        },
+        "report_role": {
+          "const": "source_global_symbolic"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "source",
+        "specification_sha256",
+        "finite_inventory_sha256",
+        "record_schemas",
+        "algorithm_version",
+        "premise_class",
+        "machine_sqlite_rust_proof",
+        "init_class",
+        "primitive_bindings",
+        "formulas",
+        "records",
+        "complete_kind_inventory_sha256",
+        "acceptance",
+        "report_role"
+      ],
+      "additionalProperties": false
+    },
+    "OperationalResourceBounds": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "accounting_rule": {
+          "const": "operational_encoded_caps_v1"
+        },
+        "source_receipt": {
+          "$ref": "#/$defs/SourceBoundReceipt"
+        },
+        "record_allowances": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "records": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_encoded_bytes": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "records",
+              "max_encoded_bytes"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "overhead": {
+          "type": "object",
+          "properties": {
+            "index_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "wal_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "scratch_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "retained_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "duplicate_backup_bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "index_bytes",
+            "wal_bytes",
+            "scratch_bytes",
+            "retained_bytes",
+            "duplicate_backup_bytes"
+          ],
+          "additionalProperties": false
+        },
+        "accounting_method_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        },
+        "measurement_sha256": {
+          "$ref": "paged-proof.schema.json#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "schema_version",
+        "accounting_rule",
+        "source_receipt",
+        "record_allowances",
+        "overhead",
+        "accounting_method_sha256",
+        "measurement_sha256"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SourceBoundReceipt"
+    },
+    {
+      "$ref": "#/$defs/OperationalResourceBounds"
+    }
+  ]
+}
