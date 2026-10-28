@@ -68,7 +68,7 @@ This builds the Debian source package and `plurx-player_<version>_amd64.deb` in 
 
 **How the build works.**
 
-1. **Environment.** `packaging/upstream.lock` pins an apt snapshot timestamp. `packaging/apt-snapshot.sh` points apt at `snapshot.ubuntu.com` at that time, so every package in the build and verification containers is the one that was current then, whenever the build runs.
+1. **Environment.** `packaging/upstream.lock` pins an apt snapshot timestamp. `packaging/apt-snapshot.sh` points apt at `snapshot.ubuntu.com` at that time, so every package in the build and verification containers is the one that was current then, whenever the build runs. `build-deb.sh` mounts a cache of that snapshot's apt indexes and packages into every container (`target/linux-player-apt-cache`, or `PLURX_DEB_APT_CACHE`), and apt retries the snapshot service's 503s: once the indexes have been fetched and verified in full, later builds reuse them without contacting the mirror. One build at a time uses a cache.
 2. **Sources.** The lock also pins libplacebo 7.387.0 and an mpv master commit (the first with Dolby Vision FEL composition; Ubuntu 26.10 ships 7.360.1 and 0.41.0), by URL and sha256. `packaging/fetch-sources.sh` makes the launcher orig tarball reproducibly, fetches the upstream tarballs, refuses a checksum mismatch, and checks that the changelog's upstream version ends in `+lp<libplacebo>.mpv<mpv>`. `dpkg-source -b` then makes the source package.
 3. **Build.** In the unpacked source package, `dpkg-buildpackage` runs `debian/rules`, which calls `packaging/build-private.sh`:
    - each component is copied, made a git repository tagged `v<version>-plurx`, and patched with its series by `packaging/apply-series.sh`;

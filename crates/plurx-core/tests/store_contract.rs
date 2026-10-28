@@ -24499,7 +24499,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("busy-engine"),
                     11,
                     1011,
-                    true
+                    true,
+                    false
                 )
                 .await
                 .expect("busy claim")
@@ -24546,7 +24547,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("other-engine"),
                     13,
                     1013,
-                    true
+                    true,
+                    false
                 )
                 .await
                 .expect("wrong engine")
@@ -24554,7 +24556,14 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
             "{backend}"
         );
         let claimed = store
-            .claim_analysis_request_for_capacity("busy-node", Some("busy-engine"), 14, 1014, true)
+            .claim_analysis_request_for_capacity(
+                "busy-node",
+                Some("busy-engine"),
+                14,
+                1014,
+                true,
+                false,
+            )
             .await
             .expect("viewer claim")
             .expect("viewer source read admitted");
@@ -24579,7 +24588,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("busy-engine"),
                     120013,
                     121013,
-                    true
+                    true,
+                    false
                 )
                 .await
                 .expect("expired viewer claim")
@@ -24593,6 +24603,7 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     Some("busy-engine"),
                     120014,
                     121014,
+                    false,
                     false
                 )
                 .await
@@ -24602,6 +24613,224 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
         );
     })
     .await;
+}
+
+/// Lab3 (2026-10-26): 104 active requests targeted a node removed from the
+/// cluster. Nothing but a request's target claims it, so they stayed active,
+/// counted against the queue's ceiling, for good. Removal retires them; a
+/// learner's targeted-only claim never takes untargeted work.
+#[tokio::test]
+async fn removing_a_node_retires_only_its_active_analysis_requests() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "removed-node-analysis").await;
+        let request = |id: &str, target: &str, generation: &str| NewAnalysisRequest {
+            request_id: id.into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "removal-engine".into(),
+            video_identity: String::new(),
+            requested_generation: generation.into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: target.into(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        for (id, target, generation) in [
+            ("gone-a", "gone-node", "removal-a"),
+            ("gone-b", "gone-node", "removal-b"),
+            ("kept", "kept-node", "removal-c"),
+        ] {
+            store
+                .enqueue_analysis_request(&request(id, target, generation))
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {id}: {error}"));
+        }
+        let running = store
+            .claim_analysis_request_for_capacity(
+                "gone-node",
+                Some("removal-engine"),
+                11,
+                1011,
+                false,
+                true,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the removed node held a claim"));
+        assert_eq!(
+            store
+                .retire_analysis_requests_for_node("gone-node", 20)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: retire: {error}")),
+            2,
+            "{backend}: its queued and its running request"
+        );
+        for id in ["gone-a", "gone-b"] {
+            let row = store
+                .analysis_request(id)
+                .await
+                .expect("read")
+                .expect("row");
+            assert_eq!(row.state, "cancelled", "{backend}: {id}");
+            assert_eq!(row.last_error_code, "node_removed", "{backend}: {id}");
+        }
+        let attempts = store
+            .analysis_attempts(&running.request_id, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: attempts: {error}"));
+        assert_eq!(attempts[0].phase, "canceled", "{backend}");
+        assert_eq!(
+            store
+                .analysis_request("kept")
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "queued",
+            "{backend}: another node's request is untouched"
+        );
+        assert_eq!(
+            store
+                .retire_analysis_requests_for_node("gone-node", 21)
+                .await
+                .expect("again"),
+            0,
+            "{backend}"
+        );
+
+        // The retired claim keeps its lease-bound source reservation, as any
+        // cancelled reader does, so the claims below come after its lease.
+        let (_, other_file) = seed_file(&store, "untargeted-analysis").await;
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "untargeted".into(),
+                file_id: other_file,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "skip_markers".to_owned(),
+                pipeline_version: "chapter-classifier-v1".to_owned(),
+                video_identity: String::new(),
+                requested_generation: "untargeted-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "admin".to_owned(),
+                force_rebuild: false,
+                target_node_id: String::new(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: untargeted: {error}"));
+        assert!(
+            store
+                .claim_analysis_request_for_capacity("lonely-node", None, 2_000, 3_000, false, true)
+                .await
+                .expect("targeted-only claim")
+                .is_none(),
+            "{backend}: a targeted-only claim leaves untargeted work"
+        );
+        assert_eq!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "lonely-node",
+                    None,
+                    2_001,
+                    3_001,
+                    false,
+                    false
+                )
+                .await
+                .expect("claim")
+                .expect("untargeted work")
+                .request_id,
+            "untargeted",
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+/// Review of #1299: the voters' settle pass retires the active requests of a
+/// node membership has already removed -- the rows a removal predating the
+/// retirement left behind (104 on lab3).
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn hiqlite_settle_retires_requests_of_a_node_membership_removed() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let raw = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect raw replicated client");
+    raw.execute(
+        "CREATE TABLE IF NOT EXISTS cluster_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER)",
+        hiqlite::params!(),
+    )
+    .await
+    .expect("the membership table");
+    raw.execute(
+        "INSERT INTO cluster_nodes (node_id, removed_at) VALUES ($1, $2)",
+        hiqlite::params!("removed-node", 5_i64),
+    )
+    .await
+    .expect("a removed node");
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (_, file_id) = seed_file(&store, "settle-removed").await;
+    for (id, target, generation) in [
+        ("settle-removed", "removed-node", "settle-removed-a"),
+        ("settle-kept", "kept-node", "settle-removed-b"),
+    ] {
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: id.into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "settle-engine".into(),
+                video_identity: String::new(),
+                requested_generation: generation.into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: target.into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("enqueue");
+    }
+    store.settle_analysis_requests(20).await.expect("settle");
+    let removed = store
+        .analysis_request("settle-removed")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(removed.state, "cancelled");
+    assert_eq!(removed.last_error_code, "node_removed");
+    assert_eq!(
+        store
+            .analysis_request("settle-kept")
+            .await
+            .expect("read")
+            .expect("row")
+            .state,
+        "queued"
+    );
 }
 
 #[tokio::test]

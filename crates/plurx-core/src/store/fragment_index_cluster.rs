@@ -1772,6 +1772,13 @@ pub struct AnalysisHistoryPage {
 /// other producer needs to be able to enqueue into at all.
 pub const MAX_ACTIVE_ANALYSIS_REQUESTS: i64 = 4_096;
 
+/// Room above [`MAX_ACTIVE_ANALYSIS_REQUESTS`] that only a viewer's own
+/// request may use: copy preparation (`priority = foreground`,
+/// `trigger = playback`) and a viewer's subtitle source (`foreground`). Background discovery that filled the queue to the ceiling refused
+/// the one request a waiting viewer needed; the ceiling still bounds the
+/// background producers, and this bounds the viewers.
+pub const PLAYBACK_ANALYSIS_HEADROOM: i64 = 256;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalysisStatusSummary {
     pub total: i64,
@@ -1991,6 +1998,7 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
             now_ms,
             lease_expires_ms,
             false,
+            false,
         )
         .await
     }
@@ -1998,6 +2006,10 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     /// A busy playback node may attest only work with an unexpired viewer.
     /// Both candidate selection and the fenced claim recheck that interest;
     /// ordinary maintenance remains idle-only and consumes no retry attempt.
+    ///
+    /// `targeted_only` limits the claim to requests naming `node_id`: a
+    /// learner resolves what is targeted at it, and leaves the untargeted
+    /// requests any node may take to the voters.
     async fn claim_analysis_request_for_capacity(
         &self,
         node_id: &str,
@@ -2005,7 +2017,19 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         now_ms: i64,
         lease_expires_ms: i64,
         viewer_only: bool,
+        targeted_only: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Retire the active (queued, running or submitted) requests targeted at
+    /// `node_id`, which membership has removed: nothing but the target ever
+    /// claims a targeted request, so they would otherwise stay active --
+    /// counted against [`MAX_ACTIVE_ANALYSIS_REQUESTS`] -- for good. Each is
+    /// cancelled with `node_removed`; returns how many.
+    async fn retire_analysis_requests_for_node(
+        &self,
+        node_id: &str,
+        now_ms: i64,
+    ) -> Result<u64, StoreError>;
 
     async fn renew_analysis_request(
         &self,

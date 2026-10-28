@@ -1,3 +1,48 @@
+plurx-player (0.3.2+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Profile 7 titles from plurx now play with their full enhancement layer.
+    Everything plurx streams arrives through mpv's FFmpeg demuxer, which
+    keeps the stream's hvcC where the enhancement-layer split did not look,
+    so the split read the samples as Annex B, found no layer, and mpv
+    buffered about 150 MB waiting for one before showing the base layer
+    alone. Local Matroska files were unaffected.
+  * A title the server is still preparing (it streams a live presentation
+    from where playback started) shows the whole film on the seek bar, and
+    a seek anywhere in it works: mpv's OSC draws the film timeline the
+    launcher gives it (new mpv patch 0005), seeks inside what the stream
+    holds stay in mpv (--force-seekable), and one outside it starts the
+    stream again at that point.
+  * The package build keeps the pinned snapshot's apt indexes and packages
+    in a cache shared by its containers, and retries the snapshot service's
+    503s, so a rebuild does not depend on snapshot.ubuntu.com being up.
+  * Closed-form equations unchanged: tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Tue, 27 Oct 2026 05:00:00 +0000
+
+plurx-player (0.3.1+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * The player window no longer opens black and closes on an NVIDIA GPU.
+    The NVIDIA driver (615) gives an sRGB swapchain a Wayland colour
+    surface of its own and keeps it after that swapchain is gone, so mpv's
+    request for the window's colour surface, made when the HDR video
+    arrives, ended the Wayland connection. Wayland swapchains now start
+    pass-through, so mpv is the only one that describes the window.
+  * Opened from Chrome, the launcher finds the desktop's display even when
+    xdg-desktop-portal started it without one: it takes WAYLAND_DISPLAY,
+    DISPLAY, XAUTHORITY, XDG_SESSION_TYPE and XDG_CURRENT_DESKTOP from the
+    user session, and nothing else.
+  * A title with video that mpv cannot open a window for fails with a
+    dialog instead of playing its audio with no picture.
+  * Every control exchange carries the player's capabilities, as the
+    playback control protocol requires, and the server knows a Linux
+    client (it answered 400 and then 409 before).
+  * Profile 7 titles arrive with both layers once the server is on this
+    release's plurx: a copy used to narrow every dual-layer source to its
+    HDR10 base, even for a client that names Profile 7.
+  * Closed-form equations unchanged: tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Mon, 26 Oct 2026 23:00:00 +0000
+
 plurx-player (0.3.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
 
   * Profile 7 FEL titles play with their full enhancement layer, composed

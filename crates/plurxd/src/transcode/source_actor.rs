@@ -1904,6 +1904,7 @@ fn source_native_presentation(
                 transcode_audio: facts.aac,
                 preserve_dolby_vision: facts.preserve_dolby_vision,
                 convert_dolby_vision: facts.convert_dolby_vision,
+                dual_layer_as_copied: false,
             },
             Some(probe),
         );

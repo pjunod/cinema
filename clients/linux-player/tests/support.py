@@ -289,6 +289,10 @@ class MpvFiles:
         with open(os.path.join(self.dir, "env.json"), encoding="utf-8") as handle:
             return json.load(handle)
 
+    def display(self):
+        with open(os.path.join(self.dir, "display.json"), encoding="utf-8") as handle:
+            return json.load(handle)
+
 
 class LauncherCase(unittest.TestCase):
     """One fake server, one fake mpv, one virtual clock, a private config and runtime dir."""
@@ -332,10 +336,12 @@ class LauncherCase(unittest.TestCase):
         self.confirms.append(origin)
         return False
 
-    def run_launcher(self, url=None, confirm=None, extra=(), timing=None, error=None):
+    def run_launcher(self, url=None, confirm=None, extra=(), timing=None, error=None,
+                     session_environment=""):
         deps = Deps(confirm=confirm or self.refuse, error=error or self.errors.append, clock=self.clock,
                     sleep=self.clock.sleep, timing=timing or Timing(), config_dir=self.config,
-                    runtime_dir=self.runtime, install_signals=False)
+                    runtime_dir=self.runtime, install_signals=False,
+                    session_environment=lambda: session_environment)
         return main([url or self.server.url(), "--mpv", self.wrapper, *extra], deps)
 
     def close_at(self, when):

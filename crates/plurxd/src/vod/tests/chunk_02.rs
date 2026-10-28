@@ -1010,6 +1010,7 @@
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         serve
             .try_create(
@@ -1280,6 +1281,7 @@
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
         serve
             .try_create(

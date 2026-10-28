@@ -11,7 +11,7 @@ const sourceOptions=()=>({version:1,file_id:FILE,source_size:"9007199254740995",
 const translationResult=()=>({file_id:FILE,subtitle_index:3,downloaded_subtitle_id:CAPTION,language:"en"});
 const decision=()=>({subtitles:[{index:7,source:"downloaded",text:true,language:"en",title:"Translated English",downloaded_subtitle_id:CAPTION}]});
 const response=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{"content-type":"application/json"}});
-function element(){return Object.assign(new EventTarget(),{textContent:"",innerHTML:"",hidden:false,disabled:false,isConnected:true,value:"",checked:false,children:[],dataset:{},classList:{contains:()=>false},appendChild(child){this.children.push(child);},replaceChildren(...children){this.children=children;},querySelector(selector){return this.fields?.[selector]||null;},querySelectorAll(){return [];},focus(){},scrollIntoView(){},setAttribute(){},hasAttribute(){return false;}});}
+function element(){return Object.assign(new EventTarget(),{textContent:"",innerHTML:"",hidden:false,disabled:false,isConnected:true,value:"",checked:false,children:[],dataset:{},classList:{contains:()=>false,add(){},remove(){},toggle(){}},appendChild(child){this.children.push(child);},replaceChildren(...children){this.children=children;},querySelector(selector){return this.fields?.[selector]||null;},querySelectorAll(){return [];},focus(){},scrollIntoView(){},setAttribute(){},hasAttribute(){return false;}});}
 function harness(kind="local"){
   let timer=0;const timers=new Map(),calls=[],selected=[],panel=element(),setup=element(),shared=element(),video=element(),fields={};
   const schedule=(run,delay,repeat=false)=>{const id=++timer;timers.set(id,{run,delay,repeat});return id;};

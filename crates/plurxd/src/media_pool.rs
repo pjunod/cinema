@@ -1964,6 +1964,7 @@ pub(crate) async fn prepared_vod_owner(
                 aac,
                 preserve_dolby_vision,
                 convert_dolby_vision,
+                ..
             } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
             crate::transcode::SessionKind::Transcode { .. } => None,
         },
