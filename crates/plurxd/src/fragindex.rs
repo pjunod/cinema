@@ -1394,6 +1394,7 @@ struct IndexPass {
 /// The scan can only ever add an answer. It never touches the pass's argv,
 /// descriptors or exit status; it is kept only when the pass's lead output
 /// built, and killed otherwise.
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub(crate) struct DvTitleRide {
     tools: Arc<crate::vodencode::dv_runtime::ToolSet>,
@@ -1421,9 +1422,9 @@ pub(crate) struct PendingDvTitle {
     pub(crate) stats: plurx_core::scan::dv_title::DvTitleStats,
 }
 
+#[cfg(target_os = "linux")]
 impl DvTitleRide {
     /// A title the scanner covers, on a node with the processing bundle.
-    #[cfg(target_os = "linux")]
     async fn for_file(file: &MediaFile, stream_index: u32) -> Option<Self> {
         let facts = &file.dolby_vision;
         if !matches!(file.video_codec.as_deref(), Some("hevc"))
@@ -1447,7 +1448,6 @@ impl DvTitleRide {
 
     /// Start the scanner on a duplicate of the pass's held source. The task
     /// owns the scanner: dropping or aborting it kills the child.
-    #[cfg(target_os = "linux")]
     fn spawn(&self, source: &std::fs::File, wall_time: Duration) -> Option<DvTitleScan> {
         let held = match source.try_clone() {
             Ok(held) => held,
@@ -1484,7 +1484,6 @@ impl DvTitleRide {
 
     /// The scan's aggregate when the pass's lead output built; anything else
     /// keeps nothing, and the title's own job reads the file itself.
-    #[cfg(target_os = "linux")]
     async fn finish(
         &self,
         file_id: i64,
@@ -1522,6 +1521,7 @@ impl DvTitleRide {
 }
 
 /// Judge the companion scan's output exactly as the title job judges its own.
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn dv_title_aggregate(
     output: &plurx_core::process::bounded::Output,
     scanner_current: bool,
