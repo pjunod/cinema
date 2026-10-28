@@ -136,7 +136,7 @@ impl NodeResourceRuntime {
         if !Arc::ptr_eq(selected, &owner.state) {
             return Err(OperationError::State);
         }
-        let (binding, durable, cancel_without_unknown) = {
+        let (binding, durable, cancel_without_physical_receipt) = {
             let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
             let role = bundle.roles.get(index).ok_or(OperationError::State)?;
             if bundle.id != owner.id
@@ -151,13 +151,18 @@ impl NodeResourceRuntime {
             {
                 return Err(OperationError::State);
             }
-            let cancel_without_unknown = if unaccepted {
+            let cancel_without_physical_receipt = if unaccepted {
                 if !finite_prepare_definitely_unaccepted(&bundle)
                     || !finite_unaccepted_payload_closed(role)
                 {
                     return Err(OperationError::State);
                 }
-                true
+                // The original actual absence receipt remains here after the
+                // sealed graph's conservative Drop marks its entry held. That
+                // mark is not new native uncertainty. Only this proven branch
+                // may use the receipt after every application owner is gone;
+                // a generic CancelPrepared still has no physical receipt.
+                false
             } else {
                 let transition = role.transition.as_ref().ok_or(OperationError::State)?;
                 if !bundle.installed
@@ -173,7 +178,11 @@ impl NodeResourceRuntime {
                 }
                 transition.effect == Effect::Cancel
             };
-            (role.binding, role.durable_tag, cancel_without_unknown)
+            (
+                role.binding,
+                role.durable_tag,
+                cancel_without_physical_receipt,
+            )
         };
         let entry = ledger
             .entries
@@ -182,7 +191,7 @@ impl NodeResourceRuntime {
         if entry.binding != binding
             || entry.durable != Some(durable)
             || ledger.used.checked_sub(entry.resources).is_none()
-            || (cancel_without_unknown && entry.state == ReservationState::UnknownHeld)
+            || (cancel_without_physical_receipt && entry.state == ReservationState::UnknownHeld)
         {
             return Err(OperationError::State);
         }
