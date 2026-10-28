@@ -1,0 +1,361 @@
+{
+  "schema_version": 6,
+  "kind": "normative_outcome_mapping",
+  "status": "M0 contract; implementation and acceptance pending",
+  "source_bindings": {
+    "verification/async-driver-refinement/checker.py": "0103695e2e4676dd67851c387d9d9b1e14f4d39bff3c19001fdfc0a2b3439f6e",
+    "verification/async-driver-refinement/AsyncDriverRefinement.tla": "c86cc8bd2915e2540071bf060def535e565e8f6002b79129f0c83cc8cbdaf12a"
+  },
+  "contexts": [
+    "base",
+    "stable",
+    "weak_admission",
+    "no_claim_win",
+    "withheld_join",
+    "old_poll_policy",
+    "drop_before_join"
+  ],
+  "families": [
+    {
+      "family": "safety",
+      "source_config": "safety.cfg",
+      "source_descriptor": {
+        "stable": false,
+        "mutation": "none",
+        "invariants": [
+          "ImportedOracleSafety",
+          "TypeOK",
+          "NoTwoSourceReaders",
+          "ResultAtomicity",
+          "LastRequestAtomicRetirement",
+          "ReservationConservation",
+          "NoStaleCommit",
+          "MonotoneFence",
+          "AdmissionUntilJoined",
+          "JoinBeforeRelease",
+          "NoFictitiousRelease",
+          "GuardBeforeRevoke"
+        ],
+        "properties": [],
+        "expected": null
+      },
+      "context": "base",
+      "scope": "complete_verified_context",
+      "expected_result": "pass",
+      "expected_first_failure": null,
+      "required_coverage_invariants": [
+        "DemandCovered",
+        "CapacityAgrees",
+        "CertifiedReachable",
+        "CertificateNextAgreement",
+        "FairPairAgreement",
+        "FairEnablednessAgreement"
+      ],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "cleanup",
+      "source_config": "cleanup.cfg",
+      "source_descriptor": {
+        "stable": false,
+        "mutation": "none",
+        "invariants": [
+          "Safety"
+        ],
+        "properties": [
+          "ConditionalAttemptCleanup"
+        ],
+        "expected": null
+      },
+      "context": "base",
+      "scope": "complete_verified_context",
+      "expected_result": "pass",
+      "expected_first_failure": null,
+      "required_coverage_invariants": [
+        "DemandCovered",
+        "CapacityAgrees",
+        "CertifiedReachable",
+        "CertificateNextAgreement",
+        "FairPairAgreement",
+        "FairEnablednessAgreement"
+      ],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "selected-success",
+      "source_config": "selected-success.cfg",
+      "source_descriptor": {
+        "stable": true,
+        "mutation": "none",
+        "invariants": [
+          "Safety"
+        ],
+        "properties": [
+          "ConditionalAttemptCleanup",
+          "BothSelectedCompletion"
+        ],
+        "expected": null
+      },
+      "context": "stable",
+      "scope": "complete_verified_context",
+      "expected_result": "pass",
+      "expected_first_failure": null,
+      "required_coverage_invariants": [
+        "DemandCovered",
+        "CapacityAgrees",
+        "CertifiedReachable",
+        "CertificateNextAgreement",
+        "FairPairAgreement",
+        "FairEnablednessAgreement"
+      ],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "nonvacuity",
+      "source_config": "nonvacuity.cfg",
+      "source_descriptor": {
+        "stable": true,
+        "mutation": "none",
+        "invariants": [
+          "NonvacuityWitness"
+        ],
+        "properties": [],
+        "expected": "NonvacuityWitness"
+      },
+      "context": "stable",
+      "scope": "complete_verified_context",
+      "expected_result": "reachable_original_init_witness",
+      "expected_first_failure": "NonvacuityWitness",
+      "required_coverage_invariants": [
+        "DemandCovered",
+        "CapacityAgrees",
+        "CertifiedReachable",
+        "CertificateNextAgreement",
+        "FairPairAgreement",
+        "FairEnablednessAgreement"
+      ],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "control-weak-admission",
+      "source_config": "control-weak-admission.cfg",
+      "source_descriptor": {
+        "stable": true,
+        "mutation": "weak-admission",
+        "invariants": [
+          "Safety"
+        ],
+        "properties": [
+          "BothSelectedCompletion"
+        ],
+        "expected": "BothSelectedCompletion"
+      },
+      "context": "weak_admission",
+      "scope": "complete_verified_context",
+      "expected_result": "expected_first_failure_with_source_valid_witness",
+      "expected_first_failure": "BothSelectedCompletion",
+      "required_coverage_invariants": [
+        "DemandCovered",
+        "CapacityAgrees",
+        "CertifiedReachable",
+        "CertificateNextAgreement",
+        "FairPairAgreement",
+        "FairEnablednessAgreement"
+      ],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "control-no-claim-win",
+      "source_config": "control-no-claim-win.cfg",
+      "source_descriptor": {
+        "stable": true,
+        "mutation": "no-claim-win",
+        "invariants": [
+          "Safety"
+        ],
+        "properties": [
+          "BothSelectedCompletion"
+        ],
+        "expected": "BothSelectedCompletion"
+      },
+      "context": "no_claim_win",
+      "scope": "complete_verified_context",
+      "expected_result": "expected_first_failure_with_source_valid_witness",
+      "expected_first_failure": "BothSelectedCompletion",
+      "required_coverage_invariants": [
+        "DemandCovered",
+        "CapacityAgrees",
+        "CertifiedReachable",
+        "CertificateNextAgreement",
+        "FairPairAgreement",
+        "FairEnablednessAgreement"
+      ],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "control-withheld-join",
+      "source_config": "control-withheld-join.cfg",
+      "source_descriptor": {
+        "stable": false,
+        "mutation": "withheld-join",
+        "invariants": [
+          "Safety"
+        ],
+        "properties": [
+          "ConditionalAttemptCleanup"
+        ],
+        "expected": "ConditionalAttemptCleanup"
+      },
+      "context": "withheld_join",
+      "scope": "complete_verified_context",
+      "expected_result": "expected_first_failure_with_source_valid_witness",
+      "expected_first_failure": "ConditionalAttemptCleanup",
+      "required_coverage_invariants": [
+        "DemandCovered",
+        "CapacityAgrees",
+        "CertifiedReachable",
+        "CertificateNextAgreement",
+        "FairPairAgreement",
+        "FairEnablednessAgreement"
+      ],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "control-old-poll-policy",
+      "source_config": "control-old-poll-policy.cfg",
+      "source_descriptor": {
+        "stable": false,
+        "mutation": "old-poll-policy",
+        "invariants": [
+          "Safety"
+        ],
+        "properties": [
+          "ConditionalAttemptCleanup"
+        ],
+        "expected": "ConditionalAttemptCleanup"
+      },
+      "context": "old_poll_policy",
+      "scope": "complete_verified_context",
+      "expected_result": "expected_first_failure_with_source_valid_witness",
+      "expected_first_failure": "ConditionalAttemptCleanup",
+      "required_coverage_invariants": [
+        "DemandCovered",
+        "CapacityAgrees",
+        "CertifiedReachable",
+        "CertificateNextAgreement",
+        "FairPairAgreement",
+        "FairEnablednessAgreement"
+      ],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "control-local-revocation",
+      "source_config": "control-local-revocation.cfg",
+      "source_descriptor": {
+        "model": "BoundaryControls",
+        "stable": false,
+        "mutation": "local-revocation",
+        "invariants": [
+          "NoStaleCommit",
+          "NoCommitAfterLocalRevocation"
+        ],
+        "properties": [],
+        "expected": "NoCommitAfterLocalRevocation"
+      },
+      "context": null,
+      "scope": "sparse_boundary_control",
+      "expected_result": "expected_first_failure_with_source_valid_witness",
+      "expected_first_failure": "NoCommitAfterLocalRevocation",
+      "required_coverage_invariants": [],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "control-unknown-as-rollback",
+      "source_config": "control-unknown-as-rollback.cfg",
+      "source_descriptor": {
+        "model": "BoundaryControls",
+        "stable": false,
+        "mutation": "unknown-as-rollback",
+        "invariants": [
+          "NoStaleCommit",
+          "ResultAtomicity"
+        ],
+        "properties": [],
+        "expected": "ResultAtomicity"
+      },
+      "context": null,
+      "scope": "sparse_boundary_control",
+      "expected_result": "expected_first_failure_with_source_valid_witness",
+      "expected_first_failure": "ResultAtomicity",
+      "required_coverage_invariants": [],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    },
+    {
+      "family": "control-drop-before-join",
+      "source_config": "control-drop-before-join.cfg",
+      "source_descriptor": {
+        "stable": false,
+        "mutation": "drop-before-join",
+        "invariants": [
+          "AdmissionUntilJoined"
+        ],
+        "properties": [],
+        "expected": "AdmissionUntilJoined"
+      },
+      "context": "drop_before_join",
+      "scope": "complete_verified_context",
+      "expected_result": "expected_first_failure_with_source_valid_witness",
+      "expected_first_failure": "AdmissionUntilJoined",
+      "required_coverage_invariants": [
+        "DemandCovered",
+        "CapacityAgrees",
+        "CertifiedReachable",
+        "CertificateNextAgreement",
+        "FairPairAgreement",
+        "FairEnablednessAgreement"
+      ],
+      "component_process_count": "data-dependent; every required reachable component, never fixed at eleven"
+    }
+  ],
+  "monitors": {
+    "BothSelectedCompletion": {
+      "goal": "DoneJobs(sql)=Nodes",
+      "initial": "seen_goal=goal(Init)",
+      "next": "seen_goal_next=seen_goal OR goal(next)",
+      "violating_suffix": "seen_goal=false"
+    },
+    "ConditionalAttemptCleanup": {
+      "P": "w[n].stage=driver AND w[n].started AND w[n].job=j AND w[n].attempt=a",
+      "Q": "w[n].stage=driver AND w[n].dropped AND w[n].job=j AND w[n].attempt=a",
+      "identity": "every fixed worker n, selected job j and attempt a, exactly original AttemptCleanup quantification",
+      "initial": "pending=P(Init) AND NOT Q(Init); capacity_ok=WithinEpisodeCapacity(Init)",
+      "next": "pending_next=(pending OR P(next)) AND NOT Q(next); capacity_ok_next=capacity_ok AND WithinEpisodeCapacity(next)",
+      "violating_suffix": "pending=true permanently for some matching job/attempt AND capacity_ok=true throughout prefix and suffix",
+      "reject": "GF pending alone is insufficient"
+    }
+  },
+  "fairness": {
+    "enabledness": "full original graph ENABLED <A>_vars including outgoing component edges",
+    "occurrence": "original nonstuttering <A>_vars pair membership; original state-selfloop has none",
+    "weak": "GF(NOT EnA) OR GF(OccA)",
+    "strong": "FG(NOT EnA) OR GF(OccA)",
+    "stutter": "original implicit stutter permitted, including original deadlocks; no sticky last action",
+    "mutation_families": "exactly original source configs, independently checked"
+  },
+  "scc_certificate": {
+    "membership": "total disjoint cover of every relevant reachable monitor node",
+    "connectivity": "actual-edge forward and reverse rooted arborescences",
+    "maximality": "strictly increasing condensation rank for every cross-component edge",
+    "witness": "actual original-Init prefix and fair recurrent walk/cycle or valid implicit-stutter witness; independently replay monitor and fairness obligations",
+    "indivisible": "component exceeding admitted bound fails incomplete"
+  },
+  "required_comparison_fixture_semantics": [
+    "action enabled only by an outgoing component edge",
+    "reachable genuine deadlock with original implicit stutter",
+    "original state-selfloop carrying action label but no <A>_vars occurrence",
+    "completion goal already seen in prefix",
+    "cleanup pending across component boundary",
+    "capacity becomes false in prefix"
+  ],
+  "execution_or_acceptance_credit": false
+}

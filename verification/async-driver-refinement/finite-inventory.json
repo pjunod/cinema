@@ -1,0 +1,656 @@
+{
+  "schema_version": 6,
+  "kind": "finite_inventory_definition",
+  "status": "M0 source construction; independent conformance review, Rust/Python certificate implementation and acceptance pending",
+  "source_review_base": "7431d4336c1d7dfda7f856c2f471cfc12636ccff",
+  "source_bindings": {
+    "oracle": {
+      "path": "crates/plurx-core/src/store/async_driver_refinement.rs",
+      "sha256": "bef32311f0ea3f0cef7295f2855d1e6932d8e5a19292a13b50bc51741f515403",
+      "anchors": [
+        {
+          "text": "pub(super) struct Episode {",
+          "line": 616,
+          "occurrences": 1
+        },
+        {
+          "text": "async fn actions(",
+          "line": 796,
+          "occurrences": 1
+        },
+        {
+          "text": "async fn apply_primitive(",
+          "line": 976,
+          "occurrences": 1
+        },
+        {
+          "text": "async fn omitted_dv_state(",
+          "line": 1427,
+          "occurrences": 1
+        },
+        {
+          "text": "struct BoundaryObservation {",
+          "line": 1558,
+          "occurrences": 1
+        }
+      ]
+    },
+    "product": {
+      "path": "crates/plurx-core/src/store/async_driver_product.rs",
+      "sha256": "53cfe82bafc68207765bef857849cbf85b84cc455dcee3a32258a0334fb38ee2",
+      "anchors": [
+        {
+          "text": "struct Valuation {",
+          "line": 555,
+          "occurrences": 1
+        },
+        {
+          "text": "fn retain_anchors(",
+          "line": 671,
+          "occurrences": 1
+        },
+        {
+          "text": "fn claim_recovery_steps(",
+          "line": 1452,
+          "occurrences": 1
+        },
+        {
+          "text": "fn environment_allowed(",
+          "line": 945,
+          "occurrences": 1
+        },
+        {
+          "text": "fn enumerate_candidates(",
+          "line": 1007,
+          "occurrences": 1
+        },
+        {
+          "text": "fn classify_demand(",
+          "line": 1143,
+          "occurrences": 1
+        },
+        {
+          "text": "fn successors(",
+          "line": 1607,
+          "occurrences": 1
+        }
+      ]
+    },
+    "queue": {
+      "path": "crates/plurx-core/src/store/background_jobs.rs",
+      "sha256": "a71c9b2a3e1e1fd5f7fd9b248af402ee95263075f836ef0881203a86fd984f88",
+      "anchors": [
+        {
+          "text": "const RENEW_SQL: &str",
+          "line": 651,
+          "occurrences": 1
+        },
+        {
+          "text": "const SETTLE_SQL: &str",
+          "line": 684,
+          "occurrences": 1
+        },
+        {
+          "text": "async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError> {",
+          "line": 3742,
+          "occurrences": 1
+        }
+      ]
+    },
+    "queue_triggers": {
+      "path": "crates/plurx-core/src/store/background_jobs_schema.sql",
+      "sha256": "11c521ad5bae7516e34bf02147e9d37e85e4f924b83283231178d6d0a5596984",
+      "anchors": [
+        {
+          "text": "CREATE TRIGGER IF NOT EXISTS background_job_renew_command",
+          "line": 350,
+          "occurrences": 1
+        },
+        {
+          "text": "CREATE TRIGGER IF NOT EXISTS background_job_settlement_effects",
+          "line": 369,
+          "occurrences": 1
+        }
+      ]
+    },
+    "resources": {
+      "path": "crates/plurx-core/src/store/background_jobs_resources.sql",
+      "sha256": "e2313d279bbbf5688adbfc6c3aba9f17d31e7fa93345c2193543a61639a50f81",
+      "anchors": [
+        {
+          "text": "CREATE TRIGGER IF NOT EXISTS background_job_claim_effects",
+          "line": 40,
+          "occurrences": 1
+        }
+      ]
+    },
+    "binding": {
+      "path": "crates/plurx-core/src/store/background_jobs_domain.rs",
+      "sha256": "6479626d2de5337070c8cc7d830d7bbb4a9338fb64235d37c4b5876047570375",
+      "anchors": [
+        {
+          "text": "const BIND_SQL: &str",
+          "line": 22,
+          "occurrences": 1
+        }
+      ]
+    },
+    "binding_schema": {
+      "path": "crates/plurx-core/src/store/background_jobs_domain.sql",
+      "sha256": "b7874bab929232c01d66800bc01f3ae0023d02c196ba4ab86f192469091f0598",
+      "anchors": []
+    },
+    "completion": {
+      "path": "crates/plurx-core/src/store/background_jobs_library.rs",
+      "sha256": "107b004d328e655edcb0841aa52d866d01522203cf02eef584e7584e5c32903c",
+      "anchors": [
+        {
+          "text": "const COMPLETE_SQL: &str",
+          "line": 241,
+          "occurrences": 1
+        }
+      ]
+    },
+    "completion_triggers": {
+      "path": "crates/plurx-core/src/store/background_jobs_library.sql",
+      "sha256": "0fe89737a0dea0c72c4de8cf4280da9a53e07e054d5621174072f734e6ea7f3b",
+      "anchors": [
+        {
+          "text": "CREATE TRIGGER IF NOT EXISTS background_library_request_completed",
+          "line": 44,
+          "occurrences": 1
+        }
+      ]
+    },
+    "domain": {
+      "path": "crates/plurx-core/src/store/sqlite/coordination.rs",
+      "sha256": "b6f888196144a0231af75cdeef6bbb9ed0ccc4b7c912024d082191b6a0abe81b",
+      "anchors": [
+        {
+          "text": "async fn acquire_lease(",
+          "line": 27,
+          "occurrences": 1
+        },
+        {
+          "text": "async fn release_lease(",
+          "line": 116,
+          "occurrences": 1
+        }
+      ]
+    },
+    "retry": {
+      "path": "crates/plurx-worker-control/src/retry_policy.rs",
+      "sha256": "d3ffbeacdebb3214128870c24f244d97f815fef013ec20b466ad2f0dfcf2b395",
+      "anchors": [
+        {
+          "text": "pub fn retry_delay_ms(",
+          "line": 7,
+          "occurrences": 1
+        }
+      ]
+    },
+    "driver": {
+      "path": "crates/plurx-worker-control/src/library_driver.rs",
+      "sha256": "4afc578789afe747baf6c512cf2d53127ffb96297ed4263b2aff7f6ddc1dbe58",
+      "anchors": []
+    },
+    "lifecycle": {
+      "path": "crates/plurx-worker-control/src/library_lifecycle.rs",
+      "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0",
+      "anchors": []
+    },
+    "independent": {
+      "path": "verification/async-driver-refinement/checker.py",
+      "sha256": "0103695e2e4676dd67851c387d9d9b1e14f4d39bff3c19001fdfc0a2b3439f6e",
+      "anchors": [
+        {
+          "text": "def validate_driver(g):",
+          "line": 259,
+          "occurrences": 1
+        },
+        {
+          "text": "def expected_actions(s):",
+          "line": 303,
+          "occurrences": 1
+        },
+        {
+          "text": "def expected_product_successors(",
+          "line": 757,
+          "occurrences": 1
+        }
+      ]
+    },
+    "temporal": {
+      "path": "verification/async-driver-refinement/AsyncDriverRefinement.tla",
+      "sha256": "c86cc8bd2915e2540071bf060def535e565e8f6002b79129f0c83cc8cbdaf12a",
+      "anchors": [
+        {
+          "text": "\nAttemptCleanup ==",
+          "line": 555,
+          "occurrences": 1
+        },
+        {
+          "text": "BothSelectedCompletion ==",
+          "line": 560,
+          "occurrences": 1
+        },
+        {
+          "text": "Spec ==",
+          "line": 496,
+          "occurrences": 1
+        }
+      ]
+    },
+    "migrations": {
+      "path": "crates/plurx-core/src/store/sqlite/mod.rs",
+      "sha256": "1509df2d15e01f43b40228440c8dbe2be03e2eaef4585a2fb436250c78ec5ada",
+      "anchors": []
+    }
+  },
+  "fixed_domain": {
+    "jobs": 2,
+    "requests": 2,
+    "waiters": 2,
+    "nodes": 2,
+    "domain_owners": 3,
+    "attempts_per_job": 2,
+    "renewals_per_claim": 1,
+    "domain_acquisitions_per_owner": 1,
+    "claim_loss_keys": 8,
+    "raw_init_policy": "persist actual migrated initial DB image, raw UUID/settings/schema and full initial rows; never reseed or normalize"
+  },
+  "driver_static_metadata": {
+    "source": "evidence/ci-6115/artifact-4742.zip::driver-graph.json",
+    "sha256": "ff22b4924b9d427bb0e45efbcb724bb19d0b3bb18b76d1a04a42801ad91d3bba",
+    "states": 48,
+    "edges": 52,
+    "initial_rank": 11,
+    "rank_by_id": {
+      "0": 11,
+      "1": 3,
+      "2": 10,
+      "3": 2,
+      "4": 5,
+      "5": 9,
+      "6": 1,
+      "7": 4,
+      "8": 8,
+      "9": 8,
+      "10": 8,
+      "11": 6,
+      "12": 5,
+      "13": 0,
+      "14": 7,
+      "15": 7,
+      "16": 7,
+      "17": 5,
+      "18": 4,
+      "19": 6,
+      "20": 6,
+      "21": 6,
+      "22": 4,
+      "23": 3,
+      "24": 5,
+      "25": 4,
+      "26": 5,
+      "27": 5,
+      "28": 3,
+      "29": 2,
+      "30": 4,
+      "31": 3,
+      "32": 4,
+      "33": 4,
+      "34": 2,
+      "35": 1,
+      "36": 3,
+      "37": 2,
+      "38": 3,
+      "39": 3,
+      "40": 1,
+      "41": 0,
+      "42": 2,
+      "43": 1,
+      "44": 0,
+      "45": 1,
+      "46": 0,
+      "47": 0
+    },
+    "interpretation": "static computation on captured metadata only; Rust Driver::parse and Python validate_driver must independently rederive for actual session bytes; no new driver/model execution"
+  },
+  "generators": [
+    {
+      "id": "claim",
+      "maximum": 4,
+      "consumes": "claims[job] < 2; only Claimed increments; no reset",
+      "retained_births": "token expiry now+30000, immutable claim snapshot and one selected claim ID",
+      "sources": [
+        "oracle",
+        "queue",
+        "resources"
+      ]
+    },
+    {
+      "id": "renew",
+      "maximum": 4,
+      "consumes": "one renewed_claims entry per successful selected claim; latest captured revision only",
+      "retained_births": "new captured expiry now+30000; at most two local mono observations per success",
+      "sources": [
+        "oracle",
+        "product",
+        "queue",
+        "queue_triggers"
+      ]
+    },
+    {
+      "id": "domain_acquire",
+      "maximum": 3,
+      "consumes": "one domain_acquired flag per node-a/node-b/foreign-holder; never reset",
+      "retained_births": "one captured expiry now+90000",
+      "sources": [
+        "oracle",
+        "domain"
+      ]
+    },
+    {
+      "id": "domain_release",
+      "maximum": 3,
+      "consumes": "exact captured revision/expiry CAS increments revision; same capture cannot succeed twice",
+      "retained_births": "min(old expiry,now) is dominated by its already retained captured expiry; no prospective bound increase",
+      "sources": [
+        "oracle",
+        "domain"
+      ]
+    },
+    {
+      "id": "owner_remove",
+      "maximum": 2,
+      "consumes": "persistent removed flag and one fixed settings key per selected node",
+      "retained_births": "raw updated_at=current wall only; no retained future anchor",
+      "sources": [
+        "oracle"
+      ]
+    },
+    {
+      "id": "driver_lifetime",
+      "maximum": 4,
+      "consumes": "timely successful claim needed; recycle does not reset claims",
+      "retained_births": "finite driver frames and rank-descending replies",
+      "sources": [
+        "product",
+        "driver",
+        "lifecycle"
+      ]
+    },
+    {
+      "id": "driver_reply",
+      "maximum": 44,
+      "consumes": "actual accepted graph edge strictly decreases independently checked rank R",
+      "retained_births": "at most one saved settlement prospective anchor per reply, delay <=719999",
+      "sources": [
+        "product",
+        "driver",
+        "retry",
+        "independent"
+      ]
+    },
+    {
+      "id": "accepted_settlement",
+      "maximum": 4,
+      "consumes": "clears running/cancelling authority; another success needs another claim",
+      "retained_births": "queued not_before may equal current wall or copied bounded payload; one new current-time frontier anchor per success",
+      "sources": [
+        "oracle",
+        "queue",
+        "queue_triggers"
+      ]
+    },
+    {
+      "id": "completion",
+      "maximum": 2,
+      "consumes": "one result_json NULL-to-value update per fixed request; no new request",
+      "retained_births": "completed_at/current wall; job authority cleared; no future anchor",
+      "sources": [
+        "completion",
+        "completion_triggers"
+      ]
+    },
+    {
+      "id": "lost_claim_episode",
+      "maximum": 8,
+      "consumes": "persistent (job,node,claim_id) key; no reset at idle/recycle",
+      "retained_births": "one fixed issue+30000 deadline plus at most120 wake anchors per key",
+      "sources": [
+        "product",
+        "independent"
+      ]
+    }
+  ],
+  "repeating_paths": [
+    {
+      "path": "refused/delivered claim",
+      "effect": "ClaimApply transiently records wall/mono request samples. A non-lost refusal clears them before Idle; no snapshot/recovery phase exists to retain a future mono deadline. A lost refusal consumes a fresh persistent F key.",
+      "sources": [
+        "product",
+        "oracle"
+      ]
+    },
+    {
+      "path": "idempotent or stale claim retry",
+      "effect": "claim ID derives from fixed job index and current finite claim count. Every Claimed return consumes C; duplicate non-advancing fence aborts MonotoneFence instead of creating a state. Refusal creates no SQL attempt/reservation or new expiry.",
+      "sources": [
+        "oracle",
+        "queue",
+        "resources"
+      ]
+    },
+    {
+      "path": "availability toggle",
+      "effect": "only two booleans change. No counter, source write or time sample.",
+      "sources": [
+        "product"
+      ]
+    },
+    {
+      "path": "AdapterSample pending reply",
+      "effect": "Requires adapter_reply.is_none(), then installs Some(AdapterReply). Cannot sample again until DriverReturn clears it while consuming a driver DAG edge. Interleavings may sample at different wall times, but do not overwrite a pending reply. The sample copies current wall and creates no future anchor; saved settlement creation consumes rank.",
+      "sources": [
+        "product",
+        "driver"
+      ]
+    },
+    {
+      "path": "bind cycle",
+      "effect": "BIND_SQL changes only fixed resource/fence/job/node/boot/claim identity columns. No timestamp or counter/revision increment; full identity ranges over bounded captures.",
+      "sources": [
+        "binding",
+        "binding_schema"
+      ]
+    },
+    {
+      "path": "same captured domain release",
+      "effect": "first accepted release increments revision; repeats fail exact revision/expiry CAS. Release expiry is bounded above by an already captured expiry even when now advances.",
+      "sources": [
+        "domain",
+        "oracle"
+      ]
+    },
+    {
+      "path": "refused renewal and resolution",
+      "effect": "latest selected capture equals current owned token whenever the same claim remains Running. Every RENEW_SQL guard needed for a Running resolver is shared; maximal revision cannot occur under bounded writes. Refused outcomes resolve to lost/settled/expired/cancel-requested or error/loss, never a fresh Running deadline. Successful renewal/resolution consumes N; CancelRequested bypasses deadline assignment.",
+      "sources": [
+        "oracle",
+        "product",
+        "queue",
+        "queue_triggers",
+        "binding"
+      ]
+    },
+    {
+      "path": "read/resolve repeat",
+      "effect": "production logical reads do not change durable rows. remember deduplicates exact returned tokens; claim/renew are the only selected creators of current Running token revisions.",
+      "sources": [
+        "oracle",
+        "queue"
+      ]
+    },
+    {
+      "path": "delayed initial claim recovery",
+      "effect": "original issue time is immutable; source deadline is issue+30000 and wake is min(current_mono+250,deadline), serviced only after reaching wake. At most120 wake assignments per consumed F key; terminal recovery clears phase and never slides deadline.",
+      "sources": [
+        "product",
+        "independent"
+      ]
+    },
+    {
+      "path": "ordinary/retirement phases",
+      "effect": "ordinary service and retirement inner phases are one-way; denied service does not resample a saved payload. Retirement samples copy current wall or -1 and do not create future anchors.",
+      "sources": [
+        "product",
+        "oracle"
+      ]
+    }
+  ],
+  "row_write_inventory": [
+    {
+      "table": "background_jobs",
+      "maximum_rows": 2,
+      "mutable_fields": "state, owner/boot/claim, fence/revision, expiry, failed/yield/abandoned counters, finite error strings, not_before and updated_at; selected ordinary retry also changes failure_policy (finite source literal) and attempt_errors (bounded concatenation over accepted settlements); paired completion writes result_ref (fixed prefix plus raw existing job ID). Payload/dedupe/created and selected-absent COALESCE retry_deadline/checkpoint/diagnostic values stay fixed by raw Init.",
+      "write_bound": "per job claims<=2, renewals<=2, accepted settlements<=2, completion<=1; revision<=init_revision+7 and fence<=init_fence+2; this deliberately overcounts mutually exclusive settlement/completion",
+      "source": [
+        "queue",
+        "queue_triggers",
+        "resources",
+        "completion_triggers"
+      ]
+    },
+    {
+      "table": "background_job_waiters",
+      "maximum_rows": 2,
+      "mutable_fields": "participation fence, terminal state/result/error/updated_at; identity, initial receipt and input values fixed",
+      "write_bound": "no new waiter or removal in selected Next; claim participation<=4 total; completion/terminal effects bounded by claims/settlements/completions",
+      "source": [
+        "resources",
+        "queue_triggers",
+        "completion_triggers"
+      ]
+    },
+    {
+      "table": "background_job_attempts",
+      "maximum_rows": 4,
+      "mutable_fields": "finished_at,outcome,error set by bounded reclaim/settlement/completion; identity and started/resolve_until fixed per claim",
+      "write_bound": "one row per successful claim; resolve_until=claim_time+120000; no maintenance/pruning Next",
+      "source": [
+        "resources",
+        "queue_triggers"
+      ]
+    },
+    {
+      "table": "background_job_reservations",
+      "maximum_rows": 6,
+      "mutable_fields": "fixed3 resource keys x2 slots, selected2 job IDs/fences and captured expiry values",
+      "write_bound": "claim may delete/reinsert; renewal extends only under N; settlement/completion deletes; rows contain no independent allocator/counter",
+      "source": [
+        "resources",
+        "queue_triggers"
+      ]
+    },
+    {
+      "table": "background_job_domain_leases",
+      "maximum_rows": 1,
+      "mutable_fields": "fixed resource plus captured domain/job fences, node/boot/claim tuples only",
+      "write_bound": "binding may cycle but no new counter/time; no selected deletion of job_leases",
+      "source": [
+        "binding",
+        "binding_schema"
+      ]
+    },
+    {
+      "table": "background_library_requests",
+      "maximum_rows": 2,
+      "mutable_fields": "result_json/completed_claim_id/completed_at assigned once per request",
+      "write_bound": "NULL-to-result guard; paired completion trigger shares transaction",
+      "source": [
+        "completion",
+        "completion_triggers"
+      ]
+    },
+    {
+      "table": "background_job_commands",
+      "maximum_rows_at_public_boundary": 0,
+      "maximum_transient_rows": 1,
+      "mutable_fields": "one serialized fixed-source command; renew trigger deletes before public return",
+      "write_bound": "all command outcomes are observed after cleanup; SQL/rollback error aborts globally, never a certified partial command",
+      "source": [
+        "queue",
+        "queue_triggers"
+      ]
+    },
+    {
+      "table": "job_leases",
+      "maximum_rows": 1,
+      "mutable_fields": "fixed resource, three owner literals, acquisition fence/revision and expiry/updated time",
+      "write_bound": "at most3 acquisitions and3 releases; revision<=initial_revision+6; fence<=initial_fence+3; release cannot reset acquisition budget",
+      "source": [
+        "domain",
+        "oracle"
+      ]
+    },
+    {
+      "table": "settings",
+      "maximum_rows_formula": "initial_settings_rows+2",
+      "mutable_fields": "two fixed removed-owner keys, true value, current wall timestamp; all original settings/UUID values fixed by persisted Init",
+      "write_bound": "at most2 insertions; no selected settings-delete/update or arbitrary maintenance",
+      "source": [
+        "oracle",
+        "migrations"
+      ]
+    }
+  ],
+  "clock_certificate": {
+    "meaning": "prospective/max-expanding anchor births; NOT all transient time assignments or dominated anchors",
+    "C": 4,
+    "N": 4,
+    "L": 3,
+    "F": 8,
+    "R": 11,
+    "recovery_wakes_per_key": 120,
+    "maximum_future_wall_offset": 719999,
+    "maximum_future_mono_offset": 30000,
+    "Bw_formula": "2+(C+N)+L+C*R+C",
+    "Bw": 61,
+    "Bm_formula": "2*C+2*N+F*(1+120)",
+    "Bm": 984,
+    "Wmax_formula": "1000+(Bw+1)*720000",
+    "Wmax": 44641000,
+    "Mmax_formula": "(Bm+1)*30001",
+    "Mmax": 29550985,
+    "dominated_births": "release min(expiry,now) <= retained captured expiry; rebinding has no time fields; raw command/retirement/request samples copy already bounded clocks and do not create future anchors",
+    "violation": "invalidate entire finite certificate/session; never constrain Next, clip clocks, omit a candidate or treat capacity as false"
+  },
+  "finite_valuation_argument": {
+    "clock_universes": "visited wall clock in [1000,Wmax], mono in [0,Mmax] by bounded prospective births and strict neighbour rule; retained wall anchors may include0/earlier fixed initial eligibility values, so their conservative set universe is [0,Wmax]. Exact raw constants are frozen, never clipped.",
+    "row_vocabularies": "fixed Init literals/raw UUIDs plus bounded captures, finite source enums and arithmetic expressions over finite clocks/counters; all9 tables have bounded row counts above",
+    "episode_vocabularies": "claims length2 values0..2; <=4 immutable claim snapshots; <=8 exact token captures; <=4 renewed IDs; <=3 lease captures; fixed boolean arrays; now from wall universe",
+    "worker_vocabularies": "complete37-field raw Worker plus nested Ordinary/AdapterReply; finite source literal strings, fixed Init/claim IDs, finite capture indices and clock samples; no truncation/normalization",
+    "anchor_sets": "sorted distinct subsets of finite wall-anchor [0,Wmax] and mono-anchor [0,Mmax] universes; retained vectors do not introduce values outside these source-derived universes",
+    "product_universe_formula": "7 * N_store * N_worker^2 * 2^2 * 2^2 * (Mmax+1) * 2^(Wmax+1) * 2^(Mmax+1) * 2^8; N_store and N_worker derive by finite field/row Cartesian products, not empirical cutoffs",
+    "not_termination": "infinite stuttering/toggle/refusal/bind traces remain; only reachable valuations are finite",
+    "practical_limit": "enormous cardinality bound does not prove fit, throughput, RSS, disk or largest-SCC feasibility",
+    "derived_raw_timestamps": "non-anchor timestamps such as attempt.resolve_until=claim_time+120000 are bounded source expressions over finite clock values; they need not lie inside the visited-clock interval and remain exact"
+  },
+  "independent_agreement_obligations": [
+    "Rust actions vs Python expected_actions retain exact source D",
+    "Rust candidate/classification/successor/pair unions vs Python independent implementations and original TLA Next",
+    "Both consumers independently check source generator constants, all row-write origins and driver DAG rank against actual source/graph identity",
+    "Arbitrary-precision arithmetic checks include disabled candidate intermediates and full raw identity; source integer type size alone is not finiteness proof",
+    "Every installed kind-scoped extension remains source/schema-bound; omitted extension observations stay fixed at every actual endpoint/replay/rollback"
+  ],
+  "execution_or_acceptance_credit": false,
+  "design_conformance": {
+    "reviewed_ledger_sha256": "e3447ad82580bf9e2b6903f14da8803cdf34e1b39150592ee52817a4f7bd6479",
+    "receipt_sha256": "c0ceca7bca8c1db92d136eccc6f1519926c125c13f1f0a351d0f48bf490313a7",
+    "disposition": "finite-generation design and scalar envelopes conform after these two source-description corrections and anchor-universe clarification; implementation/final review/acceptance pending",
+    "actual_reviewer": "GPT-6 Astra",
+    "execution_credit": false
+  }
+}

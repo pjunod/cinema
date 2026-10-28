@@ -1,11 +1,15 @@
 # Async driver refinement — a selected two-worker product
 
-**Status: schema 5 literal agreed; implementation, feasibility, and proof
-pending.** The schema 5 wire contract preserves the complete logical schema 4
-product while factoring derived hashes, predecessor data, and exact Store
-canonical bytes. The integrated producer, decoder, TLA emitter, and SQL prefix
-materialization still require implementation, focused tests, and final source
-review. No complete schema 5 product or TLC receipt exists.
+**Status: schema 6 paged contracts constructed; design conformance,
+implementation and acceptance pending (2026-10-28).** Run 6115 hit the global
+20,000 exact Store cap with the BASE frontier still open. Fifteen prefix passes
+remain historical; no complete product/TLC acceptance exists. The target
+[PAGED-CONTRACT.md](PAGED-CONTRACT.md) and [delivery ledger](../../docs/cluster/PAGED-ASYNC-PROOF-IMPLEMENTATION.md)
+freeze persistent exact records, complete predecessor transactions, independent
+component qualification and authenticated session completion. The source-backed
+[finite inventory](finite-inventory.json) awaits independent design conformance.
+Current schema 5 runtime/commands below remain in place until implementation;
+the schema 6 resource policy is a target amendment, not a passed result.
 
 The schema 4 diagnostic run on candidate `5127c4b` reached its checked resource
 cutoff: the conservative serialized estimate was 268,435,462 bytes, six bytes
@@ -85,7 +89,7 @@ and a partial journal never becomes a complete receipt.
 `provenance.json` records the exact Rust commands, source hashes, test counts,
 raw logs, and graph identities. Rust closure is limited to the selected
 two-worker product and its explicitly enumerated demands. It does not claim
-arbitrary Store-D closure. The 20,000 cap counts distinct exact Store states
+arbitrary Store-D closure. The current schema 5 global 20,000 cap counts distinct exact Store states
 across all seven main contexts, including capacity-only successors. There is
 no product-node cap. Schema 5's exact compact JSON bundle and generated
 `SourceTables.tla` member each remain bounded by 256 MiB; the total retained

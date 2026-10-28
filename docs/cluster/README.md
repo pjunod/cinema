@@ -14,7 +14,8 @@ failures.
 
 | File | Answers | |
 |---|---|---|
-| [ASYNC-STORE-REFINEMENT-STATUS.md](ASYNC-STORE-REFINEMENT-STATUS.md) | Driver/SQL conditional fairness project; Astra-approved actual-settlement product changes are integrated, with final review and qualification outstanding. | open |
+| [ASYNC-STORE-REFINEMENT-STATUS.md](ASYNC-STORE-REFINEMENT-STATUS.md) | Current driver/SQL proof evidence and acceptance ledger; run 6115 capped, paged implementation and qualification pending. | open |
+| [PAGED-ASYNC-PROOF-IMPLEMENTATION.md](PAGED-ASYNC-PROOF-IMPLEMENTATION.md) | How exact paged storage, independent component proof and authenticated sessions replace the global cap; M0 contracts, resource amendment and file ownership. | open |
 | [RUST-ADMISSION-REFINEMENT-STATUS.md](RUST-ADMISSION-REFINEMENT-STATUS.md) | Production admission/start refinement pilot: scope, ownership, verifier feasibility, proof obligations and current delivery state. | built |
 | [WORKER-REFINEMENT-STATUS.md](WORKER-REFINEMENT-STATUS.md) | Built source correspondence and two full workers; PR receipt tracks qualification, ownership and landing. | built |
 | [OPERATION-PROGRESS-IMPLEMENTATION.md](OPERATION-PROGRESS-IMPLEMENTATION.md) | Source wait-map, repeated-operation model, acceptance and delivery plan. | built |

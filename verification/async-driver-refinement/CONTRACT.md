@@ -1,8 +1,18 @@
 # Contract — what the selected product can establish
 
 Companion to [README.md](README.md), which gives commands and receipt paths.
-**Status: schema 5 literal agreed; implementation, feasibility, and
-qualification pending.** No complete schema 5 product or TLC receipt exists.
+**Status: schema 6 paged target contracts constructed; implementation,
+feasibility and qualification pending (2026-10-28).**
+[PAGED-CONTRACT.md](PAGED-CONTRACT.md) is the normative storage/session/resource
+amendment, with [delivery ownership](../../docs/cluster/PAGED-ASYNC-PROOF-IMPLEMENTATION.md).
+It preserves every semantic obligation below. The schema 5 encoding, global
+20,000 cap and fixed-process execution descriptions below document the current
+implementation and historical evidence; schema 6 replaces those storage/resource
+and process-count rules only after its implementation and independent review.
+The target uses 20,000 resident cache entries plus admitted bytes/RSS, immutable
+bounded pages and an admitted total session quota. Eleven semantic outcome
+families remain mandatory across potentially many component TLC runs. No schema
+6 implementation or accepted complete receipt exists yet.
 The schema 4 diagnostic run on candidate `5127c4b` stopped at the checked
 serialized-output estimate of 268,435,462 bytes, six bytes over the unchanged
 268,435,456-byte bundle limit. This incomplete result is not a semantic
@@ -23,7 +33,7 @@ holder. Each job has at most two successful claims; each claim has at most
 one renewal. Each domain owner acquires at most once. Four successful attempt
 identities and two reserved mismatch identities are distinct; allocator
 exhaustion is outside D because the attempt limit is reached first. There
-are no new arrivals or cyclic demand. The 20,000 cap counts distinct exact
+are no new arrivals or cyclic demand. The current schema 5 global 20,000 cap counts distinct exact
 Store identities across the union of all seven main contexts, including
 capacity-only oracle successors. Reaching it aborts generation. There is no
 product-node cap; the schema 5 compact product bundle and generated

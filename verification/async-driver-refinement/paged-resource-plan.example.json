@@ -1,0 +1,29 @@
+{
+  "schema_version": 6,
+  "kind": "ResourcePlan",
+  "record": {
+    "session_id": null,
+    "admission": "unadmitted",
+    "source": null,
+    "resident_store_entries": 20000,
+    "resident_bytes": null,
+    "resident_rss_bytes": null,
+    "page_bytes": 268435456,
+    "source_tables_bytes": 268435456,
+    "artifact_retained_bytes": 536870912,
+    "artifact_extracted_bytes": 536870912,
+    "artifact_members": 300,
+    "unit_seconds": 1800,
+    "tlc_heap_bytes": 4294967296,
+    "tlc_workers": 1,
+    "total_session_disk_bytes": null,
+    "total_retained_artifact_bytes": null,
+    "maximum_units": null,
+    "unit_predecessor_allowance": null,
+    "unit_record_allowance": null,
+    "unit_byte_allowance": null,
+    "source_bounds_utf8": "{\"contract\":\"PAGED-CONTRACT.md\",\"finite_inventory\":\"finite-inventory.json\",\"quotas\":\"measure runner and bind immutable complete-session plan before dispatch\",\"status\":\"unadmitted\"}",
+    "available_disk_receipt": null,
+    "plan_sha256": null
+  }
+}

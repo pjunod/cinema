@@ -1,0 +1,3312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.invalid/verification/paged-proof-schema6",
+  "title": "Normative schema 6 paged proof records; implementation and acceptance pending",
+  "description": "M0 interface freeze. Shape validation never substitutes for independent semantic/source/arithmetic/authentication/closure checks. No current schema5 loader is silently redefined.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "PhysicalRows"
+        },
+        "record": {
+          "$ref": "#/$defs/PhysicalRows"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Episode"
+        },
+        "record": {
+          "$ref": "#/$defs/Episode"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Store"
+        },
+        "record": {
+          "$ref": "#/$defs/Store"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Product"
+        },
+        "record": {
+          "$ref": "#/$defs/Product"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Applied"
+        },
+        "record": {
+          "$ref": "#/$defs/Applied"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "OracleEvidence"
+        },
+        "record": {
+          "$ref": "#/$defs/OracleEvidence"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Candidate"
+        },
+        "record": {
+          "$ref": "#/$defs/Candidate"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Demand"
+        },
+        "record": {
+          "$ref": "#/$defs/Demand"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "ProductEdge"
+        },
+        "record": {
+          "$ref": "#/$defs/ProductEdge"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "FairPair"
+        },
+        "record": {
+          "$ref": "#/$defs/FairPair"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Enabledness"
+        },
+        "record": {
+          "$ref": "#/$defs/Enabledness"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Expansion"
+        },
+        "record": {
+          "$ref": "#/$defs/Expansion"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Counts"
+        },
+        "record": {
+          "$ref": "#/$defs/Counts"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "ContextRoot"
+        },
+        "record": {
+          "$ref": "#/$defs/ContextRoot"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "InitialImage"
+        },
+        "record": {
+          "$ref": "#/$defs/InitialImage"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Checkpoint"
+        },
+        "record": {
+          "$ref": "#/$defs/Checkpoint"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Page"
+        },
+        "record": {
+          "$ref": "#/$defs/Page"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "ManifestNode"
+        },
+        "record": {
+          "$ref": "#/$defs/ManifestNode"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "ResourcePlan"
+        },
+        "record": {
+          "$ref": "#/$defs/ResourcePlan"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Session"
+        },
+        "record": {
+          "$ref": "#/$defs/Session"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "WorkUnit"
+        },
+        "record": {
+          "$ref": "#/$defs/WorkUnit"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "MonitorNode"
+        },
+        "record": {
+          "$ref": "#/$defs/MonitorNode"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "MonitorEdge"
+        },
+        "record": {
+          "$ref": "#/$defs/MonitorEdge"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Scc"
+        },
+        "record": {
+          "$ref": "#/$defs/Scc"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Counterexample"
+        },
+        "record": {
+          "$ref": "#/$defs/Counterexample"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Outcome"
+        },
+        "record": {
+          "$ref": "#/$defs/Outcome"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "Completion"
+        },
+        "record": {
+          "$ref": "#/$defs/Completion"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "BoundaryObservation"
+        },
+        "record": {
+          "$ref": "#/$defs/BoundaryObservation"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 6
+        },
+        "kind": {
+          "const": "ArtifactReceipt"
+        },
+        "record": {
+          "$ref": "#/$defs/ArtifactReceipt"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "record"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "Id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "Nat": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "I64": {
+      "type": "integer",
+      "minimum": -9223372036854775808,
+      "maximum": 9223372036854775807
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "Uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "Context": {
+      "enum": [
+        "base",
+        "stable",
+        "weak_admission",
+        "no_claim_win",
+        "withheld_join",
+        "old_poll_policy",
+        "drop_before_join"
+      ]
+    },
+    "CanonicalUtf8": {
+      "type": "string",
+      "description": "Exact existing canonical JSON bytes decoded as UTF-8; no normalization, field omission or alternative equality. Byte lengths are independently checked, not inferred from codepoint counts."
+    },
+    "RelativePath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)*$",
+      "description": "Additional semantic path checks reject dot/dotdot components, absolute paths, aliases and symlinks."
+    },
+    "Ref": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "PhysicalRows",
+            "Episode",
+            "Store",
+            "Product",
+            "Applied",
+            "OracleEvidence",
+            "Candidate",
+            "Demand",
+            "ProductEdge",
+            "FairPair",
+            "Enabledness",
+            "Expansion",
+            "Counts",
+            "ContextRoot",
+            "InitialImage",
+            "Checkpoint",
+            "Page",
+            "ManifestNode",
+            "ResourcePlan",
+            "Session",
+            "WorkUnit",
+            "MonitorNode",
+            "MonitorEdge",
+            "Scc",
+            "Counterexample",
+            "Outcome",
+            "Completion",
+            "BoundaryObservation",
+            "ArtifactReceipt",
+            "initial_image_blob",
+            "schema_inventory",
+            "source_file",
+            "source_tables",
+            "tlc_receipt",
+            "runtime_receipt",
+            "numeric_receipt",
+            "backend_receipt",
+            "causal_receipt",
+            "eligibility_receipt",
+            "fresh_head_receipt",
+            "main_receipt",
+            "monitor_definition",
+            "fairness_receipt"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/RecordKey"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "SourceIdentity": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/Commit"
+        },
+        "tree": {
+          "$ref": "#/$defs/Commit"
+        },
+        "source_closure_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "driver_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "finite_inventory_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "schema_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "toolchain_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "workflow_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "commit",
+        "tree",
+        "source_closure_sha256",
+        "driver_sha256",
+        "finite_inventory_sha256",
+        "schema_sha256",
+        "toolchain_sha256",
+        "workflow_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "PhysicalRows": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "canonical_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "utf8_bytes": {
+          "$ref": "#/$defs/Nat"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "id",
+        "canonical_utf8",
+        "utf8_bytes",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "Episode": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "canonical_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "utf8_bytes": {
+          "$ref": "#/$defs/Nat"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "id",
+        "canonical_utf8",
+        "utf8_bytes",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "Store": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "physical_rows_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "episode_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "canonical_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "initial_image_id": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "schema_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "omitted_observation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "replay_parent_edge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "certification": {
+          "enum": [
+            "actual_init_checked",
+            "novel_actual_state_checked"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "physical_rows_id",
+        "episode_id",
+        "canonical_utf8",
+        "sha256",
+        "initial_image_id",
+        "schema_sha256",
+        "omitted_observation_id",
+        "replay_parent_edge",
+        "certification"
+      ],
+      "additionalProperties": false
+    },
+    "Product": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "store_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "canonical_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "predecessor_edge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "context",
+        "store_id",
+        "canonical_utf8",
+        "sha256",
+        "predecessor_edge"
+      ],
+      "additionalProperties": false
+    },
+    "Applied": {
+      "type": "object",
+      "properties": {
+        "from_store": {
+          "$ref": "#/$defs/Id"
+        },
+        "to_store": {
+          "$ref": "#/$defs/Id"
+        },
+        "action_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "result": {
+          "type": "string"
+        },
+        "resolved_token": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Nat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_snapshot_utf8": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanonicalUtf8"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_request_utf8": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanonicalUtf8"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "job_read_utf8": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanonicalUtf8"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "from_store",
+        "to_store",
+        "action_utf8",
+        "result",
+        "resolved_token",
+        "claim_snapshot_utf8",
+        "error",
+        "claim_request_utf8",
+        "job_read_utf8"
+      ],
+      "additionalProperties": false
+    },
+    "OracleEvidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "applied": {
+          "$ref": "#/$defs/Applied"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "initial_image_id": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "before_boundary": {
+          "$ref": "#/$defs/Ref"
+        },
+        "after_boundary": {
+          "$ref": "#/$defs/Ref"
+        },
+        "rollback_boundary": {
+          "$ref": "#/$defs/Ref"
+        },
+        "production_witness_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "independent_checks_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        }
+      },
+      "required": [
+        "id",
+        "applied",
+        "source",
+        "initial_image_id",
+        "before_boundary",
+        "after_boundary",
+        "rollback_boundary",
+        "production_witness_utf8",
+        "independent_checks_utf8"
+      ],
+      "additionalProperties": false
+    },
+    "Candidate": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "predecessor": {
+          "$ref": "#/$defs/Id"
+        },
+        "ordinal": {
+          "$ref": "#/$defs/Nat"
+        },
+        "family": {
+          "type": "string"
+        },
+        "worker": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "choice_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "descriptor_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "classification": {
+          "enum": [
+            "eligible",
+            "excluded_domain",
+            "excluded_sample"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "context",
+        "predecessor",
+        "ordinal",
+        "family",
+        "worker",
+        "choice_utf8",
+        "descriptor_utf8",
+        "classification",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "Demand": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "candidate": {
+          "$ref": "#/$defs/Id"
+        },
+        "ordinal": {
+          "$ref": "#/$defs/Nat"
+        },
+        "from_store": {
+          "$ref": "#/$defs/Id"
+        },
+        "family": {
+          "type": "string"
+        },
+        "worker": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "enum": [
+            "apply",
+            "capacity",
+            "dependent_resolve",
+            "dependent_read",
+            "dependent_cancel"
+          ]
+        },
+        "input_utf8": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanonicalUtf8"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capture": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sample": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/I64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "classification": {
+          "enum": [
+            "eligible",
+            "excluded_domain",
+            "excluded_sample"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "candidate",
+        "ordinal",
+        "from_store",
+        "family",
+        "worker",
+        "role",
+        "input_utf8",
+        "capture",
+        "sample",
+        "classification",
+        "reason",
+        "outcome_id",
+        "depends_on"
+      ],
+      "additionalProperties": false
+    },
+    "ProductEdge": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "from_product": {
+          "$ref": "#/$defs/Id"
+        },
+        "to_product": {
+          "$ref": "#/$defs/Id"
+        },
+        "candidate": {
+          "$ref": "#/$defs/Id"
+        },
+        "branch_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "primary_edge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolution_edge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "read_edge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanup_edge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "context",
+        "from_product",
+        "to_product",
+        "candidate",
+        "branch_utf8",
+        "primary_edge",
+        "resolution_edge",
+        "read_edge",
+        "cleanup_edge"
+      ],
+      "additionalProperties": false
+    },
+    "FairPair": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "from_product": {
+          "$ref": "#/$defs/Id"
+        },
+        "to_product": {
+          "$ref": "#/$defs/Id"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nonstuttering": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "context",
+        "from_product",
+        "to_product",
+        "labels",
+        "nonstuttering"
+      ],
+      "additionalProperties": false
+    },
+    "Enabledness": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "product_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "full_graph_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "context",
+        "product_id",
+        "full_graph_labels"
+      ],
+      "additionalProperties": false
+    },
+    "Expansion": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "predecessor": {
+          "$ref": "#/$defs/Id"
+        },
+        "fifo_ticket": {
+          "$ref": "#/$defs/Id"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "demands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "oracle_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "product_edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "fair_pairs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          }
+        },
+        "enabledness": {
+          "$ref": "#/$defs/Ref"
+        },
+        "discovered_products": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "capacity_only_stores": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "unit_ordinal": {
+          "$ref": "#/$defs/Nat"
+        },
+        "complete": {
+          "const": true
+        }
+      },
+      "required": [
+        "id",
+        "context",
+        "predecessor",
+        "fifo_ticket",
+        "candidates",
+        "demands",
+        "oracle_evidence",
+        "product_edges",
+        "fair_pairs",
+        "enabledness",
+        "discovered_products",
+        "capacity_only_stores",
+        "unit_ordinal",
+        "complete"
+      ],
+      "additionalProperties": false
+    },
+    "Counts": {
+      "type": "object",
+      "properties": {
+        "physical_rows": {
+          "$ref": "#/$defs/Nat"
+        },
+        "episodes": {
+          "$ref": "#/$defs/Nat"
+        },
+        "stores": {
+          "$ref": "#/$defs/Nat"
+        },
+        "oracle_edges": {
+          "$ref": "#/$defs/Nat"
+        },
+        "products": {
+          "$ref": "#/$defs/Nat"
+        },
+        "candidates": {
+          "$ref": "#/$defs/Nat"
+        },
+        "demands": {
+          "$ref": "#/$defs/Nat"
+        },
+        "product_edges": {
+          "$ref": "#/$defs/Nat"
+        },
+        "fair_pairs": {
+          "$ref": "#/$defs/Nat"
+        },
+        "enabledness": {
+          "$ref": "#/$defs/Nat"
+        },
+        "expansions": {
+          "$ref": "#/$defs/Nat"
+        },
+        "frontier": {
+          "$ref": "#/$defs/Nat"
+        },
+        "monitor_nodes": {
+          "$ref": "#/$defs/Nat"
+        },
+        "monitor_edges": {
+          "$ref": "#/$defs/Nat"
+        },
+        "components": {
+          "$ref": "#/$defs/Nat"
+        },
+        "boundaries": {
+          "$ref": "#/$defs/Nat"
+        }
+      },
+      "required": [
+        "physical_rows",
+        "episodes",
+        "stores",
+        "oracle_edges",
+        "products",
+        "candidates",
+        "demands",
+        "product_edges",
+        "fair_pairs",
+        "enabledness",
+        "expansions",
+        "frontier",
+        "monitor_nodes",
+        "monitor_edges",
+        "components",
+        "boundaries"
+      ],
+      "additionalProperties": false
+    },
+    "ContextRoot": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "initial_product": {
+          "$ref": "#/$defs/Id"
+        },
+        "reachable_products": {
+          "$ref": "#/$defs/Nat"
+        },
+        "expanded_products": {
+          "$ref": "#/$defs/Nat"
+        },
+        "frontier": {
+          "$ref": "#/$defs/Nat"
+        }
+      },
+      "required": [
+        "context",
+        "initial_product",
+        "reachable_products",
+        "expanded_products",
+        "frontier"
+      ],
+      "additionalProperties": false
+    },
+    "InitialImage": {
+      "type": "object",
+      "properties": {
+        "image_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "member_path": {
+          "$ref": "#/$defs/RelativePath"
+        },
+        "image_bytes": {
+          "$ref": "#/$defs/Nat"
+        },
+        "schema_inventory": {
+          "$ref": "#/$defs/Ref"
+        },
+        "initial_store": {
+          "$ref": "#/$defs/Id"
+        },
+        "raw_fixture_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "omitted_observation": {
+          "$ref": "#/$defs/Ref"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        }
+      },
+      "required": [
+        "image_sha256",
+        "member_path",
+        "image_bytes",
+        "schema_inventory",
+        "initial_store",
+        "raw_fixture_utf8",
+        "omitted_observation",
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "Checkpoint": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "sequence": {
+          "$ref": "#/$defs/Nat"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "initial_image_id": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resource_plan_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "unit_ordinal": {
+          "$ref": "#/$defs/Nat"
+        },
+        "previous_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "committed_transaction": {
+          "$ref": "#/$defs/Id"
+        },
+        "oldest_pending_ticket": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "counts": {
+          "$ref": "#/$defs/Counts"
+        },
+        "contexts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextRoot"
+          }
+        },
+        "page_root": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "catalog_logical_digest": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "session_id",
+        "sequence",
+        "source",
+        "initial_image_id",
+        "resource_plan_sha256",
+        "unit_ordinal",
+        "previous_checkpoint",
+        "committed_transaction",
+        "oldest_pending_ticket",
+        "counts",
+        "contexts",
+        "page_root",
+        "catalog_logical_digest"
+      ],
+      "additionalProperties": false
+    },
+    "Page": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "page_id": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "kind": {
+          "enum": [
+            "PhysicalRows",
+            "Episode",
+            "Store",
+            "Product",
+            "Applied",
+            "OracleEvidence",
+            "Candidate",
+            "Demand",
+            "ProductEdge",
+            "FairPair",
+            "Enabledness",
+            "Expansion",
+            "Counts",
+            "ContextRoot",
+            "InitialImage",
+            "Checkpoint",
+            "MonitorNode",
+            "MonitorEdge",
+            "Scc",
+            "Counterexample",
+            "Outcome",
+            "BoundaryObservation"
+          ]
+        },
+        "record_count": {
+          "$ref": "#/$defs/Nat"
+        },
+        "utf8_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DataEnvelope"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          }
+        },
+        "previous_page": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "transaction_high_water": {
+          "$ref": "#/$defs/Id"
+        },
+        "previous_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "first_key": {
+          "$ref": "#/$defs/RecordKey"
+        },
+        "last_key": {
+          "$ref": "#/$defs/RecordKey"
+        }
+      },
+      "required": [
+        "session_id",
+        "source",
+        "page_id",
+        "kind",
+        "first_key",
+        "last_key",
+        "record_count",
+        "utf8_bytes",
+        "records",
+        "dependencies",
+        "previous_page",
+        "previous_checkpoint",
+        "transaction_high_water"
+      ],
+      "additionalProperties": false
+    },
+    "ManifestNode": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "level": {
+          "$ref": "#/$defs/Nat"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "maxItems": 256
+        },
+        "counts": {
+          "$ref": "#/$defs/Counts"
+        },
+        "utf8_bytes": {
+          "$ref": "#/$defs/Nat"
+        }
+      },
+      "required": [
+        "session_id",
+        "source",
+        "sha256",
+        "level",
+        "children",
+        "counts",
+        "utf8_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "ResourcePlan": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "admission": {
+          "enum": [
+            "unadmitted",
+            "admitted"
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resident_store_entries": {
+          "const": 20000
+        },
+        "resident_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resident_rss_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "page_bytes": {
+          "const": 268435456
+        },
+        "source_tables_bytes": {
+          "const": 268435456
+        },
+        "artifact_retained_bytes": {
+          "const": 536870912
+        },
+        "artifact_extracted_bytes": {
+          "const": 536870912
+        },
+        "artifact_members": {
+          "const": 300
+        },
+        "unit_seconds": {
+          "const": 1800
+        },
+        "tlc_heap_bytes": {
+          "const": 4294967296
+        },
+        "tlc_workers": {
+          "const": 1
+        },
+        "total_session_disk_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total_retained_artifact_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maximum_units": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit_predecessor_allowance": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit_record_allowance": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit_byte_allowance": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_bounds_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "available_disk_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "session_id",
+        "admission",
+        "source",
+        "resident_store_entries",
+        "resident_bytes",
+        "resident_rss_bytes",
+        "page_bytes",
+        "source_tables_bytes",
+        "artifact_retained_bytes",
+        "artifact_extracted_bytes",
+        "artifact_members",
+        "unit_seconds",
+        "tlc_heap_bytes",
+        "tlc_workers",
+        "total_session_disk_bytes",
+        "total_retained_artifact_bytes",
+        "maximum_units",
+        "unit_predecessor_allowance",
+        "unit_record_allowance",
+        "unit_byte_allowance",
+        "source_bounds_utf8",
+        "available_disk_receipt",
+        "plan_sha256"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "admission": {
+                "const": "admitted"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "session_id": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "source": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "resident_bytes": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "resident_rss_bytes": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "total_session_disk_bytes": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "total_retained_artifact_bytes": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "maximum_units": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "unit_predecessor_allowance": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "unit_record_allowance": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "unit_byte_allowance": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "available_disk_receipt": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "plan_sha256": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Session": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "pr": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "repository": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "event_base": {
+          "$ref": "#/$defs/Commit"
+        },
+        "initial_image_id": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resource_plan_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "phase": {
+          "enum": [
+            "admitted",
+            "running",
+            "checkpointed_incomplete",
+            "resource_blocked",
+            "semantic_invalid",
+            "closed_unqualified",
+            "qualified",
+            "completion_rejected",
+            "complete"
+          ]
+        },
+        "checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_unit": {
+          "$ref": "#/$defs/Nat"
+        },
+        "counts": {
+          "$ref": "#/$defs/Counts"
+        }
+      },
+      "required": [
+        "session_id",
+        "source",
+        "pr",
+        "repository",
+        "event_base",
+        "initial_image_id",
+        "resource_plan_sha256",
+        "phase",
+        "checkpoint",
+        "next_unit",
+        "counts"
+      ],
+      "additionalProperties": false
+    },
+    "WorkUnit": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "#/$defs/Nat"
+        },
+        "expected_prior_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "pr": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "repository": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "event_base": {
+          "$ref": "#/$defs/Commit"
+        },
+        "workflow_id": {
+          "const": "async-proof-session.yml"
+        },
+        "event_name": {
+          "const": "workflow_dispatch"
+        },
+        "mode": {
+          "enum": [
+            "unit",
+            "complete"
+          ]
+        },
+        "run": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "job": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "task": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "attempt": {
+          "const": 1
+        },
+        "resource_plan_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "runner_identity_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "status": {
+          "enum": [
+            "dispatched",
+            "running",
+            "checkpointed_incomplete",
+            "failed_incomplete",
+            "closed_unqualified",
+            "qualified",
+            "complete"
+          ]
+        },
+        "artifact_roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          }
+        },
+        "stage": {
+          "enum": [
+            "expand",
+            "semantic_verify",
+            "monitor_scc_verify",
+            "temporal_components",
+            "backend_qualification",
+            "complete"
+          ]
+        },
+        "registered_cases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "progress": {
+          "$ref": "#/$defs/ProgressCursor"
+        }
+      },
+      "required": [
+        "session_id",
+        "unit_ordinal",
+        "expected_prior_checkpoint",
+        "source",
+        "pr",
+        "repository",
+        "event_base",
+        "workflow_id",
+        "event_name",
+        "mode",
+        "run",
+        "job",
+        "task",
+        "attempt",
+        "resource_plan_sha256",
+        "runner_identity_utf8",
+        "status",
+        "artifact_roots",
+        "stage",
+        "progress",
+        "registered_cases"
+      ],
+      "additionalProperties": false
+    },
+    "MonitorNode": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "product": {
+          "$ref": "#/$defs/Id"
+        },
+        "seen_goal": {
+          "type": "boolean"
+        },
+        "capacity_ok": {
+          "type": "boolean"
+        },
+        "pending_attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "job": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "claim_id": {
+                "$ref": "#/$defs/Uuid"
+              }
+            },
+            "required": [
+              "node",
+              "job",
+              "claim_id"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "id",
+        "context",
+        "product",
+        "seen_goal",
+        "capacity_ok",
+        "pending_attempts"
+      ],
+      "additionalProperties": false
+    },
+    "MonitorEdge": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "from_monitor": {
+          "$ref": "#/$defs/Id"
+        },
+        "to_monitor": {
+          "$ref": "#/$defs/Id"
+        },
+        "product_edge": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "id",
+        "from_monitor",
+        "to_monitor",
+        "product_edge"
+      ],
+      "additionalProperties": false
+    },
+    "Scc": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "property": {
+          "enum": [
+            "seen_goal_false",
+            "pending_true",
+            "capacity_ok_pending_true"
+          ]
+        },
+        "monitor_root": {
+          "$ref": "#/$defs/Id"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "forward_tree": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "reverse_tree": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "condensation_rank": {
+          "$ref": "#/$defs/Nat"
+        },
+        "outgoing_dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "context",
+        "property",
+        "monitor_root",
+        "members",
+        "forward_tree",
+        "reverse_tree",
+        "condensation_rank",
+        "outgoing_dependencies"
+      ],
+      "additionalProperties": false
+    },
+    "Counterexample": {
+      "type": "object",
+      "properties": {
+        "family": {
+          "type": "string"
+        },
+        "expected_first_failure": {
+          "type": "string"
+        },
+        "original_initial": {
+          "$ref": "#/$defs/Id"
+        },
+        "prefix": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "cycle": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "monitor_component": {
+          "$ref": "#/$defs/Id"
+        },
+        "full_graph_fairness": {
+          "$ref": "#/$defs/Ref"
+        },
+        "capacity_prefix_verified": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "stutter_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "family",
+        "expected_first_failure",
+        "original_initial",
+        "prefix",
+        "cycle",
+        "monitor_component",
+        "full_graph_fairness",
+        "capacity_prefix_verified",
+        "source",
+        "stutter_at"
+      ],
+      "additionalProperties": false
+    },
+    "Outcome": {
+      "type": "object",
+      "properties": {
+        "family": {
+          "type": "string"
+        },
+        "expected": {
+          "enum": [
+            "pass",
+            "named_semantic_counterexample",
+            "finite_witness"
+          ]
+        },
+        "actual": {
+          "enum": [
+            "pending",
+            "pass",
+            "named_semantic_counterexample",
+            "finite_witness",
+            "invalid",
+            "incomplete"
+          ]
+        },
+        "component_receipts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          }
+        },
+        "invocation_count": {
+          "$ref": "#/$defs/Nat"
+        },
+        "witness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "family",
+        "expected",
+        "actual",
+        "component_receipts",
+        "invocation_count",
+        "witness"
+      ],
+      "additionalProperties": false
+    },
+    "Completion": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "pr": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "repository": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "event_base": {
+          "$ref": "#/$defs/Commit"
+        },
+        "manifest_root": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "counts": {
+          "$ref": "#/$defs/Counts"
+        },
+        "contexts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextRoot"
+          }
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Outcome"
+          }
+        },
+        "backend_causal_numeric_eligibility": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          }
+        },
+        "applicable_main_receipts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ref"
+          }
+        },
+        "completion_unit": {
+          "$ref": "#/$defs/Ref"
+        },
+        "current_head_recheck": {
+          "$ref": "#/$defs/Ref"
+        },
+        "accepted": {
+          "const": true
+        }
+      },
+      "required": [
+        "session_id",
+        "source",
+        "pr",
+        "repository",
+        "event_base",
+        "manifest_root",
+        "counts",
+        "contexts",
+        "outcomes",
+        "backend_causal_numeric_eligibility",
+        "applicable_main_receipts",
+        "completion_unit",
+        "current_head_recheck",
+        "accepted"
+      ],
+      "additionalProperties": false
+    },
+    "BoundaryObservation": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "physical_rows_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "episode_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "omitted_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "canonical_utf8": {
+          "$ref": "#/$defs/CanonicalUtf8"
+        },
+        "phase": {
+          "enum": [
+            "initial",
+            "pre_apply",
+            "post_apply",
+            "post_rollback"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "writer_epoch": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "initial_image_id": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "id",
+        "physical_rows_id",
+        "episode_id",
+        "omitted_utf8",
+        "canonical_utf8",
+        "phase",
+        "source",
+        "writer_epoch",
+        "initial_image_id"
+      ],
+      "additionalProperties": false
+    },
+    "ArtifactReceipt": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "unit_ordinal": {
+          "$ref": "#/$defs/Nat"
+        },
+        "run": {
+          "$ref": "#/$defs/Id"
+        },
+        "job": {
+          "$ref": "#/$defs/Id"
+        },
+        "task": {
+          "$ref": "#/$defs/Id"
+        },
+        "attempt": {
+          "const": 1
+        },
+        "source": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "name": {
+          "type": "string"
+        },
+        "expired": {
+          "const": false
+        },
+        "zip_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "zip_bytes": {
+          "$ref": "#/$defs/Nat"
+        },
+        "extracted_bytes": {
+          "$ref": "#/$defs/Nat"
+        },
+        "member_count": {
+          "$ref": "#/$defs/Nat"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/RelativePath"
+              },
+              "bytes": {
+                "$ref": "#/$defs/Nat"
+              },
+              "sha256": {
+                "$ref": "#/$defs/Sha256"
+              }
+            },
+            "required": [
+              "path",
+              "bytes",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "upload_log_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "event_payload_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "expected_prior_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "produced_checkpoint": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "session_id",
+        "unit_ordinal",
+        "run",
+        "job",
+        "task",
+        "attempt",
+        "source",
+        "name",
+        "expired",
+        "zip_sha256",
+        "zip_bytes",
+        "extracted_bytes",
+        "member_count",
+        "members",
+        "upload_log_sha256",
+        "event_payload_sha256",
+        "expected_prior_checkpoint",
+        "produced_checkpoint"
+      ],
+      "additionalProperties": false
+    },
+    "DataEnvelope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "PhysicalRows"
+            },
+            "record": {
+              "$ref": "#/$defs/PhysicalRows"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Episode"
+            },
+            "record": {
+              "$ref": "#/$defs/Episode"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Store"
+            },
+            "record": {
+              "$ref": "#/$defs/Store"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Product"
+            },
+            "record": {
+              "$ref": "#/$defs/Product"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Applied"
+            },
+            "record": {
+              "$ref": "#/$defs/Applied"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "OracleEvidence"
+            },
+            "record": {
+              "$ref": "#/$defs/OracleEvidence"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Candidate"
+            },
+            "record": {
+              "$ref": "#/$defs/Candidate"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Demand"
+            },
+            "record": {
+              "$ref": "#/$defs/Demand"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "ProductEdge"
+            },
+            "record": {
+              "$ref": "#/$defs/ProductEdge"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "FairPair"
+            },
+            "record": {
+              "$ref": "#/$defs/FairPair"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Enabledness"
+            },
+            "record": {
+              "$ref": "#/$defs/Enabledness"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Expansion"
+            },
+            "record": {
+              "$ref": "#/$defs/Expansion"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Counts"
+            },
+            "record": {
+              "$ref": "#/$defs/Counts"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "ContextRoot"
+            },
+            "record": {
+              "$ref": "#/$defs/ContextRoot"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "InitialImage"
+            },
+            "record": {
+              "$ref": "#/$defs/InitialImage"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Checkpoint"
+            },
+            "record": {
+              "$ref": "#/$defs/Checkpoint"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "MonitorNode"
+            },
+            "record": {
+              "$ref": "#/$defs/MonitorNode"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "MonitorEdge"
+            },
+            "record": {
+              "$ref": "#/$defs/MonitorEdge"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Scc"
+            },
+            "record": {
+              "$ref": "#/$defs/Scc"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Counterexample"
+            },
+            "record": {
+              "$ref": "#/$defs/Counterexample"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "Outcome"
+            },
+            "record": {
+              "$ref": "#/$defs/Outcome"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "const": 6
+            },
+            "kind": {
+              "const": "BoundaryObservation"
+            },
+            "record": {
+              "$ref": "#/$defs/BoundaryObservation"
+            }
+          },
+          "required": [
+            "schema_version",
+            "kind",
+            "record"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ProgressCursor": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Context"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "record_kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "PhysicalRows",
+                "Episode",
+                "Store",
+                "Product",
+                "Applied",
+                "OracleEvidence",
+                "Candidate",
+                "Demand",
+                "ProductEdge",
+                "FairPair",
+                "Enabledness",
+                "Expansion",
+                "Counts",
+                "ContextRoot",
+                "InitialImage",
+                "Checkpoint",
+                "MonitorNode",
+                "MonitorEdge",
+                "Scc",
+                "Counterexample",
+                "Outcome",
+                "BoundaryObservation"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fifo_ticket": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "component_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "family": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "case_index": {
+          "$ref": "#/$defs/Nat"
+        }
+      },
+      "required": [
+        "context",
+        "record_kind",
+        "next_id",
+        "fifo_ticket",
+        "component_id",
+        "family",
+        "case_index"
+      ],
+      "additionalProperties": false
+    },
+    "RecordKey": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Nat"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    }
+  }
+}
