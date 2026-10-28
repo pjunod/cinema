@@ -972,3 +972,87 @@ async fn real_drain_refusal_drops_original_acknowledged_start_and_keeps_acquired
         ResourceVector::default()
     );
 }
+
+// R9 is distinct from successful-close result loss. This subprocess injects
+// errno at the kernel boundary of the original owned stdout close itself.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn copy_root_only_actual_stdout_close_ebadf_keeps_original_r_and_never_retries_close() {
+    const CHILD_ROOT: &str = "PLURX_COPY_STDOUT_EBADF_CHILD_ROOT";
+    const TEST: &str = "adaptive_resources::runtime::operations::copy_vod::physical_tests::copy_root_only_actual_stdout_close_ebadf_keeps_original_r_and_never_retries_close";
+    const DONE: &str = "original-root-only-stdout-ebadf-held";
+    let Some(root) = std::env::var_os(CHILD_ROOT) else {
+        let root = tempfile::tempdir().expect("isolated exact-close fixture root");
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("same test harness"))
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD_ROOT, root.path())
+                .output()
+                .expect("isolated exact-close subprocess");
+        assert!(
+            output.status.success(),
+            "exact close fixture failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(DONE),
+            "child did not reach held-charge assertions"
+        );
+        return;
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("fixture current-thread runtime")
+        .block_on(async move {
+            let root = std::path::PathBuf::from(root);
+            let (runtime, mut owner, preparation) = original(&root).await;
+            cancel_at(&runtime, &mut owner, CopyStartFixtureStage::RootRegistered).await;
+            let charge = runtime.accounting().expect("original full R").used;
+            let (graph, child) = {
+                let mut bundle = preparation.state.lock().await;
+                let role = &mut bundle.roles[0];
+                let copy = role.copy_vod.as_ref().expect("original copy");
+                assert!(copy.task.is_none() && copy.fixed_image.is_some());
+                let child = role.roots[&copy.root_member];
+                role.sealed = Some(role.graph.take().expect("same original graph").seal());
+                (role.sealed.as_ref().expect("same sealed graph").select_same(), child)
+            };
+            kill_and_wait(&graph, child).await;
+            assert_eq!(graph.fixture_original_unclaimed_stdout_close_calls(), 0);
+            graph.fixture_deny_original_unclaimed_stdout_close(child).await
+                .expect("required thread-local kernel seccomp exact-close filter");
+            let Err(error) = bounded(owner.prepare_retirement(true, deadline())).await else {
+                panic!("actual owned close EBADF cannot mint a close ticket");
+            };
+            let native_error = error.into_io_error();
+            assert_eq!(native_error.raw_os_error(), Some(libc::EBADF), "actual original close errno");
+            assert_eq!(graph.copy_hold_reason().await, Some(CopyTaskHoldReason::PipeCloseFailed));
+            assert_eq!(graph.fixture_original_unclaimed_stdout_close_calls(), 1);
+            {
+                let bundle = preparation.state.lock().await;
+                let role = &bundle.roles[0];
+                let copy = role.copy_vod.as_ref().expect("same original copy retained");
+                assert!(copy.fixed_image.is_some() && copy.root_only_closure.is_none());
+                assert!(copy.never_root_closure.is_none() && copy.process_closure.is_none());
+                assert!(copy.task.is_none() && role.roots.len() == 1);
+                assert!(!role.refunded && role.pending_finite_close.is_none());
+                assert_eq!(copy.permanent_hold, Some(crate::adaptive_resources::runtime::copy_vod::CopyCleanupHoldReason::FailedPipeClose));
+            }
+            assert!(bounded(owner.prepare_retirement(true, deadline())).await.is_err());
+            assert_eq!(graph.fixture_original_unclaimed_stdout_close_calls(), 1,
+                "sticky failure must never issue a second numeric-descriptor close");
+            assert_eq!(runtime.accounting().expect("actual close error retains full original R").used, charge);
+            assert_eq!(graph.snapshot().await.roots, 1);
+            // The denied syscall leaves uncertain native custody. Kernel
+            // process teardown below is fixture cleanup, never a refund fact.
+            use std::io::Write;
+            writeln!(std::io::stdout(), "{DONE}").expect("fixture completion marker");
+            std::io::stdout().flush().expect("fixture marker flush");
+            std::process::exit(0);
+        });
+}

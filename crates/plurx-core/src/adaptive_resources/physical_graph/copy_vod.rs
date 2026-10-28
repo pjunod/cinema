@@ -1038,3 +1038,12 @@ impl SealedPhysicalGraph {
         record.start_disposition
     }
 }
+
+// Irreversible filters are exercised only in the dedicated fixture subprocess.
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod syscall_fixture;

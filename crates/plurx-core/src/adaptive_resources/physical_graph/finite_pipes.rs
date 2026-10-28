@@ -125,6 +125,26 @@ impl PipeRecord {
     }
 }
 
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+std::thread_local! {
+    static UNCLAIMED_STDOUT_CLOSE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(super) fn fixture_unclaimed_stdout_close_calls() -> usize {
+    UNCLAIMED_STDOUT_CLOSE_CALLS.with(std::cell::Cell::get)
+}
+
 /// Consume one original pipe and observe the kernel close result exactly once.
 /// A failed close must never retry a numeric descriptor that may be reused.
 #[cfg(unix)]
@@ -151,6 +171,13 @@ fn close_native(_pipe: NativePipe) -> io::Result<()> {
 
 #[cfg(unix)]
 pub(super) fn close_unclaimed_stdout(pipe: ChildStdout) -> io::Result<()> {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    UNCLAIMED_STDOUT_CLOSE_CALLS.with(|calls| calls.set(calls.get() + 1));
     close_native(NativePipe::Stdout(pipe))
 }
 
