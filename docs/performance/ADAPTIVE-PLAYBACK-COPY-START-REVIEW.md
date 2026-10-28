@@ -312,3 +312,19 @@ naturally join as NeverEntered, with acquired-task facts and alias barriers.
 Both bodies are authored; execution and mutation validation are pending. The
 new mutex capability and boundary gate exist only in test/fixtures builds. R9,
 R20 and remaining actual pending joins/outcome certainty remain open.
+
+## 10. First behavioral run — custody startup repair, 2026-10-28
+
+The first native campaign at `2f0a2321831b4ac9b6c08bcf73ede853b3d8acd1`
+compiled both test harnesses and discovered all102 selected cases. Its first
+case failed before runtime construction: the runner's fresh scratch directory
+was group-writable. Only that owned directory's permissions were corrected.
+The second attempt reached a production startup defect: custody's full ancestor
+walk includes `/`, while the general no-follow directory helper refuses root.
+Both attempts executed1 case, passed0 and failed1; neither is qualification.
+
+The repair adds a metadata-only root ancestor inspection and uses it during
+installation and retained-chain verification. It preserves the full inode
+chain, permission checks, ordinary root-capability refusal and intermediate
+symlink refusal. A focused filesystem regression is authored; the repair still
+requires exact compilation and native execution. No failed evidence is removed.

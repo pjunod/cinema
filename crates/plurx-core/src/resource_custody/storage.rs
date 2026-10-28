@@ -270,18 +270,15 @@ impl Storage {
         // same-UID/privileged hostile replacement is not an OS-enforced boundary.
         let mut ancestors = Vec::new();
         for ancestor in path.ancestors() {
-            let file = crate::fs_secure::open_directory_nofollow_blocking(ancestor)?;
-            let m = file.metadata()?;
-            if m.mode() & 0o022 != 0 && m.mode() & 0o1000 == 0 {
+            let (identity, mode) =
+                crate::fs_secure::directory_ancestor_metadata_nofollow_blocking(ancestor)?;
+            if mode & 0o022 != 0 && mode & 0o1000 == 0 {
                 return Err(CustodyError::new(
                     ErrorKind::UnsupportedStorage,
                     "custody ancestry is replaceable",
                 ));
             }
-            ancestors.push((
-                ancestor.to_path_buf(),
-                crate::fs_secure::std_file_identity(&file)?,
-            ));
+            ancestors.push((ancestor.to_path_buf(), identity));
         }
         let db_path = path.join("obligations.sqlite3");
         let witness_path = path.join("installation.json");
@@ -438,7 +435,8 @@ impl Storage {
         #[cfg(unix)]
         {
             for (path, identity) in &self.guard.ancestors {
-                if !crate::fs_secure::directory_identity_nofollow_blocking(path)?
+                if !crate::fs_secure::directory_ancestor_metadata_nofollow_blocking(path)?
+                    .0
                     .same_inode(*identity)
                 {
                     return Err(CustodyError::new(

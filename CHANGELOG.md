@@ -109,6 +109,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Custody startup validates the filesystem-root ancestor without granting a
+  root directory capability or relaxing no-follow and private-storage checks.
 - Copy startup cancellation retains its original process, task and journal
   operations through cleanup. Unknown outcomes keep their reservation, and
   System resource ownership reports the held charge and cleanup reason.

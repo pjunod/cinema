@@ -1221,6 +1221,20 @@ pub fn directory_identity_nofollow_blocking(path: &Path) -> io::Result<FileIdent
     file_identity(&directory)
 }
 
+/// Inspect an ancestor's identity and permissions without granting a directory
+/// capability. Custody must include `/` in its retained ancestry, while the
+/// ordinary directory-open APIs deliberately refuse filesystem-root authority.
+pub(crate) fn directory_ancestor_metadata_nofollow_blocking(
+    path: &Path,
+) -> io::Result<(FileIdentity, u32)> {
+    let directory = if path == Path::new("/") {
+        File::from(root_directory()?)
+    } else {
+        open_directory_nofollow_blocking(path)?
+    };
+    Ok((file_identity(&directory)?, directory.metadata()?.mode()))
+}
+
 /// Return the held directory and parent inode chain through the current mount
 /// namespace. This catches ordinary path aliases; Linux bind-source ancestry
 /// additionally requires [`directory_source_ancestry_alias_blocking`].
@@ -3652,6 +3666,32 @@ mod tests {
                 .expect("placed bytes"),
             b"segment"
         );
+    }
+
+    #[test]
+    fn root_ancestor_metadata_preserves_root_capability_and_symlink_refusals() {
+        use super::*;
+        let (identity, mode) = directory_ancestor_metadata_nofollow_blocking(Path::new("/"))
+            .expect("root ancestry metadata");
+        let root = File::open("/").expect("independent root inspection");
+        assert!(identity.same_inode(std_file_identity(&root).expect("same root identity")));
+        assert_eq!(mode, root.metadata().expect("root mode").mode());
+        assert!(open_directory_nofollow_blocking(Path::new("/")).is_err());
+        assert!(directory_identity_nofollow_blocking(Path::new("/")).is_err());
+        assert!(directory_ancestor_metadata_nofollow_blocking(Path::new("/tmp/../")).is_err());
+        let fixture = tempfile::tempdir().expect("ancestor no-follow fixture");
+        let fixture_root =
+            std::fs::canonicalize(fixture.path()).expect("canonical fixture ancestry");
+        let actual = fixture_root.join("actual");
+        std::fs::create_dir(&actual).expect("actual directory");
+        std::fs::create_dir(actual.join("child")).expect("actual nested directory");
+        directory_ancestor_metadata_nofollow_blocking(&actual).expect("actual directory metadata");
+        directory_ancestor_metadata_nofollow_blocking(&actual.join("child"))
+            .expect("actual nested directory metadata");
+        let alias = fixture_root.join("alias");
+        std::os::unix::fs::symlink(&actual, &alias).expect("ancestor alias fixture");
+        assert!(directory_ancestor_metadata_nofollow_blocking(&alias).is_err());
+        assert!(directory_ancestor_metadata_nofollow_blocking(&alias.join("child")).is_err());
     }
 
     /// `readdir` reports end-of-directory and a failed read the same way. On a
