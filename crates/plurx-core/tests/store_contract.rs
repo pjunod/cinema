@@ -12804,7 +12804,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,1)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,2)".to_owned()),
             "translation-shape" | "managed-shape" => {
                 let trigger = if scenario == "translation-shape" {"subtitle_translation_source_changed"} else {"subtitle_managed_source_changed"};
                 let mut rows = client.query_consistent("SELECT sql FROM sqlite_master WHERE name=$1", hiqlite::params!(trigger)).await.expect("original trigger definition");
@@ -12895,7 +12895,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=1) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=2) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -12903,13 +12903,17 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         rows[0].value, 1,
         "only the current managed fixture may be rewound"
     );
-    let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_model_receipts) + (SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_model_operation','subtitle_transcribe_managed')) AS value",
-        hiqlite::params!(),
-    ).await.expect("managed fixture data inventory");
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            format!("{} AS value", queue_fixture::MANAGED_FIXTURE_DATA_SQL),
+            hiqlite::params!(),
+        )
+        .await
+        .expect("managed fixture data inventory");
     assert_eq!(rows.len(), 1);
+    let managed_data_count = rows[0].value;
     assert_eq!(
-        rows[0].value, 0,
+        managed_data_count, 0,
         "managed receipts or accepted work cannot be rewound"
     );
     let rows: Vec<I64Value> = client.query_consistent_map(
@@ -12921,6 +12925,9 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         rows[0].value, 6,
         "partial managed fixtures cannot be rewound"
     );
+    let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
+    let managed_drops =
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 2, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -12960,13 +12967,6 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let old_view = include_str!("../src/store/background_jobs_probe.sql")
-        .split("-- next statement")
-        .find(|sql| {
-            sql.trim_start()
-                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
-        })
-        .expect("published predecessor resource view");
     let mut statements: Vec<_> = title_drops
         .into_iter()
         .chain(annotations_drops)
@@ -12974,18 +12974,10 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         .map(|sql| (sql, hiqlite::params!()))
         .collect();
     statements.extend(
-        [
-            "DROP TRIGGER subtitle_managed_config_write",
-            "DROP TRIGGER subtitle_managed_source_deleted",
-            "DROP TRIGGER subtitle_managed_source_changed",
-            "DROP VIEW background_job_required_resources",
-            "DROP TABLE subtitle_model_receipts",
-            "DROP TABLE subtitle_managed_schema",
-        ]
-        .into_iter()
-        .map(|sql| (sql.to_owned(), hiqlite::params!())),
+        managed_drops
+            .into_iter()
+            .map(|sql| (sql, hiqlite::params!())),
     );
-    statements.push((old_view.to_owned(), hiqlite::params!()));
     client
         .txn(statements)
         .await
@@ -17036,7 +17028,7 @@ mod managed_bootstrap_regressions {
             ),
             (
                 "DELETE FROM subtitle_managed_schema",
-                "INSERT INTO subtitle_managed_schema VALUES(1,1)".into(),
+                "INSERT INTO subtitle_managed_schema VALUES(1,2)".into(),
                 "marker missing",
             ),
         ]
