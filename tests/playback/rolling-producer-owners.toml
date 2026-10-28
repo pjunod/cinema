@@ -1,3 +1,19 @@
+# DV title analysis ownership review (PR #1301, 2026-10-28; source 7d2d4a9c7):
+# +1 namespaced task and +1 Command are DvTitleRide's companion scanner.
+# build_attested_pass retains DvTitleScan through the index pass and finish;
+# the task owns a cloned held source descriptor, inherited by the child as fd3.
+# The existing bounded collector registers ChildWork::background, isolates its
+# process group, caps each output stream at 64 KiB, and bounds child runtime.
+# Successful collection waits for the child and joins both output readers.
+# Lead-output refusal or join timeout aborts and awaits the scan task.
+# Dropping the pass drops DvTitleScan and requests task abort; bounded child
+# Drop kills the owned group/direct child and schedules its wait on the runtime.
+# Abort/drop is not a confirmed-reap receipt before the pass returns.
+# +1 timer bounds the finish join. +1 bare spawn is the method declaration;
+# +1 method-spawn/+1 launch shape is the same Rust helper invocation.
+# No new rolling-producer authority or independent repair owner is introduced.
+# Patterns, roots, exact equality and forbidden-shape zeroes remain unchanged.
+
 # HTTPS Barrier::wait adds one test-only joined observation to main’s lifecycle census.
 # HTTPS integration 2026-10-25: retain main lifecycle owners and compose the
 # reviewed HTTPS additions: 13 awaited test/serving tasks, one owned JoinSet
@@ -3223,7 +3239,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # PR1299 VOD index recovery: +4 test-only tasks in state/tests.rs: three runs
 # of the queued local index pass and one queued speech admission behind it.
 # Each is awaited under a timeout; none outlives its test.
-expected_occurrences = 1021
+expected_occurrences = 1022
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3464,7 +3480,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # kill_on_drop guard; no production launcher or separate reap owner is added.
 # Main contributes one HTTPS transport JoinSet.spawn; its driver is joined by
 # the listener owner. Both parent additions are present in the source union.
-expected_occurrences = 78
+expected_occurrences = 79
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -3485,7 +3501,7 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # both use the same retained cancellation/reap owner, not separate launchers.
 # PR1225: +1 is vod/driver.rs:1245's cfg(test) controlled_driver::spawn
 # declaration, not a second task. Its actual task/cancellation is noted above.
-expected_occurrences = 16
+expected_occurrences = 17
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4922,7 +4938,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps that let the pass and the speech pass take their places in the
 # heavy lane's queue, four timeouts bounding those awaited tasks, and one
 # sleep in the ride-along worker test's polling loop.
-expected_occurrences = 1894
+expected_occurrences = 1895
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5404,7 +5420,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 302
+expected_occurrences = 303
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6051,7 +6067,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in-process responses, while the finite FFmpeg fixture is explicitly awaited.
 # Main's HTTPS admin/transport/startup owners and source/status reads remain in
 # the source scan; none changes launch authorization.
-expected_occurrences = 807
+expected_occurrences = 808
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
