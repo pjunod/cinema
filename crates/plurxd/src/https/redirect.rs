@@ -50,10 +50,15 @@ fn machine_endpoint(path: &str) -> bool {
             | "/identity"
             | "/api/v1/server"
             | "/api/v1/server/node"
+            | "/api/v1/cluster/join/redeem"
+            | "/api/v1/cluster/join/finalize"
+            | "/api/v1/cluster/learner/join/redeem"
+            | "/api/v1/cluster/learner/join/finalize"
     ) || [
         "/internal",
         "/_internal",
         "/api/v1/internal",
+        "/api/v1/cluster/artwork",
         "/jellyfin",
         "/library",
         "/:",
@@ -280,6 +285,37 @@ mod tests {
             app.oneshot(request).await.expect("RPC response").status(),
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn cluster_bootstrap_and_peer_artwork_keep_http_without_exempting_admin_routes() {
+        // Join and peer-artwork clients deliberately refuse redirects. Their
+        // public-looking routes still belong to the cluster machine protocol.
+        for path in [
+            "/api/v1/cluster/join/redeem",
+            "/api/v1/cluster/join/finalize",
+            "/api/v1/cluster/learner/join/redeem",
+            "/api/v1/cluster/learner/join/finalize",
+            "/api/v1/cluster/artwork/poster.jpg",
+        ] {
+            let response = response(Some(32443), path, None).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(!response.headers().contains_key(header::LOCATION));
+        }
+        for path in [
+            "/api/v1/cluster",
+            "/api/v1/cluster/join-tokens",
+            "/api/v1/cluster/join/redeem-lookalike",
+            "/api/v1/cluster/artwork-lookalike/poster.jpg",
+        ] {
+            assert_eq!(
+                response(Some(32443), path, Some("media.example"))
+                    .await
+                    .status(),
+                StatusCode::TEMPORARY_REDIRECT,
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]
