@@ -1,6 +1,7 @@
 # Linux player Cinema UI — release and installation ledger
 
-**Status:** open: 0.4.0 installed; physical acceptance pending ·
+**Status:** open: 0.4.0 installed; owner confirms UI and quality switching;
+live TV Next acceptance pending ·
 **Written:** 2026-10-28 · **Executes:** the owner's approved
 Cinema playback renders and request to complete metadata, next episode and
 quality controls, package them and install on the ROG.
@@ -39,7 +40,9 @@ and restarts. Early EOF cannot mark a whole film watched or trigger Next.
 | Main promotion and landing | PR #1307 passed Main promotion gate run 6113 (run ID 6145); merged as `530e2edad2b678c563e8d3d9c7ec6df1d30a076b` with the qualified source tree unchanged |
 | Ingress server deployment | Standard `make docker-up` deployment from the merged commit passed: healthy container, `/healthz` and `/readyz` HTTP 200, unauthenticated context HTTP 401; host override and 2535 s health start period retained |
 | ROG local server deployment | Standard `make docker-up` deployment from the merged commit passed: healthy container, `/healthz` and `/readyz` at the local and configured ingress origins returned HTTP 200 from the ROG, unauthenticated context HTTP 401; private override/environment hashes and 1500 s health start period retained |
-| Live launch and remaining physical acceptance | Owner-launched Dolby Vision movie verified on 2026-10-28: 3840×2160 p010, Dolby Vision matrix, PQ/BT.2020, gpu-next and NVDEC; title/year/runtime/overview and Auto/Original/advertised heights present, player error null. Quality switching, TV Next and physical viewing feedback remain pending; the movie correctly has no next episode |
+| Live movie launch | Owner-launched Dolby Vision movie verified on 2026-10-28: 3840×2160 p010, Dolby Vision matrix, PQ/BT.2020, gpu-next and NVDEC; title/year/runtime/overview and Auto/Original/advertised heights present, player error null |
+| Owner-confirmed Cinema acceptance | On 2026-10-28 the owner confirmed that the UI and quality switching work after the requested Original → Auto check. This is functional owner feedback, not an instrumented position-preservation trace |
+| Remaining live acceptance | TV Next was not exercised because the launched title was a movie, correctly with no next episode. Automated Next/store/HTTP regressions passed; live episode advance remains open |
 
 The original implementation is commit `ab880ed254a09b5f822e7048f8b3248528e31b29`
 under [PR #1307](http://forge.lan:3000/noirr/plurx/pulls/1307). The gate passed
@@ -61,9 +64,12 @@ and the ROG runtime image is
 Both were built from the merged source above; the ROG running image's OCI
 revision was verified against that commit. Server health and package checks
 establish installation readiness. The owner's live movie launch also verifies
-the decoded video, renderer and populated Cinema metadata/quality state. It
-does not establish a successful quality switch, TV episode advance or the
-owner's physical viewing acceptance; those receipts remain open.
+the decoded video, renderer and populated Cinema metadata/quality state. The
+owner then confirmed that the UI and quality switching work; the player had
+closed before the follow-up IPC read, so no final position-preservation trace
+was captured. Live TV episode advance remains open. These receipts do not
+qualify a different HDR processor or close the broader Linux player plan's
+physical display matrix.
 
 Release outputs, source identities, checksum manifests, logs and rollback
 material belong outside compiler/cache directories. The release includes the
