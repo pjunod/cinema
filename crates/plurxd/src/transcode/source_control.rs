@@ -89,6 +89,9 @@ impl Default for SourceControlHookOwner {
 struct PausingControlHooks {
     observed: crate::seam_hooks::PauseSlot,
     accepting: crate::seam_hooks::PauseSlot,
+    settlement_sql_fault: std::sync::atomic::AtomicU8,
+    settlement_sql_attempts: std::sync::atomic::AtomicUsize,
+    settlement_registered_proofs: std::sync::atomic::AtomicUsize,
 }
 #[cfg(test)]
 impl ControlHooks for PausingControlHooks {
@@ -116,6 +119,112 @@ impl SourceControlHookOwner {
         } else {
             hooks.accepting.arm("source_control_accepting")
         }
+    }
+}
+
+/// An ordinary Source Store result injected only after the actual original
+/// producer/preparation proof has been retained. Neither variant closes work.
+#[cfg(all(test, target_os = "linux"))]
+#[derive(Clone, Copy)]
+pub(super) enum SourceSettlementSqlFault {
+    Transient,
+    Refused,
+}
+
+#[cfg(test)]
+impl SourceControlHookOwner {
+    #[cfg(target_os = "linux")]
+    pub(super) fn fixture_arm_settlement_sql(&self, fault: SourceSettlementSqlFault) {
+        let hooks = self
+            .slot
+            .get_or_install(|| Box::new(PausingControlHooks::default()))
+            .as_any()
+            .downcast_ref::<PausingControlHooks>()
+            .expect("Source settlement test hooks");
+        assert_eq!(
+            hooks.settlement_sql_fault.swap(
+                match fault {
+                    SourceSettlementSqlFault::Transient => 1,
+                    SourceSettlementSqlFault::Refused => 2,
+                },
+                std::sync::atomic::Ordering::AcqRel,
+            ),
+            0,
+            "one SQL fault selection per actual owner"
+        );
+    }
+
+    pub(super) fn fixture_settlement_sql(
+        &self,
+        physical: &SourcePhysicalSettlement,
+        assignment: &SourceDispatchAssignment,
+    ) -> Option<
+        Result<
+            plurx_core::sharing_source_sessions::SourceReleaseOutcome,
+            plurx_core::error::StoreError,
+        >,
+    > {
+        use std::sync::atomic::Ordering;
+        let hooks = self
+            .slot
+            .get()
+            .as_any()
+            .downcast_ref::<PausingControlHooks>()?;
+        let selected = hooks.settlement_sql_fault.load(Ordering::Acquire);
+        if selected == 0 {
+            return None;
+        }
+        assert!(
+            physical.matches(assignment),
+            "SQL injection follows actual matching native/preparation closure"
+        );
+        hooks.settlement_sql_attempts.fetch_add(1, Ordering::AcqRel);
+        if matches!(physical, SourcePhysicalSettlement::Registered(_, _)) {
+            hooks
+                .settlement_registered_proofs
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        Some(match selected {
+            1 => Err(plurx_core::error::StoreError::Database(
+                "fixture Source SQL failure after original physical settlement".into(),
+            )),
+            2 => Ok(plurx_core::sharing_source_sessions::SourceReleaseOutcome::Refused),
+            _ => unreachable!("test-only SQL fault selector"),
+        })
+    }
+
+    /// Advance the existing retry loop promptly; its real attempt bound and
+    /// deadline checks remain unchanged. This never manufactures a timeout.
+    pub(super) fn fixture_settlement_retry_delay(&self) -> Option<Duration> {
+        self.slot
+            .get()
+            .as_any()
+            .downcast_ref::<PausingControlHooks>()
+            .filter(|hooks| {
+                hooks
+                    .settlement_sql_fault
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != 0
+            })
+            .map(|_| Duration::ZERO)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn fixture_settlement_sql_observations(&self) -> (usize, usize) {
+        self.slot
+            .get()
+            .as_any()
+            .downcast_ref::<PausingControlHooks>()
+            .map_or((0, 0), |hooks| {
+                (
+                    hooks
+                        .settlement_sql_attempts
+                        .load(std::sync::atomic::Ordering::Acquire),
+                    hooks
+                        .settlement_registered_proofs
+                        .load(std::sync::atomic::Ordering::Acquire),
+                )
+            })
     }
 }
 
