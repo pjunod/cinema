@@ -1,15 +1,6 @@
 version = 1
 enforce_after = "e8a910f"
 
-# Inherited fixture correction: source/test correspondence; execution is recorded separately.
-[[fixes]]
-id = "linux-player.seek-event-fixture-contract"
-commits = ["7bec1b236eb7c2acd590d7ad20890ac73d3f2501"]
-source = "clients/linux-player/tests/test_launcher.py"
-source_anchor = 'self.assertTrue(playback.on_event({"event": "seek"}))'
-test = "clients/linux-player/tests/test_launcher.py"
-test_anchor = "def test_seek_inside_the_range_stays_in_the_session(self):"
-
 # The semantic in-session seek regression exercises the real playback event path.
 [[fixes]]
 id = "linux-player.seek-inside-session-event-path"
