@@ -1908,11 +1908,20 @@ async fn copy_post_mint_source_fact_collision(root_only: bool) {
     drop(graph);
     drop(preparation);
     drop(owner);
-    Arc::try_unwrap(runtime)
-        .ok()
-        .expect("sole held runtime")
-        .drain()
-        .expect("durable held journal, no refund");
+    if root_only {
+        // The deliberately retained CopyWork still owns its original sink,
+        // which owns this runtime. That permanent hold cannot be drained as
+        // though the rich payload were gone. Test-process teardown is not a
+        // native-close or ledger-refund witness.
+        assert!(Arc::strong_count(&runtime) > 1);
+        drop(runtime);
+    } else {
+        Arc::try_unwrap(runtime)
+            .ok()
+            .expect("sole joined held runtime")
+            .drain()
+            .expect("durable held journal, no refund");
+    }
 }
 
 #[tokio::test]
