@@ -278,10 +278,12 @@ async fn standalone_index_yields_to_foreground_and_removes_partial_stage() {
         .position(|arg| arg == "-i")
         .expect("an input");
     pass.args.insert(input, "-re".to_owned());
-    let admission = transcode
-        .admit_fragment()
-        .await
-        .expect("the pass's heavy-lane admission");
+    let admission = Arc::new(
+        transcode
+            .admit_fragment()
+            .await
+            .expect("the pass's heavy-lane admission"),
+    );
     let mut build = Box::pin(crate::state::local_index_until_foreground(
         &transcode,
         &admission,
@@ -337,4 +339,126 @@ async fn standalone_index_yields_to_foreground_and_removes_partial_stage() {
     .await
     .expect("the file may retry after the viewer leaves");
     assert!(matches!(retry.outcome, IndexOutcome::Built(_)));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn unpolled_title_companion_retains_the_original_admission_until_input_drops() {
+    use plurx_core::process::bounded::{self, OriginalWorkKeeper};
+    let root = crate::test_tempdir().expect("isolated companion input");
+    let source = root.path().join("source.bin");
+    std::fs::write(&source, b"actual held source").expect("source");
+    let store: Arc<dyn plurx_core::store::Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let manager = crate::transcode::TranscodeManager::new(
+        store,
+        root.path().join("work"),
+        plurx_core::transcode::EncoderCaps::default(),
+        plurx_core::transcode::Pipeline::Cpu,
+    );
+    let admission = Arc::new(manager.admit_fragment().await.expect("original admission"));
+    let original = Arc::downgrade(&admission);
+    let keeper: Arc<dyn OriginalWorkKeeper> = admission.clone();
+    let mut task = bounded::with_original_work_keeper(keeper, async {
+        DvTitleScanInput::spawn(
+            std::fs::File::open(&source).expect("original held descriptor"),
+            root.path().join("must-not-enter"),
+            "0".into(),
+            Duration::from_secs(30),
+            None,
+        )
+    })
+    .await;
+    drop(admission);
+    assert!(
+        original.upgrade().is_some(),
+        "the queued whole input retains its original admission"
+    );
+    // Current-thread scheduling: there has been no yield since spawn.
+    task.0.abort();
+    match (&mut task.0).await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("unpolled scanner unexpectedly entered"),
+    }
+    drop(task);
+    assert!(original.upgrade().is_none());
+    assert_eq!(manager.original_legacy_drain_counts().0.software_used, 0);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn title_companion_inherits_original_cancellation_and_admission_through_native_join() {
+    use plurx_core::process::bounded::{self, OriginalWorkKeeper};
+    use std::os::unix::fs::PermissionsExt;
+    let root = crate::test_tempdir().expect("isolated original companion");
+    let source = root.path().join("source.bin");
+    std::fs::write(&source, b"actual held source").expect("source");
+    let scanner = root.path().join("scanner");
+    std::fs::write(
+        &scanner,
+        r#"#!/bin/sh
+cat "$1" >/dev/null
+: > "$2"
+exec sleep 30
+"#,
+    )
+    .expect("owned scanner");
+    std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o755))
+        .expect("executable scanner");
+    let started = root.path().join("started");
+    let store: Arc<dyn plurx_core::store::Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let manager = crate::transcode::TranscodeManager::new(
+        store,
+        root.path().join("work"),
+        plurx_core::transcode::EncoderCaps::default(),
+        plurx_core::transcode::Pipeline::Cpu,
+    );
+    let admission = Arc::new(manager.admit_fragment().await.expect("original admission"));
+    let original = Arc::downgrade(&admission);
+    let keeper: Arc<dyn OriginalWorkKeeper> = admission.clone();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut task = bounded::with_original_work_keeper(keeper, async {
+        DvTitleScanInput::spawn(
+            std::fs::File::open(&source).expect("original descriptor"),
+            scanner,
+            started.to_string_lossy().into_owned(),
+            Duration::from_secs(30),
+            Some(&cancel),
+        )
+    })
+    .await;
+    drop(admission);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("actual scanner entered");
+    assert!(original.upgrade().is_some());
+    assert!(
+        manager.admit_fragment().await.is_none(),
+        "original work still owns the lane"
+    );
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(5), &mut task.0)
+        .await
+        .expect("same cancellation reaches companion")
+        .expect("same task joined");
+    assert!(match result {
+        Ok(output) => !output.status.success(),
+        Err(_) => true,
+    });
+    drop(task);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while original.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("original input, child, pipes and any retained reaper left");
+    assert_eq!(manager.original_legacy_drain_counts().0.software_used, 0);
+    // This verifies actual keeper lifetime, not native-group extinction,
+    // planned-restart readiness or a complete finite memory/CPU peak.
 }

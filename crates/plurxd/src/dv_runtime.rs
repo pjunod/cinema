@@ -64,6 +64,9 @@ pub(crate) struct ToolSet {
     pub(crate) scanner: PathBuf,
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) identity: DvBackendIdentity,
+    /// The scanner executable's own digest. It is statically linked, so this
+    /// is everything that decides a complete-title aggregate.
+    scanner_sha256: String,
     artifacts: Arc<Vec<(PathBuf, String)>>,
 }
 
@@ -78,6 +81,7 @@ impl ToolSet {
         let digest = hash_file(&scanner)?;
         let mut tools = Self::lifecycle_fixture(identity);
         tools.scanner = scanner.clone();
+        tools.scanner_sha256 = digest.clone();
         tools.artifacts = Arc::new(vec![(scanner, digest)]);
         Ok(tools)
     }
@@ -90,6 +94,7 @@ impl ToolSet {
             scanner: PathBuf::from("/bin/false"),
             renderer_env: Vec::new(),
             identity,
+            scanner_sha256: hash(b"/bin/false"),
             artifacts: Arc::new(Vec::new()),
         }
     }
@@ -261,9 +266,19 @@ fn contained(root: &Path, path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 impl ToolSet {
+    /// The whole processing backend: renderer, libraries, parser and helper
+    /// sources. FEL verdicts are measurements of that renderer, so they are
+    /// keyed by it.
     #[cfg(unix)]
-    pub(crate) fn scanner_digest(&self) -> String {
+    pub(crate) fn backend_digest(&self) -> String {
         hash(&serde_json::to_vec(&self.identity).expect("validated backend identity serializes"))
+    }
+    /// What a complete-title aggregate depends on: the scanner executable and
+    /// nothing else. Binding title demand to the whole backend re-queued every
+    /// Dolby Vision title whenever the renderer, a shader or libplacebo changed.
+    #[cfg(unix)]
+    pub(crate) fn title_scanner_digest(&self) -> String {
+        hash(format!("plurx-dv-title-scanner-v1\0{}", self.scanner_sha256).as_bytes())
     }
     /// Configuration is captured by the worker, never supplied by a playback
     /// request. Absence preserves ordinary output and the saved preference.
@@ -271,7 +286,7 @@ impl ToolSet {
         let root = std::env::var_os("PLURX_DV_PROCESSING_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/usr/lib/plurx/dv-processing".into());
-        tokio::task::spawn_blocking(move || {
+        crate::subtitle_models::admitted_work::spawn_blocking(move || {
             let manifest_path = root.join("build-identity.json");
             let bytes = match std::fs::read(&manifest_path) {
                 Ok(bytes) => bytes,
@@ -371,11 +386,18 @@ impl ToolSet {
             )
             .map_err(|e| e.to_string())?;
             artifacts.push((root.join("build-identity.json"), hash(&bytes)));
+            let scanner_sha256 = manifest
+                .tools
+                .get("scanner")
+                .ok_or("missing scanner")?
+                .sha256
+                .clone();
             Ok(Some(Arc::new(Self {
                 renderer: tools.remove("renderer").ok_or("missing renderer")?,
                 scanner: tools.remove("scanner").ok_or("missing scanner")?,
                 renderer_env: environment,
                 identity,
+                scanner_sha256,
                 artifacts: Arc::new(artifacts),
             })))
         })
@@ -384,7 +406,7 @@ impl ToolSet {
     }
     pub(crate) async fn is_current(&self) -> bool {
         let artifacts = self.artifacts.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::subtitle_models::admitted_work::spawn_blocking(move || {
             artifacts
                 .iter()
                 .all(|(path, expected)| hash_file(path).is_ok_and(|actual| actual == *expected))
@@ -2954,5 +2976,80 @@ mod sdr_floor_tests {
             source_mastering_minimum(&serde_json::json!({})).expect("unknown"),
             None
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod title_scanner_identity_tests {
+    use super::*;
+
+    fn backend(renderer: &[u8]) -> DvBackendIdentity {
+        let digest = |bytes: &[u8]| DvDigest::new(hash(bytes)).expect("digest");
+        DvBackendIdentity::new(
+            digest(renderer),
+            digest(b"libraries"),
+            digest(b"parser"),
+            digest(b"sources"),
+            1,
+            digest(b"manifest"),
+        )
+        .expect("backend")
+    }
+
+    fn scanner(directory: &tempfile::TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = directory.path().join(name);
+        std::fs::write(&path, bytes).expect("scanner");
+        path
+    }
+
+    /// A renderer, shader or libplacebo change must not re-queue every title;
+    /// only a different scanner may.
+    #[test]
+    fn title_demand_is_keyed_by_the_scanner_alone() {
+        let directory = tempfile::tempdir().expect("scratch");
+        let first = scanner(&directory, "first", b"scanner one");
+        let second = scanner(&directory, "second", b"scanner two");
+        let before =
+            ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer one"), first.clone())
+                .expect("tools");
+        let new_renderer = ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer two"), first)
+            .expect("tools");
+        let new_scanner = ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer one"), second)
+            .expect("tools");
+        assert_ne!(before.backend_digest(), new_renderer.backend_digest());
+        assert_eq!(
+            before.title_scanner_digest(),
+            new_renderer.title_scanner_digest()
+        );
+        assert_eq!(before.backend_digest(), new_scanner.backend_digest());
+        assert_ne!(
+            before.title_scanner_digest(),
+            new_scanner.title_scanner_digest()
+        );
+    }
+
+    /// Every title-demand reader and writer uses the scanner key; FEL verdicts
+    /// keep the backend key because they measure the renderer.
+    #[test]
+    fn title_demand_call_sites_use_the_scanner_key() {
+        for (name, source) in [
+            ("title_work.rs", include_str!("source_probe/title_work.rs")),
+            ("dv_title.rs", include_str!("source_probe/dv_title.rs")),
+        ] {
+            assert!(source.contains("title_scanner_digest()"), "{name}");
+            // The backend key appears only as the FEL identity it measures.
+            assert_eq!(
+                source.matches("backend_digest()").count(),
+                source
+                    .matches("fel_identity(&tools.backend_digest())")
+                    .count(),
+                "{name}"
+            );
+        }
+        let create = include_str!("transcode/manager/create.rs");
+        assert!(create.contains("self.fel_identity(&tools.backend_digest())"));
+        assert!(create.contains(
+            "planning.probe_json.as_deref(),\n            &tools.title_scanner_digest(),"
+        ));
     }
 }

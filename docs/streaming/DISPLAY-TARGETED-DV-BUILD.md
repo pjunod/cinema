@@ -134,6 +134,10 @@ stored next to the DV facts) records:
 - the frames whose L1 is missing or invalid;
 - the L6/L9 mastering minimum and primaries.
 
+**How the title scan runs.** [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) describes
+the metadata-only parser, its concurrent read beside content analysis,
+scanner-keyed demand and renderer-keyed FEL requalification.
+
 **Bucket elision.** If the scanned title maximum is at or below the bucket,
 the target would change nothing above black. In that case the server uses
 the master recipe and reports "this title already fits a 1600-nit display".

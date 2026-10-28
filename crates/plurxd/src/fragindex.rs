@@ -1383,6 +1383,225 @@ struct IndexPass {
     ride_along: Option<RideAlongPlan>,
 }
 
+/// The content-analysis pass also yields the title's Dolby Vision aggregate.
+/// While the pass reads the file for its index, the complete-title scanner
+/// reads the same held source in its ordinary standalone mode: the same
+/// unfiltered access units, the same checks, the same aggregate as the
+/// `dv_title_scan` job, which never has to read the file again. The two read
+/// the same pages in step, so the page cache serves the slower one and the
+/// file is read once from storage in practice.
+///
+/// The scan can only ever add an answer. It never touches the pass's argv,
+/// descriptors or exit status; it is kept only when the pass's lead output
+/// built, and killed otherwise.
+#[derive(Clone)]
+pub(crate) struct DvTitleRide {
+    tools: Arc<crate::vodencode::dv_runtime::ToolSet>,
+    stream_index: u32,
+}
+
+/// The companion scan's task. Dropping it — the pass future dropped by a
+/// preemption, an early return — aborts the task, and the task's child is
+/// killed with it; a bare `JoinHandle` would leave the scan reading on.
+#[cfg(target_os = "linux")]
+struct DvTitleScan(tokio::task::JoinHandle<Result<plurx_core::process::bounded::Output, String>>);
+
+#[cfg(target_os = "linux")]
+impl Drop for DvTitleScan {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A complete-title aggregate the pass's companion scan produced, not yet
+/// published. The caller publishes it after its own freshness checks.
+#[derive(Debug)]
+pub(crate) struct PendingDvTitle {
+    pub(crate) scanner_digest: String,
+    pub(crate) stats: plurx_core::scan::dv_title::DvTitleStats,
+}
+
+impl DvTitleRide {
+    /// A title the scanner covers, on a node with the processing bundle.
+    #[cfg(target_os = "linux")]
+    async fn for_file(file: &MediaFile, stream_index: u32) -> Option<Self> {
+        let facts = &file.dolby_vision;
+        if !matches!(file.video_codec.as_deref(), Some("hevc"))
+            || !matches!(facts.profile, Some(5 | 7 | 8))
+            || facts.rpu_present != Some(true)
+        {
+            return None;
+        }
+        match crate::vodencode::dv_runtime::ToolSet::capture().await {
+            Ok(Some(tools)) => Some(Self {
+                tools,
+                stream_index,
+            }),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::debug!(file_id = file.id, %error, "title scanner unavailable to the index pass");
+                None
+            }
+        }
+    }
+
+    /// Start the scanner on a duplicate of the pass's held source. The task
+    /// owns the scanner: dropping or aborting it kills the child.
+    #[cfg(target_os = "linux")]
+    fn spawn(
+        &self,
+        source: &std::fs::File,
+        wall_time: Duration,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Option<DvTitleScan> {
+        let held = match source.try_clone() {
+            Ok(held) => held,
+            Err(error) => {
+                tracing::info!(%error, "no descriptor for the index pass's title scan");
+                return None;
+            }
+        };
+        Some(DvTitleScanInput::spawn(
+            held,
+            self.tools.scanner.clone(),
+            self.stream_index.to_string(),
+            wall_time,
+            cancel,
+        ))
+    }
+
+    /// The scan's aggregate when the pass's lead output built; anything else
+    /// keeps nothing, and the title's own job reads the file itself.
+    #[cfg(target_os = "linux")]
+    async fn finish(
+        &self,
+        file_id: i64,
+        mut task: DvTitleScan,
+        lead_built: bool,
+        wait: Duration,
+    ) -> Option<PendingDvTitle> {
+        if !lead_built {
+            task.0.abort();
+            let _ = (&mut task.0).await;
+            return None;
+        }
+        let refused = |reason: String| {
+            tracing::info!(file_id, %reason, "the index pass kept no Dolby Vision title aggregate");
+            None
+        };
+        let output = match tokio::time::timeout(wait, &mut task.0).await {
+            Ok(Ok(Ok(output))) => output,
+            Ok(Ok(Err(error))) => return refused(format!("scanner did not run: {error}")),
+            Ok(Err(error)) => return refused(format!("scanner task failed: {error}")),
+            Err(_) => {
+                task.0.abort();
+                let _ = (&mut task.0).await;
+                return refused("scanner did not finish within the pass budget".to_owned());
+            }
+        };
+        dv_title_aggregate(&output, self.tools.is_current().await)
+            .map(|stats| PendingDvTitle {
+                scanner_digest: self.tools.title_scanner_digest(),
+                stats,
+            })
+            .map_err(refused)
+            .ok()
+    }
+}
+
+// Field order closes the original held descriptor before releasing its
+// original admission, including when the spawned future was never polled.
+#[cfg(target_os = "linux")]
+struct DvTitleScanInput {
+    held: std::fs::File,
+    scanner: std::path::PathBuf,
+    index: String,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    keeper: Option<Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper>>,
+}
+
+#[cfg(target_os = "linux")]
+impl DvTitleScanInput {
+    fn spawn(
+        held: std::fs::File,
+        scanner: std::path::PathBuf,
+        index: String,
+        wall_time: Duration,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> DvTitleScan {
+        let input = Self {
+            held,
+            scanner,
+            index,
+            cancel: cancel.cloned(),
+            keeper: plurx_core::process::bounded::original_keeper(),
+        };
+        DvTitleScan(tokio::spawn(async move { input.run(wall_time).await }))
+    }
+
+    async fn run(
+        self,
+        wall_time: Duration,
+    ) -> Result<plurx_core::process::bounded::Output, String> {
+        use plurx_core::process::bounded;
+        use std::os::fd::AsRawFd;
+        let keeper = self.keeper.clone();
+        let cancel = self.cancel.clone();
+        let work = async move {
+            let mut command = tokio::process::Command::new(&self.scanner);
+            command.args(["/proc/self/fd/3", &self.index]);
+            crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
+                &mut command,
+                &[(self.held.as_raw_fd(), 3)],
+                None,
+            );
+            let output = bounded::output_command_clean_env(
+                &mut command,
+                wall_time,
+                64 * 1024,
+                plurx_core::process::ChildWork::background(
+                    "complete-title Dolby Vision scan (content-analysis pass)",
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string());
+            drop(self); // Keep the whole input, not independently captured fields.
+            output
+        };
+        let work = async move {
+            match cancel {
+                Some(cancel) => bounded::cancellable(cancel, work).await,
+                None => work.await,
+            }
+        };
+        match keeper {
+            Some(keeper) => bounded::with_original_work_keeper(keeper, work).await,
+            None => work.await,
+        }
+    }
+}
+
+/// Judge the companion scan's output exactly as the title job judges its own.
+fn dv_title_aggregate(
+    output: &plurx_core::process::bounded::Output,
+    scanner_current: bool,
+) -> Result<plurx_core::scan::dv_title::DvTitleStats, String> {
+    use plurx_core::scan::dv_title::{DvTitleStats, TitleEligibility};
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("scanner refused: {}", stderr.trim()));
+    }
+    if !scanner_current {
+        return Err("the installed scanner changed during the pass".to_owned());
+    }
+    let stats: DvTitleStats = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("scanner aggregate: {error}"))?;
+    if !stats.complete || stats.eligibility() == TitleEligibility::InvalidAggregate {
+        return Err("incomplete or inconsistent aggregate".to_owned());
+    }
+    Ok(stats)
+}
+
 /// One identity's half of an index pass: what to do about the Dolby Vision
 /// record its muxer leaves behind, and the options both that answer and the
 /// argv block were derived from — carried so the index key is derived from
@@ -1403,6 +1622,11 @@ impl IndexOutput {
         })
     }
 }
+
+/// How long a built pass waits for its companion title scan beyond the pass
+/// budget. The scan reads what the pass just read, from the page cache.
+#[cfg(target_os = "linux")]
+const DV_TITLE_SCAN_GRACE: Duration = Duration::from_secs(10 * 60);
 
 /// The most identities one pass writes. A file has at most three (stripped,
 /// preserved, converted); the bound keeps the child's fd plumbing fixed-size.
@@ -1488,6 +1712,9 @@ fn shared_index_argv(
 pub(crate) struct IndexBuild {
     pub(crate) outcome: IndexOutcome,
     pub(crate) ride_along: Option<PendingRideAlong>,
+    /// The Dolby Vision title aggregate the pass's companion scan read, on
+    /// the pass's first built output.
+    pub(crate) dv_title: Option<PendingDvTitle>,
     /// Whether the held source was still the object the pass read when the
     /// pass ended, as far as this function could tell: [`build_riding`]
     /// reads its fence; the attested paths leave it to their caller, who
@@ -1500,6 +1727,7 @@ impl IndexBuild {
         Self {
             outcome,
             ride_along: None,
+            dv_title: None,
             source_unchanged: true,
         }
     }
@@ -2321,6 +2549,11 @@ async fn build_attested_pass(
         let input = "/dev/fd/3".to_owned();
         #[cfg(windows)]
         let input = path.to_string_lossy().into_owned();
+        #[cfg(target_os = "linux")]
+        let dv_title = match DvTitleRide::for_file(file, probed.expectation.stream_index).await {
+            Some(ride) => ride.spawn(source, budget, cancel).map(|task| (ride, task)),
+            None => None,
+        };
         let pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
         #[cfg(unix)]
         let (source_fd, source_handoff) = {
@@ -2341,6 +2574,22 @@ async fn build_attested_pass(
             cancel,
         )
         .await;
+        #[allow(unused_mut)]
+        let mut built = built;
+        #[cfg(target_os = "linux")]
+        if let Some((ride, task)) = dv_title {
+            let lead_built = matches!(
+                built.first().map(|build| &build.outcome),
+                Some(IndexOutcome::Built(_))
+            );
+            let wait = budget
+                .saturating_sub(started.elapsed())
+                .max(DV_TITLE_SCAN_GRACE);
+            let pending = ride.finish(file.id, task, lead_built, wait).await;
+            if let Some(first) = built.first_mut() {
+                first.dv_title = pending;
+            }
+        }
         for (slot, build) in slots.into_iter().zip(built) {
             builds[slot] = Some(build);
         }
@@ -2962,6 +3211,7 @@ async fn build_with_args_owned(
             } else {
                 None
             },
+            dv_title: None,
             source_unchanged: true,
         })
         .collect()
