@@ -1394,6 +1394,7 @@ struct IndexPass {
 /// The scan can only ever add an answer. It never touches the pass's argv,
 /// descriptors or exit status; it is kept only when the pass's lead output
 /// built, and killed otherwise.
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub(crate) struct DvTitleRide {
     tools: Arc<crate::vodencode::dv_runtime::ToolSet>,
@@ -1421,6 +1422,7 @@ pub(crate) struct PendingDvTitle {
     pub(crate) stats: plurx_core::scan::dv_title::DvTitleStats,
 }
 
+#[cfg(target_os = "linux")]
 impl DvTitleRide {
     /// A title the scanner covers, on a node with the processing bundle.
     #[cfg(target_os = "linux")]
