@@ -3665,9 +3665,11 @@ async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
     let mut uncertified = Oracle::new(None)
         .await
         .expect("failed first certification fixture");
+    // Preserve the required reservation row/fence so production claim SQL succeeds;
+    // only the independent invariant rejects expiry before the actual lease.
     uncertified.fixture.store.async_refinement_control(
-        "CREATE TRIGGER corrupt_first_certificate AFTER INSERT ON background_job_reservations BEGIN DELETE FROM background_job_reservations WHERE job_id = NEW.job_id; END;".into()
-    ).await.expect("deliberate test-only resource loss");
+        "CREATE TRIGGER corrupt_first_certificate AFTER INSERT ON background_job_reservations BEGIN UPDATE background_job_reservations SET expires_at_ms = NEW.expires_at_ms - 1 WHERE resource_key = NEW.resource_key AND slot = NEW.slot; END;".into()
+    ).await.expect("deliberate test-only reservation expiry drift");
     let error = uncertified
         .apply(0, &action)
         .await
@@ -3682,6 +3684,11 @@ async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
         uncertified.states[0].canonical,
         "failed certification still rolls back actual SQL"
     );
+    assert!(uncertified
+        .apply(0, &action)
+        .await
+        .expect_err("no fallback after failed first certification")
+        .starts_with("MaterializationPoisoned:"));
 
     // Real SQL perturbs rows outside the original canonical frame. Both the
     // independent-check reference and certified path must refuse every form.
