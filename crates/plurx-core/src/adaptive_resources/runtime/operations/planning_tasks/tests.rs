@@ -469,3 +469,44 @@ async fn never_entered_book_conflict_holds_ledger_and_journal_without_refund() {
 
 pub(super) mod construction;
 mod native_custody;
+
+#[tokio::test]
+async fn v7_original_planning_prepare_persists_p_and_metadata_claim_before_native_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let (runtime, owner) = prepared(root.path()).await;
+    let journal =
+        rusqlite::Connection::open(root.path().join("resource-custody/obligations.sqlite3"))
+            .unwrap();
+    assert_eq!(
+        journal
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    let claims = journal
+        .prepare("SELECT memory_claim FROM obligations ORDER BY memory_claim")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(claims, ["planning_metadata", "unknown_producer"]);
+    let adapters = journal
+        .prepare("SELECT adapter FROM members")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .unwrap();
+    assert!(adapters.contains("fixed_probe_metadata"));
+    assert!(adapters.contains("fixed_probe_discover_source"));
+    assert!(adapters.contains("fixed_probe_discover_task"));
+    assert!(adapters.contains("fixed_planning_engine_task"));
+    drop(journal);
+    runtime
+        .finish_planning_native(&owner, deadline())
+        .await
+        .expect("same never-entered original P closes");
+    assert_only_m_survives(&runtime, &owner).await;
+    Arc::try_unwrap(runtime).ok().unwrap().drain().unwrap();
+}

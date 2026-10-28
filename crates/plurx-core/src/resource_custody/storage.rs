@@ -369,7 +369,7 @@ impl Storage {
             let tx = connection.transaction()?;
             tx.execute_batch(schema::DDL)?;
             tx.execute(
-                "INSERT INTO journal_meta VALUES(1,6,?1,?2,?3,?4,0,NULL)",
+                "INSERT INTO journal_meta VALUES(1,7,?1,?2,?3,?4,0,NULL)",
                 rusqlite::params![
                     witness.journal_id.as_bytes(),
                     witness.installation_id.as_bytes(),

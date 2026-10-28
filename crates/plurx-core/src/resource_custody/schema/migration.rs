@@ -1,5 +1,5 @@
-//! Same-file recognized v1 -> v2 -> v3 -> v4 -> v5 -> v6 upgrades; no missing-authority repair.
-use super::{validate, DDL, DDL_V2, DDL_V3, DDL_V4, DDL_V5};
+//! Same-file recognized v1 through v7 upgrades; no missing-authority repair.
+use super::{validate, DDL, DDL_V2, DDL_V3, DDL_V4, DDL_V5, DDL_V6};
 use crate::resource_custody::{
     codec, storage::Witness, transaction, CommitCertainty, CustodyError, ErrorKind,
 };
@@ -36,6 +36,9 @@ pub(in crate::resource_custody) fn upgrade(
     }
     if version <= 5 {
         upgrade_v5_to_v6(connection, witness)?;
+    }
+    if version <= 6 {
+        upgrade_v6_to_v7(connection, witness)?;
     }
     Ok(())
 }
@@ -374,7 +377,7 @@ pub(super) fn upgrade_v5_to_v6(
         ))?;
     }
     let canonical = Connection::open_in_memory()?;
-    canonical.execute_batch(DDL)?;
+    canonical.execute_batch(DDL_V6)?;
     let index_sql: String = canonical.query_row(
         "SELECT sql FROM sqlite_schema WHERE name='family_roles_by_obligation_role'",
         [],
@@ -441,4 +444,151 @@ pub(super) fn upgrade_v5_to_v6(
         error.certainty = CommitCertainty::Unknown;
         error
     })
+}
+
+/// Admit only the exact v6 authority. Widen two SQL CHECK domains to the
+/// already-implemented typed adapters and paired planning-M claim. Original
+/// identities, bytes, memory vectors, phase/history and native proof do not
+/// change. Owners, immutable operation rowids and asset projection stay in place.
+pub(super) fn upgrade_v6_to_v7(
+    connection: &mut Connection,
+    witness: &Witness,
+) -> Result<(), CustodyError> {
+    validate(connection)?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let foreign_keys: bool = connection.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    if version != 6 || !foreign_keys {
+        return Err(codec::invalid());
+    }
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Both recognized shape and complete semantic history are asserted again
+    // under the actual writer transaction, before any persistent DDL changes.
+    validate(&tx)?;
+    let before = transaction::snapshot(&tx, witness)?;
+    const ALL: &[&str] = &[
+        "journal_meta",
+        "owners",
+        "obligations",
+        "family_roles",
+        "members",
+        "operations",
+        "retained_asset_owners",
+        "recovered_s_holders",
+        "recovered_r_holders",
+        "asset_operation_membership",
+    ];
+    for table in ALL {
+        tx.execute_batch(&format!(
+            "CREATE TEMP TABLE custody_upgrade_v7_{table} AS SELECT * FROM main.{table};"
+        ))?;
+    }
+    // Rebuild all inbound-FK children before obligations, keeping FK checking
+    // enabled throughout. Unknown triggers/objects were rejected by validate.
+    tx.execute_batch("DROP TABLE members; DROP TABLE family_roles; DROP TABLE retained_asset_owners; DROP TABLE recovered_s_holders; DROP TABLE recovered_r_holders; DROP TABLE obligations; DROP TABLE journal_meta;")?;
+    let canonical = Connection::open_in_memory()?;
+    canonical.execute_batch(DDL)?;
+    for name in [
+        "journal_meta",
+        "obligations",
+        "family_roles",
+        "family_roles_by_obligation_role",
+        "members",
+        "unique_member_identity",
+        "retained_asset_owners",
+        "recovered_s_holders",
+        "recovered_r_holders",
+    ] {
+        let sql: String =
+            canonical.query_row("SELECT sql FROM sqlite_schema WHERE name=?1", [name], |r| {
+                r.get(0)
+            })?;
+        tx.execute_batch(&sql)?;
+    }
+    #[cfg(test)]
+    if V7_DDL_FAILURE.with(|flag| flag.replace(false)) {
+        tx.execute_batch("SELECT custody_v7_missing_rollback_function();")?;
+    }
+    tx.execute_batch("INSERT INTO journal_meta SELECT singleton,7,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id FROM temp.custody_upgrade_v7_journal_meta;")?;
+    for table in [
+        "obligations",
+        "family_roles",
+        "members",
+        "retained_asset_owners",
+        "recovered_s_holders",
+        "recovered_r_holders",
+    ] {
+        tx.execute_batch(&format!(
+            "INSERT INTO main.{table} SELECT * FROM temp.custody_upgrade_v7_{table};"
+        ))?;
+    }
+    tx.execute_batch("PRAGMA user_version=7;")?;
+    validate(&tx)?;
+    for table in ALL {
+        let projection = if *table == "journal_meta" {
+            "singleton,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id"
+        } else {
+            "*"
+        };
+        let unchanged: bool = tx.query_row(&format!(
+            "SELECT NOT EXISTS(SELECT {projection} FROM main.{table} EXCEPT SELECT {projection} FROM temp.custody_upgrade_v7_{table}) AND NOT EXISTS(SELECT {projection} FROM temp.custody_upgrade_v7_{table} EXCEPT SELECT {projection} FROM main.{table}) AND (SELECT count(*) FROM main.{table})=(SELECT count(*) FROM temp.custody_upgrade_v7_{table})"
+        ), [], |r| r.get(0))?;
+        if !unchanged {
+            return Err(codec::invalid());
+        }
+    }
+    let no_broken_fk: bool = tx.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+        [],
+        |r| r.get(0),
+    )?;
+    if !no_broken_fk {
+        return Err(codec::invalid());
+    }
+    let after = transaction::snapshot(&tx, witness)?;
+    if before.total != after.total
+        || before.trial_groups != after.trial_groups
+        || before.obligations.len() != after.obligations.len()
+        || !before
+            .family_authority
+            .same_complete_rows(&after.family_authority)
+        || before.protected_paths != after.protected_paths
+    {
+        return Err(codec::invalid());
+    }
+    for table in ALL {
+        tx.execute_batch(&format!("DROP TABLE temp.custody_upgrade_v7_{table};"))?;
+    }
+    tx.commit().map_err(|_| {
+        let mut error = CustodyError::new(
+            ErrorKind::Storage,
+            "custody schema upgrade commit uncertain",
+        );
+        error.certainty = CommitCertainty::Unknown;
+        error
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static V7_DDL_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(in crate::resource_custody) struct V7FailureGuard;
+#[cfg(test)]
+impl V7FailureGuard {
+    pub(in crate::resource_custody) fn was_reached(&self) -> bool {
+        V7_DDL_FAILURE.with(|flag| !flag.get())
+    }
+}
+#[cfg(test)]
+impl Drop for V7FailureGuard {
+    fn drop(&mut self) {
+        V7_DDL_FAILURE.with(|flag| flag.set(false));
+    }
+}
+#[cfg(test)]
+pub(in crate::resource_custody) fn fail_next_v7_after_ddl_for_test() -> V7FailureGuard {
+    V7_DDL_FAILURE.with(|flag| assert!(!flag.replace(true)));
+    V7FailureGuard
 }

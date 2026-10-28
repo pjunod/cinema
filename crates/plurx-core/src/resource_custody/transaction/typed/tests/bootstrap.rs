@@ -191,7 +191,18 @@ fn observed_directory(
 }
 
 pub(in crate::resource_custody) fn frozen_source_fixture() -> FrozenSourceFixture {
+    frozen_source_fixture_for_schema(false)
+}
+
+pub(in crate::resource_custody) fn frozen_source_fixture_v6() -> FrozenSourceFixture {
+    frozen_source_fixture_for_schema(true)
+}
+
+fn frozen_source_fixture_for_schema(v6: bool) -> FrozenSourceFixture {
     let mut f = bootstrap();
+    if v6 {
+        super::install_empty_v6_fixture(&mut f.storage);
+    }
     let Command::PrepareTyped { batch, .. } = &mut f.command.command else {
         unreachable!()
     };

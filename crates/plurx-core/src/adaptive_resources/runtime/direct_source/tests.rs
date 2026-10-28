@@ -100,6 +100,43 @@ async fn actual_direct_owners_share_one_cpu_domain_until_last_known_close_and_ap
         .open(deadline())
         .await
         .expect("second original FD");
+    let journal =
+        rusqlite::Connection::open(root.path().join("resource-custody/obligations.sqlite3"))
+            .unwrap();
+    assert_eq!(
+        journal
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    let mut statement = journal
+        .prepare("SELECT adapter,phase FROM members ORDER BY adapter,member_id")
+        .unwrap();
+    let persisted = statement
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|(adapter, _)| adapter == "direct_read_domain")
+            .count(),
+        1
+    );
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|(adapter, _)| adapter == "direct_source_file")
+            .count(),
+        2
+    );
+    assert!(persisted
+        .iter()
+        .filter(|(adapter, _)| adapter == "direct_source_file")
+        .all(|(_, phase)| phase == "acquired"));
+    drop(statement);
+    drop(journal);
     let mut first_ticket = first_owner
         .prepare_retirement(deadline())
         .await

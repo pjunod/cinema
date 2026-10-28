@@ -13,7 +13,13 @@ struct RetirementFixture {
 }
 
 fn make_fixture(corrupt_snapshot: bool) -> RetirementFixture {
-    let source = frozen_source_fixture();
+    make_fixture_with_source(corrupt_snapshot, frozen_source_fixture())
+}
+
+fn make_fixture_with_source(
+    corrupt_snapshot: bool,
+    source: super::super::typed::tests::bootstrap::FrozenSourceFixture,
+) -> RetirementFixture {
     let target_obligation_id = Uuid::new_v4();
     let target_graph_id = Uuid::new_v4();
     let target_member_id = v2::Id::new(Uuid::new_v4()).unwrap();
@@ -281,4 +287,209 @@ fn corrupt_frozen_snapshot_rolls_back_source_target_and_retains_receipt() {
         )
         .unwrap();
     assert_eq!(retained, 0);
+}
+
+/// These are complete journal AUDIT fixtures, not a NativeRetainedSImportProof
+/// or positive process-exit witness. The tested authority is schema migration.
+fn retained_v6_with_adoption_history() -> RetirementFixture {
+    let source = super::super::typed::tests::bootstrap::frozen_source_fixture_v6();
+    let mut f = make_fixture_with_source(false, source);
+    let OperationResult::RetiredWithAssets { target, .. } =
+        execute(&mut f.source.storage, &f.command, f.source.owner).unwrap()
+    else {
+        panic!("original fixture retirement");
+    };
+    let db = &mut f.source.storage.connection;
+    let mut next_owner =
+        super::super::load_owner(db, f.source.owner, &f.source.storage.witness).unwrap();
+    next_owner.owner_id = Uuid::new_v4();
+    super::super::register_owner(db, &next_owner).unwrap();
+    let original_sequence: i64 = db
+        .query_row(
+            "SELECT sequence FROM obligations WHERE obligation_id=?1",
+            [target.obligation_id().as_bytes()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let head = f
+        .source
+        .full
+        .state
+        .asset
+        .head
+        .clone()
+        .expect("actual original frozen audit head");
+    let frozen =
+        v2::scratch::bootstrap::frozen_snapshot_ref(&f.source.plan, &f.source.full).unwrap();
+    let operation = Uuid::new_v4();
+    let tx = db.transaction().unwrap();
+    let sequence = super::super::next_sequence(&tx).unwrap();
+    let ack = RecoveryAdoptionAck {
+        operation_id: operation,
+        obligation_id: target.obligation_id(),
+        previous_owner_id: f.source.owner,
+        current_owner_id: next_owner.owner_id,
+        sequence,
+    };
+    // Append internally consistent historical data only. No native receipt is
+    // constructed, and no production adoption/close/refund API consumes this.
+    tx.execute(
+        "INSERT INTO operations VALUES(?1,?2,?3)",
+        params![
+            operation.as_bytes(),
+            codec::encode(&"0".repeat(64)).unwrap(),
+            codec::encode(&DiskResult::RecoveredSAdoption(ack)).unwrap()
+        ],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO recovered_s_holders VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            target.obligation_id().as_bytes(),
+            sequence,
+            operation.as_bytes(),
+            f.source.owner.as_bytes(),
+            next_owner.owner_id.as_bytes(),
+            original_sequence,
+            head.operation_id.uuid().as_bytes(),
+            i64::try_from(head.revision).unwrap(),
+            frozen.inventory_sha256
+        ],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let restored = snapshot(db, &f.source.storage.witness).unwrap();
+    assert_eq!(restored.retained_assets.len(), 1);
+    assert_eq!(restored.recovered_s_holders.len(), 1);
+    assert!(
+        db.query_row("SELECT count(*) FROM asset_operation_membership", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap()
+            > 1
+    );
+    f
+}
+
+fn complete_history_rows(db: &Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
+    let projection = if table == "journal_meta" {
+        "singleton,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id"
+    } else {
+        "*"
+    };
+    let mut statement = db
+        .prepare(&format!("SELECT {projection} FROM {table} ORDER BY 1,2"))
+        .unwrap();
+    let count = statement.column_count();
+    statement
+        .query_map([], |row| (0..count).map(|i| row.get(i)).collect())
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn v6_to_v7_preserves_typed_retained_adoption_and_asset_projection_history() {
+    let mut f = retained_v6_with_adoption_history();
+    assert_v7_typed_migration(&mut f, false);
+}
+
+#[test]
+fn v7_sql_error_after_persistent_rebuild_rolls_back_typed_history_and_schema() {
+    let mut f = retained_v6_with_adoption_history();
+    assert_v7_typed_migration(&mut f, true);
+}
+
+fn assert_v7_typed_migration(f: &mut RetirementFixture, after_ddl_error: bool) {
+    let tables = [
+        "journal_meta",
+        "owners",
+        "obligations",
+        "family_roles",
+        "members",
+        "operations",
+        "retained_asset_owners",
+        "recovered_s_holders",
+        "recovered_r_holders",
+        "asset_operation_membership",
+    ];
+    let db = &mut f.source.storage.connection;
+    let before = tables
+        .iter()
+        .map(|table| complete_history_rows(db, table))
+        .collect::<Vec<_>>();
+    let rowids = db
+        .prepare("SELECT rowid FROM operations ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let catalog = db
+        .prepare("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let failure =
+        after_ddl_error.then(crate::resource_custody::schema::fail_next_v7_after_ddl_for_test);
+    let result = crate::resource_custody::schema::upgrade(db, &f.source.storage.witness);
+    if after_ddl_error {
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Storage);
+        assert!(
+            failure.as_ref().unwrap().was_reached(),
+            "actual post-DDL failure hook was reached"
+        );
+        let after_catalog = db
+            .prepare(
+                "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(after_catalog, catalog);
+    } else {
+        result.unwrap();
+    }
+    drop(failure);
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        if after_ddl_error { 6 } else { 7 }
+    );
+    crate::resource_custody::schema::validate(db).unwrap();
+    for (table, expected) in tables.iter().zip(before) {
+        assert_eq!(complete_history_rows(db, table), expected, "{table}");
+    }
+    let after_rowids = db
+        .prepare("SELECT rowid FROM operations ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(after_rowids, rowids);
+    let restored = snapshot(db, &f.source.storage.witness).unwrap();
+    assert_eq!(restored.retained_assets.len(), 1);
+    assert_eq!(restored.recovered_s_holders.len(), 1);
+    assert_eq!(restored.total, f.target_resources);
+    assert_eq!(
+        db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
 }

@@ -16,7 +16,7 @@ struct Fixture {
 fn fixture(trial: bool) -> Fixture {
     let root = tempfile::Builder::new()
         .prefix("plurx-typed-fixture-")
-        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .tempdir()
         .unwrap();
     let manifest = v2::tests::fixture();
     let mut identity = owner();
@@ -81,6 +81,7 @@ fn prepare(f: &mut Fixture) -> PreparedBatch {
 #[test]
 fn typed_prepare_accepts_current_exact_v6_storage_schema() {
     let mut f = fixture(false);
+    install_empty_v6_fixture(&mut f.storage);
     let version: i64 = f
         .storage
         .connection
@@ -90,6 +91,46 @@ fn typed_prepare_accepts_current_exact_v6_storage_schema() {
 
     let prepared = prepare(&mut f);
     assert_eq!(prepared.obligations.len(), 1);
+}
+
+#[test]
+fn typed_prepare_accepts_current_exact_v7_storage_schema() {
+    let mut f = fixture(false);
+    assert_eq!(
+        f.storage
+            .connection
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    assert_eq!(prepare(&mut f).obligations.len(), 1);
+}
+
+/// Test-only construction of an EMPTY historical database before any command
+/// is submitted. Existing owner/witness bytes are copied, never regenerated.
+/// This is not a production downgrade, migration, native proof or refund.
+pub(in crate::resource_custody) fn install_empty_v6_fixture(storage: &mut storage::Storage) {
+    let db = &mut storage.connection;
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM obligations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM operations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let tx = db.transaction().unwrap();
+    tx.execute_batch("CREATE TEMP TABLE fixture_empty_v6_owner AS SELECT * FROM owners; CREATE TEMP TABLE fixture_empty_v6_meta AS SELECT * FROM journal_meta;").unwrap();
+    tx.execute_batch("DROP TABLE members; DROP TABLE family_roles; DROP TABLE retained_asset_owners; DROP TABLE recovered_s_holders; DROP TABLE recovered_r_holders; DROP TABLE asset_operation_membership; DROP TABLE operations; DROP TABLE obligations; DROP TABLE journal_meta; DROP TABLE owners;").unwrap();
+    tx.execute_batch(crate::resource_custody::schema::DDL_V6)
+        .unwrap();
+    tx.execute_batch("INSERT INTO owners SELECT * FROM temp.fixture_empty_v6_owner; INSERT INTO journal_meta SELECT singleton,6,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id FROM temp.fixture_empty_v6_meta; DROP TABLE temp.fixture_empty_v6_owner; DROP TABLE temp.fixture_empty_v6_meta;").unwrap();
+    crate::resource_custody::schema::validate(&tx).unwrap();
+    tx.commit().unwrap();
 }
 
 fn change_command(handle: &ObligationHandle, sequence: i64, mutation: Mutation) -> QueuedOperation {
@@ -549,3 +590,52 @@ fn typed_unknown_producer_cannot_join_an_active_legacy_prepare() {
 }
 
 mod copy_task_settlement;
+
+#[test]
+fn v7_unknown_adapter_or_memory_claim_cannot_replace_the_original_prepared_rows() {
+    let mut f = fixture(false);
+    let prepared = prepare(&mut f);
+    let obligation = prepared.obligations[0].obligation_id;
+    let before: Vec<(String, String)> = f
+        .storage
+        .connection
+        .prepare("SELECT adapter,identity_json FROM members ORDER BY member_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(f
+        .storage
+        .connection
+        .execute(
+            "UPDATE members SET adapter='unrecognized_adapter' WHERE obligation_id=?1",
+            [obligation.as_bytes()]
+        )
+        .is_err());
+    assert!(f
+        .storage
+        .connection
+        .execute(
+            "UPDATE obligations SET memory_claim='unrecognized_claim' WHERE obligation_id=?1",
+            [obligation.as_bytes()]
+        )
+        .is_err());
+    let after: Vec<(String, String)> = f
+        .storage
+        .connection
+        .prepare("SELECT adapter,identity_json FROM members ORDER BY member_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(
+        crate::resource_custody::transaction::snapshot(&f.storage.connection, &f.storage.witness)
+            .unwrap()
+            .obligations
+            .len(),
+        1
+    );
+}

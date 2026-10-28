@@ -182,7 +182,7 @@ fn v1_upgrade_preserves_active_settled_history_trial_and_full_width_values() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
     for (table, old) in tables.iter().zip(before) {
         assert_eq!(logical_rows(&db, table), old, "{table}");
@@ -337,7 +337,7 @@ fn v5_schema_is_exact_and_rejects_extra_shape() {
 #[test]
 fn v6_schema_requires_covering_family_lookup_index() {
     let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(DDL).unwrap();
+    db.execute_batch(DDL_V6).unwrap();
     validate(&db).unwrap();
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -428,9 +428,9 @@ fn v5_to_v6_index_upgrade_preserves_all_historical_table_rows() {
 #[cfg(unix)]
 #[test]
 fn v5_to_v6_refuses_corrupted_oldest_asset_event_and_rolls_back_projection() {
-    use crate::resource_custody::transaction::frozen_source_fixture;
+    use crate::resource_custody::transaction::frozen_source_fixture_v6;
 
-    let mut source = frozen_source_fixture();
+    let mut source = frozen_source_fixture_v6();
     let db = &mut source.storage.connection;
     let canonical = Connection::open_in_memory().unwrap();
     canonical.execute_batch(DDL_V5).unwrap();
@@ -525,7 +525,7 @@ fn v1_upgrade_disk_full_rolls_back_persistent_ddl_and_history() {
 fn recognized_v2_history_upgrades_to_v3_with_conservative_claim_and_unchanged_bytes() {
     let root = tempfile::Builder::new()
         .prefix("plurx-custody-migration-")
-        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .tempdir()
         .unwrap();
     let store = storage::Storage::open(&options(
         root.path(),
@@ -547,7 +547,7 @@ fn recognized_v2_history_upgrades_to_v3_with_conservative_claim_and_unchanged_by
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
     assert_eq!(logical_rows(&db, "obligations"), before_obligations);
     assert_eq!(logical_rows(&db, "operations"), before_operations);
@@ -564,4 +564,154 @@ fn recognized_v2_history_upgrades_to_v3_with_conservative_claim_and_unchanged_by
         recovered.obligations[0].memory_claim,
         crate::adaptive_resources::MemoryClaim::default()
     );
+}
+
+fn populated_v6(db: &mut Connection, witness: &storage::Witness) {
+    populated_v1(db, witness);
+    migration::upgrade_v1_to_v2(db, witness).unwrap();
+    migration::upgrade_v2_to_v3(db, witness).unwrap();
+    migration::upgrade_v3_to_v4(db, witness).unwrap();
+    migration::upgrade_v4_to_v5(db, witness).unwrap();
+    migration::upgrade_v5_to_v6(db, witness).unwrap();
+    validate(db).unwrap();
+}
+
+fn v7_complete_rows(db: &Connection, table: &str) -> Vec<Vec<Value>> {
+    if table == "journal_meta" {
+        return logical_rows(db, table);
+    }
+    let mut stmt = db
+        .prepare(&format!("SELECT * FROM {table} ORDER BY 1,2"))
+        .unwrap();
+    let count = stmt.column_count();
+    stmt.query_map([], |row| (0..count).map(|i| row.get(i)).collect())
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn recognized_v6_storage_reopen_upgrades_to_v7_without_losing_original_debt_or_history() {
+    let root = tempfile::tempdir().unwrap();
+    let store = storage::Storage::open(&options(
+        root.path(),
+        owner(),
+        InstallationContext::FirstInstallation,
+    ))
+    .unwrap();
+    let witness = store.witness.clone();
+    drop(store);
+    // Same guarded authority file/inode, deliberately populated as a real
+    // historical version before its next actual Storage::open.
+    let path = root.path().join("resource-custody/obligations.sqlite3");
+    let mut db = Connection::open(&path).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=ON; DROP TABLE members; DROP TABLE family_roles; DROP TABLE retained_asset_owners; DROP TABLE recovered_s_holders; DROP TABLE recovered_r_holders; DROP TABLE asset_operation_membership; DROP TABLE operations; DROP TABLE obligations; DROP TABLE journal_meta; DROP TABLE owners;").unwrap();
+    populated_v6(&mut db, &witness);
+    let tables = [
+        "journal_meta",
+        "owners",
+        "obligations",
+        "family_roles",
+        "members",
+        "operations",
+        "retained_asset_owners",
+        "recovered_s_holders",
+        "recovered_r_holders",
+        "asset_operation_membership",
+    ];
+    let before = tables
+        .iter()
+        .map(|table| v7_complete_rows(&db, table))
+        .collect::<Vec<_>>();
+    let operation_rowids = db
+        .prepare("SELECT rowid FROM operations ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    drop(db);
+    let reopened = storage::Storage::open(&options(
+        root.path(),
+        owner(),
+        InstallationContext::Existing,
+    ))
+    .unwrap();
+    assert_eq!(
+        reopened
+            .connection
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    for (table, expected) in tables.iter().zip(before) {
+        assert_eq!(
+            v7_complete_rows(&reopened.connection, table),
+            expected,
+            "{table}"
+        );
+    }
+    let actual_rowids = reopened
+        .connection
+        .prepare("SELECT rowid FROM operations ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(actual_rowids, operation_rowids);
+    let snapshot = transaction::snapshot(&reopened.connection, &reopened.witness).unwrap();
+    assert_eq!(snapshot.total, vector(u64::MAX));
+    assert_eq!(snapshot.obligations.len(), 1);
+    assert!(!snapshot.trial_groups.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn v6_to_v7_unknown_shape_and_corrupt_history_are_refused_without_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = storage::Storage::open(&options(
+        root.path(),
+        owner(),
+        InstallationContext::FirstInstallation,
+    ))
+    .unwrap();
+    for extra_shape in [true, false] {
+        let mut db = Connection::open_in_memory().unwrap();
+        populated_v6(&mut db, &store.witness);
+        if extra_shape {
+            db.execute_batch(
+                "CREATE TRIGGER fixture_unknown AFTER UPDATE ON members BEGIN SELECT 1; END;",
+            )
+            .unwrap();
+        } else {
+            db.execute("UPDATE operations SET result_json='{}' WHERE rowid=(SELECT MIN(rowid) FROM operations)", []).unwrap();
+        }
+        let shape_before = shape(&db).unwrap();
+        let old_rows = v7_complete_rows(&db, "operations");
+        assert!(migration::upgrade_v6_to_v7(&mut db, &store.witness).is_err());
+        assert_eq!(shape(&db).unwrap(), shape_before);
+        assert_eq!(v7_complete_rows(&db, "operations"), old_rows);
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+    }
+}
+
+#[test]
+fn v7_schema_is_exact_and_rejects_extra_shape() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(DDL).unwrap();
+    validate(&db).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    db.execute_batch("CREATE TABLE unexpected_authority(x TEXT) STRICT;")
+        .unwrap();
+    assert!(validate(&db).is_err());
 }
