@@ -472,15 +472,18 @@ impl NodeResourceRuntime {
                 .bootstrap
                 .get_mut(&member)
                 .ok_or(OperationError::State)?;
-            if bootstrap
-                .fold
-                .as_ref()
-                .ok_or(OperationError::State)?
-                .state()
-                .asset
-                .totals
-                .readers
-                != 0
+            // An issued owner cannot disappear. Refuse before Begin/native
+            // cleanup so restoring that same owner can resume this attempt.
+            if !bootstrap.native_io_slots_consistent()
+                || bootstrap
+                    .fold
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .state()
+                    .asset
+                    .totals
+                    .readers
+                    != 0
             {
                 return Err(OperationError::State);
             }

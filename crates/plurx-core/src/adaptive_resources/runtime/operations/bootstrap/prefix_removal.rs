@@ -182,6 +182,24 @@ impl NodeResourceRuntime {
                     .bootstrap
                     .get_mut(&member)
                     .ok_or(OperationError::State)?;
+                let state = bootstrap
+                    .fold
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .state();
+                let baseline = [
+                    state
+                        .bootstrap
+                        .current
+                        .as_ref()
+                        .map(|directory| &directory.observed),
+                    state
+                        .bootstrap
+                        .parent
+                        .as_ref()
+                        .map(|directory| &directory.observed),
+                    state.asset.directory.as_ref(),
+                ];
                 let removal = bootstrap
                     .prefix_removal
                     .as_mut()
@@ -191,6 +209,7 @@ impl NodeResourceRuntime {
                         .native_root
                         .as_mut()
                         .ok_or(OperationError::State)?,
+                    &baseline,
                 )?;
                 removal.launched = true;
                 let _ = entry.send(());
