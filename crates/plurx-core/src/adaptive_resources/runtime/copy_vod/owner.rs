@@ -1314,8 +1314,13 @@ impl NodeResourceRuntime {
             if actual_task > u64::try_from(minimum_task_memory).map_err(|_| invalid())? {
                 return Err(invalid());
             }
-            self.install_finite_response_budget(&pending_preparation, 0, response_budget)?;
-            self.install_copy_work(&pending_preparation, 0, work)?;
+            self.install_copy_work_and_response(
+                &pending_preparation,
+                0,
+                work,
+                response_budget,
+                (&app_state, &cleanup_custody),
+            )?;
             Ok(CopyVodOwner {
                 runtime: Arc::clone(self),
                 preparation: pending_preparation,

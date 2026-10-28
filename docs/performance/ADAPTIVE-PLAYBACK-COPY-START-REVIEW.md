@@ -328,3 +328,20 @@ installation and retained-chain verification. It preserves the full inode
 chain, permission checks, ordinary root-capability refusal and intermediate
 symlink refusal. A focused filesystem regression is authored; the repair still
 requires exact compilation and native execution. No failed evidence is removed.
+
+## 11. Dormant copy allocation installation — source repair, 2026-10-28
+
+At `78a3a4e3e2f6f36803fdddcf9327f9631c61c0d1`, both strict compiler loops
+passed and the core-only campaign discovered64 selected cases. Its first case
+passed custody startup, then failed during `prepare_copy_vod` with State.
+One case ran, zero passed and one failed; the remaining63 did not execute.
+
+The constructor registers its dormant CopyLaunch before fallible allocation,
+so a failed constructor retains the original cleanup selector. It then called
+the generic response installer, which intentionally rejects registered copies.
+The repair preserves early registration and the generic guard. A private copy
+installer validates the same app and cleanup allocations, an unsealed dormant
+graph with no acquisition or close state, and absent work/budget, then installs
+both original allocations atomically without suspension. It does not require a
+prepare acknowledgement or change memory, handle or storage limits. Source
+review found no blocker; exact compilation and actual cleanup runs remain due.

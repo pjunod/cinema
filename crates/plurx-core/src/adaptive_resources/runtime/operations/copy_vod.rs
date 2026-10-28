@@ -378,20 +378,67 @@ impl NodeResourceRuntime {
         custody.try_claim_owner().ok_or(OperationError::State)
     }
 
-    pub(in crate::adaptive_resources::runtime) fn install_copy_work(
+    /// Install the original charged allocations together while this registered
+    /// copy is dormant. Early registration remains available to failed-constructor
+    /// cleanup; neither this path nor the generic installer can replace a live
+    /// response budget or add allocations after acquisition.
+    pub(in crate::adaptive_resources::runtime) fn install_copy_work_and_response(
         &self,
         owner: &OwnedPreparation,
         index: usize,
         work: CopyWork,
+        budget: Arc<super::super::response_memory::ResponseBudget>,
+        original_owners: (
+            &Arc<super::super::finite_lifetime::FiniteAppState>,
+            &Arc<CopyCleanupCustody>,
+        ),
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
-        if role.refunded || copy.entered || copy.work.is_some() || copy.never_root_closure.is_some()
+        if role.refunded
+            || role.response_budget.is_some()
+            || role.finite_vod.is_some()
+            || role.graph.is_none()
+            || role.sealed.is_some()
+            || !role.bootstrap.is_empty()
+            || !role.sources.is_empty()
+            || !role.scratch.is_empty()
+            || !role.armed.is_empty()
+            || !role.invoked.is_empty()
+            || !role.roots.is_empty()
+            || role.transition.is_some()
+            || role.pending_finite_close.is_some()
+            || role.receipt.is_some()
+            || role
+                .finite_app
+                .as_ref()
+                .is_none_or(|app| !Arc::ptr_eq(app, original_owners.0))
+            || role
+                .copy_cleanup
+                .as_ref()
+                .is_none_or(|custody| !Arc::ptr_eq(custody, original_owners.1) || custody.closing())
+            || copy.entered
+            || copy.work.is_some()
+            || copy.task.is_some()
+            || copy.fixed_image.is_some()
+            || copy.root_observed_committed
+            || copy.task_observed_committed
+            || copy.start_released
+            || copy.process_closure.is_some()
+            || copy.root_only_closure.is_some()
+            || copy.never_root_closure.is_some()
+            || copy.terminal.is_some()
+            || copy.permanent_hold.is_some()
+            || copy.retryable_hold.is_some()
+            || copy.source_drifted
+            || copy.closing
         {
             return Err(OperationError::State);
         }
+        // No await or fallible operation separates these original allocations.
+        role.response_budget = Some(budget);
         copy.work = Some(work);
         Ok(())
     }
