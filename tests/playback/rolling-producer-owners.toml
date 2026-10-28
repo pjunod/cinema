@@ -1,3 +1,7 @@
+# Final task/C5 source census (2026-10-28): preserves every forbidden zero.
+# Three added task sites and the extra child-launch/teardown sites are fixtures.
+# Seven production timers bound the same Source cleanup/admission; fifty are fixture waits.
+# Counts reconcile the reviewed original-owner wrappers and fixtures, not native qualification.
 # Adaptive/current-main ownership source audit (2026-10-28, e1d42fb2):
 # Reconciles35 exact counts against main6a2f8156 and effort5cf30d147;
 # per-row notes explain guarded production moves and authored fixture sites.
@@ -830,7 +834,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # Adaptive source audit e1d42fb2: Three additional retirement sleeps repeat original
 # reap/close attempts while retaining original owners, and two source_direct sleeps retry
 # original SQL settlement. No timer selects an independent replacement producer.
-expected_occurrences = 86
+expected_occurrences = 93
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1544,7 +1548,7 @@ pattern = "MediaSessionEnd"
 # `end_media_session_if_owner`, pinned to owner epoch 1 and the observed lease
 # expiry, before releasing its dispatch row. plurx-core Store tests cover the
 # same exact-owner end. No new end authority.
-expected_occurrences = 7
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-exact-playback-route-read"
@@ -1619,7 +1623,7 @@ pattern = "end_media_session_if_owner"
 # `end_media_session_if_owner`, pinned to owner epoch 1 and the observed lease
 # expiry, before releasing its dispatch row. plurx-core Store tests cover the
 # same exact-owner end. No new end authority.
-expected_occurrences = 5
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-exact-activation-handoff-store"
@@ -1776,7 +1780,7 @@ pattern = "publication_ready_at_ms"
 # Adaptive source audit e1d42fb2: Three actual publication_ready_at_ms checks bind adaptive
 # claim/adopt/origin readiness to MEDIA_SESSION_PUBLICATION_BLOCKED; one terminal_memory.rs
 # destructuring occurrence sizes the actual retained route.
-expected_occurrences = 151
+expected_occurrences = 153
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -1846,7 +1850,7 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # blocked activation before its existing Confirm settlement; no shipped write.
 # Adaptive source audit e1d42fb2: The three new MEDIA_SESSION_PUBLICATION_BLOCKED references
 # are the same origin/adoption/claim readiness guards; they add no publication authority.
-expected_occurrences = 58
+expected_occurrences = 60
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -2027,7 +2031,7 @@ pattern = "terminal_reason"
 # Adaptive source audit e1d42fb2: playback_control.rs excludes a replaced route from unrelated
 # End authority; terminal_memory.rs adds destructuring and actual optional-string sizing of
 # terminal_reason.
-expected_occurrences = 55
+expected_occurrences = 56
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -2107,7 +2111,7 @@ pattern = "expected_lease_expires_at_ms"
 # `end_media_session_if_owner`, pinned to owner epoch 1 and the observed lease
 # expiry, before releasing its dispatch row. plurx-core Store tests cover the
 # same exact-owner end. No new end authority.
-expected_occurrences = 4
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-takeover-settlement-capacity"
@@ -2207,7 +2211,7 @@ pattern = "rendition_build_gate"
 # serialization across resolve/adaptive prepare/original finite close; two finite_software
 # fixture references exercise abandoned build/metadata wait. Existing purge gate moved within
 # the same owner.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -3328,7 +3332,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # registry/close owners, and finite fixtures. Namespaced helper calls such as
 # DvTitleScanInput::spawn and admitted_work::spawn_blocking also match this broad shape; the
 # count is not the number of new Tokio tasks.
-expected_occurrences = 1080
+expected_occurrences = 1083
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3574,7 +3578,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # threads relocate existing decode_facts workers. Title ride.spawn is an owned Rust helper
 # invocation. Remaining delta is bounded test launch sites, not independent production
 # authority.
-expected_occurrences = 83
+expected_occurrences = 84
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5039,7 +5043,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadlines/tests), original operation/HTTP/reader/SQL deadline bounds, original retirement
 # retry cadence, selected finite lifecycle bounds and fixtures. Title-versus-E adds one actual
 # finish timeout plus four test-only waits, including the final5s keeper/reaper observation.
-expected_occurrences = 1998
+expected_occurrences = 2055
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6183,7 +6187,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # threads, custodied process launch, and test child/status calls. Each actual changed
 # production launch remains in its original registered/admitted owner; these totals do not
 # equate every output/status match with an OS launch.
-expected_occurrences = 831
+expected_occurrences = 832
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6484,7 +6488,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # retain the exact child; priority adds exact registered-control actions and fixture waits.
 # Test-only finite/attempt fixtures account for the remaining calls. No raw numeric-
 # descriptor/native absence authority is inferred.
-expected_occurrences = 371
+expected_occurrences = 375
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
