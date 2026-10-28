@@ -265,6 +265,33 @@ def admit(reg, plan, probe, measurement, root, now=None):
             'retained_bytes': 0, 'dispatched_runs': [], 'created_at': time.time() if now is None else now}
 
 
+FINAL_INPUT_SCOPE = 'restored catalog/page identity correspondence; production replay and full semantic qualification remain separate'
+FINAL_INPUT_EXECUTION = 'restore-semantic-execution.json'
+FINAL_INPUT_LOG = 'restore-semantic.log'
+FINAL_INPUT_LOG_PREFIX = b'ASYNC-READONLY-VALIDATION-LOG 1\n'
+
+
+def dispatch_mode(state):
+    """Only replay-authenticated current input evidence can select Main."""
+    if state['stage']!='complete':return 'unit'
+    current=p.digest(p.canonical(state['checkpoint']))
+    return 'complete' if state.get('final_input_checkpoint_sha256')==current else 'unit'
+
+
+def final_input_receipt(receipt,checkpoint,catalog_sha256):
+    cp=checkpoint['record']
+    expected={'schema_version':6,'source':cp['source'],'session_id':cp['session_id'],
+        'checkpoint_sha256':p.digest(p.canonical(checkpoint)), 'catalog_commit':cp['committed_transaction'],
+        'catalog_logical_digest':cp['catalog_logical_digest'],'manifest_root':cp['page_root'],
+        'catalog_sha256':catalog_sha256,'counts':cp['counts'],'contexts':cp['contexts'],
+        'complete':True,'acceptance':False,'scope':FINAL_INPUT_SCOPE}
+    partial={**expected,'complete':False,'scope':'input_preparation'}
+    p.require(type(receipt) is dict and type(receipt.get('complete')) is bool
+              and p.canonical(receipt) in (p.canonical(expected),p.canonical(partial)),
+              'final input readiness receipt is not exact current snapshot correspondence')
+    return receipt['complete']
+
+
 def unit_request(state, run, job, root):
     plan = p.envelope(state['resource_plan'], 'ResourcePlan', root)
     ordinal = state['next_ordinal']
@@ -278,7 +305,7 @@ def unit_request(state, run, job, root):
         'expected_prior_checkpoint': p.digest(p.canonical(cp)) if cp else None,
         'source': reg['source'], 'pr': reg['pr'], 'repository': reg['repository'],
         'event_base': reg['event_base'], 'workflow_id': p.WORKFLOW, 'event_name': 'workflow_dispatch',
-        'mode': 'complete' if state['stage'] == 'complete' else 'unit',
+        'mode': dispatch_mode(state),
         'run': run, 'job': job['id'], 'task': job['task_id'], 'attempt': 1,
         'resource_plan_sha256': plan['plan_sha256'], 'runner_identity_utf8': p.canonical(reg['runner']).decode(),
         'status': 'running', 'artifact_roots': [], 'stage': state['stage'],
@@ -304,11 +331,13 @@ def advance(state, result, root):
               and unit['expected_prior_checkpoint'] == (p.digest(p.canonical(state['checkpoint']))
                     if state['checkpoint'] else None), 'unit skips/splices session progress')
     p.require(unit['status'] in ('checkpointed_incomplete', 'closed_unqualified')
-              and (unit['stage'] in ('semantic_verify','monitor_scc_verify','temporal_components')
+              and (unit['stage'] in ('semantic_verify','monitor_scc_verify','temporal_components','complete')
                    or unit['progress'] != state['progress'] or result['stage_complete']),
               'failed or nonprogressing unit cannot advance')
-    preparation_only=(state['stage'] in ('semantic_verify','monitor_scc_verify','temporal_components')
+    preparation_only=(state['stage'] in ('semantic_verify','monitor_scc_verify','temporal_components','complete')
                       and result['stage_complete'] is False and result['checkpoint']==state['checkpoint'])
+    if state['stage']=='complete':
+        p.require(preparation_only and unit['mode']=='unit','final input unit cannot publish a new catalog checkpoint or qualify')
     checkpoint = p.envelope(result['checkpoint'], 'Checkpoint', root)
     initial = p.envelope(result['initial_image'], 'InitialImage', root)
     session = p.envelope(result['session'], 'Session', root)
@@ -384,6 +413,21 @@ def child_environment(reg, request, source, output):
     return env
 
 
+def validate_completion_command(operation, command, source, request_path, mode):
+    """Final preparation may read/verify the frozen catalog, never publish it."""
+    checker=str(Path(source)/'verification/async-driver-refinement/paged_checker.py')
+    runner=str(Path(source)/'scripts/check-async-driver-refinement')
+    p.require(mode in ('unit','complete'),'invalid complete-stage mode')
+    verbs={'validate_restore':('validate-restore','validate-restored-verifier')}
+    if mode=='unit':verbs.update(unit=('prepare-unit',),finalize_unit=('finalize-unit',))
+    else:verbs['completion_verify']=('complete',)
+    allowed=[[sys.executable,checker,verb,'--request',str(request_path)]
+             for verb in verbs.get(operation,())]
+    if operation=='validate_restore':
+        allowed.append([sys.executable,runner,'paged-unit','--request',str(request_path)])
+    p.require(command in allowed,'completion stage permits only fixed independent preparation/verification and readonly restore commands')
+
+
 def run_quantum(request_path, reg, source, output, command):
     request = p.read(request_path)
     operational=request.get('operation')=='catalog_calibration'
@@ -394,9 +438,7 @@ def run_quantum(request_path, reg, source, output, command):
         unit=request['work_unit']
         p.require(type(unit) is dict and 'record' not in unit,'private request WorkUnit must be record')
         if unit['stage']=='complete':
-            p.require(request['operation']=='completion_verify' and command==[sys.executable,
-                str(Path(source)/'verification/async-driver-refinement/paged_checker.py'),'complete','--request',str(request_path)],
-                'completion may invoke only the fixed independent complete verifier, never Oracle')
+            validate_completion_command(request['operation'],command,source,request_path,unit['mode'])
         p.require(unit['registered_cases']==reg['cases'][unit['stage']],'unregistered quantum cases')
         session_id=unit['session_id']
     import selectors
@@ -622,7 +664,7 @@ def dispatch(api, state, control, root):
               'terminal/incomplete resource disposition cannot dispatch another same-plan unit')
     p.require(state['next_ordinal'] < state['resource_plan']['record']['maximum_units'], 'unit budget exhausted')
     p.require(state.get('retry_authorized') is True,'unknown terminal failure cannot automatically dispatch a successor')
-    mode = 'complete' if state['stage'] == 'complete' else 'unit'
+    mode = dispatch_mode(state)
     reject_prior_ordinal_dispatch(api,reg,control,None)
     inputs = {'mode': mode, 'operation': 'execute', 'registration_sha256': p.digest(p.canonical(reg)),
               'control': p.canonical(control).decode()}
@@ -1031,7 +1073,7 @@ def replay_control(api,control,root,work):
         p.require(before['unit_runs']==successes and before['attempt_runs']==control['attempt_runs'][:ordinal]
                   and before['resume_decisions']==[d for d in control['resume_decisions'] if d['failed_ordinal']<ordinal],
                   'attempt event omitted/changed its authenticated predecessor inventory or decision')
-        expected_mode='complete' if state['stage']=='complete' else 'unit'
+        expected_mode=dispatch_mode(state)
         p.require(item['mode']==expected_mode and state['phase'] not in ('resource_blocked','semantic_invalid','completion_rejected','complete'),
                   'attempt bypasses source phase or terminal disposition')
         if ordinal and inventory[ordinal-1]['job']['status']!='success':
@@ -1139,7 +1181,7 @@ def member_stream(output, result):
 
 
 def source_commands(root, stage):
-    if stage in ('semantic_verify', 'monitor_scc_verify', 'temporal_components'):
+    if stage in ('semantic_verify', 'monitor_scc_verify', 'temporal_components','complete'):
         return [sys.executable, str(Path(root) / 'verification/async-driver-refinement/paged_checker.py'), 'prepare-unit', '--request']
     return [sys.executable, str(Path(root) / 'scripts/check-async-driver-refinement'), 'paged-unit', '--request']
 
@@ -1285,10 +1327,14 @@ def runner_body(control, root, output, mode, operation):
                     target = output / name; target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(path, target)
         restore_latest(state, latest, source, request, output, reg)
+    p.require(mode==dispatch_mode(state),'producer mode differs from authenticated replay routing')
     if mode == 'complete':
         p.require(state['stage'] == 'complete' and state['phase'] == 'qualified', 'completion premature')
+        ready=p.read(output/'restore-validation/restore-semantic.json')
+        backup=p.read(output/'restored-catalog-root.json')
+        p.require(final_input_receipt(ready,state['checkpoint'],backup['catalog_sha256']),
+                  'actual completion lost exact final input readiness; no preparation fallback')
         return finish_runner(api, reg, state, control, root, source, request, output, job)
-    p.require(state['stage'] != 'complete', 'complete stage requires registered complete mode')
     result,inventory=execute_and_package(state,reg,request,source,root,output,deadline)
     p.write(output/'finalizer-state.json',{'state':advance(state,result,root),'control':control,'unit':
             {'schema_version':6,'kind':'WorkUnit','record':result['work_unit']},
@@ -1326,6 +1372,7 @@ def find_member(parts, name):
 def finish_runner(api, reg, state, control, root, source, request, output, job):
     """A separate current Main verdict, never a relabelled PR run."""
     p.require(control['main_run'] is not None, 'completion needs independent current Main producer run')
+    p.require(dispatch_mode(state)=='complete','final exact input certificate absent before Main aggregation')
     latest = state['units'][-1]
     # The backend unit's final root is reverified from authenticated pages and
     # receipts by the independent checker, never accepted from controller bits.
@@ -1634,7 +1681,9 @@ def reserve_verifier(prepare, state, unit, final_checkpoint, source, output, pla
     for row in prepare['metadata_reservations']:
         p.closed(row,('path','maximum_bytes','role'))
         name=p.safe_path(row['path'])
-        p.require(name not in names and row['role'] in ('result','evidence_index','progress','temporal_publication'),
+        allowed_receipt=(u['stage']=='complete' and u['mode']=='unit' and row['role']=='receipt'
+                         and name=='restore-semantic.json')
+        p.require(name not in names and (allowed_receipt or row['role'] in ('result','evidence_index','progress','temporal_publication')),
                   'future metadata path/role not closed')
         names.add(name);part=plan.reserve(name,row['maximum_bytes'],row['role'])
         reservations.append({**row,'part_ordinal':part})
@@ -1805,14 +1854,84 @@ def transport_reservations(plan,verifier):
         p.require(part==0,'fixed transport metadata does not fit part0')
 
 
+def final_input_execution(unit,checkpoint,catalog_sha256,backup_sha256,progress_sha256,receipt_sha256,log,reg):
+    return {'schema_version':1,'source':unit['source'],'session_id':unit['session_id'],
+        'unit_ordinal':unit['unit_ordinal'],'origin':{k:unit[k] for k in ('run','job','task','attempt')},
+        'operation':'validate_restore','command':['python','verification/async-driver-refinement/paged_checker.py','validate-restore','--request'],
+        'checker_sha256':reg['source_files']['verification/async-driver-refinement/paged_checker.py'],
+        'runtime_sha256':p.digest(p.canonical(reg['runtime'])),
+        'checkpoint_sha256':p.digest(p.canonical(checkpoint)),'catalog_sha256':catalog_sha256,
+        'verifier_backup_sha256':backup_sha256,'verifier_progress_sha256':progress_sha256,
+        'receipt_sha256':receipt_sha256,'log_sha256':p.file_sha(log),'log_bytes':Path(log).stat().st_size,
+        'acceptance':False}
+
+
+def seal_final_input(request,produced,reg,source,output,request_path):
+    """The future receipt authenticates the exact already sealed private bytes."""
+    backup=Path(output)/'verifier-backup.sqlite';catalog=Path(request['catalog_path'])
+    backup_sha=p.file_sha(backup);catalog_sha=p.file_sha(catalog)
+    before_logs=set(Path(output).glob('quantum-*.log'))
+    validate={**request,'operation':'validate_restore','verifier_work_db':str(backup),
+              'checkpoint':produced['checkpoint']}
+    p.write(request_path,validate)
+    run_quantum(request_path,reg,source,output,[sys.executable,
+        str(Path(source)/'verification/async-driver-refinement/paged_checker.py'),
+        'validate-restore','--request',str(request_path)])
+    p.require(p.file_sha(backup)==backup_sha and p.file_sha(catalog)==catalog_sha,
+              'postseal final input validation mutated sealed private/catalog bytes')
+    receipt=Path(output)/'restore-semantic.json'
+    final_input_receipt(p.read(receipt),produced['checkpoint'],catalog_sha)
+    logs=set(Path(output).glob('quantum-*.log'))-before_logs
+    p.require(len(logs)==1,'postseal readonly invocation log missing/ambiguous')
+    log=next(iter(logs));p.require(log.stat().st_size+len(FINAL_INPUT_LOG_PREFIX)<=p.SMALL,'postseal readonly log bound exceeded')
+    # Source-owned framing preserves even an empty successful child capture.
+    with (Path(output)/FINAL_INPUT_LOG).open('xb') as target,log.open('rb') as captured:
+        target.write(FINAL_INPUT_LOG_PREFIX);shutil.copyfileobj(captured,target)
+        target.flush();os.fsync(target.fileno())
+    evidence=final_input_execution(produced['work_unit'],produced['checkpoint'],catalog_sha,backup_sha,
+        p.file_sha(Path(output)/'verifier-progress/unit.json'),p.file_sha(receipt),Path(output)/FINAL_INPUT_LOG,reg)
+    p.write(Path(output)/FINAL_INPUT_EXECUTION,evidence)
+
+
+def authenticate_final_input(state,result,transport,progress,backup,root):
+    """Scheduling evidence is source-owned same-unit execution, never a flag."""
+    unit=result['work_unit'];reg=state['registration']
+    p.require(unit['mode']=='unit' and result['stage_complete'] is False
+              and progress['after_cursor']['operation'] in ('load_input','check_input'),
+              'final preparation attempted semantic work or completion')
+    receipt_path=find_member(transport['parts'],'restore-semantic.json')
+    log=find_member(transport['parts'],FINAL_INPUT_LOG)
+    execution=p.read(find_member(transport['parts'],FINAL_INPUT_EXECUTION))
+    with log.open('rb') as captured:
+        p.require(captured.read(len(FINAL_INPUT_LOG_PREFIX))==FINAL_INPUT_LOG_PREFIX,'readonly log capture framing differs')
+    catalog=p.auxiliary(p.read(find_member(transport['parts'],'catalog-backup/root.json')),root)
+    cp=result['checkpoint']['record']
+    identities={'source':unit['source'],'session_id':unit['session_id'],'unit_ordinal':unit['unit_ordinal'],
+        'checkpoint_sha256':p.digest(p.canonical(result['checkpoint'])),
+        'previous_checkpoint_sha256':unit['expected_prior_checkpoint'],
+        'resource_plan_sha256':unit['resource_plan_sha256'],'initial_image_sha256':cp['initial_image_id'],
+        'catalog_commit':cp['committed_transaction'],'catalog_logical_digest':cp['catalog_logical_digest'],
+        'semantic_manifest_root':cp['page_root'],'artifact_part_count':len(transport['parts'])}
+    p.require(all(catalog[k]==value and backup[k]==value for k,value in identities.items())
+              and log.stat().st_size<=p.SMALL,
+              'final preparation catalog/private/current-unit/log binding differs')
+    expected=final_input_execution(unit,result['checkpoint'],catalog['catalog_sha256'],backup['work_db_sha256'],
+        state['verifier_progress_sha256'],p.file_sha(receipt_path),log,reg)
+    p.require(p.canonical(execution)==p.canonical(expected),'final readiness source invocation/private chain differs')
+    ready=final_input_receipt(p.read(receipt_path),result['checkpoint'],catalog['catalog_sha256'])
+    state['final_input_checkpoint_sha256']=p.digest(p.canonical(result['checkpoint'])) if ready else None
+
+
 def execute_and_package(state,reg,request,source,root,output,deadline):
     stage=state['stage'];quantum=Path(request['output_dir'])
     request['operation']='expand' if stage=='expand' else 'unit'
     path=Path(output)/'request.json';p.write(path,request)
-    checked=stage in ('semantic_verify','monitor_scc_verify','temporal_components')
+    checked=stage in ('semantic_verify','monitor_scc_verify','temporal_components','complete')
     produced=run_quantum(path,reg,source,quantum,source_commands(source,stage)+[str(path)])
     prepare=produced if checked else None
     preparation_only=checked and prepare['before_cursor']['operation'] in ('load_input','check_input')
+    if stage=='complete':
+        p.require(preparation_only and request['work_unit']['mode']=='unit','final unit cannot resume semantic/TLC/backend work')
     if stage!='expand':
         phase=p.read(quantum/'phase-result.json') if checked else produced
         p.closed(phase,('work_unit','stage_complete') if checked else ('work_unit','stage_complete','receipt'))
@@ -1866,8 +1985,21 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
             # self-referencing checker result/output inventory.
             if not any(r['path']=='unit-result.json' for r in prepare['metadata_reservations']):
                 plan.reserve('unit-result.json',p.SMALL,'phase_result')
+            if stage=='complete':
+                p.require(preparation_only and request['work_unit']['mode']=='unit',
+                          'final unit may only authenticate frozen inputs')
+                p.require(any(r['path']=='restore-semantic.json' and r['role']=='receipt'
+                              for r in prepare['metadata_reservations']), 'final preparation receipt not reserved')
+                plan.reserve(FINAL_INPUT_EXECUTION,p.SMALL,'source_receipt')
+                plan.reserve(FINAL_INPUT_LOG,p.SMALL,'source_receipt')
             reservation=reserve_verifier(prepare,state,request['work_unit'],produced['checkpoint'],
                                          source,quantum,plan,published)
+            if stage=='complete':
+                for name in (FINAL_INPUT_EXECUTION,FINAL_INPUT_LOG):
+                    row=plan.db.execute('SELECT part,bytes FROM members WHERE path=?',(name,)).fetchone()
+                    p.require(row is not None,'controller final-input metadata reservation disappeared')
+                    reservation['metadata_reservations'].append({'path':name,'part_ordinal':row[0],
+                        'maximum_bytes':row[1],'role':'source_receipt'})
             p.write(request['reservation_path'],reservation)
             published_result=produced
             request['checkpoint']=produced['checkpoint']
@@ -1885,6 +2017,8 @@ def execute_and_package(state,reg,request,source,root,output,deadline):
             progress=p.verifier_auxiliary(p.read(quantum/'verifier-progress/unit.json'),root)
             p.require(progress['committed_quantum_count']>0 and progress['result_count']>0,
                       'resource_blocked: framing-only verifier unit made no useful committed progress')
+            if stage=='complete':
+                seal_final_input(request,produced,reg,source,quantum,path)
             for row in reservation['metadata_reservations']:
                 if row['path']!='unit-result.json':plan.fulfill(row['path'],quantum/row['path'])
             backup_first=reservation['backup_first_part']
@@ -1938,7 +2072,7 @@ def authenticate_verifier_progress(previous,state,result,transport,root):
     backup_paths=[d/'verifier-backup/root.json' for d in transport['parts'].values()
                   if (d/'verifier-backup/root.json').is_file()]
     unit=result['work_unit']
-    is_verifier=unit['stage'] in ('semantic_verify','monitor_scc_verify','temporal_components')
+    is_verifier=unit['stage'] in ('semantic_verify','monitor_scc_verify','temporal_components','complete')
     p.require(len(progress_paths)==len(backup_paths)==(1 if is_verifier else 0),
               'verifier unit missing exact progress/backup pair')
     if not is_verifier:return state
@@ -1989,6 +2123,8 @@ def authenticate_verifier_progress(previous,state,result,transport,root):
     state['verifier_progress']=progress
     state['verifier_progress_sha256']=p.file_sha(progress_paths[0])
     state['verifier_backup_sha256']=p.file_sha(backup_paths[0])
+    if unit['stage']=='complete':
+        authenticate_final_input(state,result,transport,progress,backup,root)
     return state
 
 

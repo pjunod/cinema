@@ -144,6 +144,62 @@ class CapabilityAndStorageTests(unittest.TestCase):
         with self.assertRaises(receipts.ReceiptError):
             s.validate_resume_decision(None,{}, {}, {'initial_image':None}, {})
 
+    def test_completion_stage_allows_readonly_restore_but_never_catalog_publication(self):
+        import sys
+        request=ROOT/'owned-request.json'
+        runner=str(ROOT/'scripts/check-async-driver-refinement')
+        checker=str(ROOT/'verification/async-driver-refinement/paged_checker.py')
+        s.validate_completion_command('validate_restore',
+            [sys.executable,runner,'paged-unit','--request',str(request)],ROOT,request,'unit')
+        s.validate_completion_command('unit',
+            [sys.executable,checker,'prepare-unit','--request',str(request)],ROOT,request,'unit')
+        for operation in ('expand','temporal_import','completion_verify'):
+            with self.assertRaises(receipts.ReceiptError):
+                s.validate_completion_command(operation,
+                    [sys.executable,runner,'paged-unit','--request',str(request)],ROOT,request,'unit')
+
+    def test_final_snapshot_preparation_routes_unit_until_exact_authenticated_certificate(self):
+        checkpoint={'record':{'page_root':'a'*64,'committed_transaction':9,'counts':{'products':2},'contexts':['all seven']}}
+        state={'stage':'complete','checkpoint':checkpoint,'semantic_ready':True,
+               'restored-input-readiness.json':{'semantic_ready':True}}
+        self.assertEqual(s.dispatch_mode(state),'unit')
+        state['final_input_checkpoint_sha256']=p.digest(p.canonical(checkpoint))
+        self.assertEqual(s.dispatch_mode(state),'complete')
+        # A new final publication invalidates a previously authenticated scope.
+        state['checkpoint']=copy.deepcopy(checkpoint)
+        state['checkpoint']['record']['committed_transaction']+=1
+        self.assertEqual(s.dispatch_mode(state),'unit')
+
+    def test_final_readiness_receipt_rejects_partial_stale_and_forged_ready_forms(self):
+        cp={'source':{'commit':'a'*40},'session_id':'owned-session','committed_transaction':9,
+            'catalog_logical_digest':'b'*64,'page_root':'c'*64,'counts':{'products':2},'contexts':['seven']}
+        checkpoint={'record':cp};catalog='d'*64
+        ready={'schema_version':6,'source':cp['source'],'session_id':cp['session_id'],
+            'checkpoint_sha256':p.digest(p.canonical(checkpoint)),'catalog_commit':9,
+            'catalog_logical_digest':cp['catalog_logical_digest'],'manifest_root':cp['page_root'],
+            'catalog_sha256':catalog,'counts':cp['counts'],'contexts':cp['contexts'],
+            'complete':True,'acceptance':False,'scope':s.FINAL_INPUT_SCOPE}
+        self.assertTrue(s.final_input_receipt(ready,checkpoint,catalog))
+        self.assertFalse(s.final_input_receipt({**ready,'complete':False,'scope':'input_preparation'},checkpoint,catalog))
+        for changes in ({'checkpoint_sha256':'f'*64},{'catalog_sha256':'f'*64},
+                        {'counts':{'products':3}},{'complete':1},{'scope':'input_preparation'},
+                        {'caller_ready':True}):
+            with self.subTest(changes=changes),self.assertRaises(receipts.ReceiptError):
+                s.final_input_receipt({**ready,**changes},checkpoint,catalog)
+
+    def test_actual_complete_command_has_no_preparation_fallback(self):
+        import sys
+        request=ROOT/'owned-request.json'
+        checker=str(ROOT/'verification/async-driver-refinement/paged_checker.py')
+        s.validate_completion_command('completion_verify',
+            [sys.executable,checker,'complete','--request',str(request)],ROOT,request,'complete')
+        with self.assertRaises(receipts.ReceiptError):
+            s.validate_completion_command('unit',
+                [sys.executable,checker,'prepare-unit','--request',str(request)],ROOT,request,'complete')
+        with self.assertRaises(receipts.ReceiptError):
+            s.validate_completion_command('completion_verify',
+                [sys.executable,checker,'complete','--request',str(request)],ROOT,request,'unit')
+
     def test_missing_actual_persistent_mount_or_lease_refuses(self):
         with self.assertRaises(receipts.ReceiptError):s.validate_storage({},ROOT)
 
