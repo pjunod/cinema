@@ -280,6 +280,14 @@ source_anchor = "guard value == \"unavailable\", toldIntent != intent else { ret
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testUnavailableSubtitleNotifiesOncePerIntentWithoutConsumingReadyRetry"
 
+[[fixes]]
+id = "subtitles.translation-bound-to-captured-context"
+commits = ["030b0293bf9bd6d0f95f44b08e892f51cb227b20"]
+source = "crates/plurxd/src/web/player/subtitle-text-translation.js"
+source_anchor = "function textTranslationSourceCurrent(state){"
+test = "tests/web/subtitle-text-translation.test.js"
+test_anchor = "replacing a captured Local context refuses new work and fences a held create response"
+
 # Reviewed Mac completion client changes: source/test anchors, not execution receipts.
 [[fixes]]
 id = "android.hls-hevc-retains-measured-envelope"
