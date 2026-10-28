@@ -2864,4 +2864,564 @@ int main(void) { alarm(20); for (;;) pause(); }
         )
         .await;
     }
+    // R19 native-result delivery boundaries. These gates retain real positive
+    // native results in their original registered workers. No gate supplies a
+    // result, acknowledgment, replacement task, descriptor or close witness.
+    type NativeIoIdentity = (Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool);
+
+    async fn pending_native_io(
+        preparation: &OwnedPreparation,
+        member: Uuid,
+        kind: super::super::super::native_result_fixture::Kind,
+    ) -> NativeIoIdentity {
+        use super::super::super::native_result_fixture::Kind;
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let prefix = &role.bootstrap[&member];
+        assert!(!role.refunded && role.pending_finite_close.is_none());
+        assert_eq!(prefix.fold().unwrap().state().asset.totals.pending_jobs, 1);
+        let identity = match kind {
+            Kind::Publication => prefix.fixture_publication_job_identity(),
+            Kind::Sync => prefix.fixture_sync_job_identity(),
+            Kind::CleanupRemoveFile
+            | Kind::CleanupSyncChild
+            | Kind::CleanupRemoveChild
+            | Kind::CleanupSyncParent
+            | Kind::CleanupCloseHandles => prefix.fixture_cleanup_job_identity(),
+            _ => panic!("unexpected fixture owner"),
+        }
+        .expect("same original registered IO owner");
+        assert!(identity.3.is_some() && !identity.4);
+        identity
+    }
+
+    async fn actual_publication(
+        runtime: &NodeResourceRuntime,
+        preparation: &OwnedPreparation,
+        member: Uuid,
+        output: v2::scratch::OutputKey,
+    ) -> Uuid {
+        // Actual bytes are written/renamed/closed by PublicationIo. This native
+        // custody fixture makes no decoder/parser claim about the media unit.
+        let mut payload = b"\0\0\0\x18ftypisom\0\0\0\0isomiso6".to_vec();
+        let operation = runtime
+            .queue_scratch_publication(preparation, 0, member, output, &mut payload)
+            .expect("same original payload adopted before native entry");
+        assert!(payload.is_empty());
+        runtime
+            .publish_scratch_output(preparation, 0, member, operation, deadline())
+            .await
+            .expect("actual publication and durable original Observe");
+        operation
+    }
+
+    async fn entered_bootstrap_step_cancellation(child: bool) {
+        use super::super::super::native_result_fixture::{Gate, Kind};
+        let root = tempfile::tempdir().expect("actual entered bootstrap step fixture");
+        let (runtime, mut owner, preparation) = original(root.path()).await;
+        owner
+            .prepare_inputs(deadline())
+            .await
+            .expect("same original sources");
+        let member = output_member(&preparation).await;
+        runtime
+            .arm_scratch_bootstrap(&preparation, 0, member, deadline())
+            .await
+            .unwrap();
+        runtime
+            .open_scratch_bootstrap_root(&preparation, 0, member, deadline())
+            .await
+            .expect("actual namespace root before the tested step");
+        let charge = runtime.accounting().unwrap().used;
+        let ids = original_ids(&preparation).await;
+        let output = owner.output();
+        let application = owner
+            .take_application_lease(1024)
+            .expect("original app alias");
+        let kind = if child {
+            Kind::BootstrapChild
+        } else {
+            Kind::BootstrapTraversal
+        };
+        let gate = Gate::install_next(kind, member);
+        let mut open =
+            Box::pin(runtime.open_scratch_bootstrap_sink(&preparation, 0, member, deadline()));
+        let job = tokio::select! {
+            result = &mut open => panic!("sink returned before actual entered step result: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) =>
+                result.expect("real step result watchdog"),
+        };
+        drop(open);
+        let identity = {
+            let bundle = preparation.state.lock().await;
+            let prefix = &bundle.roles[0].bootstrap[&member];
+            let identity = prefix.fixture_root_job_identity().unwrap();
+            assert_eq!((identity.0, identity.3), (gate.identity().0, Some(job)));
+            assert_eq!(prefix.fold().unwrap().state().asset.totals.pending_jobs, 1);
+            assert_eq!(
+                prefix.fold().unwrap().state().bootstrap.phase,
+                if child {
+                    v2::scratch::bootstrap::BootstrapPhase::ChildPossible
+                } else {
+                    v2::scratch::bootstrap::BootstrapPhase::Traversing
+                }
+            );
+            identity
+        };
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        assert_eq!(original_ids(&preparation).await, ids);
+        // Cleanup itself reaches the same original step join. Its borrowed
+        // future may disappear without aborting or replacing that worker.
+        let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut cleanup)
+                .await
+                .is_err()
+        );
+        drop(cleanup);
+        {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            assert_eq!(
+                role.bootstrap[&member].fixture_root_job_identity(),
+                Some(identity)
+            );
+            assert!(role.sources.values().all(|source| source.parent_closed()));
+            assert!(
+                role.copy_vod.as_ref().unwrap().never_root_closure.is_some(),
+                "cleanup passed original Source closure and is waiting for the same bootstrap arm"
+            );
+            assert!(role.pending_finite_close.is_none() && !role.refunded);
+        }
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        // Traversal cleanup also tests the distinct one-directory partial
+        // prefix close. Child cleanup's two-directory close is swept below.
+        let close_gate = (!child).then(|| Gate::install_next(Kind::CleanupCloseHandles, member));
+        drop(gate);
+        runtime
+            .observe_finite_bootstrap_arm(&preparation, 0, member, deadline())
+            .await
+            .expect("Observe SAME completed traversal/mkdir job, never launch another step");
+        {
+            let bundle = preparation.state.lock().await;
+            let prefix = &bundle.roles[0].bootstrap[&member];
+            let joined = prefix.fixture_root_job_identity().unwrap();
+            assert_eq!(
+                (joined.0, joined.1, joined.2),
+                (identity.0, identity.1, identity.2)
+            );
+            assert!(joined.3.is_none());
+            let state = prefix.fold().unwrap().state();
+            assert_eq!(state.asset.totals.pending_jobs, 0);
+            let acquired = if child {
+                state
+                    .asset
+                    .directory
+                    .as_ref()
+                    .expect("actual original created child")
+            } else {
+                &state
+                    .bootstrap
+                    .current
+                    .as_ref()
+                    .expect("actual traversed directory")
+                    .observed
+            };
+            assert_eq!(acquired.acquisition_io_id.uuid(), identity.0);
+            if child {
+                assert_eq!(
+                    state.bootstrap.phase,
+                    v2::scratch::bootstrap::BootstrapPhase::SinkReady
+                );
+            }
+        }
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        if let Some(close_gate) = close_gate {
+            let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
+            let job = tokio::select! {
+                result = &mut cleanup => panic!("prefix retirement returned before actual checked close: {}", result.is_ok()),
+                result = tokio::time::timeout(Duration::from_secs(10), close_gate.reached()) =>
+                    result.expect("actual partial-prefix close watchdog"),
+            };
+            drop(cleanup);
+            let close = pending_native_io(&preparation, member, Kind::CleanupCloseHandles).await;
+            assert_eq!((close.0, close.3), (close_gate.identity().0, Some(job)));
+            assert_ne!(close.0, identity.0);
+            assert_eq!(runtime.accounting().unwrap().used, charge);
+            drop(close_gate);
+            assert_eq!(
+                pending_native_io(&preparation, member, Kind::CleanupCloseHandles).await,
+                close
+            );
+        }
+        let ticket = owner
+            .prepare_retirement(true, deadline())
+            .await
+            .expect("same original step Observe and acquired-prefix native closure");
+        finish_aliases(
+            runtime,
+            owner,
+            preparation,
+            output,
+            application,
+            ticket,
+            (charge, ids.3),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn copy_entered_traversal_and_partial_close_cancellation_keep_same_original_jobs() {
+        entered_bootstrap_step_cancellation(false).await;
+    }
+
+    #[tokio::test]
+    async fn copy_entered_mkdir_cancellation_observes_same_created_child_and_closes_originals() {
+        entered_bootstrap_step_cancellation(true).await;
+    }
+
+    async fn entered_publication_or_sync_cancellation(sync: bool) {
+        use super::super::super::native_result_fixture::{Gate, Kind};
+        let root = tempfile::tempdir().expect("actual entered native output fixture");
+        // The original pre-R ELF actually enters as the owned root. Root-only
+        // cleanup waits that same Child before joining the retained IO job;
+        // never-root cleanup would only refuse the pending asset job.
+        let (runtime, mut owner, preparation, graph, _) = pausing_root(root.path(), false).await;
+        let member = output_member(&preparation).await;
+        let charge = runtime.accounting().unwrap().used;
+        let ids = original_ids(&preparation).await;
+        let output = owner.output();
+        let application = owner
+            .take_application_lease(1024)
+            .expect("original app alias");
+        let operation = if sync {
+            actual_publication(&runtime, &preparation, member, v2::scratch::OutputKey::Init).await;
+            runtime
+                .queue_scratch_sync(&preparation, 0, member, &[v2::scratch::OutputKey::Init])
+                .expect("same original file sync request")
+        } else {
+            let mut payload = b"\0\0\0\x18ftypisom\0\0\0\0isomiso6".to_vec();
+            let operation = runtime
+                .queue_scratch_publication(
+                    &preparation,
+                    0,
+                    member,
+                    v2::scratch::OutputKey::Init,
+                    &mut payload,
+                )
+                .expect("same original Init payload");
+            assert!(payload.is_empty());
+            operation
+        };
+        let kind = if sync { Kind::Sync } else { Kind::Publication };
+        let gate = Gate::install(kind, operation);
+        // Both branches await the real original worker, then its ordinary
+        // Observe. The post-native gate stops delivery, not native execution.
+        let mut work = Box::pin(async {
+            if sync {
+                runtime
+                    .sync_scratch_outputs(&preparation, 0, member, operation, deadline())
+                    .await
+            } else {
+                runtime
+                    .publish_scratch_output(&preparation, 0, member, operation, deadline())
+                    .await
+            }
+        });
+        let job = tokio::select! {
+            result = &mut work => panic!("IO returned before actual native result: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) =>
+                result.expect("actual output IO result watchdog"),
+        };
+        drop(work);
+        let identity = pending_native_io(&preparation, member, kind).await;
+        assert_eq!((identity.0, identity.3), (operation, Some(job)));
+        let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
+        let waited = async {
+            loop {
+                if graph.snapshot().await.waited_roots == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::select! {
+            result = &mut cleanup => panic!("cleanup returned before original retained IO join: {}", result.is_ok()),
+            result = tokio::time::timeout(Duration::from_secs(10), waited) =>
+                result.expect("same original Child wait watchdog"),
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut cleanup)
+                .await
+                .is_err()
+        );
+        drop(cleanup);
+        assert_eq!(
+            graph.snapshot().await.waited_roots,
+            1,
+            "cleanup reached the entered native-job join after the SAME Child wait"
+        );
+        assert_eq!(
+            pending_native_io(&preparation, member, kind).await,
+            identity
+        );
+        assert_eq!(original_ids(&preparation).await, ids);
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(gate);
+        assert_eq!(
+            pending_native_io(&preparation, member, kind).await,
+            identity
+        );
+        // Joining alone is NOT durable Observe or a returned directory. Replay
+        // the SAME original runtime API; it must not launch another worker.
+        if sync {
+            runtime
+                .sync_scratch_outputs(&preparation, 0, member, operation, deadline())
+                .await
+                .expect("same original sync result/Observe/child FD return");
+        } else {
+            runtime
+                .publish_scratch_output(&preparation, 0, member, operation, deadline())
+                .await
+                .expect("same original publication result/Observe/child FD return");
+        }
+        {
+            let bundle = preparation.state.lock().await;
+            let prefix = &bundle.roles[0].bootstrap[&member];
+            let joined = if sync {
+                prefix.fixture_sync_job_identity()
+            } else {
+                prefix.fixture_publication_job_identity()
+            }
+            .unwrap();
+            assert_eq!(
+                (joined.0, joined.1, joined.2),
+                (identity.0, identity.1, identity.2)
+            );
+            assert!(joined.3.is_none() && joined.4);
+            let state = prefix.fold().unwrap().state();
+            assert_eq!(state.asset.totals.pending_jobs, 0);
+            assert_eq!(
+                state.asset.head.as_ref().unwrap().operation_id.uuid(),
+                identity.1,
+                "durable Observe uses the original named operation"
+            );
+        }
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(graph);
+        let ticket = owner
+            .prepare_retirement(true, deadline())
+            .await
+            .expect("normal original root-only/native-output cleanup after acknowledged IO");
+        finish_aliases(
+            runtime,
+            owner,
+            preparation,
+            output,
+            application,
+            ticket,
+            (charge, ids.3),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn copy_entered_publication_cleanup_join_cancellation_replays_same_observe_and_fd() {
+        entered_publication_or_sync_cancellation(false).await;
+    }
+
+    #[tokio::test]
+    async fn copy_entered_sync_cleanup_join_cancellation_replays_same_observe_and_fd() {
+        entered_publication_or_sync_cancellation(true).await;
+    }
+
+    #[tokio::test]
+    async fn copy_entered_retirement_action_results_survive_each_cancelled_original_join() {
+        use super::super::super::native_result_fixture::{Gate, Kind};
+        let root = tempfile::tempdir().expect("actual retirement action sweep");
+        let (runtime, mut owner, preparation) = original(root.path()).await;
+        original_prefix(&runtime, &mut owner, &preparation).await;
+        let member = output_member(&preparation).await;
+        actual_publication(&runtime, &preparation, member, v2::scratch::OutputKey::Init).await;
+        let sync = runtime
+            .queue_scratch_sync(&preparation, 0, member, &[v2::scratch::OutputKey::Init])
+            .unwrap();
+        runtime
+            .sync_scratch_outputs(&preparation, 0, member, sync, deadline())
+            .await
+            .unwrap();
+        let charge = runtime.accounting().unwrap().used;
+        let ids = original_ids(&preparation).await;
+        let output = owner.output();
+        let application = owner
+            .take_application_lease(1024)
+            .expect("original app alias");
+        let gates = [
+            Kind::CleanupRemoveFile,
+            Kind::CleanupSyncChild,
+            Kind::CleanupRemoveChild,
+            Kind::CleanupSyncParent,
+            Kind::CleanupCloseHandles,
+        ]
+        .map(|kind| (kind, Gate::install_next(kind, member)));
+        let mut seen = Vec::<NativeIoIdentity>::new();
+        for (kind, gate) in gates {
+            let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
+            let job = tokio::select! {
+                result = &mut cleanup => panic!("retirement returned before actual {kind:?} result: {}", result.is_ok()),
+                result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) =>
+                    result.expect("actual retirement native-result watchdog"),
+            };
+            drop(cleanup);
+            let identity = pending_native_io(&preparation, member, kind).await;
+            assert_eq!((identity.0, identity.3), (gate.identity().0, Some(job)));
+            assert!(
+                seen.iter()
+                    .all(|prior| prior.0 != identity.0 && prior.3 != identity.3),
+                "each distinct native action has its own original named IO and job"
+            );
+            assert_eq!(runtime.accounting().unwrap().used, charge);
+            assert_eq!(original_ids(&preparation).await, ids);
+            drop(gate);
+            assert_eq!(
+                pending_native_io(&preparation, member, kind).await,
+                identity,
+                "releasing delivery cannot replace/Observe the original worker by itself"
+            );
+            seen.push(identity);
+        }
+        assert_eq!(seen.len(), 5);
+        let ticket = owner
+            .prepare_retirement(true, deadline())
+            .await
+            .expect("final original checked-close Observe and exact-head native proof");
+        finish_aliases(
+            runtime,
+            owner,
+            preparation,
+            output,
+            application,
+            ticket,
+            (charge, ids.3),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn copy_entered_live_removal_join_cancellation_replays_same_original_unlink_and_observe()
+    {
+        use super::super::super::native_result_fixture::{Gate, Kind};
+        let root = tempfile::tempdir().expect("actual live prefix unlink result");
+        let (runtime, mut owner, preparation) = original(root.path()).await;
+        original_prefix(&runtime, &mut owner, &preparation).await;
+        let member = output_member(&preparation).await;
+        actual_publication(
+            &runtime,
+            &preparation,
+            member,
+            v2::scratch::OutputKey::Segment { index: 0 },
+        )
+        .await;
+        let sync = runtime
+            .queue_scratch_sync(
+                &preparation,
+                0,
+                member,
+                &[v2::scratch::OutputKey::Segment { index: 0 }],
+            )
+            .unwrap();
+        runtime
+            .sync_scratch_outputs(&preparation, 0, member, sync, deadline())
+            .await
+            .unwrap();
+        let charge = runtime.accounting().unwrap().used;
+        let ids = original_ids(&preparation).await;
+        let output = owner.output();
+        let application = owner
+            .take_application_lease(1024)
+            .expect("original app alias");
+        let gate = Gate::install_next(Kind::CleanupRemoveFile, member);
+        let mut removal = Box::pin(output.retire_segment(0, deadline()));
+        let job = tokio::select! {
+            result = &mut removal => panic!("live unlink returned before real result: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) =>
+                result.expect("actual live unlink result watchdog"),
+        };
+        drop(removal);
+        let identity = {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            let prefix = &role.bootstrap[&member];
+            let identity = prefix
+                .fixture_live_removal_job_identity()
+                .expect("same original LiveRemoval");
+            assert_eq!((identity.0, identity.3), (gate.identity().0, Some(job)));
+            assert!(!identity.4 && role.pending_finite_close.is_none() && !role.refunded);
+            assert!(
+                prefix.fold().unwrap().files().iter().any(
+                    |file| file.published == Some(v2::scratch::OutputKey::Segment { index: 0 })
+                ),
+                "the actual native unlink is not durable Observe yet"
+            );
+            assert_eq!(prefix.fold().unwrap().state().asset.totals.pending_jobs, 1);
+            identity
+        };
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        assert_eq!(original_ids(&preparation).await, ids);
+        drop(gate);
+        assert_eq!(
+            preparation.state.lock().await.roles[0].bootstrap[&member]
+                .fixture_live_removal_job_identity(),
+            Some(identity)
+        );
+        output
+            .retire_segment(0, deadline())
+            .await
+            .expect("SAME original live unlink worker, Observe and child FD return");
+        {
+            let bundle = preparation.state.lock().await;
+            let prefix = &bundle.roles[0].bootstrap[&member];
+            assert!(prefix.fixture_live_removal_job_identity().is_none());
+            let state = prefix.fold().unwrap().state();
+            assert_eq!(state.asset.totals.pending_jobs, 0);
+            assert_eq!(
+                state.asset.head.as_ref().unwrap().operation_id.uuid(),
+                identity.1,
+                "same LiveRemoval Observe, not a new operation"
+            );
+            assert!(!prefix
+                .fold()
+                .unwrap()
+                .files()
+                .iter()
+                .any(|file| file.published == Some(v2::scratch::OutputKey::Segment { index: 0 })));
+        }
+        assert_eq!(
+            runtime.accounting().unwrap().used,
+            charge,
+            "actual segment unlink/Observe alone cannot refund this owner"
+        );
+        // Known previous removal is idempotent and cannot arm replacement work.
+        output
+            .retire_segment(0, deadline())
+            .await
+            .expect("same already-removed segment retry");
+        assert!(preparation.state.lock().await.roles[0].bootstrap[&member]
+            .fixture_live_removal_job_identity()
+            .is_none());
+        let ticket = owner
+            .prepare_retirement(true, deadline())
+            .await
+            .expect("normal original prefix retirement after live removal");
+        finish_aliases(
+            runtime,
+            owner,
+            preparation,
+            output,
+            application,
+            ticket,
+            (charge, ids.3),
+        )
+        .await;
+    }
 }

@@ -29,6 +29,23 @@ struct PublicationResult {
     result: std::io::Result<()>,
 }
 impl Publication {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn fixture_job_identity(
+        &self,
+    ) -> (Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool) {
+        (
+            self.io_id.uuid(),
+            self.observe_id.uuid(),
+            self.join_id.uuid(),
+            self.pending.as_ref().map(JoinHandle::id),
+            self.acknowledged,
+        )
+    }
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn retained_heap_bytes(
         &self,
     ) -> Result<usize, OperationError> {
@@ -118,10 +135,32 @@ impl Publication {
         let request = self.request.take().expect("validated retained request");
         let directory = held.files.remove(&copy).expect("validated SAME child");
         let mut native = PublicationIo::from_held_directory(request, directory);
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        let fixture_io = self.io_id.uuid();
         let (enter, registered) = tokio::sync::oneshot::channel();
         let pending = runtime.spawn_blocking(move || {
             let result = match registered.blocking_recv() {
-                Ok(()) => native.run(),
+                Ok(()) => {
+                    let result = native.run();
+                    #[cfg(all(
+                        test,
+                        feature = "fixtures",
+                        target_os = "linux",
+                        any(target_arch = "x86_64", target_arch = "aarch64")
+                    ))]
+                    if result.is_ok() {
+                        super::super::super::native_result_fixture::after_result(
+                            super::super::super::native_result_fixture::Kind::Publication,
+                            fixture_io,
+                        );
+                    }
+                    result
+                }
                 Err(_) => Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "publication native entry was never released",
@@ -130,6 +169,20 @@ impl Publication {
             PublicationResult { native, result }
         });
         self.pending = Some(pending);
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        super::super::super::native_result_fixture::bind_job(
+            super::super::super::native_result_fixture::Kind::Publication,
+            fixture_io,
+            self.pending
+                .as_ref()
+                .expect("same original publication job")
+                .id(),
+        );
         // The original handle is registered BEFORE its native-entry permission.
         Ok(enter)
     }

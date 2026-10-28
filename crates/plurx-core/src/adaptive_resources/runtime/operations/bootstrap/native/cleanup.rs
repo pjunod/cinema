@@ -104,6 +104,33 @@ impl RootCell {
     }
 }
 impl CleanupCell {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn fixture_job(
+        &self,
+    ) -> Option<tokio::task::Id> {
+        self.pending.as_ref().map(JoinHandle::id)
+    }
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn fixture_kind(&self) -> super::super::super::native_result_fixture::Kind {
+        use super::super::super::native_result_fixture::Kind;
+        match &self.action {
+            CleanupAction::RemoveFile { .. } => Kind::CleanupRemoveFile,
+            CleanupAction::SyncChild => Kind::CleanupSyncChild,
+            CleanupAction::RemoveChild { .. } => Kind::CleanupRemoveChild,
+            CleanupAction::SyncParent => Kind::CleanupSyncParent,
+            CleanupAction::CloseHandles { .. } => Kind::CleanupCloseHandles,
+        }
+    }
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn launched(&self) -> bool {
         self.launched
     }
@@ -216,12 +243,26 @@ impl CleanupCell {
         &mut self,
         root: &mut RootCell,
         baseline: &[Option<&DirectoryObservedV1>; 3],
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        fixture_identity: (Uuid, Uuid),
     ) -> Result<tokio::sync::oneshot::Sender<()>, OperationError> {
         if self.launched || self.pending.is_some() || self.result.is_some() || self.failed_join {
             return Err(invalid());
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let action = self.action.clone();
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        let fixture_kind = self.fixture_kind();
         let observed = self.observed.clone();
         let directories = root.lend_observed_directories(&self.observed, baseline)?;
         let (enter, registered) = tokio::sync::oneshot::channel();
@@ -234,9 +275,46 @@ impl CleanupCell {
                     unknown_close: None,
                 };
             }
-            run(action, observed, directories)
+            let result = run(action, observed, directories);
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            if matches!(
+                &result.fact,
+                Some(CleanupFact::Asset {
+                    outcome: NativeOutcomeV1::Completed,
+                    ..
+                }) | Some(CleanupFact::Bootstrap(BootstrapResultV1 {
+                    outcome: NativeOutcomeV1::Completed,
+                    ..
+                }))
+            ) {
+                super::super::super::native_result_fixture::after_result(
+                    fixture_kind,
+                    fixture_identity.1,
+                );
+            }
+            result
         }));
         self.launched = true;
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        super::super::super::native_result_fixture::bind_next(
+            fixture_kind,
+            fixture_identity.0,
+            fixture_identity.1,
+            self.pending
+                .as_ref()
+                .expect("same original cleanup job")
+                .id(),
+        );
         Ok(enter)
     }
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) async fn join_registered(

@@ -107,7 +107,28 @@ impl RootCell {
                 result.audit = empty_audit(v2::scratch::NativeOutcomeV1::NeverEntered);
                 return result;
             }
-            run_step(result, &plan, io, observe_id, &operation)
+            let result = run_step(result, &plan, io, observe_id, &operation);
+            #[cfg(all(
+                test,
+                feature = "fixtures",
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            if result.audit.outcome == v2::scratch::NativeOutcomeV1::Completed {
+                super::super::super::native_result_fixture::after_result(
+                    match &operation {
+                        BootstrapIoV1::OpenNextComponent { .. } => {
+                            super::super::super::native_result_fixture::Kind::BootstrapTraversal
+                        }
+                        BootstrapIoV1::CreateRenditionChild { .. } => {
+                            super::super::super::native_result_fixture::Kind::BootstrapChild
+                        }
+                        _ => unreachable!("validated original step"),
+                    },
+                    io.uuid(),
+                );
+            }
+            result
         });
         self.io_id = io;
         self.observe_id = observe_id;
@@ -387,6 +408,30 @@ impl NodeResourceRuntime {
                 }
                 let enter = native.launch_next(&bootstrap.plan, io, &operation)?;
                 // Original handle is already installed in the SAME owned cell.
+                #[cfg(all(
+                    test,
+                    feature = "fixtures",
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ))]
+                super::super::super::native_result_fixture::bind_next(
+                    match &operation {
+                        BootstrapIoV1::OpenNextComponent { .. } => {
+                            super::super::super::native_result_fixture::Kind::BootstrapTraversal
+                        }
+                        BootstrapIoV1::CreateRenditionChild { .. } => {
+                            super::super::super::native_result_fixture::Kind::BootstrapChild
+                        }
+                        _ => unreachable!("validated original step"),
+                    },
+                    member,
+                    io.uuid(),
+                    native
+                        .pending
+                        .as_ref()
+                        .expect("same original step job")
+                        .id(),
+                );
                 self.release_native_entry(role.binding, enter)?;
             }
             let audit = native.join().await?.audit.clone();

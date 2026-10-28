@@ -25,6 +25,21 @@ pub(super) struct LiveRemoval {
 }
 
 impl LiveRemoval {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_job_identity(&self) -> (Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool) {
+        (
+            self.io.uuid(),
+            self.observe.uuid(),
+            self.join.uuid(),
+            self.cell.fixture_job(),
+            self.joined,
+        )
+    }
     pub(super) fn launched(&self) -> bool {
         self.launched
     }
@@ -210,6 +225,13 @@ impl NodeResourceRuntime {
                         .as_mut()
                         .ok_or(OperationError::State)?,
                     &baseline,
+                    #[cfg(all(
+                        test,
+                        feature = "fixtures",
+                        target_os = "linux",
+                        any(target_arch = "x86_64", target_arch = "aarch64")
+                    ))]
+                    (member, removal.io.uuid()),
                 )?;
                 removal.launched = true;
                 let _ = entry.send(());

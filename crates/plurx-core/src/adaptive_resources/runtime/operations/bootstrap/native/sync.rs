@@ -23,6 +23,23 @@ struct SyncResult {
     result: std::io::Result<()>,
 }
 impl Sync {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn fixture_job_identity(
+        &self,
+    ) -> (Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool) {
+        (
+            self.io.uuid(),
+            self.observe.uuid(),
+            self.join.uuid(),
+            self.pending.as_ref().map(JoinHandle::id),
+            self.acknowledged,
+        )
+    }
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn retained_heap_bytes(
         &self,
     ) -> Result<usize, OperationError> {
@@ -82,10 +99,32 @@ impl Sync {
             .expect("validated retained sync request");
         let directory = held.files.remove(&copy).expect("validated same child");
         let mut native = SyncIo::from_held_directory(request, directory);
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        let fixture_io = self.io.uuid();
         let (enter, registered) = tokio::sync::oneshot::channel();
         self.pending = Some(runtime.spawn_blocking(move || {
             let result = match registered.blocking_recv() {
-                Ok(()) => native.run(),
+                Ok(()) => {
+                    let result = native.run();
+                    #[cfg(all(
+                        test,
+                        feature = "fixtures",
+                        target_os = "linux",
+                        any(target_arch = "x86_64", target_arch = "aarch64")
+                    ))]
+                    if result.is_ok() {
+                        super::super::super::native_result_fixture::after_result(
+                            super::super::super::native_result_fixture::Kind::Sync,
+                            fixture_io,
+                        );
+                    }
+                    result
+                }
                 Err(_) => Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "sync native entry was never released",
@@ -93,6 +132,17 @@ impl Sync {
             };
             SyncResult { native, result }
         }));
+        #[cfg(all(
+            test,
+            feature = "fixtures",
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        super::super::super::native_result_fixture::bind_job(
+            super::super::super::native_result_fixture::Kind::Sync,
+            fixture_io,
+            self.pending.as_ref().expect("same original sync job").id(),
+        );
         Ok(enter)
     }
     /// Await only this cell's original registered worker. Its native object

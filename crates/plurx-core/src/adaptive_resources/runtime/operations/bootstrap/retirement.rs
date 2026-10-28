@@ -83,6 +83,26 @@ pub(super) struct CleanupRun {
     issued: bool,
 }
 impl CleanupRun {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool)> {
+        let Some(CleanupPending::Io(io)) = self.pending.as_ref() else {
+            return None;
+        };
+        Some((
+            io.io.uuid(),
+            io.observe.uuid(),
+            io.join.uuid(),
+            io.cell.fixture_job(),
+            io.joined,
+        ))
+    }
     fn new(mode: CleanupMode) -> Self {
         Self {
             mode,
@@ -795,6 +815,13 @@ impl NodeResourceRuntime {
                     .as_mut()
                     .ok_or(OperationError::State)?,
                 &baseline,
+                #[cfg(all(
+                    test,
+                    feature = "fixtures",
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ))]
+                (member, io.io.uuid()),
             )?;
             io.launched = true;
             let _ = enter.send(());

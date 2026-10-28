@@ -54,6 +54,54 @@ impl BootstrapMember {
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
+    pub(super) fn fixture_publication_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool)> {
+        self.publication
+            .as_ref()
+            .map(|owner| owner.fixture_job_identity())
+    }
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_sync_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool)> {
+        self.sync.as_ref().map(|owner| owner.fixture_job_identity())
+    }
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_cleanup_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool)> {
+        self.retirement.as_ref()?.fixture_job_identity()
+    }
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(super) fn fixture_live_removal_job_identity(
+        &self,
+    ) -> Option<(Uuid, Uuid, Uuid, Option<tokio::task::Id>, bool)> {
+        self.prefix_removal
+            .as_ref()
+            .map(|owner| owner.fixture_job_identity())
+    }
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     pub(super) fn fixture_root_arm_operation(&self) -> Option<Uuid> {
         self.root_arm.map(|(io, _)| io.uuid())
     }
