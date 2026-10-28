@@ -1760,6 +1760,7 @@ paths = [
   "crates/plurxd/src/http/sharing_direct_wire.rs",
   "crates/plurxd/src/http/shared_source_direct.rs",
   "crates/plurxd/src/http/shared_source_direct_tests.rs",
+  "crates/plurxd/src/http/direct_start_failure_tests.rs",
   "crates/plurxd/src/http/shared_receiver_direct.rs",
   "crates/plurxd/src/http/shared_receiver_successor.rs",
   "crates/plurxd/src/http/shared_receiver_successor_tests.rs",
