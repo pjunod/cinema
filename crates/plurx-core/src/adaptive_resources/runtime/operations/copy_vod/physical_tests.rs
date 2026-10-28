@@ -208,6 +208,15 @@ async fn root_only_closure_consumes_actual_unclaimed_pipes_without_inventing_tas
     let root = tempfile::tempdir().expect("fixture root");
     let (runtime, mut owner, preparation) = original(root.path()).await;
     cancel_at(&runtime, &mut owner, CopyStartFixtureStage::RootRegistered).await;
+    let output_member = *preparation.state.lock().await.roles[0]
+        .bootstrap
+        .keys()
+        .next()
+        .expect("original acquired output prefix");
+    runtime
+        .reconcile_copy_acquisition_for_cleanup(&preparation, 0, output_member, deadline())
+        .await
+        .expect("same original source/root observations before native close");
     let charge = runtime.accounting().expect("original R").used;
     let (graph, child, root_member, task_member, acquisition, mut image) = {
         let mut bundle = preparation.state.lock().await;
@@ -231,6 +240,26 @@ async fn root_only_closure_consumes_actual_unclaimed_pipes_without_inventing_tas
         )
     };
     kill_and_wait(&graph, child).await;
+    {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        for bootstrap in role.bootstrap.values_mut() {
+            bootstrap
+                .join_registered_native()
+                .await
+                .expect("same original prefix jobs");
+        }
+        for source in role.sources.values_mut() {
+            source
+                .join_registered()
+                .await
+                .expect("same original source jobs");
+            source
+                .close_parent()
+                .await
+                .expect("same original source parent before proof");
+        }
+    }
     let closure = graph
         .try_copy_root_only_closure(child, root_member, task_member, acquisition, &mut image)
         .await
