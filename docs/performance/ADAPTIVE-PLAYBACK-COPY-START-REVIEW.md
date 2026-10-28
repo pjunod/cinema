@@ -345,3 +345,21 @@ graph with no acquisition or close state, and absent work/budget, then installs
 both original allocations atomically without suspension. It does not require a
 prepare acknowledgement or change memory, handle or storage limits. Source
 review found no blocker; exact compilation and actual cleanup runs remain due.
+
+## 12. Typed output generation — source repair, 2026-10-28
+
+At `bb2fa576a2cf3af2994c77c1d5107cbe50222852`, both strict compiler loops
+passed. The first of64 selected core cases progressed through copy construction
+and then received a known rollback while acknowledging the initial typed
+Prepare: ScratchV3 requires a nonzero generation, but both real copy and
+software builders and their shared fixtures supplied zero. One case executed
+and failed; no later case ran. This is not a cleanup or native-closure pass.
+
+Each fresh immutable copy/software owner now starts its typed asset generation
+at1, forwarding that same value to its scratch and task plans. The separate
+legacy scheduler counter is unchanged. Zero is rejected during pure validation
+before family creation or reservation; codec validation is unchanged. Actual
+zero-generation regressions check BeforeReservation, empty original accounting
+and journal drain. Existing accepted and known-rollback software fixtures keep
+their original bounds. Source review found no mismatch; compilation and
+behavioral qualification of this repair remain pending.

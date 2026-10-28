@@ -49,6 +49,7 @@ impl NodeResourceRuntime {
 /// The daemon supplies policy bounds; they confer no native entry authority.
 pub struct CopyVodRequest {
     pub rendition_id: String,
+    /// Nonzero typed asset generation, fixed before admission.
     pub generation_epoch: u64,
     pub recipe_source_binding: String,
     pub source: FiniteSourceRequest,
@@ -66,6 +67,11 @@ pub struct CopyVodRequest {
 }
 
 impl CopyVodRequest {
+    /// First typed asset generation of a newly admitted immutable owner.
+    /// The legacy scheduler's zero-based epoch is a separate counter; this
+    /// value never resets or rewrites an existing admitted asset.
+    pub const INITIAL_GENERATION_EPOCH: u64 = 1;
+
     /// The fixed parser/name cardinality. A source duration cannot prove a
     /// smaller count: the rolling strict-target cut can precede the nominal
     /// six-second floor, and EOF can emit another short segment. Exhausting

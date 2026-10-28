@@ -109,6 +109,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Selected finite software and copy starts use valid output generations;
+  malformed zero-generation requests refuse before reserving capacity.
 - Selected copy preparation installs its original response budget and parser
   work together before acquisition, while retaining its early cleanup owner.
 - Custody startup validates the filesystem-root ancestor without granting a

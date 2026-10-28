@@ -227,7 +227,7 @@ fn selected_copy_request(
     }
     let mut request = CopyVodRequest {
         rendition_id,
-        generation_epoch: 0,
+        generation_epoch: CopyVodRequest::INITIAL_GENERATION_EPOCH,
         recipe_source_binding: planning.recipe_binding.clone(),
         source: planning.report.finite_source_request(),
         command,

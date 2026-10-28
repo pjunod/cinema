@@ -1,5 +1,5 @@
-//! Actual queued journal and fixed software producer owners. Authored/compiled
-//! only; behavioral/native execution waits for complete-candidate Fable review.
+//! Actual queued journal and fixed producer owners. Execution and
+//! qualification are recorded separately in source-bound receipts.
 use super::*;
 use crate::domain::MediaFile;
 use crate::resource_custody::InstallationContext;
@@ -79,6 +79,25 @@ fn original_owner(
     root: &Path,
     reject_prepare: bool,
 ) -> (Arc<NodeResourceRuntime>, SoftwareVodOwner) {
+    let (runtime, owner) = original_owner_at_generation(
+        root,
+        reject_prepare,
+        SoftwareVodRequest::INITIAL_GENERATION_EPOCH,
+    );
+    (
+        runtime,
+        owner.expect("same original accepted queue command"),
+    )
+}
+
+fn original_owner_at_generation(
+    root: &Path,
+    reject_prepare: bool,
+    generation_epoch: u64,
+) -> (
+    Arc<NodeResourceRuntime>,
+    Result<SoftwareVodOwner, FiniteVodError>,
+) {
     crate::testfixtures::require_ffmpeg();
     let source = root.join("source.mkv");
     crate::testfixtures::run(
@@ -240,52 +259,69 @@ fn original_owner(
     // The original public constructor queues these immutable bounds. The
     // actual journal validator rejects zero file objects; no fixture returns
     // an injected error or replaces the original accepted command/result.
-    let owner = runtime
-        .prepare_software_vod(
-            SoftwareVodRequest {
-                rendition_id: "original-finite".into(),
-                generation_epoch: 0,
-                recipe_source_binding: "actual-original-source".into(),
-                command,
-                producer: super::tests::pump_plan(),
-                sources: vec![FiniteSourceRequest {
-                    path: source,
-                    media_file_id: "1".into(),
-                    object_version: identity.render_s1(),
-                    scanner_size: file.size,
-                    scanner_mtime: file.mtime,
-                }],
-                segment_count: 1,
-                encoded_process_marker: true,
-                demand: WorkloadDemand {
-                    resources: Metric::Known(vector),
-                    limit_epoch: 1,
-                    trial: false,
-                },
-                application_owner_bytes: 0,
-                output: FiniteOutputLimits {
-                    response_memory_bytes: 1024 * 1024,
-                    retained_metadata_bytes: 1024 * 1024,
-                    client_state_bytes: 1024 * 1024,
-                    resident_file_objects: if reject_prepare { 0 } else { 4 },
-                    resident_logical_bytes: 4 * 1024 * 1024,
-                    reserved_storage_bytes: 64 * 1024 * 1024,
-                    one_file_logical_bytes: 1024 * 1024,
-                    one_io_payload_bytes: 1024 * 1024,
-                    live_handles: 8,
-                    reader_leases: 4,
-                    resident_memory_bytes: 1024 * 1024,
-                    allocation_unit_bytes: 4096,
-                    per_object_reserve_bytes: 4096,
-                    child_directory_reserve_bytes: 4096,
-                    parent_entry_reserve_bytes: 4096,
-                    bootstrap_memory_bytes: 1024 * 1024,
-                },
+    let owner = runtime.prepare_software_vod(
+        SoftwareVodRequest {
+            rendition_id: "original-finite".into(),
+            generation_epoch,
+            recipe_source_binding: "actual-original-source".into(),
+            command,
+            producer: super::tests::pump_plan(),
+            sources: vec![FiniteSourceRequest {
+                path: source,
+                media_file_id: "1".into(),
+                object_version: identity.render_s1(),
+                scanner_size: file.size,
+                scanner_mtime: file.mtime,
+            }],
+            segment_count: 1,
+            encoded_process_marker: true,
+            demand: WorkloadDemand {
+                resources: Metric::Known(vector),
+                limit_epoch: 1,
+                trial: false,
             },
-            deadline(),
-        )
-        .expect("same original accepted queue command");
+            application_owner_bytes: 0,
+            output: FiniteOutputLimits {
+                response_memory_bytes: 1024 * 1024,
+                retained_metadata_bytes: 1024 * 1024,
+                client_state_bytes: 1024 * 1024,
+                resident_file_objects: if reject_prepare { 0 } else { 4 },
+                resident_logical_bytes: 4 * 1024 * 1024,
+                reserved_storage_bytes: 64 * 1024 * 1024,
+                one_file_logical_bytes: 1024 * 1024,
+                one_io_payload_bytes: 1024 * 1024,
+                live_handles: 8,
+                reader_leases: 4,
+                resident_memory_bytes: 1024 * 1024,
+                allocation_unit_bytes: 4096,
+                per_object_reserve_bytes: 4096,
+                child_directory_reserve_bytes: 4096,
+                parent_entry_reserve_bytes: 4096,
+                bootstrap_memory_bytes: 1024 * 1024,
+            },
+        },
+        deadline(),
+    );
     (runtime, owner)
+}
+
+#[tokio::test]
+async fn zero_typed_software_generation_refuses_before_any_reservation() {
+    let root = tempfile::tempdir().expect("actual software generation fixture");
+    let (runtime, result) = original_owner_at_generation(root.path(), false, 0);
+    let Err(error) = result else {
+        panic!("zero typed generation must not allocate an owner");
+    };
+    assert!(error.definitely_before_reservation());
+    assert_eq!(
+        runtime.accounting().expect("same empty ledger").used,
+        ResourceVector::default()
+    );
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("original journal drain");
 }
 
 async fn finish_same_ticket(

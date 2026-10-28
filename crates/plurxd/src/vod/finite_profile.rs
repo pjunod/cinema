@@ -318,7 +318,7 @@ pub(super) fn compile(
 
     let mut request = SoftwareVodRequest {
         rendition_id: key.to_owned(),
-        generation_epoch: 0,
+        generation_epoch: SoftwareVodRequest::INITIAL_GENERATION_EPOCH,
         recipe_source_binding: key.to_owned(),
         command,
         producer: pump,

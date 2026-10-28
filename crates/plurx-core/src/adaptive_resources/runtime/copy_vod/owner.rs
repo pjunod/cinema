@@ -880,6 +880,7 @@ impl NodeResourceRuntime {
         deadline: Instant,
     ) -> Result<CopyVodOwner, FiniteVodError> {
         if !cfg!(target_os = "linux")
+            || request.generation_epoch == 0
             || request.max_segments == 0
             || request.max_segments > 65_536
             || request.source.path != request.command.source().path

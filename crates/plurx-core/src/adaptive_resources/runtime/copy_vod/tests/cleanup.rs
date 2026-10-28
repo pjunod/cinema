@@ -1,5 +1,5 @@
-//! Actual queued copy owners and original copy receipts. Authored/compiled
-//! only; behavioral/native execution requires complete-candidate Fable review.
+//! Actual queued journal and fixed producer owners. Execution and
+//! qualification are recorded separately in source-bound receipts.
 use super::*;
 use crate::domain::MediaFile;
 use crate::resource_custody::InstallationContext;
@@ -129,7 +129,7 @@ pub(super) async fn actual_request(
         .expect("original known fixture capacity");
     let request = CopyVodRequest {
         rendition_id: "original-copy".into(),
-        generation_epoch: 0,
+        generation_epoch: CopyVodRequest::INITIAL_GENERATION_EPOCH,
         recipe_source_binding: "actual-original-copy-source".into(),
         source: FiniteSourceRequest {
             path: source,
@@ -487,4 +487,24 @@ async fn selected_copy_named_arm_starts_same_root_replays_release_and_fully_join
         .expect("no original owner remains")
         .drain()
         .expect("join actual custody journal");
+}
+
+#[tokio::test]
+async fn zero_typed_copy_generation_refuses_before_any_reservation() {
+    let root = tempfile::tempdir().expect("actual copy generation fixture");
+    let (runtime, mut request) = actual_request(root.path(), false).await;
+    request.generation_epoch = 0;
+    let Err(error) = runtime.prepare_copy_vod(request, deadline()).await else {
+        panic!("zero typed generation must not allocate an owner");
+    };
+    assert!(error.definitely_before_reservation());
+    assert_eq!(
+        runtime.accounting().expect("same empty ledger").used,
+        ResourceVector::default()
+    );
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("original journal drain");
 }

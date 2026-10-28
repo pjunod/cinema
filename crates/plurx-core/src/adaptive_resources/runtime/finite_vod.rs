@@ -128,6 +128,7 @@ pub struct FiniteOutputLimits {
 
 pub struct SoftwareVodRequest {
     pub rendition_id: String,
+    /// Nonzero typed asset generation, fixed before admission.
     pub generation_epoch: u64,
     pub recipe_source_binding: String,
     pub command: SoftwareAvcCommand,
@@ -143,6 +144,11 @@ pub struct SoftwareVodRequest {
 }
 
 impl SoftwareVodRequest {
+    /// First typed asset generation of a newly admitted immutable owner.
+    /// The legacy scheduler's zero-based epoch is a separate counter; this
+    /// value never resets or rewrites an existing admitted asset.
+    pub const INITIAL_GENERATION_EPOCH: u64 = 1;
+
     /// Requested capacity of the request's present planning graph. This is a
     /// heap projection, not native custody, admission, or a bound on future
     /// parser/output allocations.
@@ -1169,6 +1175,14 @@ impl NodeResourceRuntime {
             &Arc<super::finite_lifetime::FiniteAppState>,
         ) -> Result<T, FiniteVodError>,
     ) -> Result<(SoftwareVodOwner, T), FiniteVodError> {
+        if request.generation_epoch == 0 {
+            return Err(OperationError::BeforeReservation(
+                super::operations::PreReservationRefusal::Admission(
+                    crate::adaptive_resources::AdmissionRefusal::InvalidBundle,
+                ),
+            )
+            .into());
+        }
         if !cfg!(target_os = "linux")
             || request.sources.is_empty()
             || request.sources.len() > 2
