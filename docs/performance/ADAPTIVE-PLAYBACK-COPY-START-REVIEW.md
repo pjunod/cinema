@@ -1,6 +1,6 @@
 # Copy start cleanup — accepted decisions and implementation review
 
-**Status:** open · bounded design reviewed; implementation and qualification active.
+**Status:** open · implementation review received; blocking fixes and qualification pending.
 **Updated:** 2026-10-26.
 
 Companion to the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) and
@@ -153,9 +153,11 @@ Git and task PR #1293 into effort PR #1248. Use effort `48eccfd748741bab47d945e6
 as the task diff base. Historical `8b6331e` retains the original bounded design
 request and manifest. The current source manifest includes original dependencies
 and changed Source/private-constructor/product files; review the task diff too.
-The compiler receipts cover the code pin above. Publication adds status/review
-text, the source manifest and a source-backed client-history anchor afterward;
-no Rust/Cargo changes or behavioral/mutation execution follow that code pin.
+The implementation code pin remains unchanged. Subsequent commits add status/
+review text, the source manifest, a client-history anchor and the isolated
+Hiqlite spike lockfile refresh for the existing macOS Wasmtime dependency.
+No Rust source or root-workspace dependency changes follow that code pin.
+Behavioral and mutation execution remains held for independent review.
 
 Check the S0–S4 boundaries, original latch/handle identity, kill/join/wait
 ordering, same-operation journal replay, complete preflight before witness
@@ -174,3 +176,39 @@ Do not run behavior or mutation tests as part of this source review. Return
 whether the examined implementation can proceed to the identified focused
 qualification after findings are fixed; do not label the whole adaptive
 playback effort accepted from a bounded review.
+
+
+## 6. Supplied implementation review and policy decision
+
+The user supplied a source-only Opus 5.5 implementation review of code
+`5267b8721312b86e205ac99217c20a159b0fec4a`, base
+`48eccfd748741bab47d945e68c7713a4c213ea60`, and this document at `c1085312`.
+SHA-256: `97f0d42b524143dced18f03975acae890106292d265a21a1a8107c954359fccc`.
+Its verdict is **not ready** until B1–B4 and C1–C2 are fixed and their
+regressions authored. C3–C4 regressions are also required. Nothing was compiled
+or executed by that review. The fixes are being integrated and compiled;
+this section grants no passing result for an unfinished candidate.
+
+The user selected the operation-local reservation policy recorded in
+[contract history](ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md#native-uncertainty-admission-policy--2026-10-26):
+keep existing charges and restart-drain uncertainty, while allowing unrelated
+starts through normal capacity and phase checks. No uncertainty bit is
+cleared, no closure is invented, and no charge is created for work that never
+reserved resources. Ordinary SQL failures and pre-reservation refusals must
+not create native uncertainty.
+
+Required source corrections cover original physical/preparation settlement
+independent of Source SQL; exact pre-reservation classification; returning a
+never-published Direct owner's original sealed ticket; positive never-root
+closure after an actual post-Arm refusal; waking a parser parked at a full
+window on retirement; and permanent holds for contradictory post-mint facts.
+A known original planning selector must retain resumable cleanup rather than
+become a selector-less permanent wait. R15 is now required, not deferred.
+
+C5 remains open: the normal-retirement failed-admission flag also selects
+orphan pending-ticket repair. Removing it alone would strand abandoned
+cleanup, so its labeling/selection split needs a bounded follow-up. This minor
+finding does not authorize hiding any held reservation or changing native
+proof. Earlier coverage gaps and V1–V5/R1/M0–M7 remain open. The user's explicit
+behavioral-test hold remains in force while these fixes and compiler checks
+are completed.

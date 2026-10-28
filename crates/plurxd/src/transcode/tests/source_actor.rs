@@ -3,6 +3,10 @@
 mod restart_admission_tests;
 
 #[cfg(target_os = "linux")]
+#[path = "../source_actor/settlement_tests.rs"]
+mod settlement_tests;
+
+#[cfg(target_os = "linux")]
 #[path = "source_fixed_native.rs"]
 mod fixed_native;
 
@@ -226,16 +230,17 @@ async fn source_copy_preadmission_fixture_with_restart(
         .await
         .expect("actual Source startup coordinator"));
     #[cfg(target_os = "linux")]
-    let fixed_runtime = if fixed_case.is_some() || (12..=20).contains(&mode) {
-        Some(
-            crate::resource_runtime::open_before_cleanup(&mut selected, &config)
-                .await
-                .expect("real Source custody startup")
-                .expect("Linux Source runtime"),
-        )
-    } else {
-        None
-    };
+    let fixed_runtime =
+        if fixed_case.is_some() || (12..=20).contains(&mode) || (80..=83).contains(&mode) {
+            Some(
+                crate::resource_runtime::open_before_cleanup(&mut selected, &config)
+                    .await
+                    .expect("real Source custody startup")
+                    .expect("Linux Source runtime"),
+            )
+        } else {
+            None
+        };
     #[cfg(not(target_os = "linux"))]
     assert!(
         fixed_case.is_none(),
@@ -1296,6 +1301,20 @@ async fn source_actual_actor(
         );
         assert!(manager.lookup_source_worker(&assignment).is_none());
         assert_eq!(manager.admissions.software_in_use(), 0);
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if (80..=83).contains(&mode) {
+        settlement_tests::exercise(
+            state,
+            manager,
+            prepared,
+            assignment,
+            (*activation, ingress_permission),
+            ingress_fixture,
+            mode,
+        )
+        .await;
         return;
     }
     let index_pause = match mode {

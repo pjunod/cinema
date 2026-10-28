@@ -5,6 +5,31 @@
 
 Companion to the [current adaptive playback resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md), which records implementation and evidence. This file preserves the two former M0 contract sections verbatim so their historical constraints and limits remain available without presenting them as current ownership or completed behavior. The approved implementation scope remains in the [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md).
 
+## Native uncertainty admission policy — 2026-10-26
+
+The user selected operation-local reservation retention after the supplied
+Opus implementation review exposed the process-wide coupling. Genuine native
+uncertainty keeps its existing P/R reservation held and prevents a planned
+restart from declaring the node drained or committing shutdown. It does not
+by itself reject unrelated new work: normal capacity, readiness, active drain,
+release and admission-identity checks still apply.
+
+This decision does not clear uncertainty, mint a closure or return capacity.
+An operation that reserved nothing has no resource charge to retain. Earlier
+unbudgeted availability/file-open work remains an explicit coverage limit;
+this policy adds no fabricated reservation for it. SQL-only failure and pure
+pre-reservation refusal must not be reported as unknown native cleanup.
+
+The user supplied the implementation review of code
+`5267b8721312b86e205ac99217c20a159b0fec4a` against effort
+`48eccfd748741bab47d945e68c7713a4c213ea60`, attributed to Claude Opus 5.5
+with an Opus copy-cleanup sub-review. Its SHA-256 is
+`97f0d42b524143dced18f03975acae890106292d265a21a1a8107c954359fccc`.
+The source-only verdict requires B1–B4 and C1–C2 fixes and authored regressions
+before focused qualification. It grants neither execution evidence nor full
+adaptive-playback acceptance. The current [copy review](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md)
+records disposition and remaining scope. Behavioral tests remain on hold.
+
 ## Copy partial-start decision — 2026-10-26
 
 The user supplied a bounded review attributed to Claude Opus 5.5 against
