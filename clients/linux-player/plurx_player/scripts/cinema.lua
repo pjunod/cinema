@@ -118,6 +118,112 @@ local function next_episode()
     local next = cinema().next
     return type(next) == 'table' and type(next.metadata) == 'table' and next or nil
 end
+-- Read only documented mpv observations. Missing values stay unknown, including
+-- after a file/quality transition; requested options never stand in for output.
+local function observed(value)
+    if type(value) ~= 'string' or value == '' or value:find('://',1,true)
+            or value:match('^[/~]') or value:find('token=',1,true) then return nil end
+    return value:gsub('[%c]',' '):sub(1,300)
+end
+local function measurement(value, format)
+    if number(value) and value >= 0 then return string.format(format,value) end
+end
+local function dimensions(p, x, y)
+    if number(p[x]) and p[x]>0 and number(p[y]) and p[y]>0 then
+        return string.format('%d×%d',p[x],p[y])
+    end
+end
+local function joined(...)
+    local values={}
+    for i=1,select('#',...) do
+        local value=select(i,...)
+        if value then values[#values+1]=value end
+    end
+    if #values>0 then return table.concat(values,' · ') end
+end
+local function bitrate(value)
+    if not number(value) or value<0 then return nil end
+    if value<1000000 then return string.format('%.0f kb/s',value/1000) end
+    return string.format(value<10000000 and '%.1f Mb/s' or '%.0f Mb/s',value/1000000)
+end
+local function audio_format(p)
+    return joined(observed(p['hr-channels']) or observed(p.channels),
+        measurement(p.samplerate,'%.0f Hz'),observed(p.format))
+end
+local function playback_info()
+    local r={}
+    local columns=math.max(20,math.floor((math.min(680,W-48)-32)/9))
+    local function row(label,value)
+        for _,line in ipairs(wrapped(label..': '..(value or 'Unavailable'),columns)) do
+            r[#r+1]={text=line}
+        end
+    end
+    local function table_prop(name)
+        local value=prop(name)
+        return type(value)=='table' and value or {}
+    end
+    local p=table_prop('video-params')
+    local decoded=table_prop('video-dec-params')
+    local target=table_prop('video-target-params')
+    local osd=table_prop('osd-dimensions')
+    local cache=table_prop('demuxer-cache-state')
+    local facts=cinema().playback
+    facts=type(facts)=='table' and facts or {}
+    local methods={direct='Direct play',remux='Remux',transcode='Transcode'}
+    local transports={progressive='Progressive file · range requests',hls='Segmented HLS'}
+    local sessions={none='No server-side session',live='Live HLS session',vod='VOD HLS session'}
+    row('Method',methods[facts.mode])
+    row('Transport',transports[facts.transport])
+    row('Session',sessions[facts.session])
+    local state
+    if prop('eof-reached')==true then state='Ended'
+    elseif prop('paused-for-cache')==true then state='Buffering'
+    elseif prop('pause')==true then state='Paused'
+    elseif prop('pause')==false and prop('idle-active')==false then state='Playing' end
+    row('Player state',state)
+    local total=duration()
+    row('Position',number(prop('time-pos')) and (time(position())..' / '..
+        (number(total) and total>0 and time(total) or 'Unavailable')) or nil)
+    row('Stream format',joined(observed(prop('video-format')),observed(prop('video-codec'))))
+    row('Stream frame (mpv decoder)',dimensions(decoded,'w','h'))
+    row('Player window size',dimensions(osd,'w','h'))
+    if number(osd.w) and number(osd.h) and number(osd.ml) and number(osd.mr)
+            and number(osd.mt) and number(osd.mb) then
+        row('Video display area',dimensions({w=osd.w-osd.ml-osd.mr,
+            h=osd.h-osd.mt-osd.mb},'w','h'))
+    else row('Video display area') end
+    row('Pixel format',joined(observed(p.pixelformat),observed(p['hw-pixelformat'])))
+    local range=observed(p.colormatrix)
+    if range=='dolbyvision' then range='Dolby Vision (mpv matrix)'
+    elseif p.gamma=='pq' then range='PQ HDR'
+    elseif p.gamma=='hlg' then range='HLG HDR' end
+    row('Dynamic range',range)
+    row('Input color',joined(observed(p.primaries),observed(p.gamma),observed(p.colormatrix),observed(p['colorlevels'])))
+    row('VO target color',joined(observed(target.primaries),observed(target.gamma)))
+    row('VO target peak',number(target['max-luma']) and target['max-luma']>0
+        and measurement(target['max-luma'],'%.0f nits') or nil)
+    row('Renderer',joined(observed(prop('current-vo')),observed(prop('current-gpu-context'))))
+    local hw=observed(prop('hwdec-current'))
+    row('Decoder',hw=='no' and 'Software (mpv)' or hw)
+    row('Frame rate (estimated)',measurement(prop('estimated-vf-fps'),'%.2f fps'))
+    row('Video bitrate (packets)',bitrate(prop('video-bitrate')))
+    row('Dropped frames (renderer)',measurement(prop('frame-drop-count'),'%.0f'))
+    row('Dropped frames (decoder)',measurement(prop('decoder-frame-drop-count'),'%.0f'))
+    local selected
+    for _,track in ipairs(prop('track-list',{})) do
+        if track.type=='audio' and track.selected then selected=track; break end
+    end
+    row('Stream audio track',selected and joined(observed(selected.codec),observed(selected.lang)))
+    row('Decoded audio',audio_format(table_prop('audio-params')))
+    row('Device audio output',joined(observed(prop('current-ao')),audio_format(table_prop('audio-out-params'))))
+    row('Audio bitrate (packets)',bitrate(prop('audio-bitrate')))
+    row('AV sync difference',number(prop('avsync')) and string.format('%+.0f ms',prop('avsync')*1000) or nil)
+    row('Audio delay (applied)',number(prop('audio-delay')) and string.format('%+.0f ms',prop('audio-delay')*1000) or nil)
+    row('Buffered on device (demuxer estimate)',measurement(cache['cache-duration'],'%.1f s'))
+    row('Observed input rate (mpv estimate)',number(cache['raw-input-rate']) and bitrate(cache['raw-input-rate']*8) or nil)
+    row('Demuxer buffered bytes',measurement(cache['fw-bytes'],'%.0f B'))
+    return r
+end
 local function rows()
     local r = {}
     if S.menu == 'audio' or S.menu == 'sub' then
@@ -147,17 +253,6 @@ local function rows()
             end
         end
         if #r==0 then r[1]={text='Quality choices are unavailable'} end
-    elseif S.menu == 'title' then
-        local m=metadata()
-        local width=math.min(460,W-48)
-        local columns=math.max(20,math.floor((width-32)/9))
-        for _,line in ipairs(wrapped(title(),columns)) do r[#r+1]={text=line} end
-        for _,line in ipairs(wrapped(metadata_details(m),columns)) do r[#r+1]={text=line} end
-        if clean(m.overview)~='' then
-            r[#r+1]={text=''}
-            for _,line in ipairs(wrapped(m.overview,columns)) do r[#r+1]={text=line} end
-        end
-        if #r==0 then r[1]={text='Library metadata is unavailable'} end
     elseif S.menu == 'settings' then
         for _, speed in ipairs({0.5, 0.75, 1, 1.25, 1.5, 2}) do
             local value = speed
@@ -172,14 +267,7 @@ local function rows()
         r[#r+1] = {text = 'Autoplay next episode', selected = cinema().autoplay_next == true,
             action = function() request('cinema-autoplay', cinema().autoplay_next == true and 'no' or 'yes') end}
     elseif S.menu == 'info' then
-        local p, v = prop('video-params', {}), prop('video-target-params', {})
-        r = {{text = title()},
-             {text = string.format('Picture  %s × %s', p.w or '—', p.h or '—')},
-             {text = 'Video  '..prop('video-codec', '—')},
-             {text = 'Output transfer  '..tostring(v.gamma or '—')},
-             {text = 'Display target  '..tostring(v['max-luma'] or '—')..' nits'},
-             {text = 'Dropped frames  '..tostring(prop('frame-drop-count', 0))},
-             {text = string.format('Audio sync  %+.2f s', prop('audio-delay', 0))}}
+        r = playback_info()
     end
     return r
 end
@@ -293,7 +381,7 @@ render = function()
     local actual=number(p.h) and p.h>0 and (tostring(p.h)..'p') or '—'
     text(a,x+192,tools_y-9,mode..' · '..actual,12,'D4D4D4',2)
     button(a, 'settings', x+244, tools_y, 102, 'Settings', function() toggle('settings') end, S.menu=='settings')
-    button(a, 'title', x+354, tools_y, 64, 'Info', function() toggle('title') end, S.menu=='title')
+    button(a, 'toolbar-info', x+354, tools_y, 64, 'Info', function() toggle('info') end, S.menu=='info')
     button(a, 'fullscreen', x+426, tools_y, 96, 'Fullscreen', function() mp.commandv('cycle','fullscreen') end)
     local m=metadata()
     local strip_y=compact and H-302 or H-180
@@ -338,11 +426,11 @@ render = function()
         S.row = clamp(S.row, 1, math.max(1,#items))
         local visible = math.min(#items, 9)
         local first = clamp(S.row-4,1,math.max(1,#items-visible+1))
-        local mw, mh = math.min(460,W-48), 62+visible*36
+        local mw, mh = math.min(S.menu=='info' and 680 or 460,W-48), 62+visible*36
         local mx, my = W-mw-24, math.min(tools_y-16,H-116)-mh
         draw_rect(a,mx,my,mw,mh,'1A1412',12)
         S.buttons[#S.buttons+1]={id='menu-panel',x=mx,y=my,w=mw,h=mh,action=function() end}
-        local titles = {audio='Audio tracks',sub='Subtitles',quality='Playback quality',settings='Playback settings',info='Playback info',title='About this title'}
+        local titles = {audio='Audio tracks',sub='Subtitles',quality='Playback quality',settings='Playback settings',info='Playback info'}
         text(a,mx+16,my+15,titles[S.menu],20)
         for n=first,first+visible-1 do
             local row, ry = items[n], my+54+(n-first)*36
@@ -454,6 +542,9 @@ end)
 mp.observe_property('pause','bool',function() activity() end)
 mp.register_event('file-loaded',function() S.preview=nil; S.dragging=false; S.menu=nil; S.focus=nil; activity() end)
 mp.add_periodic_timer(0.2,function()
+    -- No diagnostic polling while the panel is closed. Read fresh properties
+    -- while open even when playback is paused or notifications are throttled.
+    if S.menu=='info' then render() end
     if S.shown and not prop('pause',false) and not S.menu and not S.preview and not S.dragging
             and not busy() and mp.get_time()-S.touched >= opts.hide_ms/1000 then
         S.shown=false; S.focus=nil; render()

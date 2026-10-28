@@ -29,6 +29,26 @@ class CinemaModel(unittest.TestCase):
             context(value, FILE_ID + 1)
         self.assertEqual(display_title({'title': 'Arrival', 'series_title': 'Example', 'season_number': 2, 'episode_number': 3}), 'Example · S02E03 · Arrival')
 
+    def test_playback_info_publishes_only_whitelisted_delivery_facts(self):
+        mpv = mock.Mock()
+        player = Playback(mock.Mock(), mpv, {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
+        player.decision = {'source': {'filename': '/private/movie.mkv'}, 'token': TOKEN}
+        for mode, session, expected in (
+                ('direct', None, ('progressive', 'none')),
+                ('remux', {'session_id': TOKEN, 'playlist_url': 'https://media1/secret'}, ('hls', 'live')),
+                ('transcode', {'vod': True, 'session_id': TOKEN}, ('hls', 'vod'))):
+            player.mode, player.session = mode, session
+            player.publish_chrome()
+            value = mpv.set.call_args.args[1]
+            self.assertEqual(value['playback'], {'mode': mode, 'transport': expected[0],
+                                               'session': expected[1]})
+            for secret in (TOKEN, '/private/', 'https://'):
+                self.assertNotIn(secret, json.dumps(value))
+        player.mode, player.session = TOKEN, None
+        player.publish_chrome()
+        self.assertEqual(mpv.set.call_args.args[1]['playback'],
+                         {'mode': None, 'transport': None, 'session': None})
+
     def test_queued_incumbent_restart_cannot_commit_unloaded_quality(self):
         player = Playback(mock.Mock(), mock.Mock(), {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
         player.started, player.loading = True, True
