@@ -44,13 +44,19 @@ PREFIXES = ('crates/plurx-core/src/store/', 'crates/plurx-worker-control/',
  'crates/plurxd/src/library_work/', 'crates/plurxd/src/background_jobs/',
  'verification/async-driver-refinement/', 'crates/plurx-core/tests/store_contract/',
  'crates/plurx-core/tests/support/')
-FILES = ('.github/workflows/main-fast-lane.yml','.github/workflows/effort-ci.yml',
+FILES = ('.github/workflows/async-proof-session.yml',
+ '.github/actions/async-proof-capability/action.yml','.github/actions/async-proof-capability/main.js',
+ '.github/actions/async-proof-capability/post.js',
+ 'validation/async_refinement_session.py','validation/async_refinement_provenance.py',
+ 'verification/async-driver-refinement/paged-catalog-transport.schema.json',
+ 'tests/operations/test_async_refinement_session.py','tests/operations/test_async_refinement_provenance.py',
+ '.github/workflows/main-fast-lane.yml','.github/workflows/effort-ci.yml',
  'validation/worker_control_resume.py','validation/async_refinement_resume.py',
  'tests/operations/test_async_driver_refinement_resume.py','tests/operations/test_async_driver_refinement_ci.py','crates/plurx-core/tests/store_contract.rs','crates/plurx-core/Cargo.toml','crates/plurxd/Cargo.toml','crates/plurx-core/src/cluster/coordination.rs','crates/plurxd/src/library_work.rs',
  'crates/plurxd/src/background_jobs.rs','Cargo.lock','Cargo.toml','rust-toolchain.toml',
  'scripts/check-async-driver-refinement','scripts/check-formal','scripts/bootstrap-formal-toolchain',
  'verification/durable-jobs/toolchain.json','tests/operations/test_async_driver_refinement.py')
-TASK_SCRATCH = ROOT/'target/async-driver-refinement-scratch'
+TASK_SCRATCH = Path(os.environ['TMPDIR']) if os.environ.get('PLURX_ASYNC_PAGED_REQUEST') or os.environ.get('PLURX_ASYNC_CATALOG_CALIBRATION') else ROOT/'target/async-driver-refinement-scratch'
 CARGO = ['cargo','+1.97.1']
 CORE = CARGO+['test','--locked','--offline','-p','plurx-core','--lib','--features','hiqlite-contract-tests']
 LEAF = CARGO+['test','--locked','--offline','-p','plurx-worker-control','--test','library_driver']
@@ -61,8 +67,8 @@ PRODUCT_WIRE_TESTS = {
  'product_wire_compact_keys_are_bijective_with_full_logical_payloads',
  'product_wire_byte_accounting_and_stream_writer_fail_closed',
  'product_wire_store_export_omits_only_redundant_raw',
- 'product_schema5_fragment_dag_preserves_original_canonical_bytes_and_bounds',
- 'product_schema5_grouped_descriptors_and_derived_digests_preserve_full_values',
+ 'product_schema6_factored_records_preserve_original_canonical_bytes_and_bounds',
+ 'product_schema6_page_dependencies_and_outcomes_preserve_full_values',
  'oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock',
  'oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback',
 }
@@ -96,13 +102,15 @@ ACTUAL_SETTLEMENT_SOURCE_PATHS = (
 ACTUAL_SETTLEMENT_CASES = {'graph-product','control-C4','control-C9'} | {
  'store-'+case.rsplit('::',1)[-1] for case in STORE_TESTS['core_tests']
  if case.rsplit('::',1)[-1] in ACTUAL_SETTLEMENT_TESTS}
-IGNORED_INPUT_CASES = {'graph-product','control-C4','control-C9'} | {
+IGNORED_INPUT_CASES = {'graph-product','control-C4','control-C9',
+ 'store-product_paged_disk_and_reference_complete_predecessors_agree'} | {
  'store-'+case.rsplit('::',1)[-1] for case in STORE_TESTS['core_tests']
  if case.rsplit('::',1)[-1] in {
   'actual_ordinary_settlement_payload_and_time_conformance',
   'actual_ordinary_local_guard_and_response_conformance',
   'actual_queued_eligibility_progress_witness'}}
 DRIVER_INPUT_CASES = {'graph-product','control-C4','control-C9',
+ 'store-product_paged_disk_and_reference_complete_predecessors_agree',
  'store-actual_ordinary_local_guard_and_response_conformance'}
 CASES = {
  'control-selector': CARGO+['test','--offline','--manifest-path','@SELECTOR_MANIFEST@','--test','library_driver','selector_ready_work_precedes_ready_tick_and_preserves_loss_priority','--','--exact','--nocapture'],
@@ -681,8 +689,9 @@ def run_rust_case(argv, *, env, log, timeout=1800):
             sizes[index] += min(len(block),remaining)
             return len(block) <= remaining
         try:
+            delegated_group=bool(environment.get('PLURX_ASYNC_PAGED_REQUEST') or environment.get('PLURX_ASYNC_CATALOG_CALIBRATION'))
             proc = subprocess.Popen(argv,cwd=ROOT,env=environment,stdout=subprocess.PIPE,
-              stderr=subprocess.PIPE,start_new_session=True)
+              stderr=subprocess.PIPE,start_new_session=not delegated_group)
             with selectors.DefaultSelector() as poll:
                 for index,pipe in enumerate((proc.stdout,proc.stderr)):
                     os.set_blocking(pipe.fileno(),False)
@@ -708,7 +717,9 @@ def run_rust_case(argv, *, env, log, timeout=1800):
             if proc is not None:
                 # The session is created by us. Kill the whole owned group,
                 # including children left after the parent exits; never a PID search.
-                try: os.killpg(proc.pid,signal.SIGKILL)
+                try:
+                    if delegated_group:proc.kill()
+                    else:os.killpg(proc.pid,signal.SIGKILL)
                 except ProcessLookupError: pass
                 proc.wait()
                 for index,pipe in enumerate((proc.stdout,proc.stderr)):
@@ -858,7 +869,7 @@ def build_inputs(args):
         environment.pop('PLURX_ASYNC_PRODUCT_BUNDLE',None)
         environment.pop('PLURX_ASYNC_DRIVER_GRAPH',None)
         mutation = stage_selector(out) if name == 'control-selector' else None
-        if mutation is not None: environment['CARGO_TARGET_DIR'] = str(ROOT/'target/async-driver-selector-target')
+        if mutation is not None: environment['CARGO_TARGET_DIR'] = str(Path(os.environ.get('CARGO_TARGET_DIR',str(ROOT/'target')))/'async-selector')
         if name in DRIVER_INPUT_CASES:
             environment['PLURX_ASYNC_DRIVER_GRAPH'] = str(out/'driver-graph.json')
         if name == 'graph-product':
@@ -1037,8 +1048,213 @@ def qualify(args):
     write(receipt_path,receipt)
     print(json.dumps({'receipt':str(receipt_path),'complete':receipt['complete'],'result_class':receipt['result_class']}))
 
+
+def paged_unit(args):
+    """Source-only exact producer entry; all remote authentication stays outside."""
+    from validation import async_refinement_provenance as paged
+    request = paged.read(args.request)
+    unit = request['work_unit']
+    if unit.get('kind') == 'WorkUnit':
+        unit = paged.envelope(unit, 'WorkUnit', ROOT)
+    schema = paged.read(ROOT / paged.SCHEMA_PATH)
+    paged.validate(unit, schema['$defs']['WorkUnit'], schema)
+    c.require(request['operation'] in ('expand', 'temporal_import', 'validate_restore', 'unit'),
+              'unknown paged operation')
+    c.require(not any(name in os.environ for name in ('GITHUB_TOKEN','GH_TOKEN','ACTIONS_RUNTIME_TOKEN',
+              'GITHUB_EVENT_PATH','GITHUB_API_URL')), 'Oracle received controller credentials or event')
+    driver = Path(request['driver_graph'])
+    out = Path(request['output_dir']); out.mkdir(parents=True, exist_ok=True)
+    if unit['stage'] == 'backend_qualification' and request['operation'] == 'unit':
+        return paged_backend(request, args.request)
+    if not driver.is_file():
+        c.require(request['operation'] == 'expand' and unit['unit_ordinal'] == 0
+                  and request['initial_image'] is None and request['prior_checkpoint'] is None,
+                  'missing authenticated original driver graph')
+        build_inputs(argparse.Namespace(output_dir=out, case='graph-driver', prefix=False))
+        driver.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(out/'driver-graph.json', driver)
+    c.require(c.sha(driver) == unit['source']['driver_sha256'], 'raw driver graph identity differs')
+    environment = os.environ.copy()
+    environment['PLURX_ASYNC_PAGED_REQUEST'] = str(args.request.resolve())
+    environment['PLURX_ASYNC_DRIVER_GRAPH'] = str(driver)
+    # This command remains the one actual registered graph-product method.
+    argv = rendered_command('graph-product', out)
+    capture = run_rust_case(argv, env=environment, log=out/('paged-'+request['operation']+'.log'), timeout=1800)
+    c.require(capture[0].returncode == 0, 'paged production/private validator failed')
+
+
+def paged_backend(request, request_path):
+    """Run one actual registered backend/control case per bounded unit."""
+    from validation import async_refinement_provenance as paged
+    unit = request['work_unit']
+    c.require(type(unit) is dict and 'record' not in unit,'current backend WorkUnit must be record')
+    registered = unit['registered_cases']
+    c.require(registered and all(name in CASES and name != 'graph-product' for name in registered)
+              and len(registered) == len(set(registered)), 'unknown or duplicated backend case')
+    index = unit['progress']['case_index']
+    c.require(type(index) is int and 0 <= index < len(registered), 'backend cursor outside registry')
+    out = Path(request['output_dir']); out.mkdir(parents=True,exist_ok=True)
+    driver = Path(request['driver_graph'])
+    if driver.is_file() and driver != out/'driver-graph.json':
+        shutil.copyfile(driver,out/'driver-graph.json')
+    build_inputs(argparse.Namespace(output_dir=out, case=registered[index], prefix=False))
+    journal = paged.read(out/'provenance.json')
+    row = journal['cases'][registered[index]]
+    c.require(reusable_case(registered[index],row,out,source_identity(False)), 'backend result not source-bound')
+    # Output is an immutable actual-case receipt, not a complete proof verdict.
+    origin={key:unit[key] for key in ('unit_ordinal','run','job','task','attempt','stage')}
+    log=out/f'rust-{registered[index]}.log'
+    log_member='backend/'+registered[index]+'/rust.log'
+    target=out/log_member;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(log,target)
+    driver_member=None
+    if registered[index] in DRIVER_INPUT_CASES:
+        driver_member={'path':'driver-graph.json','bytes':driver.stat().st_size,'sha256':paged.file_sha(driver)}
+    body={'schema_version':2,'case':registered[index],'source':unit['source'],'origin':origin,
+          'output_dir':str(out.resolve()),'rust_toolchain':journal['rust_toolchain'],'case_result':row,
+          'categories':paged_backend_categories(registered[index]),
+          'profile':paged_backend_profile(registered[index]),
+          'execution_environment':{key:os.environ.get(key) for key in PAGED_BACKEND_ENV},
+          'log_member':{'path':log_member,'bytes':log.stat().st_size,'sha256':paged.file_sha(log)},
+          'driver_member':driver_member}
+    member='backend/'+registered[index]+'.json'
+    paged.write(out/member,body)
+    with (out/'backend-external-roots.ndjson').open('wb') as external:
+        for kind in body['categories']:
+            external.write(paged.canonical({'reference':{'kind':kind,'id':member,
+                'sha256':paged.digest(paged.canonical(body))},'member_path':member})+b'\n')
+    paged.write(out/'backend-members.json',{'members':[body['log_member']]+([driver_member] if driver_member else [])})
+    unit = dict(unit); unit['progress'] = dict(unit['progress'],case_index=index+1)
+    unit['status'] = 'closed_unqualified' if index+1 == len(registered) else 'checkpointed_incomplete'
+    # Catalog checkpoint publication/backup is performed by the single Rust
+    # temporal_import writer after this actual-case result, including zero rows.
+    paged.write(out/'backend-progress.json',{'work_unit':unit,'stage_complete':index+1 == len(registered),
+                'receipt':{'kind':'backend_receipt','id':member,
+                           'sha256':paged.digest(paged.canonical(body))}})
+    return 0
+
+
+PAGED_BACKEND_ENV={'CARGO_NET_OFFLINE':'true','CARGO_INCREMENTAL':'0','RUSTUP_TOOLCHAIN':'1.97.1',
+                   'CARGO_BUILD_JOBS':'1','RUSTFLAGS':None,'CARGO_ENCODED_RUSTFLAGS':None}
+
+
+def paged_backend_profile(name):
+    return 'cargo_default_test' if CASES[name][2]=='test' else 'cargo_default_dev'
+
+
+def paged_backend_cases():
+    return tuple(sorted(name for name in CASES if name!='graph-product'))
+
+
+def paged_backend_categories(name):
+    c.require(name in paged_backend_cases(),'unregistered backend case')
+    categories=['backend_receipt']
+    if name in {'control-C4','control-C9'}:categories.append('causal_receipt')
+    if name=='driver-payload' or name in {'control-C4','control-C9',
+        'store-actual_ordinary_settlement_payload_and_time_conformance',
+        'store-actual_ordinary_local_guard_and_response_conformance',
+        'store-actual_queued_eligibility_progress_witness'} or name.startswith('driver-retry-policy-'):
+        categories.append('numeric_receipt')
+    if name=='store-actual_queued_eligibility_progress_witness':categories.append('eligibility_receipt')
+    return categories
+
+
+def validate_paged_backend_receipt(body,log_path,driver_path,*,source,source_files,origin):
+    """Pure retained-log/source reparse; does not launch Rust or a source Oracle."""
+    from validation import async_refinement_provenance as paged
+    paged.closed(body,('schema_version','case','source','origin','output_dir','rust_toolchain',
+                      'case_result','categories','profile','execution_environment','log_member','driver_member'))
+    name=body['case'];row=body['case_result']
+    c.require(body['schema_version']==2 and type(body['schema_version']) is int
+              and name in paged_backend_cases() and body['source']==source and body['origin']==origin
+              and origin['attempt']==1 and origin['stage']=='backend_qualification'
+              and body['categories']==paged_backend_categories(name)
+              and body['profile']==paged_backend_profile(name) and body['execution_environment']==PAGED_BACKEND_ENV, 'backend receipt exact source/origin/categories differ')
+    original=Path(body['output_dir'])
+    c.require(original.is_absolute() and original.name=='quantum' and original.parent.name=='run-'+str(origin['run'])
+              and '..' not in original.parts,'backend original command locator differs')
+    current=Path(log_path);paged.closed(body['log_member'],('path','bytes','sha256'))
+    c.require(body['log_member']['path']=='backend/'+name+'/rust.log'
+              and current.stat().st_size==body['log_member']['bytes']
+              and paged.file_sha(current)==body['log_member']['sha256']==row['log_sha256'],
+              'backend retained log bytes differ')
+    raw=current.read_bytes()
+    c.require(type(row.get('exit_code')) is int and type(row.get('test_count')) is int
+              and type(row.get('elapsed_seconds')) in (int,float) and row['elapsed_seconds']>=0,
+              'backend integer/timing metadata types differ')
+    c.require(complete_rust_capture(row,raw) and row['accepted'] is True
+              and row['scope']==case_scope(name) and row['argv']==rendered_command(name,original),
+              'backend actual capture/command is incomplete or source-drifted')
+    sources=source_identity(False)
+    c.require(all(source_files.get(path)==sha for path,sha in sources.items()),'backend source closure differs')
+    selected=case_sources(name,sources,out=Path(driver_path).parent if driver_path else current.parent)
+    c.require(row['input_sha256']==selected,'backend exact input closure differs')
+    facts=case_evidence(name,raw.decode('utf-8'),row['exit_code'])
+    if name in {'control-C4','control-C9'}:
+        c.require(driver_path is not None,'causal actual driver graph missing')
+        driver=c.read_json(driver_path);c.validate_driver(driver)
+        facts.update(causal_prefix_evidence(name,raw.decode('utf-8'),driver,c.sha(driver_path)))
+    allowed={'argv','exit_code','log_sha256','elapsed_seconds','test_count','accepted','result_class','scope','input_sha256','output_capture'}|set(facts)
+    if name=='graph-driver':allowed.add('graph_sha256')
+    if name=='control-selector':allowed.add('mutation')
+    c.require(set(row)==allowed and all(row.get(key)==value for key,value in facts.items()),'backend retained facts differ')
+    if name=='graph-driver':
+        stdout=raw[:row['output_capture']['stdout_bytes']]
+        c.validate_driver(json.loads(stdout))
+        c.require(row['graph_sha256']==hashlib.sha256(stdout).hexdigest()==source['driver_sha256'],'actual driver export bytes differ')
+    if name in DRIVER_INPUT_CASES:
+        paged.closed(body['driver_member'],('path','bytes','sha256'))
+        c.require(driver_path is not None and body['driver_member']['path']=='driver-graph.json'
+                  and Path(driver_path).stat().st_size==body['driver_member']['bytes']
+                  and c.sha(driver_path)==body['driver_member']['sha256']==source['driver_sha256'],
+                  'backend numeric/causal input driver differs')
+    else:c.require(body['driver_member'] is None,'unexpected backend driver member')
+    if name=='control-selector':
+        contract=c.read_json(PACKAGE/'selector-control.json')
+        original=ROOT/contract['source'];text=original.read_text()
+        c.require(c.sha(original)==contract['source_sha256'] and text.count(contract['find'])==1,'selector reviewed source anchor differs')
+        originals={relative:c.sha(ROOT/'crates/plurx-worker-control'/relative) for relative in
+            ('src/lib.rs','src/library_driver.rs','src/library_lifecycle.rs','src/retry_policy.rs','src/proofs.rs','tests/library_driver.rs')}
+        package=tomllib.loads((ROOT/'Cargo.toml').read_text())['workspace']['package']
+        manifest='[package]\nname = \"plurx-worker-control\"\nversion = '+json.dumps(package['version'])+'\nedition = '+json.dumps(package['edition'])+'\n[workspace]\n'
+        expected={'contract_sha256':c.sha(PACKAGE/'selector-control.json'),'original_sha256':originals,
+            'mutant_sha256':hashlib.sha256(text.replace(contract['find'],contract['replace']).encode()).hexdigest(),
+            'manifest_sha256':hashlib.sha256(manifest.encode()).hexdigest()}
+        c.require(row['mutation']==expected,'selector actual reviewed mutation/source manifest differs')
+    return tuple(body['categories'])
+
+
+def calibrate_catalog(args):
+    from validation import async_refinement_provenance as paged
+    test='store::async_driver_catalog::tests::catalog_sqlite_empty_schema_reports_actual_engine_geometry'
+    registered=STORE_TESTS.get('catalog_calibration')
+    c.require(registered=={'test':test,'source':'crates/plurx-core/src/store/async_driver_catalog.rs'},
+              'actual catalog calibration definition is not registered')
+    out=args.output_dir.resolve();out.mkdir(parents=True,exist_ok=True)
+    target=out/'catalog-calibration.json'
+    c.require(os.environ.get('PLURX_ASYNC_CATALOG_CALIBRATION')==str(target) and not target.exists()
+              and not os.environ.get('PLURX_ASYNC_PAGED_REQUEST'),'calibration cannot invoke proof/Init request')
+    argv=CORE+[test,'--','--ignored','--exact','--nocapture']
+    sources=source_identity(False);tools=rust_identity();log=out/'rust-catalog-calibration.log'
+    process,_,capture=run_rust_case(argv,env=os.environ.copy(),log=log)
+    row={'schema_version':1,'purpose':'catalog_operational_calibration','test':test,'argv':argv,
+         'input_sha256':sources,'rust_toolchain':tools,'output_capture':capture,'exit_code':process.returncode,
+         'log_sha256':paged.file_sha(log),'geometry_sha256':None,'acceptance':False}
+    c.require(process.returncode==0 and complete_rust_capture(row,log.read_bytes())
+              and source_identity(False)==sources,'actual empty calibration did not complete against exact source')
+    output=process.stdout+'\n'+process.stderr
+    c.require(re.findall(r'test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;',output)==[('1','0','0')]
+              and len(re.findall(r'^test '+re.escape(test)+r' \.\.\. ok$',output,re.MULTILINE))==1,
+              'calibration fixed ignored method did not execute exactly once')
+    value=paged.read(target);markers=re.findall(r'^async_paged_catalog_calibration=(.+)$',output,re.MULTILINE)
+    c.require(len(markers)==1 and paged.decode(markers[0].encode())==value,'calibration marker/file differ')
+    row['geometry_sha256']=paged.file_sha(target)
+    paged.write(out/'catalog-calibration-execution.json',row)
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__); sub = p.add_subparsers(dest='command',required=True)
+    calibration=sub.add_parser('calibrate-catalog');calibration.add_argument('--output-dir',type=Path,required=True)
+    a = sub.add_parser('paged-unit'); a.add_argument('--request',type=Path,required=True)
     a = sub.add_parser('affected'); a.add_argument('--base')
     b = sub.add_parser('build-inputs'); b.add_argument('--output-dir',type=Path,required=True); b.add_argument('--case',choices=tuple(CASES))
     b.set_defaults(prefix=False)
@@ -1058,7 +1274,9 @@ def main():
     global TASK_SCRATCH
     if hasattr(args,'output_dir'): TASK_SCRATCH = args.output_dir.resolve()/'scratch'
     try:
-        if args.command == 'affected': affected(args)
+        if args.command == 'calibrate-catalog':calibrate_catalog(args)
+        elif args.command == 'paged-unit': paged_unit(args)
+        elif args.command == 'affected': affected(args)
         elif args.command in ('build-inputs','build-prefix'): build_inputs(args)
         elif args.command == 'inventory':
             out,_ = prepare(args); print(json.dumps({'inventory':str(out/'inventory.json'),'acceptance':False}))

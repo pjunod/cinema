@@ -1,26 +1,27 @@
 # Paged exact proof — schema 6 boundary
 
-**Status: M0 normative interfaces under design conformance review; implementation
-and acceptance pending. Updated 2026-10-28.** This contract changes storage and
-qualification scheduling for the exact selected product in [CONTRACT.md](CONTRACT.md).
+**Normative specification: schema 6 and its closed transport, continuation,
+resource and control adjuncts.** This contract defines storage and qualification
+scheduling for the exact selected product in [CONTRACT.md](CONTRACT.md).
 It preserves D, all raw identities and times, all seven contexts, original
 Next/fairness, actual production replay and backend obligations. It grants no
 proof credit to a page, checkpoint, prefix, or unfinished session.
 
 The [implementation ledger](../../docs/cluster/PAGED-ASYNC-PROOF-IMPLEMENTATION.md)
-owns delivery and file ownership. [paged-proof.schema.json](paged-proof.schema.json)
+owns implementation status, source conformance, qualification evidence and file
+ownership. [paged-proof.schema.json](paged-proof.schema.json)
 defines the closed schema 6 envelopes; [paged-catalog.sql](paged-catalog.sql)
 defines the separate harness catalog. Neither is a production Store migration.
 The [finite inventory](finite-inventory.json) is a source-reviewed construction
-argument with source-only finite-generation design conformance; the amended
-schema/API still awaits design recheck. It is not an executed closure certificate.
+argument. Source-conformance dispositions and execution evidence belong to the
+implementation ledger. The inventory is not an executed closure certificate.
 
 ## Exact records and concrete Rust interfaces
 
 The implementation lives in `crates/plurx-core/src/store/async_driver_catalog.rs`
 with `records.rs`, `sqlite.rs` and `memory.rs` in its same-named subdirectory.
-These paths and signatures are normative interfaces to implement after M0;
-there are no linked placeholder modules or runtime stubs in M0. SQLite is the
+These paths and signatures define the normative harness API; source delivery
+and qualification evidence belong to the implementation ledger. SQLite is the
 persistent implementation; the bounded memory implementation supports small
 backend-equivalence fixtures. Both implement the same record/transaction API.
 
@@ -446,10 +447,16 @@ indivisible; an oversized SCC fails incomplete. Fairness is evaluated from
 is non-occurring even if labeled. Implicit original TLA stutter remains available,
 including at a reachable deadlock; no past-action flag counts during stutter.
 
-Counterexample.prefix and cycle contain ordered MonitorEdge IDs projected to
-actual original edges. A nonempty cycle has stutter_at=null; an empty cycle
-requires stutter_at equal to the endpoint of its valid original-Init prefix and
-the original implicit-stutter fairness checks. That endpoint may have outgoing
+Counterexample.original_initial is an original ProductId; prefix and cycle
+contain ordered MonitorEdge IDs projected to actual original edges. A nonempty
+cycle has stutter_at=null. For an empty cycle, stutter_at is the original
+ProductId projected from the unique MonitorNode reached by the valid ordered
+prefix from the actual MonitorInit; an empty prefix uses that MonitorInit.
+Replay retains that exact monitor endpoint, history, fixed obligation, component,
+capacity and full original enabledness. Product and MonitorNode numeric IDs are
+never assumed equal, and histories projecting to the same Product are never
+collapsed. Original implicit-stutter fairness checks remain required. That
+endpoint may have outgoing
 nonfair edges; stutter is not restricted to graph deadlocks. Full original
 fairness determines whether the infinite stutter is a valid witness. Finite invariant/nonvacuity and sparse boundary
 control traces use source-bound causal/TLC receipt members instead of fabricating
@@ -498,6 +505,29 @@ session/plan, ordered predecessor checkpoint, stage/cases and fresh actual
 run/job/task attempt1. Source and Oracle never receive API credentials. Existing
 ordinary positive/current gates keep strict attempt1 authority; no compatibility
 adapter or exception accepts a partial session.
+
+Executed attempts have monotonically increasing unused ordinals. Every prior
+actual dispatch, source event, producer job/task and attempt1 terminal state is
+authenticated, including failed or unpublished slots; maximum_units counts them
+all. Successful checkpoint/control sequences may therefore have ordinal gaps
+explained only by those authenticated failures. Session.next_unit is the lower
+bound from the last successful checkpoint, not a dense-success counter.
+Previous control and actual Init/private cursors remain those of the latest
+fully authenticated successful control. Failed artifacts, local transactions
+and checked flags grant no continuation credit. A failed initial attempt with
+no authenticated Init requires a new session; it cannot reseed the same UUID.
+
+The controller automatically dispatches only after useful authenticated progress.
+After terminal failure, a source-bound trusted controller infrastructure resume
+decision must identify the exact failed task/log, concrete diagnosis and repair,
+unchanged predecessor/source/allocation and explicit nonacceptance scope. Unknown
+failure is not evidence of retryability. Semantic-invalid and permanent
+resource-blocked states never continue, and no retry extends quotas or slots.
+Producer nonoverlap is established by exact terminal job/task observations before
+dispatch and before new unit storage/work, plus the exclusive owned execution
+lease and pinned workflow concurrency. Aggregate run stop times are not producer
+end timestamps. The bounded current predecessor observation is retained as an
+uploaded constituent, not a new semantic record or proof credit.
 
 The registered successor alone may resume a checkpoint, after checking catalog
 logical digest, full dependency closure, actual Init image and exact sources.
@@ -593,7 +623,15 @@ The first before state is deterministic empty private schema initialization at
 commit0. Later before state equals the last authenticated after state, even
 across intervening M1-only units. Cursor operations follow M3's explicit legal
 transition graph and typed scope/input ordering; scalar ordering cannot skip
-algorithm work. No committed progress is resource_blocked unless an already
+algorithm work. load_input and check_input are bounded private preparation
+operations: their authenticated algorithm_checkpoint results preserve path-free
+member loading and root-scoped dependency checks without granting semantic
+coverage. Unrelated historical cached members do not become current roots.
+Preparation-only incomplete prefixes may be sealed, uploaded and restored;
+semantic use and the catalog writer remain blocked until the exact current
+snapshot correspondence checks succeed. Durable member indexes, dependency
+queues and tallies enter the private logical digest and backup accounting;
+host paths remain disposable bindings to authenticated members. No committed progress is resource_blocked unless an already
 admitted different stage has actual work. WorkUnit.progress mirrors only the
 after_cursor.position and is never coverage authority.
 

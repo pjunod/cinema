@@ -1467,6 +1467,8 @@ paths = [
   "scripts/check-worker-control",
   "validation/worker_control_resume.py",
   "validation/async_refinement_resume.py",
+  "validation/async_refinement_session.py",
+  "validation/async_refinement_provenance.py",
   "tests/operations/test_async_driver_refinement_resume.py",
   "tests/operations/test_worker_control_runner.py",
   "tests/fixtures/worker-control/**",

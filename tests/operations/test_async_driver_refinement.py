@@ -1411,4 +1411,16 @@ class CargoPathOverrideIdentityContracts(unittest.TestCase):
         with self.assertRaises(runner.c.Invalid):
             runner.patch_path_overrides(self.scratch)
 
+
+
+class PagedSessionSourceBoundaryContracts(unittest.TestCase):
+    def test_paged_oracle_entry_uses_actual_registered_product_method_without_credentials(self):
+        source=(ROOT/'scripts/check-async-driver-refinement').read_text()
+        self.assertIn("rendered_command('graph-product', out)",source)
+        self.assertIn("environment['PLURX_ASYNC_PAGED_REQUEST']",source)
+        self.assertIn("'GITHUB_TOKEN','GH_TOKEN','ACTIONS_RUNTIME_TOKEN'",source)
+        self.assertIn("'expand', 'temporal_import', 'validate_restore', 'unit'",source)
+        self.assertIn("request['initial_image'] is None",source)
+        self.assertIn("unit['unit_ordinal'] == 0",source)
+
 if __name__ == '__main__': unittest.main()

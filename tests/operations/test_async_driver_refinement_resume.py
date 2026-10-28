@@ -381,8 +381,8 @@ class ReuseIdentities(OwnedScratch):
           'product_wire_compact_keys_are_bijective_with_full_logical_payloads',
           'product_wire_byte_accounting_and_stream_writer_fail_closed',
           'product_wire_store_export_omits_only_redundant_raw',
-          'product_schema5_fragment_dag_preserves_original_canonical_bytes_and_bounds',
-          'product_schema5_grouped_descriptors_and_derived_digests_preserve_full_values',
+          'product_schema6_factored_records_preserve_original_canonical_bytes_and_bounds',
+          'product_schema6_page_dependencies_and_outcomes_preserve_full_values',
           'oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock',
           'oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback',
         }
@@ -897,3 +897,24 @@ class ExplicitTransportAuthentication(unittest.TestCase):
             with self.subTest(index=index,value=value),patch.object(adapter,'current_context',return_value=tuple(changed)):
                 with self.assertRaisesRegex(receipts.ReceiptError,'context changed during restore'):
                     adapter.recheck_current_context(ROOT,11,2,scope,'a'*40,job)
+
+
+class RegisteredSessionBoundary(OwnedScratch):
+    def test_session_producer_is_not_an_ordinary_pr_attempt_exception(self):
+        from validation import async_refinement_provenance as paged
+        self.assertEqual(adapter.transport_spec().workflow,'main-fast-lane.yml')
+        self.assertEqual(paged.WORKFLOW,'async-proof-session.yml')
+        self.assertNotEqual(adapter.transport_spec().workflow,paged.WORKFLOW)
+        current = {'scope':1}
+        with patch.object(adapter,'current_context',return_value=(None,{},'a'*40,1,{'id':1,'task_id':2,'attempt':1})):
+            with self.assertRaises(receipts.ReceiptError):
+                adapter.recheck_current_context(self.directory,1,1,{},'a'*40,{'id':1,'task_id':3,'attempt':1})
+
+    def test_backup_root_is_separate_from_semantic_checkpoint_hash(self):
+        from validation import async_refinement_provenance as paged
+        source=(ROOT/'verification/async-driver-refinement/paged-proof.schema.json').read_text()
+        schema=json.loads(source)
+        self.assertNotIn('catalog_backup',schema['$defs']['Ref']['properties']['kind']['enum'])
+        self.assertNotIn('catalog_backup',schema['$defs']['Checkpoint']['properties'])
+        adjunct=json.loads((ROOT/paged.TRANSPORT_SCHEMA).read_text())
+        self.assertEqual(set(adjunct['$defs']),{'CatalogBackup','CatalogChunkIndex','ChunkDescriptor','IndexRef'})

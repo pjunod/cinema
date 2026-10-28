@@ -1,5 +1,5 @@
 {
-  "status": "schema 5 literal agreed for the selected two-worker product and actual-SQL source boundaries; implementation, runtime execution, feasibility, and proof remain pending final review; compiler results are recorded separately",
+  "status": "Source-owned selected-product regression and paged-session invocation registry. Implementation and qualification evidence are tracked by the canonical implementation ledger; entries do not assert execution.",
   "core_lib_feature": "hiqlite-contract-tests",
   "core_tests": [
     "store::async_driver_product::product_runtime_diagnostic_records_are_bounded",
@@ -7,8 +7,8 @@
     "store::async_driver_product::product_wire_compact_keys_are_bijective_with_full_logical_payloads",
     "store::async_driver_product::product_wire_byte_accounting_and_stream_writer_fail_closed",
     "store::async_driver_product::product_wire_store_export_omits_only_redundant_raw",
-    "store::async_driver_product::product_schema5_fragment_dag_preserves_original_canonical_bytes_and_bounds",
-    "store::async_driver_product::product_schema5_grouped_descriptors_and_derived_digests_preserve_full_values",
+    "store::async_driver_product::product_schema6_factored_records_preserve_original_canonical_bytes_and_bounds",
+    "store::async_driver_product::product_schema6_page_dependencies_and_outcomes_preserve_full_values",
     "store::async_driver_refinement::oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock",
     "store::async_driver_refinement::oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback",
     "store::async_driver_refinement::two_node_same_root_claim_refusal_and_atomic_last_request_retirement",
@@ -27,7 +27,11 @@
     "store::async_driver_product::actual_ordinary_settlement_payload_and_time_conformance",
     "store::async_driver_product::actual_ordinary_local_guard_and_response_conformance",
     "store::async_driver_product::actual_queued_eligibility_progress_witness",
-    "store::async_driver_refinement::actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows"
+    "store::async_driver_refinement::actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows",
+    "store::async_driver_product::product_paged_disk_and_reference_complete_predecessors_agree",
+    "store::async_driver_catalog::tests::catalog_reference_and_sqlite_atomic_fifo_snapshots_agree",
+    "store::async_driver_catalog::tests::catalog_closed_records_reject_duplicate_keys_and_source_aliases",
+    "store::async_driver_refinement::oracle_catalog_image_resume_replays_all_applied_and_rollback"
   ],
   "product_test": "store::async_driver_product::actual_sql_two_worker_product_is_closed",
   "product_env": "PLURX_ASYNC_PRODUCT_BUNDLE",
@@ -120,5 +124,239 @@
   "review_corrections": {
     "S2": "original BFS and checker already checked full-canonical refused self-edges; the direct observer serves non-graph conformance and no pre-existing closure gap is claimed",
     "R1-C2": "Some(fence) dispatch-time noninterference is reviewed from actual resolve_claim source; first retirement sample may differ from resolve sample, while request.now_ms/application-time scope remains explicitly bounded"
+  },
+  "catalog_calibration": {
+    "test": "store::async_driver_catalog::tests::catalog_sqlite_empty_schema_reports_actual_engine_geometry",
+    "source": "crates/plurx-core/src/store/async_driver_catalog.rs"
+  },
+  "session_protocol": {
+    "schema_version": 1,
+    "source_closure": "entire_registered_git_regular_files_v1",
+    "stages": {
+      "expand": [
+        "graph-product"
+      ],
+      "semantic_verify": [
+        "semantic_verify"
+      ],
+      "monitor_scc_verify": [
+        "monitor_scc_verify"
+      ],
+      "temporal_components": [
+        "safety",
+        "cleanup",
+        "selected-success",
+        "nonvacuity",
+        "control-weak-admission",
+        "control-no-claim-win",
+        "control-withheld-join",
+        "control-old-poll-policy",
+        "control-local-revocation",
+        "control-unknown-as-rollback",
+        "control-drop-before-join"
+      ],
+      "backend_qualification": [
+        "control-C4",
+        "control-C9",
+        "control-selector",
+        "daemon-acknowledged_settlement_leaves_retirement_durably_unchanged",
+        "daemon-admission_pressure_joins_before_release_and_drop",
+        "daemon-domain_loss_joins_before_release_and_admission_drop",
+        "daemon-ordinary_settlement_local_guards_and_validation_preserve_owner",
+        "daemon-queue_loss_joins_before_release_and_retirement",
+        "daemon-ready_work_precedes_burst_pressure_ticks",
+        "daemon-reconciles_lost_completion_acknowledgement",
+        "daemon-retirement_releases_durably_valid_claim_after_local_revocation",
+        "daemon-retirement_resolves_cancellation_revision_after_child_join",
+        "daemon-retirement_resolves_unobserved_renewal_revision",
+        "daemon-selector_preserves_loss_precedence_and_pending_work_pressure",
+        "daemon-two_jobs_contend_at_the_durable_queue_and_both_complete",
+        "driver-closure",
+        "driver-executor",
+        "driver-payload",
+        "driver-retry-policy-bases",
+        "driver-retry-policy-jitter",
+        "driver-selector",
+        "graph-driver",
+        "sampled-backends",
+        "store-actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows",
+        "store-actual_ordinary_local_guard_and_response_conformance",
+        "store-actual_ordinary_settlement_payload_and_time_conformance",
+        "store-actual_queued_eligibility_progress_witness",
+        "store-catalog_closed_records_reject_duplicate_keys_and_source_aliases",
+        "store-catalog_reference_and_sqlite_atomic_fifo_snapshots_agree",
+        "store-claim_guard_predicate_partitions_refuse_without_mutation",
+        "store-completion_trigger_mutation_is_detected_by_last_request_atomic_retirement",
+        "store-domain_expiry_missing_resources_and_overflow_are_separate_partitions",
+        "store-oracle_catalog_image_resume_replays_all_applied_and_rollback",
+        "store-oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback",
+        "store-oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock",
+        "store-product_paged_disk_and_reference_complete_predecessors_agree",
+        "store-product_runtime_diagnostic_records_are_bounded",
+        "store-product_schema6_factored_records_preserve_original_canonical_bytes_and_bounds",
+        "store-product_schema6_page_dependencies_and_outcomes_preserve_full_values",
+        "store-product_wire_byte_accounting_and_stream_writer_fail_closed",
+        "store-product_wire_compact_keys_are_bijective_with_full_logical_payloads",
+        "store-product_wire_pools_preserve_exact_types_order_and_complex_worker_values",
+        "store-product_wire_store_export_omits_only_redundant_raw",
+        "store-protocol_excluded_domain_owner_and_terminal_settlements_are_conformance_only",
+        "store-queue_identity_and_expiry_predicate_partitions_are_atomic",
+        "store-reclaim_equality_and_removed_owner_preserve_failed_cas_atomicity",
+        "store-refusal_snapshot_guard_detects_mutation_in_apply",
+        "store-renewal_and_completion_application_before_reply_reconcile_authoritatively",
+        "store-reply_loss_keeps_application_and_exact_claim_reconciliation_distinct",
+        "store-retirement_settle_and_resolution_primitives_preserve_identity_and_rows",
+        "store-snapshot_table_registry_matches_producer",
+        "store-state_cap_diagnostic_is_bounded_and_marks_partial_trace",
+        "store-two_node_same_root_claim_refusal_and_atomic_last_request_retirement"
+      ],
+      "complete": [
+        "complete"
+      ]
+    },
+    "commands": {
+      "expand": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "scripts/check-async-driver-refinement",
+          "paged-unit",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "expand"
+      },
+      "semantic_verify": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "verification/async-driver-refinement/paged_checker.py",
+          "prepare-unit",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "unit"
+      },
+      "monitor_scc_verify": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "verification/async-driver-refinement/paged_checker.py",
+          "prepare-unit",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "unit"
+      },
+      "temporal_components": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "verification/async-driver-refinement/paged_checker.py",
+          "prepare-unit",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "unit"
+      },
+      "backend_qualification": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "scripts/check-async-driver-refinement",
+          "paged-unit",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "unit"
+      },
+      "complete": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "verification/async-driver-refinement/paged_checker.py",
+          "complete",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "completion_verify"
+      },
+      "finalize": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "verification/async-driver-refinement/paged_checker.py",
+          "finalize-unit",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "finalize_unit"
+      },
+      "restore_semantic": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "verification/async-driver-refinement/paged_checker.py",
+          "validate-restore",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "validate_restore"
+      },
+      "restore_verifier": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "verification/async-driver-refinement/paged_checker.py",
+          "validate-restored-verifier",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "validate_restore"
+      },
+      "restore_private": {
+        "argv": [
+          "@PINNED_PYTHON@",
+          "scripts/check-async-driver-refinement",
+          "paged-unit",
+          "--request",
+          "@ABS_REQUEST@"
+        ],
+        "operation": "validate_restore"
+      }
+    },
+    "temporal_configs": [
+      "verification/async-driver-refinement/paged-one-step.cfg",
+      "verification/async-driver-refinement/paged-component.cfg"
+    ],
+    "fixture_cases": [
+      "tests/operations/test_paged_bounds.py::PagedInitClassFixtures.test_fixed_startup_i64_samples_survive_without_episode_clipping",
+      "tests/operations/test_paged_bounds.py::PagedInitClassFixtures.test_extra_preexisting_setting_refuses_fresh_constructor_class",
+      "tests/operations/test_paged_bounds.py::PagedInitClassFixtures.test_raw_non_v4_job_identity_is_refused_without_normalization",
+      "tests/operations/test_paged_bounds.py::PagedInitClassFixtures.test_changed_storage_mapping_refuses_the_fixed_source_class",
+      "tests/operations/test_paged_codec.py::PagedCodecFixtures.test_duplicate_json_keys_unknown_fields_bool_ids_and_nonfinite_rejected",
+      "tests/operations/test_paged_codec.py::PagedCodecFixtures.test_forced_digest_collision_never_aliases_distinct_canonical_bytes",
+      "tests/operations/test_paged_codec.py::PagedCodecFixtures.test_overlapping_page_copies_require_identical_full_bytes",
+      "tests/operations/test_paged_codec.py::PagedCodecFixtures.test_tampered_hash_byte_count_kind_and_key_range_fail",
+      "tests/operations/test_paged_codec.py::PagedCodecFixtures.test_root_filenames_are_valid_and_aliases_symlinks_traversal_rejected",
+      "tests/operations/test_paged_codec.py::PagedCodecFixtures.test_resource_exhaustion_is_incomplete_and_preserves_prior_records",
+      "tests/operations/test_paged_codec.py::PagedCodecFixtures.test_mixed_source_and_premature_singletons_are_rejected",
+      "tests/operations/test_paged_codec.py::PagedCodecFixtures.test_text_cursor_keys_do_not_acquire_numeric_aliases",
+      "tests/operations/test_paged_continuation.py::PagedContinuationFixtures.test_resource_incomplete_rolls_back_rows_cursor_and_credit",
+      "tests/operations/test_paged_continuation.py::PagedContinuationFixtures.test_private_quantum_cursor_survives_exact_sqlite_backup",
+      "tests/operations/test_paged_continuation.py::PagedContinuationFixtures.test_unregistered_operation_transition_cannot_commit_progress",
+      "tests/operations/test_paged_continuation.py::PagedContinuationFixtures.test_local_checked_bits_without_uploaded_origin_chain_cannot_resume",
+      "tests/operations/test_paged_semantics.py::PagedSemanticFixtures.test_missing_cross_page_capacity_outcome_never_makes_premise_false",
+      "tests/operations/test_paged_semantics.py::PagedSemanticFixtures.test_disabled_candidate_arithmetic_is_checked_globally",
+      "tests/operations/test_paged_semantics.py::PagedSemanticFixtures.test_huge_global_transport_handles_preserve_raw_numeric_checks",
+      "tests/operations/test_paged_semantics.py::PagedSemanticFixtures.test_pair_lookup_compares_full_bytes_even_under_forced_digest_collision",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_outgoing_only_enabledness_prevents_false_internal_fair_cycle",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_original_deadlock_stutter_is_a_real_suffix",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_nonstuttering_occurrence_does_not_count_labelled_selfloop",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_wf_and_sf_differ_with_periodically_disabled_action",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_bad_fair_subcycle_inside_larger_unfair_scc_is_found",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_pair_label_union_keeps_all_original_action_families",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_goal_seen_in_prefix_does_not_restart_at_later_component",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_pending_crosses_component_boundary_and_fixed_identity_is_retained",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_capacity_false_in_prefix_cannot_be_erased_in_component",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_recurring_completed_obligations_are_not_permanent_pending",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_forged_forward_tree_is_rejected_before_any_scc_credit",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_missing_monitor_edge_is_rejected",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_forged_condensation_rank_cannot_split_a_reachable_edge",
+      "tests/operations/test_paged_temporal.py::PagedTemporalFixtures.test_unreachable_monitor_history_cannot_acquire_prefix_credit",
+      "tests/operations/test_paged_tlc_comparison.py::PagedTlcComparisonFixtures.test_complete_micrographs_monolithic_and_composed_tlc_agree"
+    ],
+    "acceptance": false
   }
 }

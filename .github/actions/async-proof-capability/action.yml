@@ -1,0 +1,7 @@
+name: Async proof capability post-action fixture
+description: Source-bound operational probe; never proof or session credit
+runs:
+  using: node20
+  main: main.js
+  post: post.js
+  post-if: always()

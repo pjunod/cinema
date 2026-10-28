@@ -998,6 +998,8 @@
         },
         "operation": {
           "enum": [
+            "load_input",
+            "check_input",
             "materialize_store",
             "materialize_oracle",
             "materialize_product",

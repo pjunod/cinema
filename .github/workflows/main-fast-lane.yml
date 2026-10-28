@@ -419,131 +419,27 @@ jobs:
     name: fast async driver refinement gate
     needs: [scope, preflight, rust_compile]
     if: needs.scope.outputs.rust == 'true' && needs.rust_compile.outputs.async_driver_affected == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    container: ubuntu:24.04
-    # Prefix upload finishes before graph-product. Cancellation of expensive
-    # qualification cannot overwrite or retract that immutable checkpoint.
-    timeout-minutes: 90
-    env:
-      CARGO_BUILD_JOBS: "1"
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 10
     steps:
-      - name: Install Rust gate prerequisites
-        run: |
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get -o Acquire::Retries=3 update
-          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-            build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
-            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
-      - name: Check out the candidate
+      - name: Check out the exact candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Install the pinned Rust toolchain
-        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
-        with:
-          components: rustfmt, clippy
-      - name: Install the pinned FFmpeg
-        uses: ./.github/actions/ffmpeg
-        with:
-          major: "6"
-      - name: Restore the main fast Rust cache
-        id: cargo-cache
-        uses: ./.github/actions/cargo-cache
-        with:
-          lane: main-fast-rust
-      - name: Provision locked dependencies for offline async qualification
-        run: |
-          set -euo pipefail
-          cargo +1.97.1 fetch --locked --manifest-path Cargo.toml
-          cargo +1.97.1 fetch --locked --offline --manifest-path Cargo.toml
-          git diff --exit-code -- Cargo.lock
-      - name: Prepare authenticated same-PR async driver proof resumption
-        id: async-driver-resume
+      - name: Require an authenticated complete qualification session
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 -m validation.async_refinement_resume prepare
-      - name: Provision the pinned TLC toolchain for async driver refinement
-        run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
-      - name: Build deterministic async driver prefix checkpoint
-        env:
-          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
-        run: |
-          set -euo pipefail
-          test -n "$ASYNC_DRIVER_WORKING"
-          python3 scripts/check-async-driver-refinement build-prefix --output-dir "$ASYNC_DRIVER_WORKING"
-      - name: Snapshot immutable async driver prefix checkpoint
-        env:
-          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
-          ASYNC_DRIVER_ORIGIN: ${{ steps.async-driver-resume.outputs.origin_path }}
-          ASYNC_DRIVER_PREFIX: ${{ github.workspace }}/target/verification/async-driver-refinement-prefix-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          test ! -e "$ASYNC_DRIVER_PREFIX"
-          python3 -m validation.async_refinement_resume snapshot \
-            --working-dir "$ASYNC_DRIVER_WORKING" \
-            --output-dir "$ASYNC_DRIVER_PREFIX" \
-            --origin "$ASYNC_DRIVER_ORIGIN" --phase prefix
-      - name: Preserve immutable async driver prefix checkpoint
-        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
-        with:
-          name: async-driver-refinement-prefix-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/verification/async-driver-refinement-prefix-${{ github.run_id }}-${{ github.run_attempt }}/
-          if-no-files-found: error
-          retention-days: 90
-      - name: Build async driver refinement graph and control inputs
-        env:
-          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
-        run: |
-          set -euo pipefail
-          test -n "$ASYNC_DRIVER_WORKING"
-          python3 scripts/check-async-driver-refinement build-inputs --output-dir "$ASYNC_DRIVER_WORKING"
-      - name: Qualify async driver refinement with pinned TLC
-        env:
-          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
         run: >-
-          python3 scripts/check-async-driver-refinement qualify
-          --driver-graph "$ASYNC_DRIVER_WORKING/driver-graph.json"
-          --product-bundle "$ASYNC_DRIVER_WORKING/product-bundle.json"
-          --provenance "$ASYNC_DRIVER_WORKING/provenance.json"
-          --output-dir "$ASYNC_DRIVER_WORKING/tlc"
-          --cache-dir target/formal-toolchain
-      - name: Snapshot compact async driver refinement evidence
-        if: always() && steps.async-driver-resume.outputs.working_dir != ''
-        env:
-          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
-          ASYNC_DRIVER_ORIGIN: ${{ steps.async-driver-resume.outputs.origin_path }}
-          ASYNC_DRIVER_SNAPSHOT: ${{ github.workspace }}/target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/target/verification"
-          test ! -e "$ASYNC_DRIVER_SNAPSHOT"
-          python3 -m validation.async_refinement_resume snapshot \
-            --working-dir "$ASYNC_DRIVER_WORKING" \
-            --output-dir "$ASYNC_DRIVER_SNAPSHOT" \
-            --origin "$ASYNC_DRIVER_ORIGIN" --phase final
-      - name: Preserve async driver refinement evidence
-        if: always() && steps.async-driver-resume.outputs.working_dir != ''
+          python3 -m validation.async_refinement_session require-completion
+          --output .async-proof-sessions/main-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Preserve the consumed complete session root
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
-          name: async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}/
+          name: async-main-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .async-proof-sessions/main-${{ github.run_id }}-${{ github.run_attempt }}/completion.json
           if-no-files-found: error
           retention-days: 90
-      - name: Enforce persistent Cargo bounds
-        if: always() && steps.cargo-cache.outputs.local == 'true'
-        continue-on-error: true
-        uses: ./.github/actions/cargo-cache-finalize
-        with:
-          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
-          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
-          last-used: ${{ steps.cargo-cache.outputs.last-used }}
-      - name: Restore persistent runner workspace ownership
-        if: always()
-        run: |
-          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
-          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   web_compile:
     name: fast web syntax gate
@@ -690,6 +586,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - name: Require policy and every affected compile surface
         env:
           PAPERWORK_RESULT: ${{ needs.paperwork.result }}
@@ -703,32 +603,7 @@ jobs:
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
         run: |
-          # Paperwork must pass outright: when it fails, every job below it is
-          # skipped, and a skipped job is otherwise accepted here.
-          if [ "$PAPERWORK_RESULT" != success ]; then
-            echo "paperwork ended with: $PAPERWORK_RESULT"; exit 1
-          fi
-          if [ "$WORKER_CONTROL_RESULT" != success ]; then
-            echo "The required production worker controller proof ended with: $WORKER_CONTROL_RESULT"
-            exit 1
-          fi
-          if [ "$ASYNC_DRIVER_AFFECTED" = true ] && [ "$ASYNC_DRIVER_RESULT" != success ]; then
-            echo "The selected async refinement proof ended with: $ASYNC_DRIVER_RESULT"
-            exit 1
-          fi
-          for result in \
-            "$SCOPE_RESULT" "$PREFLIGHT_RESULT" \
-            "$RUST_RESULT" "$ASYNC_DRIVER_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
-            "$ANDROID_RESULT"; do
-            case "$result" in
-              success|skipped) ;;
-              *) echo "A selected fast-lane job ended with: $result"; exit 1 ;;
-            esac
-          done
-      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
+          python3 -m validation.async_refinement_session main-aggregate
       # Every job above built the PR head alone -- Forgejo checks out
       # refs/pull/<n>/head, not a merge preview -- so the one thing this gate
       # can prove is that the head is still that commit: a newer push is

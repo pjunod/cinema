@@ -1,0 +1,680 @@
+name: async proof session
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Registered unit or current Main completion
+        type: choice
+        options: [unit, complete]
+        required: true
+      operation:
+        description: Capability probe or authenticated execution
+        type: choice
+        options: [probe, execute]
+        required: true
+      registration_sha256:
+        description: Exact source and producer registration digest
+        required: true
+      control:
+        description: Closed immutable admission and ordered predecessor run chain
+        required: true
+
+# Units never overlap within a session. A failed unit keeps the preceding root.
+concurrency:
+  group: async-proof-${{ github.event.inputs.registration_sha256 }}
+  cancel-in-progress: false
+
+jobs:
+  unit:
+    name: async proof session producer
+    if: github.event.inputs.mode == 'unit'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    container: ubuntu:24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "1"
+    steps:
+      - name: Install pinned-runtime prerequisites
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
+      - name: Check out the registered candidate
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Register source-bound capability post-action fixture
+        if: github.event.inputs.operation == 'probe'
+        uses: ./.github/actions/async-proof-capability
+        env:
+          NODE_OPTIONS: ""
+          NODE_PATH: ""
+          LD_PRELOAD: ""
+          DYLD_INSERT_LIBRARIES: ""
+      - name: Install the pinned Rust compiler
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Install pinned FFmpeg
+        uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
+      - name: Restore the owned compiler slot
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: async-proof-session
+      - name: Provision locked offline inputs
+        run: |
+          set -euo pipefail
+          cargo +1.97.1 fetch --locked --manifest-path Cargo.toml
+          cargo +1.97.1 fetch --locked --offline --manifest-path Cargo.toml
+          git diff --exit-code -- Cargo.lock
+          python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+      - name: Authenticate and execute the registered protocol
+        id: session
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m validation.async_refinement_session runner
+      - name: Native immutable part 0
+        if: steps.session.outputs.part_0_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_0_name }}
+          path: ${{ steps.session.outputs.part_0_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 1
+        if: steps.session.outputs.part_1_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_1_name }}
+          path: ${{ steps.session.outputs.part_1_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 2
+        if: steps.session.outputs.part_2_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_2_name }}
+          path: ${{ steps.session.outputs.part_2_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 3
+        if: steps.session.outputs.part_3_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_3_name }}
+          path: ${{ steps.session.outputs.part_3_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 4
+        if: steps.session.outputs.part_4_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_4_name }}
+          path: ${{ steps.session.outputs.part_4_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 5
+        if: steps.session.outputs.part_5_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_5_name }}
+          path: ${{ steps.session.outputs.part_5_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 6
+        if: steps.session.outputs.part_6_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_6_name }}
+          path: ${{ steps.session.outputs.part_6_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 7
+        if: steps.session.outputs.part_7_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_7_name }}
+          path: ${{ steps.session.outputs.part_7_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 8
+        if: steps.session.outputs.part_8_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_8_name }}
+          path: ${{ steps.session.outputs.part_8_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 9
+        if: steps.session.outputs.part_9_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_9_name }}
+          path: ${{ steps.session.outputs.part_9_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 10
+        if: steps.session.outputs.part_10_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_10_name }}
+          path: ${{ steps.session.outputs.part_10_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 11
+        if: steps.session.outputs.part_11_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_11_name }}
+          path: ${{ steps.session.outputs.part_11_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 12
+        if: steps.session.outputs.part_12_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_12_name }}
+          path: ${{ steps.session.outputs.part_12_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 13
+        if: steps.session.outputs.part_13_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_13_name }}
+          path: ${{ steps.session.outputs.part_13_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 14
+        if: steps.session.outputs.part_14_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_14_name }}
+          path: ${{ steps.session.outputs.part_14_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 15
+        if: steps.session.outputs.part_15_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_15_name }}
+          path: ${{ steps.session.outputs.part_15_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 16
+        if: steps.session.outputs.part_16_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_16_name }}
+          path: ${{ steps.session.outputs.part_16_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 17
+        if: steps.session.outputs.part_17_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_17_name }}
+          path: ${{ steps.session.outputs.part_17_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 18
+        if: steps.session.outputs.part_18_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_18_name }}
+          path: ${{ steps.session.outputs.part_18_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 19
+        if: steps.session.outputs.part_19_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_19_name }}
+          path: ${{ steps.session.outputs.part_19_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 20
+        if: steps.session.outputs.part_20_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_20_name }}
+          path: ${{ steps.session.outputs.part_20_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 21
+        if: steps.session.outputs.part_21_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_21_name }}
+          path: ${{ steps.session.outputs.part_21_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 22
+        if: steps.session.outputs.part_22_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_22_name }}
+          path: ${{ steps.session.outputs.part_22_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 23
+        if: steps.session.outputs.part_23_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_23_name }}
+          path: ${{ steps.session.outputs.part_23_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 24
+        if: steps.session.outputs.part_24_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_24_name }}
+          path: ${{ steps.session.outputs.part_24_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 25
+        if: steps.session.outputs.part_25_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_25_name }}
+          path: ${{ steps.session.outputs.part_25_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 26
+        if: steps.session.outputs.part_26_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_26_name }}
+          path: ${{ steps.session.outputs.part_26_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 27
+        if: steps.session.outputs.part_27_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_27_name }}
+          path: ${{ steps.session.outputs.part_27_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 28
+        if: steps.session.outputs.part_28_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_28_name }}
+          path: ${{ steps.session.outputs.part_28_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 29
+        if: steps.session.outputs.part_29_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_29_name }}
+          path: ${{ steps.session.outputs.part_29_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 30
+        if: steps.session.outputs.part_30_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_30_name }}
+          path: ${{ steps.session.outputs.part_30_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 31
+        if: steps.session.outputs.part_31_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_31_name }}
+          path: ${{ steps.session.outputs.part_31_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Enforce persistent compiler bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
+      - name: Finalize authenticated post-upload control
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m validation.async_refinement_session finalize-uploads
+
+  complete:
+    name: Main promotion gate
+    if: github.event.inputs.mode == 'complete'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    container: ubuntu:24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "1"
+    steps:
+      - name: Install pinned-runtime prerequisites
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
+      - name: Check out the registered candidate
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Register source-bound capability post-action fixture
+        if: github.event.inputs.operation == 'probe'
+        uses: ./.github/actions/async-proof-capability
+        env:
+          NODE_OPTIONS: ""
+          NODE_PATH: ""
+          LD_PRELOAD: ""
+          DYLD_INSERT_LIBRARIES: ""
+      - name: Install the pinned Rust compiler
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Install pinned FFmpeg
+        uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
+      - name: Restore the owned compiler slot
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: async-proof-session
+      - name: Provision locked offline inputs
+        run: |
+          set -euo pipefail
+          cargo +1.97.1 fetch --locked --manifest-path Cargo.toml
+          cargo +1.97.1 fetch --locked --offline --manifest-path Cargo.toml
+          git diff --exit-code -- Cargo.lock
+          python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+      - name: Authenticate and execute the registered protocol
+        id: session
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m validation.async_refinement_session runner
+      - name: Native immutable part 0
+        if: steps.session.outputs.part_0_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_0_name }}
+          path: ${{ steps.session.outputs.part_0_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 1
+        if: steps.session.outputs.part_1_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_1_name }}
+          path: ${{ steps.session.outputs.part_1_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 2
+        if: steps.session.outputs.part_2_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_2_name }}
+          path: ${{ steps.session.outputs.part_2_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 3
+        if: steps.session.outputs.part_3_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_3_name }}
+          path: ${{ steps.session.outputs.part_3_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 4
+        if: steps.session.outputs.part_4_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_4_name }}
+          path: ${{ steps.session.outputs.part_4_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 5
+        if: steps.session.outputs.part_5_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_5_name }}
+          path: ${{ steps.session.outputs.part_5_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 6
+        if: steps.session.outputs.part_6_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_6_name }}
+          path: ${{ steps.session.outputs.part_6_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 7
+        if: steps.session.outputs.part_7_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_7_name }}
+          path: ${{ steps.session.outputs.part_7_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 8
+        if: steps.session.outputs.part_8_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_8_name }}
+          path: ${{ steps.session.outputs.part_8_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 9
+        if: steps.session.outputs.part_9_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_9_name }}
+          path: ${{ steps.session.outputs.part_9_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 10
+        if: steps.session.outputs.part_10_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_10_name }}
+          path: ${{ steps.session.outputs.part_10_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 11
+        if: steps.session.outputs.part_11_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_11_name }}
+          path: ${{ steps.session.outputs.part_11_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 12
+        if: steps.session.outputs.part_12_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_12_name }}
+          path: ${{ steps.session.outputs.part_12_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 13
+        if: steps.session.outputs.part_13_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_13_name }}
+          path: ${{ steps.session.outputs.part_13_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 14
+        if: steps.session.outputs.part_14_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_14_name }}
+          path: ${{ steps.session.outputs.part_14_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 15
+        if: steps.session.outputs.part_15_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_15_name }}
+          path: ${{ steps.session.outputs.part_15_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 16
+        if: steps.session.outputs.part_16_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_16_name }}
+          path: ${{ steps.session.outputs.part_16_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 17
+        if: steps.session.outputs.part_17_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_17_name }}
+          path: ${{ steps.session.outputs.part_17_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 18
+        if: steps.session.outputs.part_18_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_18_name }}
+          path: ${{ steps.session.outputs.part_18_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 19
+        if: steps.session.outputs.part_19_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_19_name }}
+          path: ${{ steps.session.outputs.part_19_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 20
+        if: steps.session.outputs.part_20_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_20_name }}
+          path: ${{ steps.session.outputs.part_20_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 21
+        if: steps.session.outputs.part_21_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_21_name }}
+          path: ${{ steps.session.outputs.part_21_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 22
+        if: steps.session.outputs.part_22_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_22_name }}
+          path: ${{ steps.session.outputs.part_22_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 23
+        if: steps.session.outputs.part_23_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_23_name }}
+          path: ${{ steps.session.outputs.part_23_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 24
+        if: steps.session.outputs.part_24_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_24_name }}
+          path: ${{ steps.session.outputs.part_24_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 25
+        if: steps.session.outputs.part_25_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_25_name }}
+          path: ${{ steps.session.outputs.part_25_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 26
+        if: steps.session.outputs.part_26_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_26_name }}
+          path: ${{ steps.session.outputs.part_26_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 27
+        if: steps.session.outputs.part_27_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_27_name }}
+          path: ${{ steps.session.outputs.part_27_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 28
+        if: steps.session.outputs.part_28_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_28_name }}
+          path: ${{ steps.session.outputs.part_28_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 29
+        if: steps.session.outputs.part_29_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_29_name }}
+          path: ${{ steps.session.outputs.part_29_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 30
+        if: steps.session.outputs.part_30_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_30_name }}
+          path: ${{ steps.session.outputs.part_30_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Native immutable part 31
+        if: steps.session.outputs.part_31_name != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.session.outputs.part_31_name }}
+          path: ${{ steps.session.outputs.part_31_path }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Enforce persistent compiler bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Finalize authenticated post-upload control
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m validation.async_refinement_session finalize-uploads
