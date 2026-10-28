@@ -193,6 +193,56 @@ impl Record {
                 }
             }
         }
+        if matches!(self.kind.as_str(), "Page" | "ManifestNode") {
+            let own = if self.kind == "Page" {
+                "page_id"
+            } else {
+                "sha256"
+            };
+            if string(&self.record, own)? != self.sha256()
+                || number(&self.record, "utf8_bytes")? != self.encoded_len(u64::MAX)?
+            {
+                return Err(CatalogError::CorruptRecord(
+                    "addressed envelope hash/outer byte count".into(),
+                ));
+            }
+        }
+        if self.kind == "Page" {
+            let values = self.record["records"]
+                .as_array()
+                .expect("validated page array");
+            if values.is_empty() || number(&self.record, "record_count")? != values.len() as u64 {
+                return Err(CatalogError::CorruptRecord(
+                    "empty page or wrong record count".into(),
+                ));
+            }
+            let mut first = None;
+            let mut previous = None;
+            for value in values {
+                let record: Record = serde_json::from_value(value.clone())?;
+                record.validate()?;
+                if record.kind != string(&self.record, "kind")? {
+                    return Err(CatalogError::CorruptRecord("mixed page kind".into()));
+                }
+                let key = record.key()?;
+                if previous.as_ref().is_some_and(|old| old >= &key) {
+                    return Err(CatalogError::CorruptRecord(
+                        "page keys are not strictly increasing".into(),
+                    ));
+                }
+                if first.is_none() {
+                    first = Some(key.clone());
+                }
+                previous = Some(key);
+            }
+            if self.record["first_key"] != json!(first)
+                || self.record["last_key"] != json!(previous)
+            {
+                return Err(CatalogError::CorruptRecord(
+                    "page inclusive key bounds".into(),
+                ));
+            }
+        }
         Ok(())
     }
     pub fn key(&self) -> CatalogResult<RecordKey> {
@@ -279,6 +329,202 @@ impl Record {
     }
     pub fn bytes(&self) -> Vec<u8> {
         canonical(self).into_bytes()
+    }
+}
+
+/// A semantic reference before resolving its exact envelope hash. Opaque
+/// canonical UTF-8 payloads are never traversed as an alternative graph.
+#[derive(Clone, Debug)]
+pub struct RecordLink {
+    pub kind: String,
+    pub key: RecordKey,
+    pub sha256: Option<String>,
+}
+pub fn record_links(value: &Record) -> CatalogResult<Vec<RecordLink>> {
+    let mut result = Vec::new();
+    let r = &value.record;
+    let pairs: &[(&str, &str)] = match value.kind.as_str() {
+        "Store" => &[
+            ("PhysicalRows", "physical_rows_id"),
+            ("Episode", "episode_id"),
+            ("InitialImage", "initial_image_id"),
+            ("BoundaryObservation", "omitted_observation_id"),
+            ("OracleEvidence", "replay_parent_edge"),
+        ],
+        "Product" => &[("Store", "store_id"), ("ProductEdge", "predecessor_edge")],
+        "Candidate" => &[("Product", "predecessor")],
+        "Demand" => &[
+            ("Candidate", "candidate"),
+            ("Store", "from_store"),
+            ("OracleEvidence", "outcome_id"),
+        ],
+        "ProductEdge" => &[
+            ("Product", "from_product"),
+            ("Product", "to_product"),
+            ("Candidate", "candidate"),
+            ("OracleEvidence", "primary_edge"),
+            ("OracleEvidence", "resolution_edge"),
+            ("OracleEvidence", "read_edge"),
+            ("OracleEvidence", "cleanup_edge"),
+        ],
+        "FairPair" => &[("Product", "from_product"), ("Product", "to_product")],
+        "Enabledness" => &[("Product", "product_id")],
+        "Expansion" => &[("Product", "predecessor")],
+        "ContextRoot" => &[("Product", "initial_product")],
+        "InitialImage" => &[("Store", "initial_store")],
+        "MonitorNode" => &[("Product", "product")],
+        "MonitorEdge" => &[
+            ("MonitorNode", "from_monitor"),
+            ("MonitorNode", "to_monitor"),
+            ("ProductEdge", "product_edge"),
+        ],
+        "Scc" => &[("MonitorNode", "monitor_root")],
+        "Counterexample" => &[
+            ("Product", "original_initial"),
+            ("Scc", "monitor_component"),
+            ("Product", "stutter_at"),
+        ],
+        "BoundaryObservation" => &[
+            ("PhysicalRows", "physical_rows_id"),
+            ("Episode", "episode_id"),
+            ("InitialImage", "initial_image_id"),
+        ],
+        "Page" => &[
+            ("Page", "previous_page"),
+            ("Checkpoint", "previous_checkpoint"),
+        ],
+        "Checkpoint" => &[
+            ("ManifestNode", "page_root"),
+            ("Checkpoint", "previous_checkpoint"),
+        ],
+        _ => &[],
+    };
+    for (kind, field) in pairs {
+        if !r[field].is_null() {
+            result.push(RecordLink {
+                kind: (*kind).into(),
+                key: serde_json::from_value(r[field].clone())?,
+                sha256: None,
+            });
+        }
+    }
+    let arrays: &[(&str, &str)] = match value.kind.as_str() {
+        "Demand" => &[("Demand", "depends_on")],
+        "Expansion" => &[
+            ("Candidate", "candidates"),
+            ("Demand", "demands"),
+            ("OracleEvidence", "oracle_evidence"),
+            ("ProductEdge", "product_edges"),
+            ("Product", "discovered_products"),
+            ("Store", "capacity_only_stores"),
+        ],
+        "Scc" => &[
+            ("MonitorNode", "members"),
+            ("MonitorEdge", "forward_tree"),
+            ("MonitorEdge", "reverse_tree"),
+        ],
+        "Counterexample" => &[("MonitorEdge", "prefix"), ("MonitorEdge", "cycle")],
+        _ => &[],
+    };
+    for (kind, field) in arrays {
+        for key in r[field]
+            .as_array()
+            .ok_or_else(|| CatalogError::CorruptRecord("reference array".into()))?
+        {
+            result.push(RecordLink {
+                kind: (*kind).into(),
+                key: serde_json::from_value(key.clone())?,
+                sha256: None,
+            });
+        }
+    }
+    if matches!(value.kind.as_str(), "Applied" | "OracleEvidence") {
+        let applied = if value.kind == "OracleEvidence" {
+            &r["applied"]
+        } else {
+            r
+        };
+        for field in ["from_store", "to_store"] {
+            result.push(RecordLink {
+                kind: "Store".into(),
+                key: RecordKey::Numeric(number(applied, field)?),
+                sha256: None,
+            });
+        }
+    }
+    if value.kind == "InitialImage" {
+        result.push(RecordLink {
+            kind: "initial_image_blob".into(),
+            key: RecordKey::Text(string(r, "member_path")?.into()),
+            sha256: Some(string(r, "image_sha256")?.into()),
+        });
+    }
+    fn refs(value: &Value, result: &mut Vec<RecordLink>) -> CatalogResult<()> {
+        match value {
+            Value::Object(object)
+                if object.len() == 3
+                    && object.contains_key("kind")
+                    && object.contains_key("id")
+                    && object.contains_key("sha256") =>
+            {
+                validate_definition("Ref", value)?;
+                let reference: RecordRef = serde_json::from_value(value.clone())?;
+                result.push(RecordLink {
+                    kind: reference.kind,
+                    key: reference.id,
+                    sha256: Some(reference.sha256),
+                });
+            }
+            Value::Object(object) => {
+                for (key, value) in object {
+                    if key != "records" {
+                        refs(value, result)?;
+                    }
+                }
+            }
+            Value::Array(array) => {
+                for value in array {
+                    refs(value, result)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    refs(r, &mut result)?;
+    Ok(result)
+}
+
+impl Record {
+    /// Resolve the byte-count fixed point before hashing an addressed envelope.
+    /// The hash excludes only its own address field, exactly as schema6 defines.
+    pub fn addressed(kind: &str, mut body: Value, limit: u64) -> CatalogResult<Self> {
+        let field = match kind {
+            "Page" => "page_id",
+            "ManifestNode" => "sha256",
+            _ => {
+                return Err(CatalogError::CorruptRecord(
+                    "not an addressed data container".into(),
+                ))
+            }
+        };
+        body[field] = json!("0".repeat(64));
+        body["utf8_bytes"] = json!(0);
+        let mut value = Self {
+            schema_version: 6,
+            kind: kind.into(),
+            record: body,
+        };
+        loop {
+            let size = value.encoded_len(limit)?;
+            if value.record["utf8_bytes"] == size {
+                break;
+            }
+            value.record["utf8_bytes"] = json!(size);
+        }
+        value.record[field] = json!(value.sha256());
+        value.validate()?;
+        Ok(value)
     }
 }
 

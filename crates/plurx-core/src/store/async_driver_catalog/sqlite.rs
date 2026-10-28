@@ -70,7 +70,7 @@ impl<T: SqlParameter + ?Sized> SqlParameter for &T {
     }
 }
 macro_rules! params {($($value:expr),* $(,)?)=>{rusqlite::params_from_iter(vec![$(SqlParameter::sql_value(&$value)?),*])};}
-fn row_uint(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<u64> {
+pub(super) fn row_uint(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<u64> {
     let value: i64 = row.get(column)?;
     u64::try_from(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -858,6 +858,7 @@ impl Storage for SqliteStorage {
         &self,
         kind: &str,
         after: Option<&RecordKey>,
+        after_transaction: u64,
         limits: &ReadLimits,
     ) -> CatalogResult<RecordBatch> {
         if limits.max_records == 0 || limits.max_encoded_bytes == 0 {
@@ -870,13 +871,19 @@ impl Storage for SqliteStorage {
             Some(RecordKey::Numeric(id)) => (0, *id, String::new()),
             Some(RecordKey::Text(text)) => (1, 0, text.clone()),
         };
-        let mut statement=self.connection.prepare("SELECT length(payload),payload FROM catalog_records WHERE kind=?1 AND (key_type>?2 OR (key_type=?2 AND ((key_type=0 AND key_integer>?3) OR (key_type=1 AND key_text>?4)))) ORDER BY key_type,key_integer,key_text LIMIT ?5")?;
+        let mut statement=self.connection.prepare("SELECT length(payload),payload FROM catalog_records WHERE kind=?1 AND created_commit>?6 AND (key_type>?2 OR (key_type=?2 AND ((key_type=0 AND key_integer>?3) OR (key_type=1 AND key_text>?4)))) ORDER BY key_type,key_integer,key_text LIMIT ?5")?;
         let bound = i64::try_from(limits.max_records)
             .map_err(|_| CatalogError::ResourceIncomplete("read count overflow".into()))?
             .checked_add(1)
             .ok_or_else(|| CatalogError::ResourceIncomplete("read count overflow".into()))?;
-        let mut rows =
-            statement.query(params![kind, after_type, after_integer, after_text, bound])?;
+        let mut rows = statement.query(params![
+            kind,
+            after_type,
+            after_integer,
+            after_text,
+            bound,
+            after_transaction
+        ])?;
         let mut records = Vec::new();
         let mut bytes = 0u64;
         let mut more = false;
@@ -1094,6 +1101,57 @@ impl Storage for SqliteStorage {
                 ),
             ] {
                 self.connection.execute("INSERT INTO catalog_control(key,payload) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",params![key,canonical(&value).as_bytes()])?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+    fn save_export(&mut self, record: &Record) -> CatalogResult<()> {
+        if self.reading || self.context.is_some() {
+            return Err(CatalogError::SnapshotMismatch(
+                "export writer/read snapshot active".into(),
+            ));
+        }
+        let key = format!("export:{}:{}", record.kind, record.key()?.canonical());
+        if let Some(old) = self.get_control(&key)? {
+            if old != serde_json::to_value(record)? {
+                return Err(CatalogError::ConflictingOutcome(
+                    "immutable export changed".into(),
+                ));
+            }
+            return Ok(());
+        }
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            self.connection.execute(
+                "INSERT INTO catalog_control(key,payload) VALUES(?1,?2)",
+                params![key, record.bytes()],
+            )?;
+            let count_key = format!("export_count:{}", record.kind);
+            let old = self
+                .get_control(&count_key)?
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            self.connection.execute("INSERT INTO catalog_control(key,payload) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",params![count_key,canonical(&json!(old.checked_add(1).ok_or_else(||CatalogError::NumericDomain("export count".into()))?)).as_bytes()])?;
+            if record.kind == "Page" {
+                let v = &record.record;
+                self.connection.execute("INSERT INTO pages(id,kind,first_key,last_key,record_count,bytes,descriptor,previous_checkpoint,transaction_high_water) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![string(v,"page_id")?,string(v,"kind")?,canonical(&v["first_key"]).as_bytes(),canonical(&v["last_key"]).as_bytes(),number(v,"record_count")?,number(v,"utf8_bytes")?,record.bytes(),v["previous_checkpoint"].as_str(),number(v,"transaction_high_water")?])?;
+                for dependency in v["dependencies"]
+                    .as_array()
+                    .expect("validated page dependencies")
+                {
+                    self.connection.execute("INSERT INTO page_dependencies(page_id,target_kind,target_id,sha256) VALUES(?1,?2,?3,?4)",params![string(v,"page_id")?,string(dependency,"kind")?,canonical(&dependency["id"]),string(dependency,"sha256")?])?;
+                }
+                self.connection.execute("INSERT INTO catalog_control(key,payload) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",params![format!("last_page:{}",string(v,"kind")?),canonical(&v["page_id"]).as_bytes()])?;
             }
             Ok(())
         })();

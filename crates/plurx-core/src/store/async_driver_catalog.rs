@@ -99,6 +99,7 @@ pub trait Storage {
         &self,
         kind: &str,
         after: Option<&RecordKey>,
+        after_transaction: u64,
         limits: &ReadLimits,
     ) -> CatalogResult<RecordBatch>;
     fn count(&self, kind: &str) -> CatalogResult<u64>;
@@ -114,6 +115,7 @@ pub trait Storage {
     fn begin_read(&mut self, expected: u64) -> CatalogResult<()>;
     fn end_read(&mut self) -> CatalogResult<()>;
     fn save_checkpoint(&mut self, checkpoint: &Record, work_unit: &Record) -> CatalogResult<()>;
+    fn save_export(&mut self, record: &Record) -> CatalogResult<()>;
     fn check_private(&self, checkpoint: &Record) -> CatalogResult<()>;
     fn backup(&self, path: &Path, limits: &BackupLimits) -> CatalogResult<()>;
 }
@@ -964,6 +966,76 @@ impl Catalog {
             .borrow_mut()
             .save_checkpoint(checkpoint, work_unit)
     }
+    pub fn exported_record(&self, kind: &str, key: &RecordKey) -> CatalogResult<Record> {
+        if kind == "Checkpoint" {
+            return self.checkpoint_record(match key {
+                RecordKey::Text(text) => text,
+                _ => return Err(CatalogError::CorruptRecord("checkpoint key".into())),
+            });
+        }
+        if kind == "ResourcePlan" && *key == self.resource_plan().key()? {
+            return Ok(self.resource_plan().clone());
+        }
+        if matches!(kind, "Page" | "ManifestNode") {
+            let value = self
+                .control(&format!("export:{kind}:{}", key.canonical()))?
+                .ok_or_else(|| CatalogError::MissingDependency(format!("exported {kind}")))?;
+            let record: Record = serde_json::from_value(value)?;
+            record.validate()?;
+            if record.kind != kind || record.key() != Ok(key.clone()) {
+                return Err(CatalogError::CorruptRecord("exported container key".into()));
+            }
+            return Ok(record);
+        }
+        self.get(kind, key)
+    }
+    pub fn register_export(&self, record: &Record) -> CatalogResult<()> {
+        if self.inner.reading.get() || self.inner.pending.borrow().is_some() {
+            return Err(CatalogError::SnapshotMismatch(
+                "export bookkeeping while snapshot/writer active".into(),
+            ));
+        }
+        if !matches!(record.kind.as_str(), "Page" | "ManifestNode")
+            || record.record["source"] != json!(self.source())
+            || record.record["session_id"] != json!(self.session_id())
+        {
+            return Err(CatalogError::SourceMismatch(
+                "export bookkeeping binding".into(),
+            ));
+        }
+        record.validate()?;
+        let allowance = self.inner.limits.allowance(&record.kind)?;
+        record.encoded_len(
+            allowance
+                .max_encoded_bytes
+                .min(self.inner.limits.resident_bytes / 4),
+        )?;
+        let key = format!("export:{}:{}", record.kind, record.key()?.canonical());
+        if let Some(old) = self.control(&key)? {
+            if old != serde_json::to_value(record)? {
+                return Err(CatalogError::ConflictingOutcome(
+                    "immutable export changed".into(),
+                ));
+            }
+            return Ok(());
+        }
+        let count = self
+            .control(&format!("export_count:{}", record.kind))?
+            .map(|value| {
+                value
+                    .as_u64()
+                    .ok_or_else(|| CatalogError::CorruptRecord("export count".into()))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        if count >= allowance.records {
+            return Err(CatalogError::ResourceIncomplete(format!(
+                "{} lifetime export allowance",
+                record.kind
+            )));
+        }
+        self.inner.storage.borrow_mut().save_export(record)
+    }
     pub fn latest_checkpoint(&self) -> CatalogResult<Option<Record>> {
         self.control("latest_checkpoint")?
             .map(|value| {
@@ -1521,7 +1593,7 @@ impl ReadSnapshot {
             .inner
             .storage
             .borrow()
-            .scan(&range.kind, range.after.as_ref(), &limits)
+            .scan(&range.kind, range.after.as_ref(), 0, &limits)
     }
     pub fn counts(&self) -> CatalogResult<Value> {
         let storage = self.catalog.inner.storage.borrow();
@@ -1562,6 +1634,7 @@ impl ReadSnapshot {
                 let batch = storage.scan(
                     "Product",
                     after.as_ref(),
+                    0,
                     &ReadLimits {
                         max_records: 64,
                         max_encoded_bytes: PAGE_BYTES,
@@ -1609,6 +1682,7 @@ impl ReadSnapshot {
                 let batch = self.catalog.inner.storage.borrow().scan(
                     kind,
                     after.as_ref(),
+                    0,
                     &ReadLimits {
                         max_records: 64,
                         max_encoded_bytes: PAGE_BYTES,
@@ -1668,6 +1742,536 @@ impl Drop for ReadSnapshot {
             let _ = self.catalog.inner.storage.borrow_mut().end_read();
             self.catalog.inner.reading.set(false);
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ExportedSnapshot {
+    pub root: RecordRef,
+    pub members: Vec<String>,
+}
+struct ExportBuilder<'a> {
+    snapshot: &'a ReadSnapshot,
+    output: &'a Path,
+    work: rusqlite::Connection,
+    limits: &'a PageLimits,
+    deadline: std::time::Instant,
+    members: Vec<String>,
+    bytes: u64,
+}
+impl ExportBuilder<'_> {
+    fn check(&self) -> CatalogResult<()> {
+        if std::time::Instant::now() >= self.deadline {
+            return Err(CatalogError::ResourceIncomplete(
+                "export unit deadline".into(),
+            ));
+        }
+        let pages: u64 = self
+            .work
+            .query_row("PRAGMA page_count", [], |row| sqlite::row_uint(row, 0))?;
+        let size: u64 = self
+            .work
+            .query_row("PRAGMA page_size", [], |row| sqlite::row_uint(row, 0))?;
+        if pages
+            .checked_mul(size)
+            .is_none_or(|bytes| bytes > self.snapshot.catalog.inner.limits.scratch_bytes)
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "export closure scratch allowance".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn resolve(&self, kind: &str, key: &RecordKey) -> CatalogResult<Record> {
+        use rusqlite::OptionalExtension;
+        let path: Option<String> = self
+            .work
+            .query_row(
+                "SELECT path FROM exports WHERE kind=?1 AND key=?2",
+                rusqlite::params![kind, key.canonical()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(path) = path {
+            let path = self.output.join(path);
+            let size = path.metadata()?.len();
+            if size > self.snapshot.catalog.inner.limits.resident_bytes / 4 {
+                return Err(CatalogError::ResourceIncomplete(
+                    "export dependency decoded reservation".into(),
+                ));
+            }
+            let record = Record::parse(&std::fs::read(path)?)?;
+            if record.kind != kind || record.key() != Ok(key.clone()) {
+                return Err(CatalogError::CorruptRecord(
+                    "new export dependency identity".into(),
+                ));
+            }
+            return Ok(record);
+        }
+        self.snapshot.catalog.exported_record(kind, key)
+    }
+    fn reference(&self, link: RecordLink) -> CatalogResult<RecordRef> {
+        let sha = if record_kinds().contains(&link.kind.as_str()) {
+            let actual = self.resolve(&link.kind, &link.key)?;
+            let sha = actual.sha256();
+            if link
+                .sha256
+                .as_ref()
+                .is_some_and(|expected| *expected != sha)
+            {
+                return Err(CatalogError::CorruptRecord(
+                    "export dependency exact hash mismatch".into(),
+                ));
+            }
+            sha
+        } else {
+            link.sha256
+                .ok_or_else(|| CatalogError::MissingDependency("unhashed external member".into()))?
+        };
+        Ok(RecordRef {
+            kind: link.kind,
+            id: link.key,
+            sha256: sha,
+        })
+    }
+    fn dependencies(&self, records: &[Record]) -> CatalogResult<Vec<RecordRef>> {
+        let local = records
+            .iter()
+            .map(|record| Ok((record.kind.clone(), record.key()?)))
+            .collect::<CatalogResult<BTreeSet<_>>>()?;
+        let mut dependencies = BTreeMap::new();
+        for record in records {
+            for link in record_links(record)? {
+                if local.contains(&(link.kind.clone(), link.key.clone())) {
+                    continue;
+                }
+                let reference = self.reference(link)?;
+                let key = (reference.kind.clone(), reference.id.clone());
+                if let Some(old) = dependencies.insert(key, reference.clone()) {
+                    if old != reference {
+                        return Err(CatalogError::CorruptRecord(
+                            "dependency key has unequal full hashes".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(dependencies.into_values().collect())
+    }
+    fn emit(&mut self, record: &Record) -> CatalogResult<RecordRef> {
+        use std::io::Write;
+        self.check()?;
+        match self.resolve(&record.kind, &record.key()?) {
+            Ok(existing) => {
+                if existing.bytes() != record.bytes() {
+                    return Err(CatalogError::ConflictingOutcome(
+                        "addressed export key has unequal full bytes".into(),
+                    ));
+                }
+                return existing.reference();
+            }
+            Err(CatalogError::MissingDependency(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let limits = &self.snapshot.catalog.inner.limits;
+        let cap = if record.kind == "ManifestNode" {
+            self.limits.max_manifest_node_bytes
+        } else {
+            self.limits.max_member_bytes
+        };
+        let size = record.encoded_len(
+            cap.min(limits.allowance(&record.kind)?.max_encoded_bytes)
+                .min(limits.resident_bytes / 4),
+        )?;
+        let next = self
+            .bytes
+            .checked_add(size)
+            .filter(|bytes| *bytes <= limits.unit_bytes)
+            .ok_or_else(|| CatalogError::ResourceIncomplete("export unit byte allowance".into()))?;
+        let reference = record.reference()?;
+        let name = format!(
+            "{}-{}.json",
+            record.kind.to_ascii_lowercase(),
+            record.sha256()
+        );
+        let metadata_bytes = self
+            .members
+            .iter()
+            .try_fold(name.len() as u64, |total, path| {
+                total.checked_add(path.len() as u64).ok_or_else(|| {
+                    CatalogError::ResourceIncomplete("export member inventory".into())
+                })
+            })?;
+        if metadata_bytes > limits.resident_bytes / 64
+            || self.members.len() as u64 >= limits.unit_records
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "bounded export member inventory".into(),
+            ));
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.output.join(&name))?;
+        file.write_all(&record.bytes())?;
+        file.sync_all()?;
+        self.work.execute(
+            "INSERT INTO exports(kind,key,path,level) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![
+                record.kind,
+                record.key()?.canonical(),
+                name,
+                record.record["level"].as_u64().map(|n| n as i64)
+            ],
+        )?;
+        self.members.push(name);
+        self.bytes = next;
+        Ok(reference)
+    }
+    fn enqueue(&self, kind: &str, key: &RecordKey, expected: Option<&str>) -> CatalogResult<()> {
+        use rusqlite::OptionalExtension;
+        self.check()?;
+        let old: Option<Option<String>> = self
+            .work
+            .query_row(
+                "SELECT expected FROM closure WHERE kind=?1 AND key=?2",
+                rusqlite::params![kind, key.canonical()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(old) = old {
+            if old.as_deref().zip(expected).is_some_and(|(a, b)| a != b) {
+                return Err(CatalogError::CorruptRecord(
+                    "transitive full-key hash collision".into(),
+                ));
+            }
+            if old.is_none() && expected.is_some() {
+                self.work.execute(
+                    "UPDATE closure SET expected=?3 WHERE kind=?1 AND key=?2",
+                    rusqlite::params![kind, key.canonical(), expected],
+                )?;
+            }
+        } else {
+            self.work.execute(
+                "INSERT INTO closure(kind,key,expected,done) VALUES(?1,?2,?3,0)",
+                rusqlite::params![kind, key.canonical(), expected],
+            )?;
+        }
+        Ok(())
+    }
+    fn closure_counts(&self, roots: &[RecordRef]) -> CatalogResult<Value> {
+        use rusqlite::OptionalExtension;
+        self.work.execute("DELETE FROM closure", [])?;
+        for root in roots {
+            self.enqueue(&root.kind, &root.id, Some(&root.sha256))?;
+        }
+        loop {
+            self.check()?;
+            let next: Option<(String, String, Option<String>)> = self
+                .work
+                .query_row(
+                    "SELECT kind,key,expected FROM closure WHERE done=0 ORDER BY kind,key LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((kind, key, expected)) = next else {
+                break;
+            };
+            let id: RecordKey = serde_json::from_str(&key)?;
+            if record_kinds().contains(&kind.as_str()) {
+                let record = self.resolve(&kind, &id)?;
+                let actual = record.sha256();
+                if expected.as_ref().is_some_and(|hash| *hash != actual) {
+                    return Err(CatalogError::CorruptRecord(
+                        "transitive dependency bytes changed".into(),
+                    ));
+                }
+                if kind == "Page" {
+                    for inner in record.record["records"]
+                        .as_array()
+                        .expect("validated page records")
+                    {
+                        let inner: Record = serde_json::from_value(inner.clone())?;
+                        let reference = inner.reference()?;
+                        self.enqueue(&reference.kind, &reference.id, Some(&reference.sha256))?;
+                    }
+                }
+                for link in record_links(&record)? {
+                    self.enqueue(&link.kind, &link.key, link.sha256.as_deref())?;
+                }
+                self.work.execute(
+                    "UPDATE closure SET done=1,expected=?3 WHERE kind=?1 AND key=?2",
+                    rusqlite::params![kind, key, actual],
+                )?;
+            } else {
+                if expected.is_none() {
+                    return Err(CatalogError::MissingDependency(
+                        "unhashed external closure leaf".into(),
+                    ));
+                }
+                self.work.execute(
+                    "UPDATE closure SET done=1 WHERE kind=?1 AND key=?2",
+                    rusqlite::params![kind, key],
+                )?;
+            }
+        }
+        let mut counts = serde_json::Map::new();
+        for (field, kind) in count_kinds() {
+            let count: u64 = self.work.query_row(
+                "SELECT count(*) FROM closure WHERE kind=?1",
+                [kind],
+                |row| sqlite::row_uint(row, 0),
+            )?;
+            counts.insert(field.into(), json!(count));
+        }
+        let products = number(&Value::Object(counts.clone()), "products")?;
+        let expansions = number(&Value::Object(counts.clone()), "expansions")?;
+        counts.insert(
+            "frontier".into(),
+            json!(products
+                .checked_sub(expansions)
+                .ok_or_else(|| CatalogError::CorruptRecord(
+                    "dependency closure has more expansions than predecessors".into()
+                ))?),
+        );
+        Ok(Value::Object(counts))
+    }
+    fn manifest(&mut self, level: u64, children: &[RecordRef]) -> CatalogResult<RecordRef> {
+        if children.is_empty() || children.len() > 256 {
+            return Err(CatalogError::CorruptRecord(
+                "bounded nonempty manifest fanout".into(),
+            ));
+        }
+        let counts = self.closure_counts(children)?;
+        let record = Record::addressed(
+            "ManifestNode",
+            json!({"session_id":self.snapshot.catalog.session_id(),"source":self.snapshot.catalog.source(),"sha256":"0".repeat(64),"level":level,"children":children,"counts":counts,"utf8_bytes":0}),
+            self.limits.max_manifest_node_bytes,
+        )?;
+        self.emit(&record)
+    }
+    fn combine_pages(&mut self, pages: &[RecordRef]) -> CatalogResult<Option<(RecordRef, u64)>> {
+        if pages.is_empty() {
+            return Ok(None);
+        }
+        let mut nodes = Vec::new();
+        for group in pages.chunks(256) {
+            nodes.push(self.manifest(0, group)?);
+        }
+        let mut level = 0u64;
+        while nodes.len() > 1 {
+            let mut parents = Vec::new();
+            for group in nodes.chunks(256) {
+                parents.push(self.manifest(level + 1, group)?);
+            }
+            nodes = parents;
+            level += 1;
+        }
+        Ok(Some((nodes.pop().expect("nonempty manifest tree"), level)))
+    }
+}
+fn count_kinds() -> [(&'static str, &'static str); 15] {
+    [
+        ("physical_rows", "PhysicalRows"),
+        ("episodes", "Episode"),
+        ("stores", "Store"),
+        ("oracle_edges", "OracleEvidence"),
+        ("products", "Product"),
+        ("candidates", "Candidate"),
+        ("demands", "Demand"),
+        ("product_edges", "ProductEdge"),
+        ("fair_pairs", "FairPair"),
+        ("enabledness", "Enabledness"),
+        ("expansions", "Expansion"),
+        ("monitor_nodes", "MonitorNode"),
+        ("monitor_edges", "MonitorEdge"),
+        ("components", "Scc"),
+        ("boundaries", "BoundaryObservation"),
+    ]
+}
+impl ReadSnapshot {
+    pub fn export(
+        &self,
+        output: &Path,
+        prior: Option<&Record>,
+        limits: &PageLimits,
+        deadline: std::time::Instant,
+    ) -> CatalogResult<ExportedSnapshot> {
+        if self.closed {
+            return Err(CatalogError::SnapshotUnavailable(
+                "export on closed snapshot".into(),
+            ));
+        }
+        if limits.max_records == 0
+            || limits.max_member_bytes == 0
+            || limits.max_member_bytes > PAGE_BYTES
+            || limits.max_manifest_node_bytes == 0
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "invalid export page allowances".into(),
+            ));
+        }
+        let resource = &self.catalog.inner.limits;
+        let since = if let Some(prior) = prior {
+            let stored = self.catalog.checkpoint_record(&prior.sha256())?;
+            if stored.bytes() != prior.bytes()
+                || prior.record["source"] != json!(self.catalog.source())
+                || prior.record["session_id"] != json!(self.catalog.session_id())
+            {
+                return Err(CatalogError::SnapshotMismatch(
+                    "export prior checkpoint binding".into(),
+                ));
+            }
+            number(&prior.record, "committed_transaction")?
+        } else {
+            0
+        };
+        if since > self.sequence.get() {
+            return Err(CatalogError::SnapshotMismatch(
+                "export prior high-water is in future".into(),
+            ));
+        }
+        std::fs::create_dir_all(output)?;
+        let scratch = output.join(".manifest-closure.sqlite");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&scratch)?;
+        let work = rusqlite::Connection::open(&scratch)?;
+        work.execute_batch(
+            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE;",
+        )?;
+        work.pragma_update(
+            None,
+            "cache_size",
+            -((resource.resident_bytes / 64 / 1024).clamp(1, i32::MAX as u64) as i64),
+        )?;
+        let page_size: u64 =
+            work.query_row("PRAGMA page_size", [], |row| sqlite::row_uint(row, 0))?;
+        work.pragma_update(
+            None,
+            "max_page_count",
+            (resource.scratch_bytes / page_size).min(i64::MAX as u64) as i64,
+        )?;
+        work.execute_batch("CREATE TABLE exports(kind TEXT NOT NULL,key TEXT NOT NULL,path TEXT NOT NULL,level INTEGER,PRIMARY KEY(kind,key)); CREATE TABLE closure(kind TEXT NOT NULL,key TEXT NOT NULL,expected TEXT,done INTEGER NOT NULL,PRIMARY KEY(kind,key)); CREATE INDEX closure_pending ON closure(done,kind,key);")?;
+        let mut builder = ExportBuilder {
+            snapshot: self,
+            output,
+            work,
+            limits,
+            deadline,
+            members: Vec::new(),
+            bytes: 0,
+        };
+        let result = (|| {
+            let mut pages = Vec::new();
+            for kind in record_kinds().iter().filter(|kind| {
+                !matches!(
+                    **kind,
+                    "Page"
+                        | "ManifestNode"
+                        | "Checkpoint"
+                        | "ResourcePlan"
+                        | "Session"
+                        | "WorkUnit"
+                        | "ArtifactReceipt"
+                        | "Completion"
+                )
+            }) {
+                let mut after = None;
+                let mut previous = self.catalog.control(&format!("last_page:{kind}"))?;
+                loop {
+                    builder.check()?;
+                    let batch = self.catalog.inner.storage.borrow().scan(
+                        kind,
+                        after.as_ref(),
+                        since,
+                        &ReadLimits {
+                            max_records: limits.max_records,
+                            max_encoded_bytes: limits
+                                .max_member_bytes
+                                .min(resource.resident_bytes / 8),
+                        },
+                    )?;
+                    if batch.records.is_empty() {
+                        break;
+                    }
+                    let original_count = batch.records.len();
+                    let mut records = batch.records;
+                    let page = loop {
+                        let dependencies = builder.dependencies(&records)?;
+                        let first = records.first().expect("nonempty page").key()?;
+                        let last = records.last().expect("nonempty page").key()?;
+                        let page = Record::addressed(
+                            "Page",
+                            json!({"session_id":self.catalog.session_id(),"source":self.catalog.source(),"page_id":"0".repeat(64),"kind":kind,"first_key":first,"last_key":last,"record_count":records.len(),"utf8_bytes":0,"records":records,"dependencies":dependencies,"previous_page":previous,"previous_checkpoint":prior.map(Record::sha256),"transaction_high_water":self.sequence.get()}),
+                            limits
+                                .max_member_bytes
+                                .min(resource.allowance("Page")?.max_encoded_bytes)
+                                .min(resource.resident_bytes / 4),
+                        );
+                        match page {
+                            Ok(page) => break page,
+                            Err(CatalogError::ResourceIncomplete(_)) if records.len() > 1 => {
+                                records.truncate(records.len() / 2)
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    };
+                    after = Some(records.last().expect("nonempty page").key()?);
+                    previous = Some(page.record["page_id"].clone());
+                    pages.push(builder.emit(&page)?);
+                    if batch.next_after.is_none() && records.len() == original_count {
+                        break;
+                    }
+                }
+            }
+            let current = builder.combine_pages(&pages)?;
+            let root = match (prior, current) {
+                (None, Some((root, _))) => root,
+                (Some(previous), None) => builder
+                    .resolve(
+                        "ManifestNode",
+                        &RecordKey::Text(string(&previous.record, "page_root")?.into()),
+                    )?
+                    .reference()?,
+                (Some(previous), Some((mut new, mut new_level))) => {
+                    let old_record = builder.resolve(
+                        "ManifestNode",
+                        &RecordKey::Text(string(&previous.record, "page_root")?.into()),
+                    )?;
+                    let mut old = old_record.reference()?;
+                    let mut old_level = number(&old_record.record, "level")?;
+                    while old_level < new_level {
+                        old = builder.manifest(old_level + 1, &[old])?;
+                        old_level += 1;
+                    }
+                    while new_level < old_level {
+                        new = builder.manifest(new_level + 1, &[new])?;
+                        new_level += 1;
+                    }
+                    builder.manifest(old_level + 1, &[old, new])?
+                }
+                (None, None) => {
+                    return Err(CatalogError::IncompleteExpansion(
+                        "no actual Init records to export".into(),
+                    ))
+                }
+            };
+            if builder.closure_counts(std::slice::from_ref(&root))? != self.counts()? {
+                return Err(CatalogError::SnapshotMismatch(
+                    "root transitive counts differ from exact source snapshot".into(),
+                ));
+            }
+            Ok(ExportedSnapshot {
+                root,
+                members: builder.members.clone(),
+            })
+        })();
+        drop(builder);
+        std::fs::remove_file(&scratch)?;
+        result
     }
 }
 
@@ -1771,18 +2375,20 @@ mod tests {
         transaction.seal_initial(image, &contexts)?;
         Ok(())
     }
-    fn expand_selfloop(catalog: &Catalog) -> CatalogResult<()> {
+    fn expand_selfloop(catalog: &Catalog, unit: u64) -> CatalogResult<()> {
         let (ticket, product) = catalog.oldest_pending()?.expect("fixture frontier");
-        let tx = catalog.begin_expansion(ticket, product, 1)?;
+        let tx = catalog.begin_expansion(ticket, product, unit)?;
+        let state = catalog.get_id("Product", product.get())?;
+        let context = string(&state.record, "context")?;
         let candidate = catalog.allocate("Candidate")?;
-        catalog.append_record("Candidate",json!({"id":candidate,"context":"base","predecessor":product.get(),"ordinal":0,"family":"fixture_selfloop","worker":null,"choice_utf8":"{}","descriptor_utf8":"{}","classification":"eligible","reason":null}))?;
-        let edge=catalog.append_product_edge(json!({"context":"base","from_product":product.get(),"to_product":product.get(),"candidate":candidate,"branch_utf8":"{}","primary_edge":null,"resolution_edge":null,"read_edge":null,"cleanup_edge":null}))?;
-        let pair = catalog.union_fair_pair("base", product, product, &["Admission".into()])?;
+        catalog.append_record("Candidate",json!({"id":candidate,"context":context,"predecessor":product.get(),"ordinal":0,"family":"fixture_selfloop","worker":null,"choice_utf8":"{}","descriptor_utf8":"{}","classification":"eligible","reason":null}))?;
+        let edge=catalog.append_product_edge(json!({"context":context,"from_product":product.get(),"to_product":product.get(),"candidate":candidate,"branch_utf8":"{}","primary_edge":null,"resolution_edge":null,"read_edge":null,"cleanup_edge":null}))?;
+        let pair = catalog.union_fair_pair(context, product, product, &["Admission".into()])?;
         let enabled = catalog.append_enabledness(
-            json!({"context":"base","product_id":product.get(),"full_graph_labels":[]}),
+            json!({"context":context,"product_id":product.get(),"full_graph_labels":[]}),
         )?;
         let expansion = tx.expansion_id()?.get();
-        tx.seal(json!({"id":expansion,"context":"base","predecessor":product.get(),"fifo_ticket":ticket.get(),"candidates":[candidate],"demands":[],"oracle_evidence":[],"product_edges":[edge.get()],"fair_pairs":[pair],"enabledness":enabled,"discovered_products":[],"capacity_only_stores":[],"unit_ordinal":1,"complete":true}))?;
+        tx.seal(json!({"id":expansion,"context":context,"predecessor":product.get(),"fifo_ticket":ticket.get(),"candidates":[candidate],"demands":[],"oracle_evidence":[],"product_edges":[edge.get()],"fair_pairs":[pair],"enabledness":enabled,"discovered_products":[],"capacity_only_stores":[],"unit_ordinal":unit,"complete":true}))?;
         Ok(())
     }
     #[test]
@@ -1794,7 +2400,7 @@ mod tests {
         let disk = Catalog::disk(config).expect("persistent catalog");
         for catalog in [&memory, &disk] {
             seed(catalog).expect("seed catalog");
-            expand_selfloop(catalog).expect("complete predecessor");
+            expand_selfloop(catalog, 1).expect("complete predecessor");
             let (ticket, product) = catalog
                 .oldest_pending()
                 .expect("frontier")
@@ -1854,14 +2460,53 @@ mod tests {
             .expect("composite-key read");
         assert_eq!(row.records.len(), 1);
         assert_eq!(row.records[0].record["nonstuttering"], false);
+        let page_limits = PageLimits {
+            max_records: 2,
+            max_member_bytes: 256 * 1024,
+            max_manifest_node_bytes: 256 * 1024,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let memory_output = directory.path().join("reference-pages");
+        let disk_output = directory.path().join("sqlite-pages");
+        let memory_export = a
+            .export(&memory_output, None, &page_limits, deadline)
+            .expect("reference dependency closure export");
+        let disk_export = b
+            .export(&disk_output, None, &page_limits, deadline)
+            .expect("SQLite dependency closure export");
+        assert_eq!(
+            memory_export.root, disk_export.root,
+            "same exact records imply same addressed root"
+        );
+        assert_eq!(memory_export.members, disk_export.members);
+        for member in &memory_export.members {
+            assert_eq!(
+                std::fs::read(memory_output.join(member)).expect("reference member"),
+                std::fs::read(disk_output.join(member)).expect("SQLite member")
+            );
+        }
         a.close().expect("close reference");
         b.close().expect("close disk");
+        for (catalog, output, export) in [
+            (&memory, &memory_output, &memory_export),
+            (&disk, &disk_output, &disk_export),
+        ] {
+            for member in &export.members {
+                let record = Record::parse(
+                    &std::fs::read(output.join(member)).expect("closed exported bytes"),
+                )
+                .expect("closed export record");
+                catalog
+                    .register_export(&record)
+                    .expect("post-snapshot immutable export bookkeeping");
+            }
+        }
         // Bookkeeping is deliberately after the pinned semantic snapshot and
         // before the actual SQLite backup. No current artifact hashes enter it.
         let snapshot = disk
             .pin_read_snapshot(disk.current_transaction().expect("checkpoint sequence"))
             .expect("pin checkpoint");
-        let checkpoint=Record::new("Checkpoint",json!({"session_id":disk.session_id(),"sequence":0,"source":disk.source(),"initial_image_id":"a".repeat(64),"resource_plan_sha256":disk.resource_plan().sha256(),"unit_ordinal":1,"previous_checkpoint":null,"committed_transaction":snapshot.transaction().get(),"oldest_pending_ticket":ticket.get(),"counts":snapshot.counts().expect("checkpoint counts"),"contexts":snapshot.context_snapshots().expect("checkpoint contexts"),"page_root":"d".repeat(64),"catalog_logical_digest":snapshot.logical_digest().expect("checkpoint digest")})).expect("closed checkpoint");
+        let checkpoint=Record::new("Checkpoint",json!({"session_id":disk.session_id(),"sequence":0,"source":disk.source(),"initial_image_id":"a".repeat(64),"resource_plan_sha256":disk.resource_plan().sha256(),"unit_ordinal":1,"previous_checkpoint":null,"committed_transaction":snapshot.transaction().get(),"oldest_pending_ticket":ticket.get(),"counts":snapshot.counts().expect("checkpoint counts"),"contexts":snapshot.context_snapshots().expect("checkpoint contexts"),"page_root":disk_export.root.id,"catalog_logical_digest":snapshot.logical_digest().expect("checkpoint digest")})).expect("closed checkpoint");
         let unit=Record::new("WorkUnit",json!({"session_id":disk.session_id(),"unit_ordinal":1,"expected_prior_checkpoint":null,"source":disk.source(),"pr":1,"repository":1,"event_base":"0".repeat(40),"workflow_id":"async-proof-session.yml","event_name":"workflow_dispatch","mode":"unit","run":1,"job":1,"task":1,"attempt":1,"resource_plan_sha256":disk.resource_plan().sha256(),"runner_identity_utf8":"{}","status":"checkpointed_incomplete","artifact_roots":[],"stage":"expand","registered_cases":[],"progress":{"context":null,"record_kind":null,"after_key":null,"fifo_ticket":ticket.get(),"component_id":null,"family":null,"case_index":0}})).expect("private unit");
         assert!(
             disk.record_checkpoint(&checkpoint, &unit).is_err(),
@@ -1895,6 +2540,62 @@ mod tests {
             checkpoint.record["catalog_logical_digest"]
         );
         drop(restored);
+        let old_root = disk
+            .exported_record("ManifestNode", &disk_export.root.id)
+            .expect("immutable prior root");
+        expand_selfloop(&disk, 2).expect("next global FIFO predecessor");
+        let next_snapshot = disk
+            .pin_read_snapshot(disk.current_transaction().expect("new high-water"))
+            .expect("pin new source snapshot");
+        let next_output = directory.path().join("next-unit-pages");
+        let next = next_snapshot
+            .export(&next_output, Some(&checkpoint), &page_limits, deadline)
+            .expect("incremental export retains exact prior dependency closure");
+        assert_ne!(next.root, disk_export.root);
+        let mut next_checkpoint = checkpoint.record.clone();
+        next_checkpoint["sequence"] = json!(1);
+        next_checkpoint["unit_ordinal"] = json!(2);
+        next_checkpoint["previous_checkpoint"] = json!(checkpoint.sha256());
+        next_checkpoint["committed_transaction"] = json!(next_snapshot.transaction());
+        next_checkpoint["oldest_pending_ticket"] = json!(
+            disk.oldest_pending()
+                .expect("new FIFO head")
+                .expect("pending")
+                .0
+        );
+        next_checkpoint["counts"] = next_snapshot.counts().expect("new counts");
+        next_checkpoint["contexts"] =
+            json!(next_snapshot.context_snapshots().expect("new contexts"));
+        next_checkpoint["page_root"] = json!(next.root.id);
+        next_checkpoint["catalog_logical_digest"] =
+            json!(next_snapshot.logical_digest().expect("new logical digest"));
+        next_snapshot.close().expect("close next snapshot");
+        for member in &next.members {
+            let record =
+                Record::parse(&std::fs::read(next_output.join(member)).expect("new member bytes"))
+                    .expect("new closed member");
+            disk.register_export(&record)
+                .expect("new immutable export registration");
+        }
+        assert_eq!(
+            disk.exported_record("ManifestNode", &disk_export.root.id)
+                .expect("prior root unchanged")
+                .bytes(),
+            old_root.bytes()
+        );
+        let next_checkpoint = Record::new("Checkpoint", next_checkpoint).expect("next checkpoint");
+        let mut next_unit = unit.record.clone();
+        next_unit["unit_ordinal"] = json!(2);
+        next_unit["expected_prior_checkpoint"] = json!(checkpoint.sha256());
+        disk.record_checkpoint(
+            &next_checkpoint,
+            &Record::new("WorkUnit", next_unit).expect("next private unit"),
+        )
+        .expect("monotone checkpoint chain");
+        assert!(
+            disk.record_checkpoint(&checkpoint, &unit).is_err(),
+            "cannot replay an old checkpoint over new progress"
+        );
         let tamper = rusqlite::Connection::open(&backup).expect("fixture tamper writer");
         tamper
             .execute(

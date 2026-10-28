@@ -15,6 +15,7 @@ struct State {
     sequence: u64,
     records: BTreeMap<(String, RecordKey), Record>,
     counters: BTreeMap<String, u64>,
+    created: BTreeMap<(String, RecordKey), u64>,
     controls: BTreeMap<String, Value>,
     frontier: BTreeMap<u64, (u64, bool)>,
     initial: BTreeMap<String, u64>,
@@ -137,6 +138,12 @@ impl Storage for MemoryStorage {
                 ));
             }
         }
+        let sequence = self
+            .state
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| CatalogError::NumericDomain("reference commit".into()))?;
+        self.state.created.entry(key.clone()).or_insert(sequence);
         self.state.records.insert(key, record.clone());
         self.within_bounds()
     }
@@ -162,6 +169,7 @@ impl Storage for MemoryStorage {
         &self,
         kind: &str,
         after: Option<&RecordKey>,
+        after_transaction: u64,
         limits: &ReadLimits,
     ) -> CatalogResult<RecordBatch> {
         if limits.max_records == 0 || limits.max_encoded_bytes == 0 {
@@ -173,7 +181,16 @@ impl Storage for MemoryStorage {
         let mut bytes = 0u64;
         let mut more = false;
         for ((k, key), record) in &self.state.records {
-            if k != kind || after.is_some_and(|after| key <= after) {
+            if k != kind
+                || after.is_some_and(|after| key <= after)
+                || self
+                    .state
+                    .created
+                    .get(&(k.clone(), key.clone()))
+                    .copied()
+                    .unwrap_or(0)
+                    <= after_transaction
+            {
                 continue;
             }
             let size = record.bytes().len() as u64;
@@ -347,6 +364,45 @@ impl Storage for MemoryStorage {
             serde_json::to_value(work_unit)?,
         );
         Ok(())
+    }
+    fn save_export(&mut self, record: &Record) -> CatalogResult<()> {
+        if self.reading || self.prior.is_some() {
+            return Err(CatalogError::SnapshotMismatch(
+                "reference export writer active".into(),
+            ));
+        }
+        let key = format!("export:{}:{}", record.kind, record.key()?.canonical());
+        if let Some(old) = self.state.controls.get(&key) {
+            if *old != serde_json::to_value(record)? {
+                return Err(CatalogError::ConflictingOutcome(
+                    "reference immutable export".into(),
+                ));
+            }
+            return Ok(());
+        }
+        self.state
+            .controls
+            .insert(key, serde_json::to_value(record)?);
+        let count_key = format!("export_count:{}", record.kind);
+        let old = self
+            .state
+            .controls
+            .get(&count_key)
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.state.controls.insert(
+            count_key,
+            serde_json::json!(old
+                .checked_add(1)
+                .ok_or_else(|| CatalogError::NumericDomain("export count".into()))?),
+        );
+        if record.kind == "Page" {
+            self.state.controls.insert(
+                format!("last_page:{}", string(&record.record, "kind")?),
+                record.record["page_id"].clone(),
+            );
+        }
+        self.within_bounds()
     }
     fn check_private(&self, checkpoint: &Record) -> CatalogResult<()> {
         if number(&checkpoint.record, "committed_transaction")? != self.state.sequence {
