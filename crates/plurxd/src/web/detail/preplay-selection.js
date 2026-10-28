@@ -984,7 +984,8 @@ let PLAYER_HANDOFF={generation:0,bypass:null,last:null};
 function linuxPlayerClient(){
   if(typeof navigator==="undefined") return false;
   if(/Android|CrOS/i.test(navigator.userAgent||"")) return false;
-  const platform=navigator.userAgentData?.platform||navigator.platform||"";
+  const client=/** @type {Navigator & {userAgentData?:{platform?:string}}} */(navigator);
+  const platform=client.userAgentData?.platform||client.platform||"";
   return /^Linux\b/i.test(platform);
 }
 function openInPreference(){
