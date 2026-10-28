@@ -5,9 +5,11 @@
 
 Companion to the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) and
 [delivery checklist](ADAPTIVE-PLAYBACK-DELIVERY.md). PR #1293 targets effort
-PR #1248. Source is committed and reviewed through ordinary Git. No behavioral
-or mutation tests have run. Completed-candidate independent review and fixes
-must precede those tests; the bounded design review grants no final acceptance.
+PR #1248. Source is committed and reviewed through ordinary Git. Required
+behavioral tests are now authorized and running after the supplied source review
+and fixes. The incomplete 00811689a core survey recorded 16 passes and 41
+failures; those failures remain qualification blockers. Mutation tests have not
+run. The bounded design review grants no final implementation acceptance.
 
 The user supplied a review attributed to Claude Opus 5.5, dated 2026-10-26,
 against implementation `46dc2805b9b6688b5052494605250898a6b105c7` and document
@@ -17,8 +19,9 @@ execution. That original request and manifest remain available at `8b6331e`.
 The supplied review's SHA-256 is
 `dc9df50930130a30adee9ec91a52e62bf06392509d25e8bff677dc7439505672`.
 The current [source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW-SOURCE.json)
-pins implementation `9903421c871c0146b8030bc88c51340403ba8134` after the review fixes; it establishes source identity,
-not execution or approval evidence.
+pins the earlier published implementation `9903421c871c0146b8030bc88c51340403ba8134`.
+Later local fixes and failed-run evidence are recorded below. The manifest will
+be refreshed after current-source checks; it grants no execution or approval.
 
 **Original** means the same retained instance: Child/ChildJob, JoinHandle,
 source or pipe cell, latch, graph custody and named operation. Reopening a
@@ -389,3 +392,30 @@ application-alias barrier or change/next-arm guard is relaxed. Missing native
 owners still prevent the driver from issuing a close fact. The existing actual
 copy-prefix and software cleanup regressions cover this repair; compilation
 and execution of the new source remain pending.
+
+## 14. Actual cleanup qualification and repairs
+
+The first actual native campaigns found constructor and lifecycle failures;
+these are failed runs, not acceptance. At 00811689a the incomplete survey
+recorded 57 cases: 16 passed and 41 failed. Its next isolated-process fixture
+printed both child and parent harness summaries; reporting stopped rather than
+crediting an ambiguous count. Later reporting uses the exact outer case's final
+anchored summary and retains all nested logs, command exits and source hashes.
+A nonzero exit or any failed case still fails the campaign.
+
+The directory lender now validates the entire original inventory before lending
+an action's exact subset. Child-only and parent-only jobs retain unused Files;
+restoration returns the same originals. Sticky registration markers distinguish
+unissued publication/sync from missing issued owners. No absent issued owner
+can authorize retirement or transfer, and refusal precedes destructive cleanup.
+
+The survey then exposed a journal invariant violation: child removal kept the
+quiescent directory-sync marker while registering another native job. The fold
+now requires the actual prior sync, consumes its marker on removal Arm, and
+keeps the output validator unchanged. Retirement no longer syncs a removed
+child. An already-held role may observe its original prefix without authorizing
+fresh entry. Software fixtures now request their actual 24 fps cadence.
+These repairs and real missing-owner/checked-close regressions require their
+own current-source execution; earlier failures and isolated passes do not
+establish a complete candidate pass. The Direct typed-prepare schema rejection,
+publication/full-window failures, and broader delivery milestones remain open.

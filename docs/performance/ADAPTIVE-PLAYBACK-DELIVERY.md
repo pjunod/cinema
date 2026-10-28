@@ -1,13 +1,17 @@
 # Adaptive playback — finite delivery closure
 
 **Status:** open · implementation active · updated 2026-10-28. PR #1248 on
-`effort/adaptive-playback-resources` is the sole effort. Current main
-`77e9858277813456bb94e855ec62ed3e9fd65af8` is merged into effort `5cf30d1470eb40ca0359eb2372e8a46dc447cc53`; draft task PR #1293 remains
-separate and unmerged. The user-supplied Opus implementation review examined
-5267/c108. Its findings and the current source dispositions are recorded in
-[the review document](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md). No new independent
-approval is inferred. Behavioral/native-workload/model/mutation tests remain
-NOT RUN; the user authorizes required tests after the fixes. No Hermes or external API review is dispatched.
+`effort/adaptive-playback-resources` is the sole effort. Local integration
+contains main `f2120bd9ad1770f27b16e5cefef82cf5efaa72c4` in effort
+`96ab7f0e82dee43efdd2dd703d68325ce76c737f`; task PR #1293 remains unmerged. These local changes
+are not the previously published CI candidate. The supplied Opus implementation
+review examined 5267/c108; its source findings remain in
+[the review document](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md).
+Required behavioral tests are authorized and underway. The incomplete native
+survey at `00811689a1a5dc218d3a5330a29d87b165b4a1df` recorded 16 passes
+and 41 failures before its subprocess-summary check stopped the campaign.
+A separate web regression passed at 2f0a. No full behavioral, model, mutation
+or workload qualification is claimed. No new external review is dispatched.
 V1–V5 and R1/M0–M7 remain OPEN.
 
 The copy driver retains the same NeverRoot/RootOnly/Joined witnesses and
@@ -30,7 +34,7 @@ Genuine uncertainty retains its existing operation reservation and blocks
 planned-restart drain/commit; unrelated starts use normal capacity, phase,
 readiness and identity checks. No sticky uncertainty is cleared or refunded.
 C5's later source follow-up separates live-ticket custody from repair selection;
-its regression bodies are authored and new compiler checks are pending.
+its regression bodies now run, with cleanup failures still under repair.
 
 Preparation retains its controller through positive join and same-operation
 Store proof. Selected Linux software SDR Source planning retains original P/M
@@ -40,7 +44,7 @@ executor peaks, P/legacy CPU coexistence, shared storage/provisional recovery,
 broader adapters and selective recovery remain open. Earlier compiler results
 and authored regressions do not close these acceptance gaps.
 
-**Compiler evidence:** exact source `9903421c871c0146b8030bc88c51340403ba8134` passed
+**Earlier published compiler evidence:** exact source `9903421c871c0146b8030bc88c51340403ba8134` passed
 native x86_64 Rust1.97.1 core+daemon all-target+cluster strict Clippy in
 375.492s, source stable; log SHA-256
 `919eea478ff0ea42843fee5443505c4e82bf6757cb6b8f698accf5fc758fa675`.
