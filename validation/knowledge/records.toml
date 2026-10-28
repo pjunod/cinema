@@ -189,7 +189,7 @@ id = "plurx:symbol:reviewed.receipt.inputs"
 path = "validation/main_preflight_adoption.py"
 kind = "symbol"
 selector = "def input_digest("
-digest = "sha256:ce7599264b973786d4fbb1d4c0a105d6e3d692f21f528779145a1de7ccb6aeb4"
+digest = "sha256:eb5ae6cf6be70f696a670a9237ac2f9e3fad49f00ab25aed69e41cc779d26a30"
 owner_module = "validation/main_preflight_adoption.py"
 
 [[records]]
