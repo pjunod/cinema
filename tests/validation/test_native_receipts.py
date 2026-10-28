@@ -236,3 +236,23 @@ class NativeReceiptTests(unittest.TestCase):
         api = API()
         self.assertEqual(native.native_artifacts(api, 100), eligible)
         self.assertEqual(api.calls, 1)
+
+    def test_original_pass_adopts_build_and_test_operations_with_original_provenance(self):
+        for family, name, operations in [
+                ('tv_navigation', 'tv-navigation-10-1', ['make apple-build', 'make apple-tv-navigation-test']),
+                ('desktop_macos', 'desktop-macos-check-10-1', ['make desktop-macos-check'])]:
+            artifact = {'id': 3, 'run_id': 10, 'name': name}
+            origin = {'commit': 'original', 'run': 10, 'job': 8, 'artifact': 3,
+                      'environment_contract': {}}
+            with self.subTest(family=family), patch.object(native, 'origin', return_value=origin), \
+                    patch.object(native, 'unchanged', return_value=True), \
+                    patch.object(native, 'download', return_value=io.BytesIO()), \
+                    patch.object(native, 'archive_member', return_value=b'{}'), \
+                    patch.object(native, 'verify_tv'), patch.object(native, 'verify_desktop'), \
+                    patch.object(native, 'input_digest', return_value='inputs'):
+                record = native.adopt(None, {}, 'current', 20, [artifact])[family]
+                self.assertEqual(record['operations'], operations)
+                self.assertEqual(record['commit'], 'original')
+                self.assertEqual(record['run'], 10)
+                self.assertEqual(record['disposition'], 'adopted')
+                self.assertNotIn('status', record)

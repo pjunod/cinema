@@ -1,8 +1,9 @@
 """Authenticate original native passes and retain them for unchanged inputs.
 
 This emits adoption evidence, never a replacement native pass. The current
-Apple job still verifies its pinned tools and compiles the dispatched source.
-Historical failures or incomplete proof simply leave the original tests due.
+Apple job still verifies its pinned tools. A successful original job and its
+reviewed producer bind both build and test operations to the unchanged inputs.
+Historical failures or incomplete proof leave both builds and tests due.
 The schema-1 producer did not record a macOS build fingerprint: compatibility
 here is the original workflow's pinned Xcode/architecture/runtime contract,
 not a claim that the host OS or physical-device acceptance was reproduced.
@@ -386,7 +387,14 @@ def adopt(api, scope, current, run_id, artifacts):
                 record['environment_contract']['runtime'] = RUNTIME
             else:
                 verify_desktop(data)
-            adopted[family] = {**record, 'disposition': 'adopted',
+            # A TV original artifact requires apple scope, whose reviewed job
+            # runs apple-build before the journeys. A desktop original XCTest
+            # log requires desktop-macos-check, including both native slices.
+            # Adopted jobs emit no TV original artifact and no desktop XCTest
+            # summary, so adoption records cannot become original evidence.
+            operations = (['make apple-build', 'make apple-tv-navigation-test']
+                          if family == 'tv_navigation' else ['make desktop-macos-check'])
+            adopted[family] = {**record, 'disposition': 'adopted', 'operations': operations,
                 'original_member_sha256': hashlib.sha256(data).hexdigest(),
                 'inputs': INPUTS[family],
                 'input_digest': input_digest(record['commit'], {'inputs': INPUTS[family]})}
@@ -394,7 +402,7 @@ def adopt(api, scope, current, run_id, artifacts):
         except IntegrityError:
             raise
         except UNADOPTABLE_NATIVE as error:
-            print(f"Native artifact {artifact.get('id')}: not adopted — {reason(error)}; tests remain due")
+            print(f"Native artifact {artifact.get('id')}: not adopted — {reason(error)}; builds and tests remain due")
     return adopted
 
 
@@ -408,7 +416,7 @@ def main():
     except IntegrityError:
         raise
     except UNADOPTABLE_NATIVE as error:
-        print(f'Native history unavailable — {reason(error)}; tests remain due')
+        print(f'Native history unavailable — {reason(error)}; builds and tests remain due')
         adopted = {}
     report = {'version': 1, 'scope': scope, 'current_commit': current,
               'current_run': run_id, 'adoptions': adopted,

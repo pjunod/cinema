@@ -2373,7 +2373,8 @@ assert.equal(context.ACT_TIMER, null);
                 desktop_name = ("Compile native macOS server tray" if "effort-ci" in path
                                 else "Build and test native macOS server tray")
                 desktop = steps[desktop_name]
-                # Even retained mobile units must never suppress a selected tray check.
+                # Retained mobile evidence never suppresses the independent tray step.
+                # Only its own authenticated native proof can adopt tray operations.
                 self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True))
                 self.assertTrue(enabled(workflow_step_scalar(desktop, "if"),
                                         apple=False, desktop=True, retained=True))
@@ -2409,6 +2410,7 @@ assert.equal(context.ACT_TIMER, null);
                     }:
                         continue
                     if path.endswith("main-fast-lane.yml") and name in {
+                        "Compile iOS and tvOS without running simulator tests",
                         "Require native TV navigation journeys",
                         "Preserve TV navigation evidence including failures",
                     }:
@@ -2427,7 +2429,11 @@ assert.equal(context.ACT_TIMER, null);
                         self.assertFalse(enabled(workflow_step_scalar(step, "if"),
                                                  apple=True, desktop=False, retained=False))
                         continue
-                    if name in {"Verify the pinned Apple toolchain", desktop_name}:
+                    if name == "Verify the pinned Apple toolchain":
+                        self.assertNotIn("if:", step)
+                        self.assertIn('grep -Fxq "Build version 27A9275"', step)
+                        continue
+                    if name == desktop_name:
                         continue
                     # Existing mobile work and its always-run artifacts/cleanup are
                     # conditional, so a tray-only selection creates no simulators.
@@ -2460,23 +2466,35 @@ assert.equal(context.ACT_TIMER, null);
                             "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NATIVE_TRAY_ARGS\"\nprintf '%s\\n' \"" +
                             case_line + "\"\nexit \"$NATIVE_TRAY_FAKE_EXIT\"\n", encoding="utf-8")
                         fake_make.chmod(0o755)
+                        log = root / "target/validation/desktop-macos-check.log"
+                        log.parent.mkdir(parents=True)
+                        log.write_text("Test Suite 'All tests' passed\nExecuted 61 tests, with 0 failures (0 unexpected)\n")
                         completed = subprocess.run(
                             ["/bin/sh", "-eu", "-c", commands], cwd=root,
                             env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
                                  "NATIVE_TRAY_FAKE_EXIT": str(status),
                                  "NATIVE_TRAY_ARGS": str(args_file)},
                             capture_output=True, text=True, check=False)
-                        self.assertEqual(completed.returncode, status)
-                        expected_target = "desktop-macos-build" if adopted else "desktop-macos-check"
-                        self.assertEqual(args_file.read_text().strip(), expected_target)
+                        self.assertEqual(completed.returncode, 0 if adopted else status)
                         self.assertNotIn("Test Case", completed.stdout + completed.stderr)
                         log = root / "target/validation/desktop-macos-check.log"
-                        self.assertEqual(log.read_text().strip(), case_line)
-                        if status == 0 and adopted:
-                            self.assertIn("tests adopted", completed.stdout)
-                        elif status == 0:
-                            self.assertIn("checks passed", completed.stdout)
+                        if adopted:
+                            self.assertFalse(args_file.exists(), "adopted builds and tests invoke no make target")
+                            self.assertIn("builds and tests adopted", log.read_text())
+                            self.assertIn("native-adoption artifact", log.read_text())
+                            self.assertNotIn("Test Suite", log.read_text())
+                            self.assertNotIn("Test Case", log.read_text())
+                            from validation.native_receipts import verify_desktop
+                            from validation.python_unit_receipts import ReceiptError
+                            with self.assertRaises(ReceiptError):
+                                verify_desktop(log.read_bytes())
+                            self.assertIn("builds and tests adopted", completed.stdout)
                         else:
+                            self.assertEqual(args_file.read_text().strip(), "desktop-macos-check")
+                            self.assertEqual(log.read_text().strip(), case_line)
+                        if not adopted and status == 0:
+                            self.assertIn("checks passed", completed.stdout)
+                        elif not adopted:
                             self.assertNotIn("tests adopted", completed.stdout)
                             self.assertNotIn("checks passed", completed.stdout)
 
@@ -2510,7 +2528,8 @@ assert.equal(context.ACT_TIMER, null);
             commands = [line.strip() for line in commands if line.strip()]
             if path.endswith("main-fast-lane.yml"):
                 self.assertIn('if [ "${{ steps.native_receipts.outputs.desktop_macos }}" = "true" ]; then', commands)
-                self.assertIn("make desktop-macos-build > target/validation/desktop-macos-check.log 2>&1", commands)
+                self.assertFalse(any("make desktop-macos-build" in command for command in commands))
+                self.assertTrue(any("builds and tests adopted" in command and "> target/validation/desktop-macos-check.log" in command for command in commands))
                 self.assertIn("else", commands)
                 self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
                 self.assertTrue(any("tests adopted" in line for line in commands))

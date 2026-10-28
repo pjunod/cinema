@@ -27,14 +27,22 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 self.assertNotIn("continue-on-error", apple_job)
                 # This job also serves the native macOS tray. Mobile TV
                 # journeys execute unless verified compatible native evidence
-                # is retained. Compilation and promotion still depend on this job.
+                # is retained. Builds share that proof; promotion still depends
+                # on this current job and its pinned toolchain checks.
                 expected_guard = "needs.scope.outputs.apple == 'true'"
                 if path == ".github/workflows/ci.yml":
                     expected_guard += " && needs.scope.outputs.retain_apple != 'true'"
                 else:
                     expected_guard += " && steps.native_receipts.outputs.tv_navigation != 'true'"
                     self.assertIn("run: python3 -m validation.native_receipts", apple_job)
-                    self.assertIn("run: make apple-build", apple_job)
+                    build = apple_job.split("- name: Compile iOS and tvOS without running simulator tests", 1)[1].split("- name:", 1)[0]
+                    self.assertEqual(re.findall(r"^        if: (.+)$", build, re.MULTILINE), [expected_guard])
+                    self.assertIn("run: make apple-build", build)
+                    tools = apple_job.split("- name: Verify the pinned Apple toolchain", 1)[1].split("- name:", 1)[0]
+                    self.assertNotIn("if:", tools)
+                    mobile_tools = apple_job.split("- name: Verify the pinned mobile Apple toolchain", 1)[1].split("- name:", 1)[0]
+                    self.assertEqual(re.findall(r"^        if: (.+)$", mobile_tools, re.MULTILINE), ["needs.scope.outputs.apple == 'true'"])
+                    self.assertIn('test "$(xcodegen --version)" = "Version: 2.46.0"', mobile_tools)
                     self.assertIn("path: .main-preflight-receipts/native/receipt.json", apple_job)
                     self.assertIn("name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}", apple_job)
                 self.assertEqual(
