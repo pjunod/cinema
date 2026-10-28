@@ -151,8 +151,6 @@ test("file route census allows only explicit local administration and reader exc
     "player/continuous-quality.js":["`/files/${fileId}/hls/continuous-candidates`","`/files/${fileId}/hls/continuous-sessions`"],
     // Progressive translation is Local-only: the player refuses any non-local file context before a request.
     "player/subtitle-translation.js":["`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/options`","`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/assets?cursor=${encodeURIComponent(cursor)}`","`/files/${encodeURIComponent(state.fileId)}/subtitle-translation`"],
-    // Text translation is Local-only too: openTextSubtitleTranslation refuses a non-local file context before a request.
-    "player/subtitle-text-translation.js":["`/files/${encodeURIComponent(state.fileId)}/subtitle-text-translation/options`","`/files/${encodeURIComponent(state.fileId)}/subtitles/${source.index}/translation`"],
   };
   const seen=new Set(),unexpected=[];
   for(const file of shellSource().rows.body){
