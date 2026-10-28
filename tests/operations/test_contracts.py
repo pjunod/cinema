@@ -2280,7 +2280,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('RUST_TEST_THREADS: "2"', coverage)
         steps = workflow_step_blocks(coverage)
         install = steps["Install coverage prerequisites"]
-        for package in ("git", "jq", "nodejs", "python3", "build-essential", "clang"):
+        for package in (
+            "git", "jq", "nodejs", "python3", "build-essential", "clang",
+            "libssl-dev", "libgtk-4-dev", "libdbus-1-dev",
+        ):
             self.assertRegex(install, rf"\b{package}\b")
         self.assertLess(
             coverage.index("Install coverage prerequisites"),
