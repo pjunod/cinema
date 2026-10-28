@@ -2152,3 +2152,371 @@ async fn copy_missing_registered_publication_owner_holds_r_until_same_owner_rest
 async fn copy_missing_registered_sync_owner_holds_r_until_same_owner_restored() {
     missing_registered_native_io_keeps_original_charge(false).await;
 }
+
+// Each irreversible errno filter runs in its own harness subprocess and on
+// its current Tokio thread. These cases require actual kernel syscall errors;
+// absence of the expected syscall/errno fails rather than supplying coverage.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod syscall_failures {
+    use super::*;
+    use crate::adaptive_resources::runtime::copy_vod::{CopyCloseTicket, CopyPipeCommand};
+    use crate::adaptive_resources::runtime::finite_vod::SoftwareAvcExecutable;
+    use sha2::{Digest, Sha256};
+
+    fn subprocess_root(env: &str, test: &str) -> Option<std::path::PathBuf> {
+        if let Some(root) = std::env::var_os(env) {
+            return Some(root.into());
+        }
+        let root = tempfile::tempdir().expect("isolated original root errno fixture");
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("same test harness"))
+                .args(["--exact", test, "--nocapture"])
+                .env(env, root.path())
+                .output()
+                .expect("isolated errno subprocess");
+        assert!(
+            output.status.success(),
+            "original errno fixture failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("original-root-errno-and-alias-closure-verified"),
+            "subprocess did not reach actual original wait/alias assertions"
+        );
+        None
+    }
+
+    async fn pausing_root(
+        root: &Path,
+    ) -> (
+        Arc<NodeResourceRuntime>,
+        CopyVodOwner,
+        OwnedPreparation,
+        SealedPhysicalGraph,
+        GraphRoot,
+    ) {
+        let (runtime, mut request) =
+            NodeResourceRuntime::fixture_actual_copy_request(root, false).await;
+        let source = root.join("original-pausing-child.c");
+        let binary = root.join("original-pausing-child");
+        // This is the original pre-R executable, not replacement work or an
+        // output hook. The alarm is only a bounded fixture death backstop;
+        // expiration before the asserted alive/error boundary fails the test.
+        std::fs::write(
+            &source,
+            br#"#include <unistd.h>
+int main(void) { alarm(20); for (;;) pause(); }
+"#,
+        )
+        .expect("real ELF fixture source");
+        let compiler = std::env::var_os("PLURX_TEST_CC").unwrap_or_else(|| "/usr/bin/cc".into());
+        let built = std::process::Command::new(compiler)
+            .args(["-O0", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .output()
+            .expect("actual C compiler required");
+        assert!(
+            built.status.success(),
+            "real child compilation: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let binary = std::fs::canonicalize(binary).expect("original ELF path");
+        let identity = crate::source_identity::SourceIdentity::from_metadata(
+            &std::fs::metadata(&binary).expect("original ELF metadata"),
+        );
+        let digest = hex::encode(Sha256::digest(
+            std::fs::read(&binary).expect("original ELF bytes"),
+        ));
+        request.command = CopyPipeCommand::compile(
+            request.command.source().clone(),
+            request.command.video(),
+            SoftwareAvcExecutable::new(binary, identity, &digest)
+                .expect("original immutable ELF binding"),
+            root.to_owned(),
+            None,
+            false,
+            crate::transcode::Pacing::unpaced(),
+            None,
+        )
+        .expect("original fixed recipe selected before R");
+        let mut owner = runtime
+            .prepare_copy_vod(request, deadline())
+            .await
+            .expect("same original R");
+        let preparation = NodeResourceRuntime::fixture_copy_original_preparation(&owner);
+        cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::RootRegistered).await;
+        let (graph, child) = {
+            let mut bundle = preparation.state.lock().await;
+            let role = &mut bundle.roles[0];
+            let copy = role.copy_vod.as_ref().expect("original copy");
+            assert!(copy.task.is_none() && copy.fixed_image.is_some());
+            let child = role.roots[&copy.root_member];
+            role.sealed = Some(role.graph.take().expect("same original graph").seal());
+            (
+                role.sealed.as_ref().expect("same graph").select_same(),
+                child,
+            )
+        };
+        assert!(graph
+            .try_wait_root(child)
+            .await
+            .expect("actual original alive check")
+            .is_none());
+        (runtime, owner, preparation, graph, child)
+    }
+
+    async fn original_ids(preparation: &OwnedPreparation) -> (Uuid, Uuid, Uuid, Uuid) {
+        let bundle = preparation.state.lock().await;
+        let copy = bundle.roles[0]
+            .copy_vod
+            .as_ref()
+            .expect("same original identity");
+        (
+            copy.root_member,
+            copy.task_member,
+            copy.acquisition_id,
+            copy.settlement_operation_id,
+        )
+    }
+
+    async fn assert_held(preparation: &OwnedPreparation, ids: (Uuid, Uuid, Uuid, Uuid)) {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role.copy_vod.as_ref().expect("original copy remains owned");
+        assert_eq!(
+            (
+                copy.root_member,
+                copy.task_member,
+                copy.acquisition_id,
+                copy.settlement_operation_id
+            ),
+            ids
+        );
+        assert!(!role.refunded && role.pending_finite_close.is_none());
+        assert!(
+            copy.never_root_closure.is_none()
+                && copy.root_only_closure.is_none()
+                && copy.process_closure.is_none()
+        );
+        assert!(copy.fixed_image.is_some() && copy.task.is_none());
+    }
+
+    async fn finish_aliases<L>(
+        runtime: Arc<NodeResourceRuntime>,
+        owner: CopyVodOwner,
+        preparation: OwnedPreparation,
+        output: CopyOutput,
+        application: L,
+        mut ticket: CopyCloseTicket,
+        expected: (ResourceVector, Uuid),
+    ) {
+        let (charge, settlement) = expected;
+        assert_eq!(pending_command(&preparation, false).await, settlement);
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(owner);
+        assert!(ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err());
+        assert_eq!(pending_command(&preparation, false).await, settlement);
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(output);
+        assert!(ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err());
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(preparation);
+        drop(application);
+        ticket
+            .finish_retirement(deadline())
+            .await
+            .expect("actual original closure after all aliases");
+        assert_eq!(
+            runtime.accounting().unwrap().used,
+            ResourceVector::default()
+        );
+        drop(ticket);
+        Arc::try_unwrap(runtime)
+            .ok()
+            .expect("sole original runtime")
+            .drain()
+            .expect("actual journal drain");
+    }
+
+    fn complete() -> ! {
+        use std::io::Write;
+        writeln!(
+            std::io::stdout(),
+            "original-root-errno-and-alias-closure-verified"
+        )
+        .unwrap();
+        std::io::stdout().flush().unwrap();
+        // R reached zero only through actual wait/native close/journal/alias
+        // finalization above. Teardown of this filtered harness is no witness.
+        std::process::exit(0)
+    }
+
+    #[test]
+    fn copy_real_original_kill_eperm_waits_same_child_and_preserves_alias_charge() {
+        const ENV: &str = "PLURX_COPY_KILL_ERRNO_CHILD_ROOT";
+        const TEST: &str = "adaptive_resources::runtime::operations::copy_vod::runtime_tests::syscall_failures::copy_real_original_kill_eperm_waits_same_child_and_preserves_alias_charge";
+        let Some(root) = subprocess_root(ENV, TEST) else {
+            return;
+        };
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+            let (runtime, mut owner, preparation, graph, child) = pausing_root(&root).await;
+            let charge = runtime.accounting().unwrap().used;
+            let ids = original_ids(&preparation).await;
+            let output = owner.output();
+            let application = owner.take_application_lease(1024).expect("original pre-close app alias");
+            let control = child.registered_control().expect("same original registered pidfd control");
+            graph.fixture_deny_original_root_kill(child).await.expect("actual owned kill filter");
+            let error = graph.start_kill_root(child).await.expect_err("actual original kill must reach EPERM");
+            assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+            assert!(graph.try_wait_root(child).await.expect("same alive child after EPERM").is_none());
+            assert_held(&preparation, ids).await;
+            assert_eq!(runtime.accounting().unwrap().used, charge);
+            let mut close = Box::pin(owner.prepare_retirement(true, deadline()));
+            let hold = async {
+                loop {
+                    {
+                        let bundle = preparation.state.lock().await;
+                        if bundle.roles[0].copy_vod.as_ref().is_some_and(|copy|
+                            copy.retryable_hold == Some(CopyCleanupHoldReason::FailedParserKill)) {
+                            break;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            };
+            tokio::select! {
+                result = &mut close => panic!("original cleanup completed before actual wait recovery: {}", result.is_ok()),
+                result = tokio::time::timeout(Duration::from_secs(5), hold) => result.expect("real EPERM hold must be retained while original wait is pending"),
+            }
+            assert_held(&preparation, ids).await;
+            assert_eq!(runtime.accounting().unwrap().used, charge);
+            // Cancel only this borrowed waiter. Its original Child, claim
+            // repair selection and all R/native owners stay in runtime custody.
+            drop(close);
+            // This SAME registered control uses its original pidfd syscall,
+            // which the kill(pid) filter intentionally does not intercept.
+            control.start_kill().expect("genuine original pidfd SIGKILL recovery");
+            let waited = tokio::time::timeout(Duration::from_secs(10), graph.wait_root(child)).await
+                .expect("same original Child wait must finish").expect("actual original wait after EPERM");
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(waited.signal(), Some(libc::SIGKILL), "original pidfd recovery, not fixture alarm");
+            assert_eq!(graph.snapshot().await.waited_roots, 1);
+            assert_held(&preparation, ids).await;
+            assert_eq!(runtime.accounting().unwrap().used, charge, "actual wait is not refund");
+            let ticket = owner.prepare_retirement(true, deadline()).await
+                .expect("same original owner resumes actual closure after EPERM");
+            assert_eq!(graph.snapshot().await.roots, 0);
+            drop(graph);
+            finish_aliases(runtime, owner, preparation, output, application, ticket, (charge, ids.3)).await;
+            complete();
+        });
+    }
+
+    #[test]
+    fn copy_real_original_wait_errno_retains_charge_until_same_child_wait_recovers() {
+        const ENV: &str = "PLURX_COPY_WAIT_ERRNO_CHILD_ROOT";
+        const TEST: &str = "adaptive_resources::runtime::operations::copy_vod::runtime_tests::syscall_failures::copy_real_original_wait_errno_retains_charge_until_same_child_wait_recovers";
+        let Some(root) = subprocess_root(ENV, TEST) else {
+            return;
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let (runtime, mut owner, preparation, graph, child) = pausing_root(&root).await;
+                let charge = runtime.accounting().unwrap().used;
+                let ids = original_ids(&preparation).await;
+                let output = owner.output();
+                let application = owner
+                    .take_application_lease(1024)
+                    .expect("original pre-close app alias");
+                // Created BEFORE the thread-local filter. This waiter holds only a
+                // selector for SAME GraphCustody and polls graph.wait_root, which
+                // locks the original Child. No waitpid/reap occurs behind its owner.
+                let same_graph = graph.select_same();
+                let handle = tokio::runtime::Handle::current();
+                let (recover, recovery) = std::sync::mpsc::channel();
+                let recovery_thread = std::thread::spawn(move || {
+                    recovery
+                        .recv_timeout(Duration::from_secs(15))
+                        .expect("bounded original-wait recovery request");
+                    handle.block_on(same_graph.wait_root(child))
+                });
+                graph
+                    .fixture_deny_original_root_wait(child)
+                    .await
+                    .expect("actual owned wait filter");
+                let Err(error) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    owner.prepare_retirement(true, deadline()),
+                )
+                .await
+                .expect("actual original wait syscall must fail promptly") else {
+                    panic!("failed original wait must not mint a close ticket");
+                };
+                assert_eq!(
+                    error.into_io_error().raw_os_error(),
+                    Some(libc::ECHILD),
+                    "actual wait4/waitid errno required"
+                );
+                assert_held(&preparation, ids).await;
+                assert_eq!(runtime.accounting().unwrap().used, charge);
+                let snapshot = graph.snapshot().await;
+                assert_eq!((snapshot.roots, snapshot.waited_roots), (1, 0));
+                // The first actual cleanup already requested SIGKILL. The original
+                // graph and Child remain owned; only the polling thread changes.
+                recover.send(()).expect("resume actual original graph wait");
+                let waited = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    tokio::task::spawn_blocking(move || recovery_thread.join()),
+                )
+                .await
+                .expect("original wait recovery watchdog")
+                .expect("fixture join worker")
+                .expect("original waiter thread")
+                .expect("genuine same-Child wait");
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(
+                    waited.signal(),
+                    Some(libc::SIGKILL),
+                    "actual owned cleanup SIGKILL, not fixture alarm"
+                );
+                assert_eq!(graph.snapshot().await.waited_roots, 1);
+                assert_held(&preparation, ids).await;
+                assert_eq!(
+                    runtime.accounting().unwrap().used,
+                    charge,
+                    "actual wait alone is not refund"
+                );
+                let ticket = owner
+                    .prepare_retirement(true, deadline())
+                    .await
+                    .expect("same original cached wait and native closure");
+                drop(graph);
+                finish_aliases(
+                    runtime,
+                    owner,
+                    preparation,
+                    output,
+                    application,
+                    ticket,
+                    (charge, ids.3),
+                )
+                .await;
+                complete();
+            });
+    }
+}
