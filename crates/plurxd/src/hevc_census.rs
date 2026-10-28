@@ -565,6 +565,16 @@ mod tests {
                     !index.rows.is_empty(),
                     "a built index must cover actual fragments"
                 );
+                assert!(
+                    index.parameter_sets_constant,
+                    "retained updates must not create conflicting promotion inputs: {:?}",
+                    index.promotion
+                );
+                assert!(
+                    index.promotion.parameter_sets.is_empty(),
+                    "the configured init must not acquire redundant retained parameter sets: {:?}",
+                    index.promotion
+                );
             }
             Err(Fmp4Error::Unsupported(expected))
                 if expected.contains("out-of-band HEVC decoder configuration")

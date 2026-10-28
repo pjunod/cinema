@@ -11,14 +11,16 @@ remains distinct from portable behavior tests.
 
 ## Execution and ownership
 
-Integrate on `effort/unit-coverage-85`. Review task branches against the
-effort with the Effort development gate, then qualify the final candidate
-with the Main promotion gate. Rust work uses the existing isolated Linux
-coverage build slot, pinned Rust 1.97.1, and source archives without Git
-metadata or credentials. Preserve warm compiler artifacts and restore
-reserved runner resources at completion.
+This independent repair PR targets `main` through the ordinary affected-surface
+validation described in `AGENTS.md` and `DEVELOPMENT_PIPELINE.md`. Require the
+focused regressions, independent adversarial review, paperwork and a green
+Main promotion gate on the current candidate. The table below records internal
+file ownership. Rust work uses the existing isolated Linux coverage build slot,
+pinned Rust 1.97.1, and source archives without Git metadata or credentials.
+Preserve warm compiler artifacts and restore reserved runner resources at
+completion.
 
-| Task | Files owned | Acceptance |
+| Repair area | Files owned | Acceptance |
 |---|---|---|
 | Repair stale core fixtures and contracts | `crates/plurx-core/tests/support/queue_fixture.rs`, `tests/store_contract.rs`, `tests/store_contract/subtitle_text.rs`, `src/store/sqlite/dv_conversion.rs`, `src/store/consistent_read_census.rs`, `src/store/hiqlite_fragment_index_cluster.rs` | Historical rewinds refuse retained data and partial schemas; Store methods have behavioral coverage; the authority ceiling stays unchanged. |
 | Repair media and daemon failures | `crates/plurxd/src/availability.rs`, `fontenv_tests.rs`, `fragindex/tests.rs`, `hevc_census.rs`, `http/hls/tests/chunk_01.rs`, `http/tests.rs`, `live_tv.rs`, `live_tv/tests.rs`, `startup_tests.rs`, `vod/shared.rs`; `crates/plurx-core/src/transcode/mod.rs`, `index_pipe_tests.rs` | All original focused regressions pass; retaining HEVC preserves its admitted HLS sample entries and source PPS updates; incomplete decoder configuration is refused; valid bounded PUT staging cannot abort Live TV. |
