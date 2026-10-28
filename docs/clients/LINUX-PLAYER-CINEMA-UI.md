@@ -41,6 +41,12 @@ The original implementation is commit `ab880ed254a09b5f822e7048f8b3248528e31b29`
 under [PR #1307](http://forge.lan:3000/noirr/plurx/pulls/1307). Later receipt/fixture
 changes do not change the qualified native package payload.
 
+The qualified amd64 Debian package is
+`0.4.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1`, SHA-256
+`f576789af1faf1a0a2d026dcb6b350368ab5bf88a62b0ac47028bf5768d2d406`.
+This identifies the staged and reproducibly rebuilt binary; installation must
+verify the same checksum before replacing the retained 0.3.2 package.
+
 Release outputs, source identities, checksum manifests, logs and rollback
 material belong outside compiler/cache directories. The release includes the
 Debian binary and source packages, build metadata and verification/rebuild
