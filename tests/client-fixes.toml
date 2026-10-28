@@ -2,6 +2,42 @@ version = 1
 enforce_after = "e8a910f"
 
 
+# PR #1311: both Cinema Info buttons expose current playback observations.
+[[fixes]]
+id = "linux-player.cinema-playback-info"
+commits = ["19561df4270b306c6e03c1a60a6aece7747d993c", "11db1c5c8656c95b5f9c553061f42f5748c04fba"]
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "local function playback_info()"
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "test_info_buttons_report_live_observations"
+
+[[fixes]]
+id = "linux-player.cinema-playback-info-presentation-boundary"
+commits = []
+supplements = "linux-player.cinema-playback-info"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = '"playback": {"mode": self.mode if self.mode in ("direct", "remux", "transcode") else None,'
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "test_playback_info_publishes_only_whitelisted_delivery_facts"
+
+[[fixes]]
+id = "linux-player.cinema-playback-info-sync-sample"
+commits = []
+supplements = "linux-player.cinema-playback-info"
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "local sync, delay=prop('avsync'),prop('audio-delay')"
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "test_info_reads_each_sync_sample_once"
+
+[[fixes]]
+id = "linux-player.cinema-playback-info-range-observation"
+commits = []
+supplements = "linux-player.cinema-playback-info"
+source = "clients/linux-player/plurx_player/scripts/cinema.lua"
+source_anchor = "elseif sdr[p.gamma] then range='SDR (mpv transfer)' end"
+test = "clients/linux-player/tests/test_cinema.lua"
+test_anchor = "test_info_dynamic_range_requires_transfer"
+
 # PR #1307: Cinema quality and next episode retain native playback ownership.
 [[fixes]]
 id = "linux-player.cinema-quality-transition"
