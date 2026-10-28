@@ -12,6 +12,24 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+## Managed-v2 fixture follow-through — scoped refresh on 2026-10-28
+
+The test-only follow-through on `48e2acc2a` restores the current managed marker
+as v2 in the owned replicated refusal fixtures. Both backend rewind helpers use
+the canonical published v1/v2 DDL with a matching marker and reject populated,
+partial or drifted managed extensions before mutation. Historical v1 authority
+remains exact; a v1 marker cannot certify the v2 view. The v120 downgrade
+inventory entry names the new managed marker definition. The separate baseline
+handoff rewind still supports v115 only and its v116–v119 inventory gap remains;
+these focused managed-fixture checks do not qualify a complete current-schema
+historical downgrade.
+
+Only the whole-file pin for the conformance parent module changes. Its
+`formal_publication` registration remains unique and byte-identical, as does the
+selected conformance module. No production queue, reservation, lease, binding or
+publication transition changes. Model/configuration/property/toolchain inputs
+remain unchanged; this source review supplies no new execution qualification.
+
 ## Subtitle resource admission — scoped refresh on 2026-10-28
 
 Codex reviewed `c3d764a01` against `f2120bd9a`. The shared claim SQL adds
