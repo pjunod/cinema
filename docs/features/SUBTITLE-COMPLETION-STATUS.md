@@ -1,22 +1,48 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** built · final gate and landing tracked on PR #1303
+**Status:** deployed acceptance incomplete · reviewed repair in PR #1309, qualification running
 
-**Date:** 2026-10-25 · **Updated:** 2026-10-28 · **Owner:** Codex /root · **Branch:** `codex/subtitle-final-qualification`
+**Date:** 2026-10-25 · **Updated:** 2026-10-28 · **Owner:** Codex /root · **Branch:** `codex/subtitle-live-acceptance`
 
-The original integration [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292)
-was merged by the maintainer before its final web correction landed. Its final
-lane passed Rust, Apple compile/native TV navigation and Android compilation;
-the web and promotion jobs failed. The merged PR is therefore not an all-green
-qualification receipt.
+PR #1303 landed as `4be5ff26`; the maintainer deployed a later main containing
+that work. The live media worker reports revision `f2120bd9`. A fresh text-model
+download and three-cue production inference test succeeded. The installed Small
+speech model also passed its same-language caption test. These setup results do
+not yet prove captions render during playback or on the physical Apple TV.
 
-The owned [follow-up PR #1303](http://forge.lan:3000/noirr/plurx/pulls/1303) retains the reviewed captured-file-context correction and
-its seven passing final/new app cases. It integrates current main, preserves
-both branches' caption fixture assertions, and adds authenticated reuse of
-native successes only when their tested inputs still match. The final diff review is complete. Its new focused checks run in the applicable
-fast lane; PR #1303 records the current candidate, gate and merge receipt. Passing compatible results are
-retained; failures alone are rerun. The maintainer deploys. Physical Apple TV
-acceptance remains separate from simulator and controlled server evidence.
+Live acceptance found concrete blockers. Text-model installation incorrectly
+shares the media-reader pool with library metadata work, causing a long setup
+queue before any download begins. Progressive range demand also needs the
+existing reserved live-reader slot under its durable authority predicates.
+The paused web panel's Refresh status action does not refresh choices or server
+time before an operation exists, leaving Start unable to recover after its
+four-minute action clock expires. Foreground existing-subtitle extraction also
+tries CPU admission once without registering live wait pressure, so background
+work never receives the cooperative yield signal. Active progressive inference
+also needs that signal before acquiring the shared heavy-worker lane. The fixes are implemented in [PR #1309](http://forge.lan:3000/noirr/plurx/pulls/1309),
+owned by Codex /root. Final adversarial review and the normal compile/lint hook
+passed. All 18 focused Rust cases passed, including real three-voter contracts
+and FFmpeg extraction. Formal source mappings and managed-v2 fixture inventories
+are corrected. Compatible passing cases are retained individually; only failed
+cases were rerun. Preflight retained 2,104 compatible Python passes and reran
+the two failed ownership-inventory methods successfully. Four type-only DOM
+casts resolve the remaining web compilation diagnostics.
+
+The main fast lane's live-identity guard now follows its documented head-only
+execution policy; adversarial review and the new identity regression passed.
+Source closures, authenticated origins, exact PR head and readiness checks
+remain required. Current-main integration also changes the whole-file hash of
+a mapped server source without changing its selected worker behavior. The
+reviewed mappings are being rebound before final qualification; model
+properties, bounds and authority claims remain unchanged.
+No production database edits, service restart or agent deployment has occurred.
+
+The physical Apple TV responds through its existing Companion pairing;
+installed-app discovery and Cinema launch both succeeded. Its Xcode connection
+remains unavailable and actual native caption rendering is unverified. Cinema's
+server receiver registrations remain revoked despite the locally enabled
+phone-control setting; this does not prevent Companion control. The maintainer
+owns deployment of the reviewed repair, followed by deployed acceptance.
 
 Companion to the [subtitle generation plan](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md)
 and [progressive translation plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).
