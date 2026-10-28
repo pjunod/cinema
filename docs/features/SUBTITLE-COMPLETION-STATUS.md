@@ -1,8 +1,22 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** built · runtime qualified; landing tracked on PR #1292
+**Status:** built · final gate and landing tracked on PR #1303
 
-**Date:** 2026-10-25 · **Updated:** 2026-10-26 · **Owner:** Codex /root · **Branch:** `effort/subtitle-completion`
+**Date:** 2026-10-25 · **Updated:** 2026-10-28 · **Owner:** Codex /root · **Branch:** `codex/subtitle-final-qualification`
+
+The original integration [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292)
+was merged by the maintainer before its final web correction landed. Its final
+lane passed Rust, Apple compile/native TV navigation and Android compilation;
+the web and promotion jobs failed. The merged PR is therefore not an all-green
+qualification receipt.
+
+The owned [follow-up PR #1303](http://forge.lan:3000/noirr/plurx/pulls/1303) retains the reviewed captured-file-context correction and
+its seven passing final/new app cases. It integrates current main, preserves
+both branches' caption fixture assertions, and adds authenticated reuse of
+native successes only when their tested inputs still match. The final diff review is complete. Its new focused checks run in the applicable
+fast lane; PR #1303 records the current candidate, gate and merge receipt. Passing compatible results are
+retained; failures alone are rerun. The maintainer deploys. Physical Apple TV
+acceptance remains separate from simulator and controlled server evidence.
 
 Companion to the [subtitle generation plan](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md)
 and [progressive translation plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).

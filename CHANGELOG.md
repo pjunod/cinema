@@ -131,6 +131,9 @@ bump may break compatibility and a **patch** bump never does.
   settlement; retained output releases only producer resources. Custody startup
   streams historical authority and indexes per-asset reconstruction while
   preserving every historical migration row.
+- Restrict the Linux external player preference to Dolby Vision files on Linux;
+  other formats and operating systems retain web playback, including mixed-version titles.
+
 - Shared playback retries closure acknowledgements after concurrent updates to
   the same owner's custody ledger. Actual driver closure and authority fences
   remain required.
@@ -411,6 +414,11 @@ bump may break compatibility and a **patch** bump never does.
     docs/API.md §7.4.
 
 ### Fixed
+
+- **Docker publishes native HTTPS only when enabled.** The supported Docker
+  startup targets derive the HTTPS mapping from the node's desired settings,
+  including its configured port, and remove the generated mapping on disable.
+  `PLURX_HTTPS_HOST_PORT` selects an independent host port when needed.
 
 - **Consistent reads on a cluster no longer wait 40 ms each.** Every
   linearizable read opens a stream to each other voter to confirm leadership,

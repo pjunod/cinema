@@ -188,12 +188,21 @@ used: yes" only when the BL really came from the composed picture.
 
 ### 4.1 Web — one Playback setting, one action
 
-- **The setting:** Settings → Playback → "Open titles in": **This browser**
-  (the default) or **plurx Player (Linux)**. It is stored per browser in
-  `localStorage["plurx.openIn"]`.
+- **The setting:** Settings → Playback → **Dolby Vision playback on Linux**:
+  **This browser** (the default) or **plurx Player (Linux)**. It is stored per
+  browser in `localStorage["plurx.openIn"]`. The setting is disabled outside
+  Linux, and a saved `player` preference is ignored there. Android, ChromeOS
+  and unknown client platforms use browser playback. The server OS is irrelevant.
   - It is not a feature gate. It is a viewer preference, like the HDR display
     peak, because only the viewer knows whether the player is installed.
-- **What Play does when it is set:**
+- **What Play does when it is set:** only a cold start of a local Dolby
+  Vision file in a Linux browser uses the external player. The selected
+  file’s `hdr` / legacy `hdr_format` determines its range; SDR, HDR10, HLG
+  and unknown formats stay in the web UI. Each version’s Play button uses
+  that version’s metadata, so a DV version never redirects an HDR10 version.
+  Retries, internal reopens, reserved Watch attempts, Library channels,
+  audiobooks and shared-library sources retain browser playback. For an
+  eligible Dolby Vision start:
   - mint a handoff (§3.1);
   - set `location.href` to
     `plurx-player://play?server=<origin>&code=<code>`;
