@@ -281,7 +281,7 @@ async function translationRefreshOptions(state){
       translationValidateOptions(data,state);
       if(data.source_size!==state.options.source_size||data.source_mtime!==state.options.source_mtime)throw Error(translationFailure("source_changed"));
       const panel=translationPanel(state);if(!panel)return false;
-      const taskSelect=panel.querySelector("[data-translation-task]"),profiles=panel.querySelector("[data-translation-profile]"),languages=panel.querySelector("[data-translation-language]");
+      const taskSelect=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-task]")),profiles=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-profile]")),languages=/** @type {HTMLSelectElement} */(panel.querySelector("[data-translation-language]"));
       const task=taskSelect.value,selected=profiles.value,language=languages.value,prior=translationProfile(state.options,selected),profile=translationProfile(data,selected);
       if(prior&&profile&&(prior.model_id!==profile.model_id||prior.model_sha256!==profile.model_sha256||prior.timeline_contract!==profile.timeline_contract||translationTask(prior)!==translationTask(profile)))throw Error("Caption profile identity changed. Reopen caption choices.");
       const tasks=[...new Set([task,...["translate","transcribe"].filter(value=>translationTaskProfiles(data,value).length)])];
@@ -290,7 +290,7 @@ async function translationRefreshOptions(state){
       profiles.innerHTML=(selected&&!rows.some(row=>row.profile_id===selected)?`<option value="${esc(selected)}">Selected model unavailable</option>`:"")+rows.map(row=>`<option value="${esc(row.profile_id)}">${esc(row.label||row.model_id)}</option>`).join("");profiles.value=selected;
       languages.innerHTML='<option value="">Choose spoken language</option>'+choices.map(code=>`<option value="${esc(code)}">${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");languages.value=language;
       state.options=data;if(state.profile?.profile_id===selected&&profile){state.profile=profile;state.limits=translationProfileLimits(profile);}
-      panel.querySelector("[data-translation-start]").hidden=!data.permissions?.demand||!ME?.is_admin;
+      /** @type {HTMLButtonElement} */(panel.querySelector("[data-translation-start]")).hidden=!data.permissions?.demand||!ME?.is_admin;
       translationAssetChoices(state,data.assets||[],data.assets_next_cursor);
       return true;
     }catch(error){if(state.current()&&state.windowGeneration===generation)state.clock=clock;throw error;}
