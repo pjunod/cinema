@@ -113,6 +113,8 @@ pub trait Storage {
     fn initial(&self, context: &str) -> CatalogResult<Option<u64>>;
     fn begin_read(&mut self, expected: u64) -> CatalogResult<()>;
     fn end_read(&mut self) -> CatalogResult<()>;
+    fn save_checkpoint(&mut self, checkpoint: &Record, work_unit: &Record) -> CatalogResult<()>;
+    fn check_private(&self, checkpoint: &Record) -> CatalogResult<()>;
     fn backup(&self, path: &Path, limits: &BackupLimits) -> CatalogResult<()>;
 }
 
@@ -144,6 +146,163 @@ impl CatalogConfig {
         json!({"source":self.source,"session_id":self.session_id,"resource_plan":self.resource_plan})
     }
 }
+#[derive(Clone, Debug)]
+pub struct RecordAllowance {
+    pub records: u64,
+    pub max_encoded_bytes: u64,
+}
+#[derive(Clone, Debug)]
+pub struct ResourceLimits {
+    pub record_allowances: BTreeMap<String, RecordAllowance>,
+    pub index_bytes: u64,
+    pub wal_bytes: u64,
+    pub scratch_bytes: u64,
+    pub retained_bytes: u64,
+    pub duplicate_backup_bytes: u64,
+    pub resident_bytes: u64,
+    pub rss_bytes: u64,
+    pub total_disk_bytes: u64,
+    pub unit_records: u64,
+    pub unit_bytes: u64,
+    pub unit_predecessors: u64,
+}
+impl ResourceLimits {
+    pub fn from_plan(plan: &Record) -> CatalogResult<Self> {
+        plan.validate()?;
+        let body = &plan.record;
+        let text = string(body, "source_bounds_utf8")?;
+        let wrapper = strict_json(text.as_bytes())?;
+        if canonical(&wrapper) != text {
+            return Err(CatalogError::CorruptRecord(
+                "noncanonical operational wrapper".into(),
+            ));
+        }
+        closed_fields(
+            &wrapper,
+            &[
+                "schema_version",
+                "accounting_rule",
+                "source_receipt",
+                "record_allowances",
+                "overhead",
+                "accounting_method_sha256",
+                "measurement_sha256",
+            ],
+        )?;
+        if wrapper["schema_version"] != 2
+            || wrapper["accounting_rule"] != "operational_encoded_caps_v1"
+            || !wrapper["source_receipt"].is_object()
+        {
+            return Err(CatalogError::SourceMismatch(
+                "unsupported operational accounting rule".into(),
+            ));
+        }
+        for field in ["accounting_method_sha256", "measurement_sha256"] {
+            validate_definition("Sha256", &wrapper[field])?;
+        }
+        let total_disk_bytes = number(body, "total_session_disk_bytes")?;
+        let entries = wrapper["record_allowances"]
+            .as_object()
+            .ok_or_else(|| CatalogError::CorruptRecord("allowance inventory".into()))?;
+        let mut allowances = BTreeMap::new();
+        let mut reserved = 0u64;
+        for (kind, value) in entries {
+            closed_fields(value, &["records", "max_encoded_bytes"])?;
+            let records = number(value, "records")?;
+            let bytes = number(value, "max_encoded_bytes")?;
+            if bytes == 0 {
+                return Err(CatalogError::ResourceIncomplete(
+                    "zero encoded record allowance".into(),
+                ));
+            }
+            // Exact comparison against the admitted finite disk quota avoids
+            // overflowing even when caller-supplied operational products are huge.
+            if records > total_disk_bytes / bytes {
+                return Err(CatalogError::ResourceIncomplete(
+                    "operational record allocation exceeds total disk".into(),
+                ));
+            }
+            reserved = reserved
+                .checked_add(records * bytes)
+                .filter(|n| *n <= total_disk_bytes)
+                .ok_or_else(|| {
+                    CatalogError::ResourceIncomplete(
+                        "operational allocation sum exceeds total disk".into(),
+                    )
+                })?;
+            allowances.insert(
+                kind.clone(),
+                RecordAllowance {
+                    records,
+                    max_encoded_bytes: bytes,
+                },
+            );
+        }
+        for kind in record_kinds() {
+            if !allowances.contains_key(*kind) {
+                return Err(CatalogError::ResourceIncomplete(format!(
+                    "missing operational kind {kind}"
+                )));
+            }
+        }
+        let overhead = &wrapper["overhead"];
+        closed_fields(
+            overhead,
+            &[
+                "index_bytes",
+                "wal_bytes",
+                "scratch_bytes",
+                "retained_bytes",
+                "duplicate_backup_bytes",
+            ],
+        )?;
+        for field in [
+            "index_bytes",
+            "wal_bytes",
+            "scratch_bytes",
+            "retained_bytes",
+            "duplicate_backup_bytes",
+        ] {
+            reserved = reserved
+                .checked_add(number(overhead, field)?)
+                .filter(|n| *n <= total_disk_bytes)
+                .ok_or_else(|| {
+                    CatalogError::ResourceIncomplete(
+                        "operational overhead exceeds total disk".into(),
+                    )
+                })?;
+        }
+        Ok(Self {
+            record_allowances: allowances,
+            index_bytes: number(overhead, "index_bytes")?,
+            wal_bytes: number(overhead, "wal_bytes")?,
+            scratch_bytes: number(overhead, "scratch_bytes")?,
+            retained_bytes: number(overhead, "retained_bytes")?,
+            duplicate_backup_bytes: number(overhead, "duplicate_backup_bytes")?,
+            resident_bytes: number(body, "resident_bytes")?,
+            rss_bytes: number(body, "resident_rss_bytes")?,
+            total_disk_bytes,
+            unit_records: number(body, "unit_record_allowance")?,
+            unit_bytes: number(body, "unit_byte_allowance")?,
+            unit_predecessors: number(body, "unit_predecessor_allowance")?,
+        })
+    }
+    pub fn allowance(&self, kind: &str) -> CatalogResult<&RecordAllowance> {
+        self.record_allowances.get(kind).ok_or_else(|| {
+            CatalogError::ResourceIncomplete(format!("unregistered accounting kind {kind}"))
+        })
+    }
+}
+pub fn closed_fields(value: &Value, fields: &[&str]) -> CatalogResult<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| CatalogError::CorruptRecord("closed object required".into()))?;
+    if object.len() != fields.len() || fields.iter().any(|field| !object.contains_key(*field)) {
+        return Err(CatalogError::CorruptRecord("closed object fields".into()));
+    }
+    Ok(())
+}
+
 struct Pending {
     context: WriteContext,
     sequence: u64,
@@ -151,12 +310,23 @@ struct Pending {
     new_stores: BTreeSet<u64>,
     new_products: Vec<u64>,
     written: BTreeMap<String, Vec<RecordKey>>,
+    record_count: u64,
+    record_bytes: u64,
+}
+#[derive(Default)]
+struct UnitUsage {
+    unit: Option<u64>,
+    records: u64,
+    bytes: u64,
+    predecessors: u64,
 }
 struct Inner {
     storage: RefCell<Box<dyn Storage>>,
     config: CatalogConfig,
+    limits: ResourceLimits,
     pending: RefCell<Option<Pending>>,
     reading: Cell<bool>,
+    usage: RefCell<UnitUsage>,
 }
 #[derive(Clone)]
 pub struct Catalog {
@@ -193,12 +363,15 @@ impl Catalog {
                 "committed catalog lacks binding".into(),
             ));
         }
+        let limits = ResourceLimits::from_plan(&config.resource_plan)?;
         Ok(Self {
             inner: Rc::new(Inner {
                 storage: RefCell::new(storage),
                 config,
+                limits,
                 pending: RefCell::new(None),
                 reading: Cell::new(false),
+                usage: RefCell::new(UnitUsage::default()),
             }),
         })
     }
@@ -329,6 +502,22 @@ impl Catalog {
                 "writer/read snapshot already active".into(),
             ));
         }
+        {
+            let mut usage = self.inner.usage.borrow_mut();
+            if usage.unit != Some(context.unit_ordinal) {
+                *usage = UnitUsage {
+                    unit: Some(context.unit_ordinal),
+                    ..UnitUsage::default()
+                };
+            }
+            if context.phase == CommitPhase::Source
+                && usage.predecessors >= self.inner.limits.unit_predecessors
+            {
+                return Err(CatalogError::ResourceIncomplete(
+                    "unit predecessor allowance exhausted".into(),
+                ));
+            }
+        }
         let sequence = self.inner.storage.borrow_mut().begin(context.clone())?;
         *self.inner.pending.borrow_mut() = Some(Pending {
             context,
@@ -337,6 +526,8 @@ impl Catalog {
             new_stores: BTreeSet::new(),
             new_products: Vec::new(),
             written: BTreeMap::new(),
+            record_count: 0,
+            record_bytes: 0,
         });
         let binding = (|| {
             if self.control("binding")?.is_none() {
@@ -383,6 +574,7 @@ impl Catalog {
             }
             return Ok(reference);
         }
+        self.charge_record(&record, true)?;
         self.inner.storage.borrow_mut().put(&record, false)?;
         self.inner
             .pending
@@ -394,6 +586,61 @@ impl Catalog {
             .or_default()
             .push(reference.id.clone());
         Ok(reference)
+    }
+    pub fn limits(&self) -> &ResourceLimits {
+        &self.inner.limits
+    }
+    fn charge_record(&self, record: &Record, is_new: bool) -> CatalogResult<()> {
+        let allowance = self.inner.limits.allowance(&record.kind)?;
+        let bytes = record.encoded_len(allowance.max_encoded_bytes)?;
+        if is_new && self.count(&record.kind)? >= allowance.records {
+            return Err(CatalogError::ResourceIncomplete(format!(
+                "{} lifetime count exhausted",
+                record.kind
+            )));
+        }
+        let mut pending = self.inner.pending.borrow_mut();
+        let pending = pending.as_mut().ok_or_else(|| {
+            CatalogError::IncompleteExpansion("no resource reservation transaction".into())
+        })?;
+        let count = pending
+            .record_count
+            .checked_add(u64::from(is_new))
+            .ok_or_else(|| {
+                CatalogError::ResourceIncomplete("unit record counter overflow".into())
+            })?;
+        let total = pending.record_bytes.checked_add(bytes).ok_or_else(|| {
+            CatalogError::ResourceIncomplete("unit encoded bytes overflow".into())
+        })?;
+        let usage = self.inner.usage.borrow();
+        if usage
+            .records
+            .checked_add(count)
+            .is_none_or(|n| n > self.inner.limits.unit_records)
+            || usage
+                .bytes
+                .checked_add(total)
+                .is_none_or(|n| n > self.inner.limits.unit_bytes)
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "whole atomic quantum exceeds registered unit record/byte allowance".into(),
+            ));
+        }
+        pending.record_count = count;
+        pending.record_bytes = total;
+        Ok(())
+    }
+    pub fn unit_usage(&self) -> (u64, u64, u64) {
+        let usage = self.inner.usage.borrow();
+        (usage.records, usage.bytes, usage.predecessors)
+    }
+    pub fn active_reservation(&self) -> CatalogResult<(u64, u64)> {
+        self.inner
+            .pending
+            .borrow()
+            .as_ref()
+            .map(|p| (p.record_count, p.record_bytes))
+            .ok_or_else(|| CatalogError::IncompleteExpansion("no active reservation".into()))
     }
     pub fn append_record(&self, kind: &str, value: Value) -> CatalogResult<RecordRef> {
         if matches!(
@@ -554,6 +801,7 @@ impl Catalog {
         if record.record[field].is_null() {
             record.record[field] = json!(edge);
             record.validate()?;
+            self.charge_record(&record, false)?;
             self.inner.storage.borrow_mut().put(&record, true)?;
         }
         Ok(())
@@ -652,6 +900,7 @@ impl Catalog {
         )?;
         let reference = record.reference()?;
         if old.is_some() {
+            self.charge_record(&record, false)?;
             self.inner.storage.borrow_mut().put(&record, true)?;
         } else {
             self.append(record)?;
@@ -660,6 +909,153 @@ impl Catalog {
     }
     pub fn append_enabledness(&self, value: Value) -> CatalogResult<RecordRef> {
         self.append(Record::new("Enabledness", value)?)
+    }
+    /// Mutable pre-upload controller bookkeeping is private, never a data page.
+    pub fn record_checkpoint(&self, checkpoint: &Record, work_unit: &Record) -> CatalogResult<()> {
+        if self.inner.reading.get() || self.inner.pending.borrow().is_some() {
+            return Err(CatalogError::SnapshotMismatch(
+                "checkpoint bookkeeping while writer/snapshot active".into(),
+            ));
+        }
+        checkpoint.validate()?;
+        work_unit.validate()?;
+        if checkpoint.kind != "Checkpoint"
+            || work_unit.kind != "WorkUnit"
+            || checkpoint.record["source"] != json!(self.source())
+            || checkpoint.record["session_id"] != json!(self.session_id())
+            || checkpoint.record["unit_ordinal"] != work_unit.record["unit_ordinal"]
+            || work_unit.record["source"] != json!(self.source())
+            || work_unit.record["session_id"] != json!(self.session_id())
+            || work_unit.record["resource_plan_sha256"] != self.resource_plan().sha256()
+            || checkpoint.record["previous_checkpoint"]
+                != work_unit.record["expected_prior_checkpoint"]
+            || !work_unit.record["artifact_roots"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        {
+            return Err(CatalogError::SourceMismatch(
+                "private checkpoint/unit binding".into(),
+            ));
+        }
+        let previous = self.latest_checkpoint()?;
+        let (expected_sequence, expected_previous) = match previous {
+            Some(previous) => (
+                number(&previous.record, "sequence")?
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        CatalogError::NumericDomain("checkpoint sequence exhausted".into())
+                    })?,
+                json!(previous.sha256()),
+            ),
+            None => (0, Value::Null),
+        };
+        if checkpoint.record["sequence"] != expected_sequence
+            || checkpoint.record["previous_checkpoint"] != expected_previous
+        {
+            return Err(CatalogError::SnapshotMismatch(
+                "checkpoint chain does not extend latest checkpoint".into(),
+            ));
+        }
+        let snapshot = self.pin_read_snapshot(self.current_transaction()?)?;
+        snapshot.check_checkpoint(checkpoint)?;
+        snapshot.close()?;
+        self.inner
+            .storage
+            .borrow_mut()
+            .save_checkpoint(checkpoint, work_unit)
+    }
+    pub fn latest_checkpoint(&self) -> CatalogResult<Option<Record>> {
+        self.control("latest_checkpoint")?
+            .map(|value| {
+                let record: Record = serde_json::from_value(value)?;
+                record.validate()?;
+                Ok(record)
+            })
+            .transpose()
+    }
+    pub fn checkpoint_record(&self, digest: &str) -> CatalogResult<Record> {
+        let value = self
+            .control(&format!("checkpoint:{digest}"))?
+            .ok_or_else(|| CatalogError::MissingDependency("prior checkpoint".into()))?;
+        let record: Record = serde_json::from_value(value)?;
+        record.validate()?;
+        if record.sha256() != digest {
+            return Err(CatalogError::CorruptRecord("checkpoint digest".into()));
+        }
+        Ok(record)
+    }
+    pub fn backup_checkpoint_catalog(
+        &self,
+        checkpoint: &Record,
+        destination: &Path,
+        limits: &BackupLimits,
+    ) -> CatalogResult<Value> {
+        checkpoint.validate()?;
+        let stored = self.checkpoint_record(&checkpoint.sha256())?;
+        if stored.bytes() != checkpoint.bytes() {
+            return Err(CatalogError::SnapshotMismatch(
+                "checkpoint bookkeeping not fixed".into(),
+            ));
+        }
+        let snapshot = self.pin_read_snapshot(TransactionId::new(number(
+            &checkpoint.record,
+            "committed_transaction",
+        )?)?)?;
+        snapshot.check_checkpoint(checkpoint)?;
+        self.inner.storage.borrow().check_private(checkpoint)?;
+        snapshot.write_consistent_backup(destination, limits)?;
+        let (bytes, hash) = hash_file(destination, limits.max_bytes, limits.deadline)?;
+        snapshot.check_checkpoint(checkpoint)?;
+        let descriptor = json!({"source":self.source(),"session_id":self.session_id(),"unit_ordinal":checkpoint.record["unit_ordinal"],"checkpoint_sha256":checkpoint.sha256(),"previous_checkpoint_sha256":checkpoint.record["previous_checkpoint"],"resource_plan_sha256":checkpoint.record["resource_plan_sha256"],"initial_image_sha256":checkpoint.record["initial_image_id"],"catalog_commit":checkpoint.record["committed_transaction"],"catalog_logical_digest":checkpoint.record["catalog_logical_digest"],"semantic_manifest_root":checkpoint.record["page_root"],"catalog_bytes":bytes,"catalog_sha256":hash,"snapshot_boundary":"post_checkpoint_pre_upload","format":"sqlite3","backup_method":"sqlite_backup_api_v1"});
+        snapshot.close()?;
+        Ok(descriptor)
+    }
+    pub fn validation(config: CatalogConfig) -> CatalogResult<Self> {
+        config.validate()?;
+        let storage = sqlite::SqliteStorage::open_readonly(
+            &config.path,
+            number(&config.resource_plan.record, "resident_bytes")?,
+        )?;
+        Self::with_storage(config, Box::new(storage))
+    }
+    pub fn validate_restore(
+        &self,
+        checkpoint: &Record,
+        expected_bytes: u64,
+        expected_hash: &str,
+        limits: &BackupLimits,
+    ) -> CatalogResult<Value> {
+        let (bytes, hash) = hash_file(&self.inner.config.path, limits.max_bytes, limits.deadline)?;
+        if bytes != expected_bytes || hash != expected_hash {
+            return Err(CatalogError::CorruptRecord(
+                "staged catalog full-file identity".into(),
+            ));
+        }
+        self.inner.storage.borrow().check_private(checkpoint)?;
+        let stored = self.checkpoint_record(&checkpoint.sha256())?;
+        if stored.bytes() != checkpoint.bytes() {
+            return Err(CatalogError::SnapshotMismatch(
+                "restored checkpoint metadata".into(),
+            ));
+        }
+        let snapshot = self.pin_read_snapshot(TransactionId::new(number(
+            &checkpoint.record,
+            "committed_transaction",
+        )?)?)?;
+        snapshot.check_checkpoint(checkpoint)?;
+        let counts = snapshot.counts()?;
+        let contexts = snapshot.context_snapshots()?;
+        snapshot.close()?;
+        if hash_file(&self.inner.config.path, limits.max_bytes, limits.deadline)?
+            != (bytes, hash.clone())
+        {
+            return Err(CatalogError::CorruptRecord(
+                "staged catalog changed during validation".into(),
+            ));
+        }
+        Ok(
+            json!({"schema_version":6,"operation":"validate_restore","source":self.source(),"session_id":self.session_id(),"checkpoint_sha256":checkpoint.sha256(),"catalog_sha256":hash,"catalog_bytes":bytes,"catalog_commit":checkpoint.record["committed_transaction"],"catalog_logical_digest":checkpoint.record["catalog_logical_digest"],"semantic_manifest_root":checkpoint.record["page_root"],"counts":counts,"contexts":contexts,"initial_image_sha256":checkpoint.record["initial_image_id"],"resource_plan_sha256":checkpoint.record["resource_plan_sha256"]}),
+        )
     }
     pub fn pin_read_snapshot(&self, expected: TransactionId) -> CatalogResult<ReadSnapshot> {
         if self.inner.pending.borrow().is_some() || self.inner.reading.replace(true) {
@@ -1006,6 +1402,20 @@ impl WriteTransaction {
                 "commit sequence changed".into(),
             ));
         }
+        {
+            let pending = self.catalog.inner.pending.borrow();
+            let pending = pending.as_ref().expect("committed owned writer");
+            let mut usage = self.catalog.inner.usage.borrow_mut();
+            usage.records = usage
+                .records
+                .checked_add(pending.record_count)
+                .ok_or_else(|| CatalogError::NumericDomain("unit record count".into()))?;
+            usage.bytes = usage
+                .bytes
+                .checked_add(pending.record_bytes)
+                .ok_or_else(|| CatalogError::NumericDomain("unit bytes".into()))?;
+            usage.predecessors += u64::from(pending.context.phase == CommitPhase::Source);
+        }
         self.catalog.inner.pending.borrow_mut().take();
         self.finished = true;
         TransactionId::new(sequence)
@@ -1219,6 +1629,26 @@ impl ReadSnapshot {
         hash.update(canonical(&self.context_snapshots()?).as_bytes());
         Ok(format!("{:x}", hash.finalize()))
     }
+    pub fn check_checkpoint(&self, checkpoint: &Record) -> CatalogResult<()> {
+        if checkpoint.record["source"] != json!(self.catalog.source())
+            || checkpoint.record["session_id"] != json!(self.catalog.session_id())
+            || checkpoint.record["resource_plan_sha256"] != self.catalog.resource_plan().sha256()
+            || checkpoint.record["committed_transaction"] != self.sequence.get()
+            || checkpoint.record["catalog_logical_digest"] != self.logical_digest()?
+            || checkpoint.record["counts"] != self.counts()?
+            || checkpoint.record["contexts"] != json!(self.context_snapshots()?)
+            || checkpoint.record["oldest_pending_ticket"]
+                != json!(self
+                    .catalog
+                    .oldest_pending()?
+                    .map(|(ticket, _)| ticket.get()))
+        {
+            return Err(CatalogError::SnapshotMismatch(
+                "checkpoint exact source/logical/count/context snapshot".into(),
+            ));
+        }
+        Ok(())
+    }
     pub fn write_consistent_backup(&self, path: &Path, limits: &BackupLimits) -> CatalogResult<()> {
         if self.closed {
             return Err(CatalogError::SnapshotUnavailable("closed snapshot".into()));
@@ -1275,6 +1705,23 @@ pub(super) fn fixture_configuration(path: PathBuf) -> CatalogConfig {
     }
     p["available_disk_receipt"] =
         json!({"kind":"runtime_receipt","id":"synthetic-fixture","sha256":"8".repeat(64)});
+    p["resident_bytes"] = json!(64 * 1024 * 1024u64);
+    p["resident_rss_bytes"] = json!(512 * 1024 * 1024u64);
+    p["total_session_disk_bytes"] = json!(8 * 1024 * 1024 * 1024u64);
+    p["unit_record_allowance"] = json!(4096);
+    p["unit_byte_allowance"] = json!(16 * 1024 * 1024u64);
+    let allowances = record_kinds()
+        .iter()
+        .map(|kind| {
+            (
+                (*kind).to_owned(),
+                json!({"records":256,"max_encoded_bytes":256*1024}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    p["source_bounds_utf8"] = json!(canonical(
+        &json!({"schema_version":2,"accounting_rule":"operational_encoded_caps_v1","source_receipt":{},"record_allowances":allowances,"overhead":{"index_bytes":4*1024*1024*1024u64,"wal_bytes":64*1024*1024,"scratch_bytes":128*1024*1024,"retained_bytes":128*1024*1024,"duplicate_backup_bytes":256*1024*1024},"accounting_method_sha256":"e".repeat(64),"measurement_sha256":"f".repeat(64)})
+    ));
     p["plan_sha256"] = json!("0".repeat(64));
     let provisional: Record = serde_json::from_value(plan).expect("plan shape");
     let hash = provisional.sha256();
@@ -1409,6 +1856,60 @@ mod tests {
         assert_eq!(row.records[0].record["nonstuttering"], false);
         a.close().expect("close reference");
         b.close().expect("close disk");
+        // Bookkeeping is deliberately after the pinned semantic snapshot and
+        // before the actual SQLite backup. No current artifact hashes enter it.
+        let snapshot = disk
+            .pin_read_snapshot(disk.current_transaction().expect("checkpoint sequence"))
+            .expect("pin checkpoint");
+        let checkpoint=Record::new("Checkpoint",json!({"session_id":disk.session_id(),"sequence":0,"source":disk.source(),"initial_image_id":"a".repeat(64),"resource_plan_sha256":disk.resource_plan().sha256(),"unit_ordinal":1,"previous_checkpoint":null,"committed_transaction":snapshot.transaction().get(),"oldest_pending_ticket":ticket.get(),"counts":snapshot.counts().expect("checkpoint counts"),"contexts":snapshot.context_snapshots().expect("checkpoint contexts"),"page_root":"d".repeat(64),"catalog_logical_digest":snapshot.logical_digest().expect("checkpoint digest")})).expect("closed checkpoint");
+        let unit=Record::new("WorkUnit",json!({"session_id":disk.session_id(),"unit_ordinal":1,"expected_prior_checkpoint":null,"source":disk.source(),"pr":1,"repository":1,"event_base":"0".repeat(40),"workflow_id":"async-proof-session.yml","event_name":"workflow_dispatch","mode":"unit","run":1,"job":1,"task":1,"attempt":1,"resource_plan_sha256":disk.resource_plan().sha256(),"runner_identity_utf8":"{}","status":"checkpointed_incomplete","artifact_roots":[],"stage":"expand","registered_cases":[],"progress":{"context":null,"record_kind":null,"after_key":null,"fifo_ticket":ticket.get(),"component_id":null,"family":null,"case_index":0}})).expect("private unit");
+        assert!(
+            disk.record_checkpoint(&checkpoint, &unit).is_err(),
+            "checkpoint cannot race the read snapshot"
+        );
+        snapshot.close().expect("close checkpoint snapshot");
+        disk.record_checkpoint(&checkpoint, &unit)
+            .expect("private preupload bookkeeping");
+        let backup = directory.path().join("catalog-backup.sqlite");
+        let limits = BackupLimits {
+            max_bytes: 16 * 1024 * 1024,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        };
+        let descriptor = disk
+            .backup_checkpoint_catalog(&checkpoint, &backup, &limits)
+            .expect("actual backup API");
+        let mut restored_config = disk.inner.config.clone();
+        restored_config.path = backup.clone();
+        let restored =
+            Catalog::validation(restored_config.clone()).expect("readonly staged catalog");
+        let receipt = restored
+            .validate_restore(
+                &checkpoint,
+                number(&descriptor, "catalog_bytes").expect("backup bytes"),
+                string(&descriptor, "catalog_sha256").expect("backup hash"),
+                &limits,
+            )
+            .expect("private restore checks");
+        assert_eq!(
+            receipt["catalog_logical_digest"],
+            checkpoint.record["catalog_logical_digest"]
+        );
+        drop(restored);
+        let tamper = rusqlite::Connection::open(&backup).expect("fixture tamper writer");
+        tamper
+            .execute(
+                "UPDATE catalog_allocators SET last_id=last_id+1 WHERE kind='Product'",
+                [],
+            )
+            .expect("private allocator mutation");
+        drop(tamper);
+        let (bytes, hash) =
+            hash_file(&backup, limits.max_bytes, limits.deadline).expect("mutated file identity");
+        let restored = Catalog::validation(restored_config).expect("readonly mutated catalog");
+        assert!(
+            matches!(restored.validate_restore(&checkpoint,bytes,&hash,&limits),Err(CatalogError::CorruptRecord(reason)) if reason.contains("allocator")),
+            "a newly hashed file cannot launder a corrupted private allocator"
+        );
     }
     #[test]
     fn catalog_closed_records_reject_duplicate_keys_and_source_aliases() {
@@ -1430,6 +1931,24 @@ mod tests {
         )
         .expect("right");
         assert_ne!(left.bytes(), right.bytes());
+        // Full outer envelope accounting includes every JSON escape and header.
+        let inner = canonical(&json!(["\"", "\\", "\n", "λ"]));
+        let escaped=Record::new("PhysicalRows",json!({"id":3,"canonical_utf8":inner,"utf8_bytes":inner.len(),"sha256":digest(inner.as_bytes())})).expect("escaped exact inner bytes");
+        assert_eq!(
+            escaped.encoded_len(u64::MAX).expect("escaped full size"),
+            escaped.bytes().len() as u64
+        );
+        assert!(escaped
+            .encoded_len(escaped.bytes().len() as u64 - 1)
+            .is_err());
+        let full = left.bytes().len() as u64;
+        assert_eq!(left.encoded_len(full).expect("exact outer limit"), full);
+        assert!(left.encoded_len(full - 1).is_err());
+        assert!(
+            full > string(&left.record, "canonical_utf8")
+                .expect("inner bytes")
+                .len() as u64
+        );
         assert_ne!(
             left.reference().expect("left ref"),
             right.reference().expect("right ref")

@@ -249,6 +249,34 @@ impl Record {
             sha256: self.sha256(),
         })
     }
+    /// Object key order cannot change the encoded length. Count the complete
+    /// outer envelope directly, before allocating canonical output buffers.
+    pub fn encoded_len(&self, limit: u64) -> CatalogResult<u64> {
+        struct Counter {
+            bytes: u64,
+            limit: u64,
+        }
+        impl std::io::Write for Counter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let next = self
+                    .bytes
+                    .checked_add(bytes.len() as u64)
+                    .filter(|next| *next <= self.limit)
+                    .ok_or_else(|| {
+                        std::io::Error::other("complete encoded record exceeds operational cap")
+                    })?;
+                self.bytes = next;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut counter = Counter { bytes: 0, limit };
+        serde_json::to_writer(&mut counter, self)
+            .map_err(|error| CatalogError::ResourceIncomplete(error.to_string()))?;
+        Ok(counter.bytes)
+    }
     pub fn bytes(&self) -> Vec<u8> {
         canonical(self).into_bytes()
     }

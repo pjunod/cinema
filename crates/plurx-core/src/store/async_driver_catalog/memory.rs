@@ -6,8 +6,8 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{
-    canonical, string, CatalogError, CatalogResult, ReadLimits, Record, RecordBatch, RecordKey,
-    Storage, WriteContext,
+    canonical, number, string, CatalogError, CatalogResult, ReadLimits, Record, RecordBatch,
+    RecordKey, Storage, WriteContext,
 };
 
 #[derive(Clone, Default)]
@@ -326,6 +326,58 @@ impl Storage for MemoryStorage {
             ));
         }
         self.reading = false;
+        Ok(())
+    }
+    fn save_checkpoint(&mut self, checkpoint: &Record, work_unit: &Record) -> CatalogResult<()> {
+        if self.prior.is_some() || self.reading {
+            return Err(CatalogError::SnapshotMismatch(
+                "reference checkpoint writer active".into(),
+            ));
+        }
+        self.state.controls.insert(
+            format!("checkpoint:{}", checkpoint.sha256()),
+            serde_json::to_value(checkpoint)?,
+        );
+        self.state.controls.insert(
+            "latest_checkpoint".into(),
+            serde_json::to_value(checkpoint)?,
+        );
+        self.state.controls.insert(
+            format!("work_unit:{}", number(&work_unit.record, "unit_ordinal")?),
+            serde_json::to_value(work_unit)?,
+        );
+        Ok(())
+    }
+    fn check_private(&self, checkpoint: &Record) -> CatalogResult<()> {
+        if number(&checkpoint.record, "committed_transaction")? != self.state.sequence {
+            return Err(CatalogError::SnapshotMismatch(
+                "reference checkpoint sequence".into(),
+            ));
+        }
+        for (kind, last) in &self.state.counters {
+            let max = self
+                .state
+                .records
+                .keys()
+                .filter_map(|(k, key)| {
+                    if k == kind {
+                        if let RecordKey::Numeric(id) = key {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .max()
+                .unwrap_or(0);
+            if *last != max {
+                return Err(CatalogError::CorruptRecord(
+                    "reference allocator differs from committed IDs".into(),
+                ));
+            }
+        }
         Ok(())
     }
     fn backup(&self, _path: &Path, _limits: &super::BackupLimits) -> CatalogResult<()> {
