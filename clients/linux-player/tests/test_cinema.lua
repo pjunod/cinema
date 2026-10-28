@@ -1,9 +1,14 @@
 -- Behavioral tests execute the shipped script; mpv's API is replaced at its boundary.
 local script = arg[1] or 'plurx_player/scripts/cinema.lua'
 local P, bindings, watchers, events, commands, timers, overlay = {}, {}, {}, {}, {}, {}, {}
+local reads, read_overrides = {}, {}
 local now, mx, my, width, height = 0, 0, 0, 1280, 720
 package.preload['mp'] = function() return {
-    get_property_native=function(n) return P[n] end,
+    get_property_native=function(n)
+        reads[n]=(reads[n] or 0)+1
+        if read_overrides[n] then return read_overrides[n]() end
+        return P[n]
+    end,
     set_property=function(n,v) P[n]=v; commands[#commands+1]={'set',n,v} end,
     set_property_number=function(n,v) P[n]=v; commands[#commands+1]={'set',n,v} end,
     commandv=function(...) commands[#commands+1]={...} end,
@@ -122,12 +127,123 @@ eq(last()[2],'cinema-autoplay');eq(last()[3],'no')
 reset();update('user-data/cinema',context({quality={selected='auto',choices={}}}));click(930,681)
 assert(overlay.data:find('Quality choices are unavailable',1,true));local count_before=#commands
 press('enter');eq(#commands,count_before)
--- Overview prose wraps, remains escaped, and can be read to the last line.
-local long=context();long.metadata.overview=string.rep('éééééééééé long-word ',60)..'FINAL_SYNOPSIS_LINE {\\pos(0,0)}'
-reset();update('user-data/cinema',long);click(1125,681)
-assert(overlay.data:find('About this title',1,true))
-for i=1,100 do press('down') end
-assert(overlay.data:find('FINAL_SYNOPSIS_LINE',1,true));assert(overlay.data:find('\\{',1,true))
+-- Both Info entry points show playback observations, including changes without
+-- a property notification. This executes the shipped script, not a row replica.
+local function test_info_buttons_report_live_observations()
+    local function contents()
+        local pieces={overlay.data}
+        for i=1,60 do press('down');pieces[#pieces+1]=overlay.data end
+        return table.concat(pieces,'\n')
+    end
+    local function contains(value,part) assert(value:find(part,1,true),part..' missing') end
+    reset();update('user-data/cinema',context({playback={mode='transcode',transport='hls',session='live'}}))
+    P['video-codec']='HEVC';P['video-format']='hevc';P['idle-active']=false
+    P['video-dec-params']={w=3840,h=2160}
+    P['video-params']={w=3840,h=2160,pixelformat='cuda',['hw-pixelformat']='p010',
+        gamma='pq',primaries='bt.2020',colormatrix='dolbyvision',colorlevels='limited'}
+    P['osd-dimensions']={w=2560,h=1600,ml=0,mr=0,mt=80,mb=80}
+    P['video-target-params']={gamma='pq',primaries='bt.2020',['max-luma']=465}
+    P['current-vo']='gpu-next';P['current-gpu-context']='waylandvk';P['hwdec-current']='nvdec'
+    P['estimated-vf-fps']=23.976;P['video-bitrate']=24500000
+    P['frame-drop-count']=0;P['decoder-frame-drop-count']=2
+    P['track-list']={{type='audio',selected=true,codec='eac3',lang='eng'}}
+    P['audio-params']={channels='5.1',samplerate=48000,format='floatp'}
+    P['audio-out-params']={channels='stereo',samplerate=48000,format='float'}
+    P['current-ao']='pipewire';P['audio-bitrate']=768000;P['avsync']=-0.012;P['audio-delay']=0.05
+    P['demuxer-cache-state']={['cache-duration']=17.25,['raw-input-rate']=4000000,['fw-bytes']=1234567}
+    local previous=reads['hwdec-current'] or 0
+    timers[1]();eq(reads['hwdec-current'] or 0,previous)
+    click(1125,681)
+    contains(overlay.data,'Playback info');assert(not overlay.data:find('A remote crew',1,true))
+    local value=contents()
+    for _,part in ipairs({'Method: Transcode','Segmented HLS','Live HLS session',
+            'Stream frame (mpv decoder): 3840×2160','Player window size: 2560×1600','Video display area: 2560×1440',
+            'cuda · p010','Dolby Vision (mpv matrix)','bt.2020 · pq','465 nits',
+            'gpu-next · waylandvk','Decoder: nvdec','23.98 fps','24 Mb/s',
+            'Dropped frames (renderer): 0','Dropped frames (decoder): 2','eac3 · eng',
+            '5.1 · 48000 Hz · floatp','pipewire · stereo','768 kb/s','-12 ms','+50 ms',
+            '17.2 s','32 Mb/s','1234567 B'}) do contains(value,part) end
+    -- Paused samples still refresh; neither a notification nor transport command is needed.
+    for i=1,60 do press('up') end
+    for i=1,60 do
+        if overlay.data:find('Decoder: nvdec',1,true) then break end
+        press('down')
+    end
+    contains(overlay.data,'Decoder: nvdec')
+    P.pause=true;P['frame-drop-count']=11;P['hwdec-current']='no'
+    P['demuxer-cache-state']={['cache-duration']=2.5}
+    timers[1]();contains(overlay.data,'Decoder: Software (mpv)')
+    for i=1,60 do press('up') end
+    value=contents();contains(value,'Software (mpv)');contains(value,'Dropped frames (renderer): 11')
+    contains(value,'2.5 s');assert(not value:find('17.2 s',1,true))
+    -- Late unavailable/malformed values replace old facts, never become zero or requested options.
+    P['hwdec-current']=nil;P['frame-drop-count']=nil;P['video-dec-params']='unavailable'
+    P['osd-dimensions']={w=1920};P['demuxer-cache-state']=nil
+    P.hwdec='auto-safe';P.vo='gpu-next';P['current-vo']=nil;P['current-gpu-context']=nil
+    P['video-codec']='https://media1/private?token=secret';P['video-format']='/private/media.mkv'
+    P['video-target-params']={['max-luma']=0};P['estimated-vf-fps']=0/0
+    timers[1]();for i=1,60 do press('up') end
+    value=contents()
+    for _,part in ipairs({'Stream frame (mpv decoder): Unavailable','Player window size: Unavailable','Video display area: Unavailable',
+            'Decoder: Unavailable','Renderer: Unavailable','Dropped frames (renderer): Unavailable',
+            'Frame rate (estimated): Unavailable','VO target peak: Unavailable',
+            'Stream format: Unavailable','Demuxer buffered bytes: Unavailable'}) do contains(value,part) end
+    assert(not value:find('token=secret',1,true));assert(not value:find('/private',1,true))
+    assert(not value:find('auto-safe',1,true))
+    press('escape');previous=reads['hwdec-current'];timers[1]();eq(reads['hwdec-current'],previous)
+    click(1100,34);contains(overlay.data,'Playback info');contains(contents(),'Decoder: Unavailable')
+    press('escape');P.pause=false
+    -- A narrow panel wraps every diagnostic line; all rows remain reachable.
+    width=560;reset();click(400,575);value=contents();contains(value,'Demuxer buffered bytes')
+    contains(value,'Unavailable');assert(not value:find('A remote crew',1,true))
+    width=1280;reset()
+end
+test_info_buttons_report_live_observations()
+-- The core can lose a property between separate Lua requests. Alternating
+-- getters prove each sample is checked and formatted from the same value.
+local function test_info_reads_each_sync_sample_once()
+    width=1280;reset();click(1125,681)
+    for i=1,60 do
+        if overlay.data:find('Audio delay (applied):',1,true) then break end
+        press('down')
+    end
+    local calls={avsync=0,['audio-delay']=0}
+    for name in pairs(calls) do
+        local property=name
+        read_overrides[property]=function()
+            calls[property]=calls[property]+1
+            if calls[property]%2==1 then return property=='avsync' and 0.012 or 0.025 end
+        end
+    end
+    timers[1]();eq(calls.avsync,1);eq(calls['audio-delay'],1)
+    assert(overlay.data:find('AV sync difference: +12 ms',1,true))
+    assert(overlay.data:find('Audio delay (applied): +25 ms',1,true))
+    timers[1]();eq(calls.avsync,2);eq(calls['audio-delay'],2)
+    assert(overlay.data:find('AV sync difference: Unavailable',1,true))
+    assert(overlay.data:find('Audio delay (applied): Unavailable',1,true))
+    read_overrides={};reset()
+end
+test_info_reads_each_sync_sample_once()
+local function test_info_dynamic_range_requires_transfer()
+    width=1280;reset();click(1125,681)
+    for i=1,60 do
+        if overlay.data:find('Dynamic range:',1,true) then break end
+        press('down')
+    end
+    press('down');press('down') -- keep the adjacent Input color row visible too
+    for _,matrix in ipairs({'bt.709','bt.2020-ncl'}) do
+        P['video-params']={colormatrix=matrix};timers[1]()
+        assert(overlay.data:find('Dynamic range: Unavailable',1,true))
+        assert(overlay.data:find('Input color: '..matrix,1,true))
+    end
+    for _,sample in ipairs({{'srgb','SDR (mpv transfer)'},{'bt.1886','SDR (mpv transfer)'},
+            {'pq','PQ HDR'},{'hlg','HLG HDR'},{'unrecognized','Unavailable'}}) do
+        P['video-params']={gamma=sample[1],colormatrix='bt.709'};timers[1]()
+        assert(overlay.data:find('Dynamic range: '..sample[2],1,true))
+    end
+    reset()
+end
+test_info_dynamic_range_requires_transfer()
 -- Open menus win input over the underlying Next card at the same coordinates.
 reset();update('user-data/cinema',context());click(930,681)
 click(1070,565);assert(not last() or last()[2]~='cinema-next')
@@ -140,9 +256,9 @@ reset();update('user-data/cinema',context({error='Quality refused {\\bord99}'}))
 assert(overlay.data:find('Quality refused \\{',1,true));click(155,681);eq(last()[2],'pause')
 -- An early EOF exposes recovery without advancing or issuing duplicate requests.
 width=1280;reset();update('user-data/cinema',context());click(1125,681)
-assert(overlay.data:find('About this title',1,true))
+assert(overlay.data:find('Playback info',1,true))
 update('user-data/cinema',context({retryable=true,error='Playback ended early.'}))
-assert(not overlay.data:find('About this title',1,true))
+assert(not overlay.data:find('Method: ',1,true))
 assert(overlay.data:find('Retry',1,true));click(640,150)
 eq(last()[1],'script-message');eq(last()[2],'cinema-retry');eq(#last(),2)
 local retry_commands=#commands;click(640,150);eq(#commands,retry_commands)
@@ -159,4 +275,4 @@ update('user-data/cinema',original);click(930,681);press('down');press('enter')
 eq(#commands,0);assert(not overlay.data:find('Playback quality',1,true))
 click(1035,681);for i=1,9 do press('down') end;press('enter')
 eq(last()[2],'cinema-autoplay');eq(last()[3],'no')
-print('Cinema overlay: 32 behavioral scenarios passed')
+print('Cinema overlay: 32 control scenarios and 3 live playback Info regressions passed')

@@ -1,3 +1,13 @@
+plurx-player (0.4.1+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
+
+  * Make both Cinema Info buttons show live playback diagnostics, including
+    decoded picture/color, renderer/decoder, sound and demuxer observations.
+    Report missing measurements as unavailable; retain title/episode metadata.
+  * Keep the private mpv/libplacebo pins and closed-form equations unchanged:
+    tools/dv_processing dm 193c40343ebf.
+
+ -- plurx contributors <noreply@plurx.invalid>  Wed, 28 Oct 2026 21:30:00 +0000
+
 plurx-player (0.4.0+lp7.387.0.mpv0.41.0+git20261026.e59d90c-1) stonking; urgency=medium
 
   * Replace mpv's stock on-screen controller with Cinema-style playback

@@ -1,7 +1,7 @@
 # Linux player Cinema UI — release and installation ledger
 
 **Status:** open: 0.4.0 installed; owner confirms UI and quality switching;
-live TV Next acceptance pending ·
+0.4.1 playback Info correction in progress; live TV Next acceptance pending ·
 **Written:** 2026-10-28 · **Executes:** the owner's approved
 Cinema playback renders and request to complete metadata, next episode and
 quality controls, package them and install on the ROG.
@@ -25,6 +25,25 @@ file scope only if the expected predecessor is still current. The expiry and
 minting-login binding do not change. A quality replacement has independent
 provisional ownership and releases the incumbent after the candidate loads
 and restarts. Early EOF cannot mark a whole film watched or trigger Next.
+
+### 1.1 Playback Info correction (0.4.1)
+
+Both Info entry points now open live playback diagnostics rather than library
+synopsis. The panel uses documented mpv 0.41 properties for decoded picture,
+color/Dolby Vision observations, VO target, renderer/decoder, audio, FPS,
+packet bitrate, drops and demuxer buffer/input estimates. Whitelisted launcher
+enums identify delivery and session kind; no decision/session dictionary,
+URL, token or private file path is forwarded. Missing readings remain
+Unavailable and diagnostic polling runs only while the panel is open.
+Title and episode metadata remain visible outside the panel.
+
+The Lua regression exercises both buttons, live/paused changes, late missing
+properties, narrow-window scrolling and closed-panel polling. The Python
+regression checks delivery facts and rejects credential/path forwarding.
+0.4.1 package qualification, installation and owner acceptance are pending;
+the 0.4.0 receipts below remain evidence for that earlier package only.
+The engine pins and display-management equations are unchanged. VO target
+readings do not establish calibrated luminance or physical HDR acceptance.
 
 ## 2. Qualification and installation
 

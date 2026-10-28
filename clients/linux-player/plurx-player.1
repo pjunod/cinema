@@ -1,4 +1,4 @@
-.TH PLURX-PLAYER 1 2026-10-28 "plurx-player 0.4.0" "User Commands"
+.TH PLURX-PLAYER 1 2026-10-28 "plurx-player 0.4.1" "User Commands"
 .SH NAME
 plurx-player \- play a plurx title handed over by the plurx web app
 .SH SYNOPSIS
@@ -55,7 +55,11 @@ Controls hide after four seconds while playing, except during a preview or
 an open menu, and stay visible while paused.
 .PP
 Audio and CC select tracks available in the current stream. Settings offers
-speed and audio sync; Playback info shows mpv's decoded/output properties.
+speed and audio sync. Both Info buttons show live mpv playback diagnostics:
+decoded/output picture and color, renderer/decoder, audio, FPS, packet rates,
+dropped frames and demuxer estimates. Missing readings say Unavailable.
+The panel refreshes only while open, including when paused. VO target
+properties describe mpv's output target, not measured physical HDR output.
 Library title, episode identity and synopsis come from the scoped server
 context. Quality offers Auto, Original and advertised heights, preserving
 position and pause; a failed replacement restores the incumbent stream.
