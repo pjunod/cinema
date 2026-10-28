@@ -109,6 +109,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Restrict the Linux external player preference to Dolby Vision files on Linux;
+  other formats and operating systems retain web playback, including mixed-version titles.
+
 - Shared playback retries closure acknowledgements after concurrent updates to
   the same owner's custody ledger. Actual driver closure and authority fences
   remain required.

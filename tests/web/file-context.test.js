@@ -201,7 +201,7 @@ test("translated decision media URLs cannot acquire upstream origins or unbound 
 test("actual Local play and picker handlers preserve id_text above the JS integer ceiling",()=>{
   const ctx=vm.createContext({AUTH_GENERATION:0,observed:[],PREPLAY:{},PREPLAY_SCOPE_NOTE:"This playback only"});
   const names=["exactWireId","prePlayPickers","playbackMetaFor","playCall","setPrePlay","prePlaySelection"];
-  vm.runInContext(source+"\n"+names.map(name=>shippedFunction("detail/preplay-selection.js",name)).join("\n")+`
+  vm.runInContext(source+"\n"+shippedFunction("detail/dynamic-range.js","sourceDynamicRange")+"\n"+names.map(name=>shippedFunction("detail/preplay-selection.js",name)).join("\n")+`
     function esc(value){return String(value).replaceAll("&","&amp;").replaceAll('"',"&quot;");}
     function audioFactLabel(a){return "Track "+a.index;}function subFactLabel(){return "Subtitle";}
     function prePlayPreview(){}function play(...args){observed.push(args);}

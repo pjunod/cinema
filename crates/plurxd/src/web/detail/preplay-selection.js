@@ -435,6 +435,8 @@ function itemPageModel(id,d,libs){
 // changes source files at part boundaries or when the scrubber crosses one.
 function playbackMetaFor(p,file){
   const m=Object.assign({},p.meta||{});
+  // Routing follows the selected version, never another version’s badge.
+  m.source_dynamic_range=file?sourceDynamicRange(file):null;
   if(p.item.kind!=='audiobook') return m;
   m.audiobook=true;
   m.part_offset_ms=file.part_offset_ms||0;
@@ -953,13 +955,14 @@ function useGeneratedSubtitles(id){
   const picker=/** @type {HTMLSelectElement|null} */ (document.getElementById(`pp-s-${id}`));if(picker)picker.value=String(state.readyIndex);
 }
 
-// ---- Open titles in plurx Player ------------------------------------------
-// docs/clients/LINUX-PLAYER-PLAN.md §4.1. Settings → Playback → "Open titles
-// in" is a viewer preference saved per browser, like the HDR display peak:
+// ---- Dolby Vision on Linux in plurx Player --------------------------------
+// docs/clients/LINUX-PLAYER-PLAN.md §4.1. Settings → Playback → Dolby Vision
+// playback on Linux is a viewer preference saved per browser, like HDR peak:
 // only the viewer knows whether plurx Player is installed on this computer,
 // so it is not a feature gate and nothing on the server reads it.
 //
-// When it says plurx Player, a cold Play mints a one-time handoff code and
+// On Linux, when the selected file is Dolby Vision and the preference says
+// plurx Player, a cold Play mints a one-time handoff code and
 // navigates to plurx-player://play?server=…&code=…. The long-lived credential
 // never enters that URL (scheme URLs land in shell history, `ps` and desktop
 // logs); the launcher redeems the code over HTTPS for a token scoped to this
@@ -975,7 +978,18 @@ const PLAYER_HANDOFF_POLL_MS=1000, PLAYER_HANDOFF_POLLS=15;
 // `generation` fences a superseded handoff's poll; `bypass` is the one-shot
 // "Play here instead" for the file it names; `last` is what that replays.
 let PLAYER_HANDOFF={generation:0,bypass:null,last:null};
+// Detect the browser's computer, not the server. Android also reports Linux;
+// ChromeOS cannot use the native Linux scheme handler either. Unknown stays
+// in the browser, even if a preference was restored from another computer.
+function linuxPlayerClient(){
+  if(typeof navigator==="undefined") return false;
+  if(/Android|CrOS/i.test(navigator.userAgent||"")) return false;
+  const client=/** @type {Navigator & {userAgentData?:{platform?:string}}} */(navigator);
+  const platform=client.userAgentData?.platform||client.platform||"";
+  return /^Linux\b/i.test(platform);
+}
 function openInPreference(){
+  if(!linuxPlayerClient()) return "browser";
   try{ return localStorage.getItem(OPEN_IN_KEY)==="player"?"player":"browser"; }
   catch(_){ return "browser"; }
 }
@@ -983,7 +997,7 @@ function playerHandoffWanted(fileId,meta,reservedOpenAttempt,retryIntent){
   // Consumed by whichever play() comes next, so a bypass can never outlive
   // the click that asked for it.
   const bypass=PLAYER_HANDOFF.bypass; PLAYER_HANDOFF.bypass=null;
-  if(openInPreference()!=="player") return false;
+  if(openInPreference()!=="player"||meta?.source_dynamic_range!=="dolby_vision") return false;
   if(bypass!=null&&bypass===String(fileId)) return false;
   if(retryIntent||reservedOpenAttempt) return false;
   if(meta&&(meta.audiobook||meta.return_channel_id!=null)) return false;

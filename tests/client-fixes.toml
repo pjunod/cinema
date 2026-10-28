@@ -1,6 +1,25 @@
 version = 1
 enforce_after = "e8a910f"
 
+
+# PR #1306: native handoff is limited to the selected Dolby Vision file on Linux.
+[[fixes]]
+id = "web.linux-dolby-vision-player-handoff"
+commits = ["2cbb69f9959e599b3d5c4d06ecded593ac9b3eec"]
+source = "crates/plurxd/src/web/detail/preplay-selection.js"
+source_anchor = 'if(openInPreference()!=="player"||meta?.source_dynamic_range!=="dolby_vision") return false;'
+test = "tests/web/linux-player-handoff.test.js"
+test_anchor = "only Dolby Vision on Linux can mint a handoff despite a saved player preference"
+
+[[fixes]]
+id = "web.linux-dolby-vision-selected-version"
+commits = []
+supplements = "web.linux-dolby-vision-player-handoff"
+source = "crates/plurxd/src/web/detail/preplay-selection.js"
+source_anchor = "m.source_dynamic_range=file?sourceDynamicRange(file):null;"
+test = "tests/web/linux-player-handoff.test.js"
+test_anchor = "every layout's Play and Start over buttons route the clicked version only"
+
 # The semantic in-session seek regression exercises the real playback event path.
 [[fixes]]
 id = "linux-player.seek-inside-session-event-path"
