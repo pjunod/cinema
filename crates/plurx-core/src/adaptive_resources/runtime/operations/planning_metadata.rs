@@ -124,6 +124,7 @@ impl NodeResourceRuntime {
         };
         if original != &metadata.plan
             || !metadata.release.application.released()
+            || role.graph.is_some()
             || !role.sources.is_empty()
             || !role.roots.is_empty()
             || !role.drains.is_empty()
@@ -182,6 +183,12 @@ impl NodeResourceRuntime {
             })),
             effect: Effect::Settle,
         });
+        // The exact empty original M graph was validated above. Destroy it
+        // before the final rich-bundle drop takes ledger.inner: its Drop
+        // conservatively locks that ledger to retain the original charge.
+        // The one-shot metadata closure/command is already retained, and no
+        // await or fallible step separates that transfer from this drop.
+        role.sealed = None;
         Ok(())
     }
 }
