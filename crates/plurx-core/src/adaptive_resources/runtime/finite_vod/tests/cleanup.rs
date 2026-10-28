@@ -205,7 +205,7 @@ fn original_owner_at_generation(
     .expect("actual software recipe");
     let execution = TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), ".")
         .expect("actual execution");
-    let grid = VodFrameGrid::new(24_000, 1).expect("original pump grid");
+    let grid = VodFrameGrid::new(24, 1).expect("original pump grid");
     let command = SoftwareAvcCommand::compile(
         &file,
         &plan,

@@ -585,6 +585,10 @@ impl BootstrapFold {
             self.bootstrap.phase = BootstrapPhase::Closing;
         }
         if matches!(operation, BootstrapIoV1::RemoveRenditionChild { .. }) {
+            // arm() already required the completed child-directory sync.
+            // Consume its quiescent marker before this destructive job becomes
+            // pending; the original durable sync remains in the lineage.
+            self.output.state.directory_synced = false;
             self.bootstrap.phase = BootstrapPhase::RemovingRetainedChild;
         }
         Ok(())

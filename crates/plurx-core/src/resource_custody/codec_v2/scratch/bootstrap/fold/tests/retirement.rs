@@ -897,3 +897,49 @@ fn possible_child_never_entered_must_be_observed_before_partial_cancel() {
     )
     .unwrap();
 }
+
+#[test]
+fn retained_child_removal_requires_prior_sync_and_consumes_quiescent_sync_marker() {
+    let plan = plan();
+    for synced in [false, true] {
+        let (fold, file_id, native) = retained(&plan, false);
+        let fold = begin_retirement(fold, &plan);
+        let mut fold = remove_file(fold, &plan, file_id, native);
+        if synced {
+            fold = sync_child_directory(fold, &plan);
+        }
+        let parent = fold.bootstrap.parent.as_ref().unwrap();
+        let parent_ref = OwnedDirectoryRefV1 {
+            owning_obligation: fold.obligation,
+            member_id: fold.member,
+            directory_id: parent.observed.directory_id,
+        };
+        let child_directory_id = fold.output.state.directory.as_ref().unwrap().directory_id;
+        let io_id = id();
+        let armed = apply(
+            fold,
+            &plan,
+            io_id,
+            AssetEventV3::ArmBootstrapV1 {
+                io_id,
+                operation: BootstrapIoV1::RemoveRenditionChild {
+                    parent: parent_ref,
+                    child_directory_id,
+                    child_component: plan.bootstrap().child_component.clone(),
+                },
+            },
+        );
+        if synced {
+            let armed = armed.expect("the same lineage proves the preceding sync");
+            assert_eq!(armed.bootstrap.phase, BootstrapPhase::RemovingRetainedChild);
+            assert_eq!(armed.output.state.totals.pending_jobs, 1);
+            assert!(!armed.output.state.directory_synced);
+            validate_projection(&plan, &armed.state()).unwrap();
+        } else {
+            assert!(
+                armed.is_err(),
+                "pending removal must not invent preceding sync"
+            );
+        }
+    }
+}

@@ -197,7 +197,7 @@ fn next_step(bootstrap: &BootstrapMember) -> Result<CleanupPending, OperationErr
             CleanupCell::remove_owned_file(file, child)?,
         );
     }
-    if !state.asset.directory_synced {
+    if state.bootstrap.phase == BootstrapPhase::SinkReady && !state.asset.directory_synced {
         return io(
             CleanupOperation::Output(AssetIoV1::SyncFiles { file_ids: vec![] }),
             CleanupCell::sync_child(child)?,

@@ -571,7 +571,8 @@ impl NodeResourceRuntime {
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded
-            || !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+            || (!matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+                && (allow_entry || role.phase != Phase::UnknownHeld))
             || role
                 .transition
                 .as_ref()
