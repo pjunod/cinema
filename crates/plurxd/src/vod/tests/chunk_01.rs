@@ -466,6 +466,7 @@ fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds,
         audio_index: None,
@@ -752,9 +753,9 @@ async fn insert_control_session(
         session_id.to_owned(),
         Session {
             children: Vec::new(),
-                root_admission: None,
-                processed_reuse_scope: None,
-                processed_reuse_seed: None,
+            root_admission: None,
+            processed_reuse_scope: None,
+            processed_reuse_seed: None,
             preferred_start_ms: None,
             passive_grant: None,
             rendition: Some(rendition),
@@ -813,9 +814,9 @@ async fn insert_terminal_session(
         session_id.to_owned(),
         Session {
             children: Vec::new(),
-                root_admission: None,
-                processed_reuse_scope: None,
-                processed_reuse_seed: None,
+            root_admission: None,
+            processed_reuse_scope: None,
+            processed_reuse_seed: None,
             preferred_start_ms: None,
             passive_grant: None,
             rendition: None,
@@ -926,7 +927,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         manifest: Mutex::new(Manifest::new(plan.clone())),
         output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
         private_storage: None,
-            copy_preparation: StdMutex::new(None),
+        copy_preparation: StdMutex::new(None),
         preparation_epoch: AtomicU64::new(0),
         retained_offer: StdMutex::new(None),
         cancelled_preparation_epoch: AtomicU64::new(0),
@@ -1260,6 +1261,7 @@ async fn stored_marker_prewarm_is_subordinate_and_hits_only_its_own_production()
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         hit,
     );
@@ -2165,6 +2167,7 @@ async fn marker_prewarm_placeholder_correlates_without_a_client_session_id() {
             aac: true,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         };
     }
 
@@ -2250,7 +2253,10 @@ async fn read_ready(ready: SegmentReady) -> Vec<u8> {
     let mut ready = ready;
     let bytes = ready
         .file
-        .read_all_bounded(ready.len, std::time::Instant::now() + Duration::from_secs(30))
+        .read_all_bounded(
+            ready.len,
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
         .await
         .expect("read segment");
     bytes.to_vec()

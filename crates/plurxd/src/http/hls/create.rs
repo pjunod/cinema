@@ -1271,6 +1271,7 @@ impl CreateSession {
                 // re-derives (`review_client_plan`). A wire field here would
                 // be a claim the client has no way to be right about.
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
             }
         } else {
             SessionKind::Transcode { height }
@@ -1410,6 +1411,11 @@ pub(crate) struct PlanReview {
     /// declines the converted kind too, and there is no such thing as
     /// converting RPUs a stripping filter has already removed.
     pub convert_dolby_vision: bool,
+    /// The copy hands a dual-layer source over as copied, because the
+    /// client's own capabilities enumerate its profile. Derived after every
+    /// clamp, so it is only ever true beside `preserve_dolby_vision` without
+    /// `convert_dolby_vision`; the trust path never sets it.
+    pub dual_layer_as_copied: bool,
     /// Likewise for the HDR10 re-encode request. Still only a *request*:
     /// `TranscodeManager::hdr10_grade_for` refuses it for any source, rung, or
     /// build that did not prove the chain, and that refusal is unchanged.
@@ -1468,12 +1474,14 @@ pub(super) fn apply_plan_review(
     if let crate::transcode::SessionKind::Copy {
         preserve_dolby_vision,
         convert_dolby_vision,
+        dual_layer_as_copied,
         ..
     } = &mut request.kind
     {
         *preserve_dolby_vision = review.preserve_dolby_vision;
-        // The only place this is ever set. It is derived, never echoed.
+        // The only place these two are ever set. Derived, never echoed.
         *convert_dolby_vision = review.convert_dolby_vision;
+        *dual_layer_as_copied = review.dual_layer_as_copied;
     }
     request.hdr10 = review.hdr10;
     review.notes
@@ -1631,6 +1639,8 @@ pub(super) fn legacy_trusted_review(
     PlanReview {
         preserve_dolby_vision,
         convert_dolby_vision,
+        // A build that sent no capability document named no profile.
+        dual_layer_as_copied: false,
         hdr10: asked_hdr10,
         notes,
         mismatched: false,
@@ -1718,6 +1728,7 @@ pub(super) fn review_client_plan_inner(
     let mut review = PlanReview {
         preserve_dolby_vision: derived.preserve_dolby_vision,
         convert_dolby_vision: derived.convert_dolby_vision,
+        dual_layer_as_copied: false,
         hdr10: asked_hdr10 && profile.supports_hdr10_transcode,
         notes: Vec::new(),
         mismatched: false,
@@ -1784,6 +1795,13 @@ pub(super) fn review_client_plan_inner(
     // Vision, or a client that never asked for it, must not be handed a
     // converted stream by a flag nobody looked at.
     review.convert_dolby_vision &= review.preserve_dolby_vision;
+    // A dual-layer source preserved without a conversion is a plan the
+    // derivation only makes for a client that enumerated the profile; say so
+    // explicitly, so the copy downstream can tell it from a stale echo.
+    review.dual_layer_as_copied = review.preserve_dolby_vision
+        && !review.convert_dolby_vision
+        && plurx_core::playback::dolby_vision_is_dual_layer(file)
+        && profile.decodes_dolby_vision_as_copied(file);
     if review.mismatched && count_create_metrics {
         plan_derivation::count_mismatched();
     }
@@ -6686,9 +6704,24 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
                 retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
             };
         }
+        // What the local indexer found can carry source paths and ffmpeg's
+        // stderr. The WARN above keeps it; the client is told what the code
+        // means and nothing of the indexer's log.
+        let reason = match code {
+            "vod_index_unavailable" => {
+                "this title has no fragment index on this node and will not get one \
+                 until its source changes; play it through another engine"
+            }
+            _ => reason,
+        };
         let (status, code) = match code {
             "vod_disabled" => (StatusCode::SERVICE_UNAVAILABLE, "vod_disabled"),
             "vod_index_pending" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
+            // Every shipped client answers `vod_index_pending` by falling
+            // back (a progressive remux on the web), and none knows the
+            // terminal code, so a VOD-only start keeps the public code with
+            // the generic message above.
+            "vod_index_unavailable" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
             "hevc_configuration_unverified" => {
                 (StatusCode::CONFLICT, "hevc_configuration_unverified")
             }

@@ -13,6 +13,7 @@ mod background_jobs;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
+pub(crate) use browse::index_refusal_summary;
 pub(crate) mod chapter_thumbs;
 mod cluster;
 pub(crate) mod cluster_operations;
@@ -60,6 +61,7 @@ pub(crate) mod remote;
 mod scan;
 pub(crate) mod scan_identity;
 pub(crate) mod shared_artwork;
+pub(crate) mod shared_captions;
 pub(crate) mod shared_library;
 pub(crate) mod shared_playback;
 pub(crate) mod shared_receiver_assets;
@@ -325,6 +327,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/subtitles/search"
         | "/api/v1/files/{id}/subtitles/download"
         | "/api/v1/files/{id}/subtitles/transcribe"
+        | "/api/v1/files/{id}/subtitle-text-translation/options"
         | "/api/v1/files/{id}/subtitle-translation/options"
         | "/api/v1/files/{id}/subtitle-translation/assets"
         | "/api/v1/items/{id}/classification"
@@ -511,6 +514,13 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
         | "/api/v1/subtitle-translation/models"
+        | "/api/v1/subtitle-text-translation/config"
+        | "/api/v1/subtitle-text-translation/models"
+        | "/api/v1/subtitle-text-translation/models/install"
+        | "/api/v1/subtitle-text-translation/models/verify"
+        | "/api/v1/files/{id}/subtitles/{index}/translation"
+        | "/api/v1/subtitle-text-translation/jobs/{id}"
+        | "/api/v1/subtitle-text-translation/jobs/{id}/retry"
         | "/api/v1/subtitle-transcription/managed"
         | "/api/v1/subtitle-transcription/models"
         | "/api/v1/subtitle-transcription/models/{id}/install"
@@ -1756,6 +1766,39 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/subtitle-transcription",
             put(crate::subtitle_transcription::update_settings),
+        )
+        .route(
+            "/subtitle-text-translation/config",
+            get(crate::subtitle_text_translation::api::settings)
+                .put(crate::subtitle_text_translation::api::update_settings),
+        )
+        .route(
+            "/subtitle-text-translation/models",
+            get(crate::subtitle_text_translation::api::models),
+        )
+        .route(
+            "/subtitle-text-translation/models/install",
+            post(crate::subtitle_text_translation::api::install),
+        )
+        .route(
+            "/subtitle-text-translation/models/verify",
+            post(crate::subtitle_text_translation::api::verify),
+        )
+        .route(
+            "/files/{id}/subtitle-text-translation/options",
+            get(crate::subtitle_text_translation::api::options),
+        )
+        .route(
+            "/files/{id}/subtitles/{index}/translation",
+            post(crate::subtitle_text_translation::api::create),
+        )
+        .route(
+            "/subtitle-text-translation/jobs/{id}",
+            get(crate::subtitle_text_translation::api::job),
+        )
+        .route(
+            "/subtitle-text-translation/jobs/{id}/retry",
+            post(crate::subtitle_text_translation::api::retry),
         )
         .route(
             "/subtitle-translation",

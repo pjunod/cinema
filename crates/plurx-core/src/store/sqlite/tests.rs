@@ -857,9 +857,11 @@ async fn v6_rebuild_preserves_everything() {
     // credentials, consent, revision fencing, login rebind and cleanup guards.
     // v111 appends managed subtitles; v112 appends progressive translation;
     // v113 adds ratings/lists and v114 adds source-revision title acquisition;
-    // v115 adds one-time playback handoff codes and file-scoped tokens.
+    // v115 adds one-time playback handoff codes and file-scoped tokens;
+    // v116 appends text translation, v117 Shared caption leases,
+    // v118 producer retargeting and v119 claim-bound playback continuity.
     assert_eq!(
-        version, 115,
+        version, 119,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

@@ -2,7 +2,6 @@
 use crate::http::error::ApiError;
 use axum::http::StatusCode;
 use plurx_core::store::{
-    subtitle_translation::TranslationProfile,
     subtitle_translation_read::{TranslationQuery, TranslationRead},
     subtitle_translation_settings::{
         settings_revision, TranslationSettings, TranslationSettingsWrite, SETTINGS_KEY,
@@ -155,7 +154,6 @@ pub(crate) async fn save(
     store: &dyn Store,
     user_id: i64,
     request: UpdateRequest,
-    profile: &TranslationProfile,
     languages: &[String],
     now: i64,
 ) -> Result<Snapshot, ApiError> {
@@ -177,7 +175,9 @@ pub(crate) async fn save(
     match (&request.model_id, &request.profile_id) {
         (None, None) => {}
         (Some(model), Some(id))
-            if model == &profile.model_id && id == &profile.id().map_err(ApiError::from)? => {}
+            if super::profile::profiles().iter().any(|profile| {
+                &profile.model_id == model && profile.id().is_ok_and(|candidate| candidate == *id)
+            }) => {}
         _ => return Err(invalid()),
     }
     if request
@@ -282,30 +282,97 @@ mod tests {
         assert!(!initial.enabled);
         assert!(initial.model_id.is_none());
         let input = request(&initial.revision, 1_000);
-        let profile = super::super::profile::selected_profile();
-        let first = save(
-            &store,
-            admin.id,
-            input.clone(),
-            &profile,
-            &languages(),
-            1_000,
-        )
-        .await
-        .expect("save enabled without installed resources");
+        let first = save(&store, admin.id, input.clone(), &languages(), 1_000)
+            .await
+            .expect("save enabled without installed resources");
         assert!(first.enabled);
         assert!(first.model_id.is_none());
         store
             .put_settings(&[(SETTINGS_KEY, "{\"version\":999,\"enabled\":false}")])
             .await
             .expect("changed external writer before exact replay");
-        let replay = save(&store, admin.id, input, &profile, &languages(), 1_001)
+        let replay = save(&store, admin.id, input, &languages(), 1_001)
             .await
             .expect("exact request replay");
         assert_eq!(
             serde_json::to_value(first).expect("first DTO"),
             serde_json::to_value(replay).expect("replay DTO")
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_small_model_without_profile_remains_an_explicit_small_choice() {
+        let store = SqliteStore::open_in_memory().expect("legacy settings fixture");
+        let raw = serde_json::to_string(&serde_json::json!({"version":1,
+            "revision":uuid::Uuid::new_v4().to_string(),"enabled":true,
+            "model_id":"small","profile_id":null,"preferred_spoken_language":"de"}))
+        .expect("legacy settings");
+        store
+            .put_settings(&[(SETTINGS_KEY, raw.as_str())])
+            .await
+            .expect("legacy saved choice");
+        let saved = read(&store, 1_000).await.expect("legacy read");
+        assert_eq!(saved.model_id.as_deref(), Some("small"));
+        assert!(saved.profile_id.is_none());
+        assert!(saved.enabled);
+        assert_eq!(
+            store
+                .get_setting(SETTINGS_KEY)
+                .await
+                .expect("stored bytes")
+                .as_deref(),
+            Some(raw.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_small_choice_preserves_identity_and_rejects_unregistered_model_pair() {
+        let store = SqliteStore::open_in_memory().expect("settings fixture");
+        let admin = store
+            .create_user("admin", "hash", true)
+            .await
+            .expect("administrator");
+        let initial = read(&store, 1_000).await.expect("unset choice");
+        assert!(initial.model_id.is_none());
+        let selected = super::super::profile::selected_profile();
+        let mut input = request(&initial.revision, 1_000);
+        input.model_id = Some(selected.model_id.clone());
+        input.profile_id = Some(selected.id().expect("legacy identity"));
+        let saved = save(&store, admin.id, input, &languages(), 1_000)
+            .await
+            .expect("save explicit Small without readiness");
+        let observed = read(&store, 1_001).await.expect("saved Small choice");
+        assert_eq!(observed.model_id.as_deref(), Some("small"));
+        assert_eq!(observed.profile_id, saved.profile_id);
+        let mut crosswired = request(&saved.revision, 1_001);
+        crosswired.model_id = Some("base".into());
+        crosswired.profile_id = saved.profile_id.clone();
+        let error = save(&store, admin.id, crosswired, &languages(), 1_001)
+            .await
+            .expect_err("cross-model choice");
+        assert_eq!(error.code(), Some("invalid_request"));
+        assert_eq!(
+            read(&store, 1_002)
+                .await
+                .expect("unchanged choice")
+                .profile_id,
+            saved.profile_id
+        );
+        let transcription = super::super::profile::default_for_task(
+            plurx_core::store::subtitle_translation::SpeechTask::Transcribe,
+        );
+        let mut input = request(&saved.revision, 1_002);
+        input.model_id = Some(transcription.model_id.clone());
+        input.profile_id = Some(transcription.id().expect("transcription identity"));
+        let saved = save(&store, admin.id, input, &languages(), 1_002)
+            .await
+            .expect("save Small transcription without readiness");
+        assert_eq!(saved.model_id.as_deref(), Some("small"));
+        assert_eq!(
+            saved.profile_id,
+            Some(transcription.id().expect("saved task identity"))
+        );
+        assert!(saved.enabled);
     }
 
     #[tokio::test]
@@ -316,12 +383,10 @@ mod tests {
             .await
             .expect("administrator");
         let initial = read(&store, 1_000).await.expect("virtual settings");
-        let profile = super::super::profile::selected_profile();
         save(
             &store,
             admin.id,
             request(&initial.revision, 1_000),
-            &profile,
             &languages(),
             1_000,
         )
@@ -335,7 +400,6 @@ mod tests {
             &store,
             admin.id,
             request(&initial.revision, 1_001),
-            &profile,
             &languages(),
             1_001,
         )
@@ -364,7 +428,6 @@ mod tests {
             &store,
             viewer.id,
             request(&initial.revision, 1_000),
-            &super::super::profile::selected_profile(),
             &languages(),
             1_000,
         )

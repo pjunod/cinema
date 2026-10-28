@@ -168,6 +168,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         kind: if profile81 {
             SessionKind::Copy {
                 convert_dolby_vision: true,
+                dual_layer_as_copied: false,
                 aac: true,
                 preserve_dolby_vision: false,
             }
@@ -361,7 +362,10 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         // a second play is not given another graph (it keeps its ordinary
         // converted copy, or an unprocessed recipe), never a second slot.
         assert!(runtime.reconstruction_slot.is_some());
-        assert_eq!(manager.processed_reconstruction_slots.available_permits(), 0);
+        assert_eq!(
+            manager.processed_reconstruction_slots.available_permits(),
+            0
+        );
         let second = manager
             .prepare_vod_encoding(
                 &SessionRequest {
@@ -374,14 +378,16 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             .await
             .expect("second play keeps an ordinary route");
         assert!(
-            second.as_ref().is_none_or(|second| !matches!(
-                second.dv_processing,
-                DvSelection::Selected(_)
-            )),
+            second
+                .as_ref()
+                .is_none_or(|second| !matches!(second.dv_processing, DvSelection::Selected(_))),
             "a second live reconstruction must not be admitted on this worker"
         );
         drop(second);
-        assert_eq!(manager.processed_reconstruction_slots.available_permits(), 0);
+        assert_eq!(
+            manager.processed_reconstruction_slots.available_permits(),
+            0
+        );
     }
     let luma = processed_window_luma(&verified.bytes, raster, false);
     println!(
@@ -968,9 +974,14 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
             .result
             .expect("materialized")
             .expect("planned resource");
-        let object_bytes = ready.file
-            .read_all_bounded(ready.len, Instant::now() + std::time::Duration::from_secs(30))
-            .await.expect("actual GET file");
+        let object_bytes = ready
+            .file
+            .read_all_bounded(
+                ready.len,
+                Instant::now() + std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("actual GET file");
         bytes.extend_from_slice(&object_bytes);
         if init_len.is_none() {
             init_len = Some(bytes.len());
@@ -2272,6 +2283,7 @@ async fn service_vod_only_refuses_unindexed_copy_before_rolling_allocation() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     request.vod_only = true;
     let error = create_local_vod(&manager, &request, "test")
@@ -2352,6 +2364,7 @@ async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() 
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     let pause = manager
         .test_hooks()
@@ -2548,6 +2561,7 @@ async fn a_candidate_rolling_fallback_refuses_a_source_replaced_after_the_vod_at
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     request.candidate_context = Some(Box::new(context));
     let pause = manager
@@ -2717,6 +2731,7 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     ordinary.candidate_context = Some(Box::new(ordinary_context));
     // The processed trial qualification would hand on: a Transcode HDR10
@@ -2898,6 +2913,7 @@ async fn finite_vod_bitrate_ceiling_is_shared_by_native_recipe_and_worker_identi
         aac: true,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     copy.finite_bitrate_limit_bps = Some(750_000);
     let mut copy_file = file.clone();

@@ -1,4 +1,3 @@
-
 /// A recovery that was reserved and then failed to install has been
 /// attempted, and the row says so.
 ///
@@ -1252,6 +1251,7 @@ async fn rolling_real_copy_complete_retention_attaches_new_owner_and_verified_bo
     manager.record_retained_headroom(1 << 50);
     let options = CopySessionOptions {
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
         transcode_audio: false,
         preserve_dolby_vision: false,
     };
@@ -1385,6 +1385,7 @@ async fn rolling_refused_proof_keeps_real_copy_playable_and_source_identity_clos
             None,
             CopySessionOptions {
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
                 transcode_audio: false,
                 preserve_dolby_vision: false,
             },
@@ -1600,6 +1601,7 @@ async fn rolling_integrity_refusal_is_one_way_and_retained_copy_bypasses_full_sc
     manager.record_retained_headroom(1 << 50);
     let options = CopySessionOptions {
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
         transcode_audio: false,
         preserve_dolby_vision: false,
     };
@@ -1756,6 +1758,7 @@ async fn rolling_busy_optional_capture_never_waits_on_ordinary_publication() {
             None,
             CopySessionOptions {
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
                 transcode_audio: false,
                 preserve_dolby_vision: false,
             },
@@ -1871,6 +1874,7 @@ async fn d3_copy_session(
             None,
             CopySessionOptions {
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
                 transcode_audio: false,
                 preserve_dolby_vision: false,
             },
@@ -2119,6 +2123,7 @@ async fn an_abandoned_artifact_does_not_block_the_queue_behind_it() {
             None,
             CopySessionOptions {
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
                 transcode_audio: false,
                 preserve_dolby_vision: false,
             },
@@ -2490,6 +2495,7 @@ async fn session_shipped_shape() {
             None,
             CopySessionOptions {
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
                 transcode_audio: false,
                 preserve_dolby_vision: false,
             },
@@ -2694,6 +2700,7 @@ async fn a_client_fetch_advances_publication_frontier_without_legacy_hold() {
             None,
             CopySessionOptions {
                 convert_dolby_vision: false,
+                dual_layer_as_copied: false,
                 transcode_audio: false,
                 preserve_dolby_vision: false,
             },

@@ -14,6 +14,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+source_root="${PLURX_PKG_SOURCE_ROOT:-$root}"
 arch= version= binary= out= control_dir= desktop_binary=
 packager_choice=all
 service_policy=maintainer
@@ -68,7 +69,8 @@ install -m 0755 "$binary" "$stage/plurxd"
 install -m 0644 "$binary.dwp" "$stage/plurxd.dwp"
 # The example configuration ships from the tree the binary was built from;
 # PLURX_PKG_SOURCE_ROOT names it when that is not this checkout.
-install -m 0644 "${PLURX_PKG_SOURCE_ROOT:-$root}/plurx.example.toml" "$stage/plurx.example.toml"
+install -m 0644 "$source_root/plurx.example.toml" "$stage/plurx.example.toml"
+python3 "$root/scripts/stage-subtitle-translation-notice.py" "$source_root" "$stage"
 [ -n "$control_dir" ] || { echo "package-linux: --control-dir is required" >&2; exit 2; }
 for name in plurx-control plurx-install-helper plurx-update-worker plurx-service-launch plurx-recovery; do
   [ -x "$control_dir/$name" ] || { echo "package-linux: missing controller executable $name" >&2; exit 1; }

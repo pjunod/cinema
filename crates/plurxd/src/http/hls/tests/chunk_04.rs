@@ -1,4 +1,3 @@
-
 /// P1-6. The successor resumes **where the viewer is**, not at the
 /// predecessor's original start and not at its fetch frontier.
 ///
@@ -351,8 +350,8 @@ fn preparation_row(
         ..staged_candidate_request()
     };
     let response = StartResponse {
-            enhancement: None,
-            effective_processing: None,
+        enhancement: None,
+        effective_processing: None,
         delivered_audio: None,
         quality_catalog_status: None,
         display_aware_auto_protocol: Some("route-v1".to_owned()),
@@ -505,8 +504,8 @@ async fn activate_superseding_route(
         request: request.clone(),
     };
     let start = StartResponse {
-            enhancement: None,
-            effective_processing: None,
+        enhancement: None,
+        effective_processing: None,
         delivered_audio: None,
         quality_catalog_status: None,
         display_aware_auto_protocol: Some("route-v1".to_owned()),
@@ -840,7 +839,7 @@ async fn delivery_preparation_says_offered_with_the_prepare_action() {
         &staged_predecessor_recipe(&route),
         &crate::transcode::SessionRequest {
             dv_processing_destination: None,
-        sdr_master_codecs: None,
+            sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -920,7 +919,7 @@ async fn delivery_preparation_says_none_when_the_slot_is_empty() {
         &staged_predecessor_recipe(&route),
         &crate::transcode::SessionRequest {
             dv_processing_destination: None,
-        sdr_master_codecs: None,
+            sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -1369,7 +1368,7 @@ async fn a_committed_successor_survives_the_predecessors_retirement() {
         &staged_predecessor_recipe(&route),
         &crate::transcode::SessionRequest {
             dv_processing_destination: None,
-        sdr_master_codecs: None,
+            sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -2059,7 +2058,10 @@ async fn a_peer_without_prepared_capture_is_primed_without_a_capture_reservation
         .remove("prepared_output_capture");
     let older: crate::media_pool::MediaNodeSnapshot =
         serde_json::from_value(wire).expect("a pre-capture advertisement still parses");
-    state.media_pool.cache_snapshot_for_test(older.clone()).await;
+    state
+        .media_pool
+        .cache_snapshot_for_test(older.clone())
+        .await;
     assert!(state.media_pool.retained_output_receiver("worker").await);
     assert!(
         !successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await,
@@ -2070,8 +2072,14 @@ async fn a_peer_without_prepared_capture_is_primed_without_a_capture_reservation
     let incarnation = uuid::Uuid::new_v4().to_string();
     let session = uuid::Uuid::new_v4().to_string();
     let request = |captures| {
-        serde_json::to_value(remote_prepare_request(&incarnation, &session, 7, 3, captures))
-            .expect("prepare request serializes")
+        serde_json::to_value(remote_prepare_request(
+            &incarnation,
+            &session,
+            7,
+            3,
+            captures,
+        ))
+        .expect("prepare request serializes")
     };
     let captures = successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await;
     let to_older = request(captures);
@@ -2085,7 +2093,8 @@ async fn a_peer_without_prepared_capture_is_primed_without_a_capture_reservation
     let captures = successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await;
     assert!(captures);
     assert_eq!(
-        request(captures)["expected_predecessor_owner_epoch"], 3,
+        request(captures)["expected_predecessor_owner_epoch"],
+        3,
         "a capture receiver is fenced on the admitted predecessor epoch"
     );
 }
@@ -2389,6 +2398,7 @@ fn prepared_audio_inherits_the_snapshot_and_refuses_channel_changes() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     preserve_prepared_audio(&predecessor, &mut candidate, &source)
         .expect("copy video retains encoded audio");
@@ -2419,6 +2429,7 @@ fn prepared_full_encode_successor_of_a_copied_stereo_track_stages() {
         aac: false,
         preserve_dolby_vision: false,
         convert_dolby_vision: false,
+        dual_layer_as_copied: false,
     };
     predecessor.presentation = crate::transcode::Presentation::Vod;
     predecessor.audio_index = Some(0);
@@ -2509,8 +2520,8 @@ async fn the_ingress_control_gate_answers_a_lost_owner_gone() {
             .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false")
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
             response_json: serde_json::to_string(&StartResponse {
-            enhancement: None,
-            effective_processing: None,
+                enhancement: None,
+                effective_processing: None,
                 delivered_audio: None,
                 quality_catalog_status: None,
                 display_aware_auto_protocol: Some("route-v1".to_owned()),

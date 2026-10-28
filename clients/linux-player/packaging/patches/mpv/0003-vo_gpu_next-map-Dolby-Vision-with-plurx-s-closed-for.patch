@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: plurx contributors <noreply@plurx.invalid>
 Date: Mon, 26 Oct 2026 12:00:00 +0000
-Subject: [PATCH 3/3] vo_gpu_next: map Dolby Vision with plurx's closed-form
+Subject: [PATCH 3/5] vo_gpu_next: map Dolby Vision with plurx's closed-form
  display management
 
 A Profile 5 or 8 frame is reconstructed to BT.2020/PQ by libplacebo (the

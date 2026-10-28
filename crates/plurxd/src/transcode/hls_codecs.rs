@@ -59,11 +59,12 @@ fn copied_audio_codec(
 ///
 /// So the second half of the guard asks the **file**, which this path always
 /// has and can never be wrong about, rather than a flag that travelled: a
-/// dual-layer source is not preserved by a copy that will not convert it. The
-/// one client this narrows against its wishes is a client that enumerated a
-/// dual-layer profile, and it is narrowed on the recovery path only, to a base
-/// layer it can certainly decode — the trade the whole of this function already
-/// makes.
+/// dual-layer source is not preserved by a copy that will not convert it —
+/// unless the reviewed plan says the client enumerated that very profile
+/// (`dual_layer_as_copied`, derived by `apply_plan_review` from the client's
+/// own capabilities, never echoed). plurx Player is such a client: it composes
+/// the enhancement layer itself, and narrowing it to the base layer took its
+/// Dolby Vision away on every Profile 7 title.
 ///
 /// A separate value rather than a mutation, so the caller keeps the decision's
 /// answer to log the difference.
@@ -71,11 +72,14 @@ pub(super) fn served_copy_options(
     file: &plurx_core::domain::MediaFile,
     options: CopySessionOptions,
 ) -> CopySessionOptions {
+    let preserve_dolby_vision = options.preserve_dolby_vision
+        && !options.convert_dolby_vision
+        && (!plurx_core::playback::dolby_vision_is_dual_layer(file)
+            || options.dual_layer_as_copied);
     CopySessionOptions {
-        preserve_dolby_vision: options.preserve_dolby_vision
-            && !options.convert_dolby_vision
-            && !plurx_core::playback::dolby_vision_is_dual_layer(file),
+        preserve_dolby_vision,
         convert_dolby_vision: false,
+        dual_layer_as_copied: options.dual_layer_as_copied && preserve_dolby_vision,
         ..options
     }
 }

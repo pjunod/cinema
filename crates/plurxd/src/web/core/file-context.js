@@ -83,6 +83,7 @@ function playbackFileSuffix(suffix){
 // The Shared file grammar (plurx_core::sharing_resources::SharingFileResource)
 // bounds track and chapter indexes at 4095; Local keeps its own wider bound.
 function sharedPlaybackFileSuffix(suffix){
+  if(typeof suffix==="string"&&/^(?:captions|captions\/[a-f0-9]{64}\/(?:manifest|segments\/[a-f0-9]{64}))$/.test(suffix))return suffix;
   playbackFileSuffix(suffix);
   const index=/^(?:subs|chapters)\/([0-9]+)/.exec(suffix);
   if(index&&Number(index[1])>4095) playbackFileReject();
@@ -90,6 +91,20 @@ function sharedPlaybackFileSuffix(suffix){
 }
 function playbackFileQuery(suffix,query){
   if(!query||typeof query!=="object"||Array.isArray(query)) playbackFileReject();
+  if(suffix==="captions"||suffix.startsWith("captions/")){
+    const keys=Object.keys(query);
+    if(suffix==="captions"){
+      if(keys.length===0)return "";
+      if(keys.length!==1||keys[0]!=="after"||! /^[a-f0-9]{64}$/.test(query.after))playbackFileReject();
+      return "after="+query.after;
+    }
+    if(suffix.endsWith("/manifest")){
+      if(keys.length!==1||keys[0]!=="position_ms"||!Number.isSafeInteger(query.position_ms)||query.position_ms<0||query.position_ms>14400000)playbackFileReject();
+      return "position_ms="+query.position_ms;
+    }
+    if(keys.length!==1||keys[0]!=="lease"||typeof query.lease!=="string"||!PLAYBACK_FILE_UUID.test(query.lease)||query.lease==="00000000-0000-0000-0000-000000000000")playbackFileReject();
+    return "lease="+query.lease;
+  }
   // Actual Caps and StreamQuery fields, including named-profile/native
   // compatibility claims. The browser currently emits a subset in capsQuery.
   const capabilities=["client","device","profile","vcodec","vmaxheight","acodec", "container",

@@ -2035,7 +2035,7 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
     let coverage = compact_handler(
         browse,
         "pub(crate) async fn vod_index_coverage",
-        "pub(super) fn index_refusal_summary",
+        "pub(crate) fn index_refusal_summary",
     );
     assert!(coverage.contains(".cluster_index_availability(&state.catalogue,&lookups)"));
     // Its two display settings are one bounded read, not two Authority

@@ -1,5 +1,7 @@
 # Progressive subtitle translation — review ledger and completion record
 
+**Completion effort, 2026-10-26:** [current implementation and final qualification](SUBTITLE-COMPLETION-STATUS.md) extends the initial scope with progressive transcription, native clients, multiple audio tracks, additional delivery routes and existing-text translation. The evidence below retains its original candidate and scope. The user owns deployment after the new merge.
+
 **Status:** built — first route accepted on 2026-10-17; follow-ups are listed at the end of §2.
 
 **Setup repair — 2026-10-25; [implementation, qualification and landing](SUBTITLE-SETUP-REPAIR-STATUS.md).**
@@ -194,13 +196,13 @@ demand has its own cadence, only acknowledged generations advance, and a
 lapsed demand is renewed by its next heartbeat); a retired player leaving a
 dead panel; and exhausted ranges still offered for retry.
 
-**Still open.** Native clients, multiple audio streams, remux/encoded routes,
-fleet placement, long-film completion and speed, and genuinely bilingual
-human quality review. Also open from review: an operation is pinned to the
-node that first prepared it (multi-node retargeting); deb/rpm packages do not
-install a readable notice file (the daemon embeds the attribution); nothing
-yet marks an operation `complete`; manifest refreshes re-add every cue rather
-than diffing; and whether rapid seeking can exhaust the per-user read-lease
-budget is unconfirmed. The P0 timing figures do not prove realtime on other
-hardware.
+**Current completion work.** [The completion ledger](SUBTITLE-COMPLETION-STATUS.md)
+now records native clients, actual selected audio ordinals, remux/encoded
+attachments and the three caption operations. Linux packages now stage the
+readable fixture notice, and manifest rendering applies cue changes without
+re-adding unchanged cues; their focused regressions passed. Atomic operation
+completion, durable producer reassignment and rapid-seek lease reuse now pass
+focused regression qualification in PR #1292. Fleet/device acceptance, long-film throughput and
+bilingual human quality remain distinct from implementation and fixture
+qualification. The P0 timing figures do not prove realtime on other hardware.
 

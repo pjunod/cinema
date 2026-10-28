@@ -10,6 +10,7 @@ import argparse
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -31,6 +32,49 @@ EXIT_UNTRUSTED = 3
 EXIT_REDEEM = 4
 EXIT_PLAYBACK = 5
 SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+# What a window needs from the desktop session. A handler started by
+# xdg-desktop-portal (Chrome opens plurx-player:// through the portal) gets
+# the portal's environment, which has none of these when the portal started
+# before the session imported them.
+SESSION_DISPLAY = ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP")
+
+
+def systemd_user_environment():
+    """The user manager's environment, which the desktop session fills in."""
+    try:
+        result = subprocess.run(["systemctl", "--user", "show-environment"], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def adopt_session_display(environ, read_session_environment):
+    """Take the session's display variables when this process has no display.
+
+    Only the variables in SESSION_DISPLAY, and only when neither display is
+    set: a launcher started inside the session keeps its own. Returns the
+    names it set.
+    """
+    if environ.get("WAYLAND_DISPLAY") or environ.get("DISPLAY"):
+        return []
+    session = {}
+    for line in read_session_environment().splitlines():
+        key, sep, value = line.partition("=")
+        # systemctl writes a value with special characters as $'...'; no
+        # display name or session type needs one.
+        if sep and key in SESSION_DISPLAY and value and not value.startswith("$'"):
+            session[key] = value
+    if not (session.get("WAYLAND_DISPLAY") or session.get("DISPLAY")):
+        return []
+    # As a set: an XAUTHORITY left over beside no display is not this
+    # session's, and must not be paired with its DISPLAY.
+    for key in SESSION_DISPLAY:
+        environ.pop(key, None)
+    adopted = [key for key in SESSION_DISPLAY if key in session]
+    for key in adopted:
+        environ[key] = session[key]
+    return adopted
 
 
 @dataclass
@@ -44,6 +88,7 @@ class Deps:
     config_dir: Optional[str] = None
     runtime_dir: Optional[str] = None
     install_signals: bool = True
+    session_environment: Callable[[], str] = systemd_user_environment
 
 
 class Terminated(BaseException):
@@ -100,6 +145,9 @@ def parse_args(argv):
 def main(argv=None, deps=None):
     deps = deps or Deps()
     args = parse_args(argv)
+    adopted = adopt_session_display(os.environ, deps.session_environment)
+    if adopted:
+        log(f"no display in this process's environment; using the desktop session's {', '.join(adopted)}")
     try:
         handoff = parse_handoff_url(args.url)
     except HandoffUrlError as error:

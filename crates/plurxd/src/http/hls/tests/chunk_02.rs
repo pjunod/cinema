@@ -1,4 +1,3 @@
-
 #[test]
 fn public_playback_ids_and_segment_ranges_are_bounded() {
     assert!(valid_playback_id("player-a"));
@@ -1931,23 +1930,40 @@ mod seek_coalescing {
         let (fixture, file) = cold_windowed_fixture(dir.path(), memo_session).await;
         let source = Arc::new(WindowFixtureSubtitleSource::counting());
         crate::subtitles::remember_whole_track_failure_for_test(
-            &fixture.state.subs_dir, &file, 0, "the source could not be read",
+            &fixture.state.subs_dir,
+            &file,
+            0,
+            "the source could not be read",
             Duration::from_secs(90),
-        ).await;
-        fixture.store.put_setting("playback.subtitle_not_ready_503", "1")
-            .await.expect("retained historical choice");
+        )
+        .await;
+        fixture
+            .store
+            .put_setting("playback.subtitle_not_ready_503", "1")
+            .await
+            .expect("retained historical choice");
         let response = subtitle_segment(&fixture.state, memo_session, 1, source.as_ref()).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().get(header::RETRY_AFTER).is_none());
-        assert_eq!(response.into_body().collect().await.expect("empty body")
-            .to_bytes().as_ref(), b"WEBVTT\n\n");
-        assert_eq!(crate::subtitles::sidecar_state(&fixture.state.subs_dir, &file, 0).await,
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .expect("empty body")
+                .to_bytes()
+                .as_ref(),
+            b"WEBVTT\n\n"
+        );
+        assert_eq!(
+            crate::subtitles::sidecar_state(&fixture.state.subs_dir, &file, 0).await,
             crate::subtitles::SidecarState::Failed,
-            "transport success must not erase the failure observed by control");
+            "transport success must not erase the failure observed by control"
+        );
         crate::subtitles::release_session_window(memo_session).await;
-        crate::subtitles::forget_whole_track_failure_for_test(&fixture.state.subs_dir, &file, 0).await;
+        crate::subtitles::forget_whole_track_failure_for_test(&fixture.state.subs_dir, &file, 0)
+            .await;
     }
-
 }
 
 #[tokio::test]
@@ -2499,6 +2515,7 @@ async fn staging_route_with_incumbent_on(
             aac: false,
             preserve_dolby_vision: false,
             convert_dolby_vision: false,
+            dual_layer_as_copied: false,
         },
         start_seconds: 0.0,
         audio_index: None,
@@ -2530,8 +2547,8 @@ async fn staging_route_with_incumbent_on(
         request: predecessor_request.clone(),
     };
     let predecessor_start = StartResponse {
-            enhancement: None,
-            effective_processing: None,
+        enhancement: None,
+        effective_processing: None,
         delivered_audio: None,
         quality_catalog_status: None,
         display_aware_auto_protocol: Some("route-v1".to_owned()),
