@@ -38,7 +38,7 @@ fn local_request(path: PathBuf, file_id: i64, chunks: usize) -> DirectSourceRequ
     let media_file_id = file_id.to_string();
     let memory = DirectSourceRequest::minimum_memory_bytes(
         path_len,
-        media_file_id.len(),
+        media_file_id.capacity(),
         1,
         4096,
         chunks,
@@ -59,7 +59,7 @@ fn local_request(path: PathBuf, file_id: i64, chunks: usize) -> DirectSourceRequ
         demand: WorkloadDemand {
             resources: Metric::Known(ResourceVector {
                 cpu_ns_per_second: 0,
-                peak_memory_bytes: memory + 4096,
+                peak_memory_bytes: memory,
                 handles: 1,
                 ..ResourceVector::default()
             }),
@@ -434,6 +434,18 @@ async fn expired_invalid_and_overflow_direct_requests_are_before_reservation() {
         .prepare_direct_source(invalid, deadline())
         .err()
         .expect("invalid path")
+        .definitely_before_reservation());
+    // A request may retain more text capacity than its visible ID length.
+    // This is the actual constructor boundary, not a synthetic close result:
+    // increasing the captured allocation without increasing its demand must
+    // refuse BEFORE tagging R or opening the native source/domain.
+    let mut retained_capacity = local_request(path.clone(), 1, 1);
+    retained_capacity.media_file_id.reserve(1024);
+    assert!(retained_capacity.media_file_id.capacity() > retained_capacity.media_file_id.len());
+    assert!(runtime
+        .prepare_direct_source(retained_capacity, deadline())
+        .err()
+        .expect("retained original ID capacity exceeds its earlier demand")
         .definitely_before_reservation());
     let mut overflow = local_request(path, 1, 1);
     overflow.application_owner_bytes = u64::MAX;

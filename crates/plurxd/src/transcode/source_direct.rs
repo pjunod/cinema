@@ -694,7 +694,9 @@ impl TranscodeManager {
             let epoch = runtime
                 .refresh_admission_capacity(deadline)
                 .await
-                .map_err(|_| {
+                .map_err(|_error| {
+                    #[cfg(test)]
+                    eprintln!("original Source direct capacity refresh refused: {_error:?}");
                     SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unavailable)
                 })?;
             let application_owner_bytes =
@@ -755,7 +757,9 @@ impl TranscodeManager {
             const CHUNKS: usize = 64;
             let memory = DirectSourceRequest::minimum_memory_bytes(
                 path_len,
-                media_file_id.len(),
+                // Core retains this original String and rechecks its capacity.
+                // Formatting a small ID may allocate more bytes than its len.
+                media_file_id.capacity(),
                 64,
                 CHUNK,
                 CHUNKS,
@@ -767,6 +771,8 @@ impl TranscodeManager {
             // The opaque constructor can fail after R. From this boundary
             // generic failure retains uncertainty instead of claiming no R.
             let restart_admission = SourceRestartAdmission::new(restart_admission);
+            #[cfg(test)]
+            let media_id_layout = (media_file_id.len(), media_file_id.capacity());
             let result = runtime.prepare_direct_source(
                 DirectSourceRequest {
                     binding: DirectSourceBinding::Sharing(assignment.clone()),
@@ -797,6 +803,8 @@ impl TranscodeManager {
             let (admitted, application_lease) = match result {
                 Ok(admitted) => admitted,
                 Err(error) => {
+                    #[cfg(test)]
+                    eprintln!("original Source direct constructor refused: {error:?}; media_id_len={}, media_id_capacity={}, demanded_memory={memory}", media_id_layout.0, media_id_layout.1);
                     // Only the exact typed pre-reservation tag authorizes this
                     // release. Generic constructor errors may already own R.
                     if error.definitely_before_reservation() {
