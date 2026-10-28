@@ -579,7 +579,7 @@ impl NodeResourceRuntime {
                     (
                         tasks.engine_task_observation,
                         engine_plan.member_id.uuid(),
-                        v2::Observed::FixedPlanningEngineTaskV1 {
+                        v2::Observed::FixedPlanningEngineTaskV2 {
                             task: tasks.engine_observed.clone().ok_or(OperationError::State)?,
                         },
                     )
@@ -866,6 +866,11 @@ impl NodeResourceRuntime {
                 members,
             }
         };
+
+        // Check the complete emitted row while the SAME native closures,
+        // source owner and manifest are still retained by P. A size refusal
+        // cannot consume the one-shot proof or refund the original charge.
+        v2::validate_planning_settlement_size(&settlement)?;
 
         // m. No await or fallible work between consuming native evidence and
         // retaining the exact command in this role's transition.

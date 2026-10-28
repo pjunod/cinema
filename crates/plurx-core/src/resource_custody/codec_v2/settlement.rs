@@ -221,6 +221,16 @@ pub(crate) enum ClosedFact {
         used_file_slots: u16,
         owners: Vec<FixedEngineOwnerDispositionV1>,
     },
+    /// Compact binding to the unchanged manifest task and its observation.
+    FixedPlanningEngineTaskV2 {
+        member_id: Id,
+        plan_sha256: String,
+        join_operation_id: Id,
+        version_close_operation_id: Id,
+        dependency_close_operation_id: Id,
+        used_file_slots: u16,
+        owners: Vec<FixedEngineOwnerDispositionV1>,
+    },
     FixedPlanningEngineTaskNeverAcquiredV1 {
         task: FixedPlanningEngineTaskV1,
         operation_id: Id,
@@ -589,6 +599,65 @@ pub(crate) fn validate_settlement_scope(
                             if observed.task == *task
                                 && observed.used_file_slots == *used_file_slots) =>
                 {
+                    let inventoried: BTreeSet<_> = task.inventory.pending_io.iter()
+                        .chain(&task.inventory.buffers)
+                        .chain(&task.inventory.readers)
+                        .map(|owner| owner.owner_id).collect();
+                    let closed_ids: BTreeSet<_> = owners.iter()
+                        .map(FixedEngineOwnerDispositionV1::owner_id).collect();
+                    if owners.len() != inventoried.len() || closed_ids != inventoried {
+                        return Err(codec::invalid());
+                    }
+                    for (index, slot) in task.file_slots.iter().enumerate() {
+                        let matching = owners.iter().find(|closed|
+                            closed.owner_id() == slot.owner_id
+                                && closed.operation_id() == slot.close_operation_id);
+                        let valid = if index < usize::from(*used_file_slots) {
+                            matches!(matching,
+                                Some(FixedEngineOwnerDispositionV1::ActualOwnedClose { .. }))
+                        } else {
+                            matches!(matching,
+                                Some(FixedEngineOwnerDispositionV1::ProvenNeverAcquired { .. }))
+                        };
+                        if !valid {
+                            return Err(codec::invalid());
+                        }
+                    }
+                    for (owner_id, operation_id) in [
+                        (task.version_stdout_owner_id, task.version_stdout_close_operation_id),
+                        (task.version_diagnostic_owner_id, task.version_diagnostic_close_operation_id),
+                        (task.dependency_stdout_owner_id, task.dependency_stdout_close_operation_id),
+                        (task.dependency_diagnostic_owner_id, task.dependency_diagnostic_close_operation_id),
+                        (task.hash_buffer_owner_id, task.hash_buffer_close_operation_id),
+                    ] {
+                        if !owners.iter().any(|owner| matches!(owner,
+                            FixedEngineOwnerDispositionV1::ActualOwnedClose {
+                                owner_id: actual, operation_id: close,
+                            } if *actual == owner_id && *close == operation_id)) {
+                            return Err(codec::invalid());
+                        }
+                    }
+                }
+                (
+                    MemberPlan::FixedPlanningEngineTaskV1 { task, .. },
+                    ClosedFact::FixedPlanningEngineTaskV2 {
+                        member_id, plan_sha256, join_operation_id,
+                        version_close_operation_id, dependency_close_operation_id,
+                        used_file_slots, owners,
+                    },
+                ) => {
+                    let Some(Observed::FixedPlanningEngineTaskV2 { task: observed }) =
+                        &envelope.observed else { return Err(codec::invalid()); };
+                    fixed_probe::validate_engine_task_observed_v2(task, observed)?;
+                    if *member_id != task.member_id
+                        || plan_sha256 != &observed.plan_sha256
+                        || join_operation_id.uuid().is_nil()
+                        || *version_close_operation_id != task.version_close_operation_id
+                        || *dependency_close_operation_id != task.dependency_close_operation_id
+                        || *used_file_slots != observed.used_file_slots
+                    {
+                        return Err(codec::invalid());
+                    }
                     let inventoried: BTreeSet<_> = task.inventory.pending_io.iter()
                         .chain(&task.inventory.buffers)
                         .chain(&task.inventory.readers)

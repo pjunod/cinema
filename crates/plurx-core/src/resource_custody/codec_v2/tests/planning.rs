@@ -252,9 +252,10 @@ pub(in crate::resource_custody) fn planning_fixture() -> (Manifest, Vec<Envelope
                     },
                 },
                 MemberPlan::FixedPlanningEngineTaskV1 { .. } => {
-                    Observed::FixedPlanningEngineTaskV1 {
-                        task: FixedPlanningEngineTaskObservedV1 {
-                            task: engine.clone(),
+                    Observed::FixedPlanningEngineTaskV2 {
+                        task: FixedPlanningEngineTaskObservedV2 {
+                            member_id: engine.member_id,
+                            plan_sha256: engine_task_plan_sha256(&engine).unwrap(),
                             used_file_slots: 2,
                             media_digest: "c".repeat(64),
                         },
@@ -393,8 +394,9 @@ pub(in crate::resource_custody) fn planning_fixture() -> (Manifest, Vec<Envelope
         },
         MemberDisposition::Closed {
             member_id: engine_member,
-            fact: ClosedFact::FixedPlanningEngineTaskV1 {
-                task: engine.clone(),
+            fact: ClosedFact::FixedPlanningEngineTaskV2 {
+                member_id: engine.member_id,
+                plan_sha256: engine_task_plan_sha256(&engine).unwrap(),
                 join_operation_id: id(),
                 version_close_operation_id: engine.version_close_operation_id,
                 dependency_close_operation_id: engine.dependency_close_operation_id,
@@ -422,9 +424,18 @@ fn seven_member_planning_audit_roundtrips_and_settles_exact_original_owners() {
         decode_manifest(&codec::encode(&manifest).unwrap()).unwrap(),
         ManifestDocument::V2(manifest.clone())
     );
+    let mut envelope_bytes = Vec::with_capacity(envelopes.len());
     for envelope in &envelopes {
         validate_envelope(&manifest, envelope).unwrap();
+        let encoded = codec::encode(envelope).expect("each complete acquired envelope fits 64 KiB");
+        assert!(encoded.len() <= codec::JSON_LIMIT);
+        assert_eq!(codec::decode::<Envelope>(&encoded).unwrap(), *envelope);
+        envelope_bytes.push(encoded.len());
     }
+    let encoded = codec::encode(&settlement).expect("whole seven-member settlement fits 64 KiB");
+    assert!(encoded.len() <= codec::JSON_LIMIT);
+    validate_planning_settlement_size(&settlement).unwrap();
+    eprintln!("complete seven-member planning audit JSON bytes: envelopes={envelope_bytes:?}, settlement={}, row_limit={}", encoded.len(), codec::JSON_LIMIT);
     assert_eq!(
         codec::decode::<Settlement>(&codec::encode(&settlement).unwrap()).unwrap(),
         settlement
@@ -450,10 +461,13 @@ fn planning_settlement_refuses_a_root_identity_from_another_original_owner() {
 fn planning_settlement_refuses_actual_close_for_an_unused_engine_file_slot() {
     let (manifest, envelopes, mut settlement) = planning_fixture();
     let MemberDisposition::Closed {
-        fact: ClosedFact::FixedPlanningEngineTaskV1 { task, owners, .. },
+        fact: ClosedFact::FixedPlanningEngineTaskV2 { owners, .. },
         ..
     } = &mut settlement.members[6]
     else {
+        unreachable!()
+    };
+    let MemberPlan::FixedPlanningEngineTaskV1 { task, .. } = &manifest.members[6] else {
         unreachable!()
     };
     owners[2] = FixedEngineOwnerDispositionV1::ActualOwnedClose {
@@ -467,10 +481,13 @@ fn planning_settlement_refuses_actual_close_for_an_unused_engine_file_slot() {
 fn planning_settlement_refuses_never_acquired_for_a_used_engine_file_slot() {
     let (manifest, envelopes, mut settlement) = planning_fixture();
     let MemberDisposition::Closed {
-        fact: ClosedFact::FixedPlanningEngineTaskV1 { task, owners, .. },
+        fact: ClosedFact::FixedPlanningEngineTaskV2 { owners, .. },
         ..
     } = &mut settlement.members[6]
     else {
+        unreachable!()
+    };
+    let MemberPlan::FixedPlanningEngineTaskV1 { task, .. } = &manifest.members[6] else {
         unreachable!()
     };
     owners[0] = FixedEngineOwnerDispositionV1::ProvenNeverAcquired {
@@ -484,7 +501,7 @@ fn planning_settlement_refuses_never_acquired_for_a_used_engine_file_slot() {
 fn planning_settlement_refuses_a_missing_hash_buffer_close() {
     let (manifest, envelopes, mut settlement) = planning_fixture();
     let MemberDisposition::Closed {
-        fact: ClosedFact::FixedPlanningEngineTaskV1 { owners, .. },
+        fact: ClosedFact::FixedPlanningEngineTaskV2 { owners, .. },
         ..
     } = &mut settlement.members[6]
     else {
@@ -492,4 +509,137 @@ fn planning_settlement_refuses_a_missing_hash_buffer_close() {
     };
     owners.pop().unwrap();
     assert!(validate_settlement(&manifest, &envelopes, &settlement).is_err());
+}
+
+#[test]
+fn compact_engine_observation_binds_original_member_task_and_manifest_slot() {
+    let (manifest, envelopes, _) = planning_fixture();
+    let mut wrong_member = envelopes[6].clone();
+    let Some(Observed::FixedPlanningEngineTaskV2 { task }) = &mut wrong_member.observed else {
+        unreachable!()
+    };
+    task.member_id = id();
+    assert!(validate_envelope(&manifest, &wrong_member).is_err());
+
+    let mut changed_manifest = manifest.clone();
+    let MemberPlan::FixedPlanningEngineTaskV1 { task, .. } = &mut changed_manifest.members[6]
+    else {
+        unreachable!()
+    };
+    task.configured_ffmpeg_locator.push_str("-different");
+    let mut changed_task = envelopes[6].clone();
+    changed_task.planned = changed_manifest.members[6].clone();
+    assert!(
+        validate_envelope(&changed_manifest, &changed_task).is_err(),
+        "the original compact observation cannot alias a changed same-ID task"
+    );
+
+    let mut changed_slot = envelopes[6].clone();
+    let MemberPlan::FixedPlanningEngineTaskV1 { slot, .. } = &mut changed_slot.planned else {
+        unreachable!()
+    };
+    slot.protected_paths.push("/different-original-slot".into());
+    assert!(validate_envelope(&manifest, &changed_slot).is_err());
+}
+
+#[test]
+fn compact_engine_settlement_refuses_member_plan_digest_and_close_arm_aliases() {
+    let (manifest, envelopes, settlement) = planning_fixture();
+    for mutation in 0..3 {
+        let mut changed = settlement.clone();
+        let MemberDisposition::Closed {
+            fact:
+                ClosedFact::FixedPlanningEngineTaskV2 {
+                    member_id,
+                    plan_sha256,
+                    owners,
+                    ..
+                },
+            ..
+        } = &mut changed.members[6]
+        else {
+            unreachable!()
+        };
+        match mutation {
+            0 => *member_id = id(),
+            1 => {
+                let replacement = if plan_sha256.starts_with('0') {
+                    "1"
+                } else {
+                    "0"
+                };
+                plan_sha256.replace_range(..1, replacement);
+            }
+            _ => {
+                let FixedEngineOwnerDispositionV1::ActualOwnedClose { operation_id, .. } =
+                    &mut owners[0]
+                else {
+                    unreachable!()
+                };
+                *operation_id = id();
+            }
+        }
+        assert!(validate_settlement(&manifest, &envelopes, &changed).is_err());
+    }
+}
+
+#[test]
+fn compact_engine_observation_and_closed_fact_refuse_unknown_fields() {
+    let (_, envelopes, settlement) = planning_fixture();
+    let mut observed = serde_json::to_value(envelopes[6].observed.as_ref().unwrap()).unwrap();
+    observed["task"]["unexpected"] = true.into();
+    assert!(serde_json::from_value::<Observed>(observed).is_err());
+    let MemberDisposition::Closed { fact, .. } = &settlement.members[6] else {
+        unreachable!()
+    };
+    let mut closed = serde_json::to_value(fact).unwrap();
+    closed["unexpected"] = true.into();
+    assert!(serde_json::from_value::<ClosedFact>(closed).is_err());
+}
+
+#[test]
+fn original_engine_v1_observation_and_closed_fact_vocabulary_still_decodes_strictly() {
+    let (manifest, _, _) = planning_fixture();
+    let MemberPlan::FixedPlanningEngineTaskV1 { task, .. } = &manifest.members[6] else {
+        unreachable!()
+    };
+    let observed = Observed::FixedPlanningEngineTaskV1 {
+        task: FixedPlanningEngineTaskObservedV1 {
+            task: task.clone(),
+            used_file_slots: 2,
+            media_digest: "c".repeat(64),
+        },
+    };
+    let json = codec::encode(&observed).expect("single original V1 task remains bounded");
+    assert_eq!(codec::decode::<Observed>(&json).unwrap(), observed);
+    // Empty owners are a decoding fixture only, never a valid settlement.
+    // A complete old duplicated V1 settlement exceeds the unchanged row cap.
+    let closed = ClosedFact::FixedPlanningEngineTaskV1 {
+        task: task.clone(),
+        join_operation_id: id(),
+        version_close_operation_id: task.version_close_operation_id,
+        dependency_close_operation_id: task.dependency_close_operation_id,
+        used_file_slots: 2,
+        owners: vec![],
+    };
+    let json = codec::encode(&closed).expect("original V1 vocabulary remains recognized");
+    assert_eq!(codec::decode::<ClosedFact>(&json).unwrap(), closed);
+    let mut unknown = serde_json::to_value(&observed).unwrap();
+    unknown["task"]["unexpected"] = true.into();
+    assert!(serde_json::from_value::<Observed>(unknown).is_err());
+}
+
+#[test]
+fn planning_settlement_preflight_keeps_the_original_global_json_limit() {
+    let (_, _, mut settlement) = planning_fixture();
+    let MemberDisposition::Closed {
+        fact: ClosedFact::LegacyV1 { fact },
+        ..
+    } = &mut settlement.members[0]
+    else {
+        unreachable!()
+    };
+    fact.evidence = "x".repeat(codec::JSON_LIMIT);
+    assert!(validate_planning_settlement_size(&settlement).is_err());
+    assert!(codec::encode(&settlement).is_err());
 }

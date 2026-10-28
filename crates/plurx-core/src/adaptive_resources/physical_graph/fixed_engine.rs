@@ -252,8 +252,9 @@ impl FixedEngineNativeClosure {
             owner_id: id(self.hash_buffer.owner_id())?,
             operation_id: id(self.hash_buffer.close_operation_id())?,
         });
-        Ok(v2::ClosedFact::FixedPlanningEngineTaskV1 {
-            task: task.clone(),
+        Ok(v2::ClosedFact::FixedPlanningEngineTaskV2 {
+            member_id: task.member_id,
+            plan_sha256: v2::engine_task_plan_sha256(task).map_err(|_| invalid())?,
             join_operation_id,
             version_close_operation_id: id(self.version_root.close_operation_id())?,
             dependency_close_operation_id: id(self.dependency_root.close_operation_id())?,
@@ -280,8 +281,9 @@ mod tests {
                 .expect("matching synthetic original-owner tokens");
             let (_, closure) = known.split();
             let join = v2::Id::new(Uuid::new_v4()).unwrap();
-            let v2::ClosedFact::FixedPlanningEngineTaskV1 {
-                task,
+            let v2::ClosedFact::FixedPlanningEngineTaskV2 {
+                member_id,
+                plan_sha256,
                 join_operation_id,
                 used_file_slots,
                 owners,
@@ -292,7 +294,8 @@ mod tests {
             else {
                 unreachable!()
             };
-            assert_eq!(task, planned);
+            assert_eq!(member_id, planned.member_id);
+            assert_eq!(plan_sha256, v2::engine_task_plan_sha256(&planned).unwrap());
             assert_eq!(join_operation_id, join);
             assert_eq!(usize::from(used_file_slots), used);
             assert_eq!(owners.len(), planned.file_slots.len() + 5);

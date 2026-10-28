@@ -39,7 +39,7 @@ pub(super) struct PlanningTasks {
     /// Bounded audit observations captured at join, before report data
     /// moves to M. They stay charged under P until its settlement.
     pub(super) probe_observed: Option<v2::FixedProbeDiscoverTaskObservedV1>,
-    pub(super) engine_observed: Option<v2::FixedPlanningEngineTaskObservedV1>,
+    pub(super) engine_observed: Option<v2::FixedPlanningEngineTaskObservedV2>,
     /// Pre-minted, resumable enrichment operations. Order: probe version,
     /// probe document, engine version, engine dependency roots; then the
     /// probe and engine task observations.
@@ -589,6 +589,10 @@ impl NodeResourceRuntime {
             tests::stages::probe_joined(task.engine_plan.member_id.uuid());
         }
         if let Some(original) = task.engine.as_mut() {
+            // Refuse an unencodable audit plan before awaiting/taking the
+            // SAME original task. Even an impossible admitted-plan defect
+            // must leave its JoinHandle and native custody installed.
+            let plan_sha256 = v2::engine_task_plan_sha256(&task.engine_plan)?;
             let joined = tokio::time::timeout_at(deadline.into(), original)
                 .await
                 .map_err(|_| OperationError::Deadline)?;
@@ -615,8 +619,9 @@ impl NodeResourceRuntime {
             let known =
                 FixedEngineKnownClosed::from_joined_original(native, task.engine_plan.clone())?;
             let (report, closure) = known.split();
-            task.engine_observed = Some(v2::FixedPlanningEngineTaskObservedV1 {
-                task: task.engine_plan.clone(),
+            task.engine_observed = Some(v2::FixedPlanningEngineTaskObservedV2 {
+                member_id: task.engine_plan.member_id,
+                plan_sha256,
                 used_file_slots: u16::try_from(closure.used_file_slots())
                     .map_err(|_| OperationError::State)?,
                 media_digest: closure.media_digest().to_owned(),

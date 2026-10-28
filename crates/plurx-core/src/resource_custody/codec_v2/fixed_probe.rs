@@ -107,6 +107,81 @@ pub(crate) struct FixedPlanningEngineTaskObservedV1 {
     pub media_digest: String,
 }
 
+/// Compact audit binding to the unchanged V1 plan. The digest preserves
+/// the old full task equality without serializing the 256-slot plan twice.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FixedPlanningEngineTaskObservedV2 {
+    pub member_id: Id,
+    pub plan_sha256: String,
+    pub used_file_slots: u16,
+    pub media_digest: String,
+}
+
+// Same streaming serde/SHA pattern as the frozen inventory reference. Enforce
+// the existing row bound while hashing; never allocate the full plan JSON.
+fn bounded_audit_sha256(value: &impl Serialize) -> Result<String, CustodyError> {
+    use sha2::{Digest, Sha256};
+    use std::io::{self, Write};
+    struct HashWriter {
+        hash: Sha256,
+        bytes: usize,
+    }
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let next = self
+                .bytes
+                .checked_add(bytes.len())
+                .filter(|next| *next <= codec::JSON_LIMIT)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+            self.hash.update(bytes);
+            self.bytes = next;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter {
+        hash: Sha256::new(),
+        bytes: 0,
+    };
+    serde_json::to_writer(&mut writer, value).map_err(|_| codec::invalid())?;
+    Ok(hex::encode(writer.hash.finalize()))
+}
+
+pub(crate) fn engine_task_plan_sha256(
+    task: &FixedPlanningEngineTaskV1,
+) -> Result<String, CustodyError> {
+    bounded_audit_sha256(task)
+}
+
+/// Preflight the whole emitted settlement before consuming native witnesses.
+/// This grants no close authority and keeps the existing 64 KiB row limit.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn validate_planning_settlement_size(value: &Settlement) -> Result<(), CustodyError> {
+    bounded_audit_sha256(value).map(|_| ())
+}
+
+pub(crate) fn validate_engine_task_observed_v2(
+    plan: &FixedPlanningEngineTaskV1,
+    observed: &FixedPlanningEngineTaskObservedV2,
+) -> Result<(), CustodyError> {
+    if observed.member_id != plan.member_id
+        || observed.plan_sha256 != engine_task_plan_sha256(plan)?
+        || usize::from(observed.used_file_slots) > plan.file_slots.len()
+        || observed.used_file_slots == 0
+        || observed.media_digest.len() != 64
+        || !observed
+            .media_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(codec::invalid());
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_engine_task(
     task: &FixedPlanningEngineTaskV1,
     manifest: &Manifest,

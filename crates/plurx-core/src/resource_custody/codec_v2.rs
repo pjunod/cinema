@@ -10,12 +10,14 @@ pub(in crate::resource_custody) mod tests;
 use super::{codec, CustodyError, Role};
 use codec::{BootIdentity, MemberEnvelope, MemberKind, PlannedMember};
 pub(crate) use cost::{retained_minimum_resources, validate_retained_resources};
+#[cfg(any(target_os = "linux", test))]
+pub(crate) use fixed_probe::{engine_task_plan_sha256, validate_planning_settlement_size};
 #[cfg(target_os = "linux")]
 pub(crate) use fixed_probe::{FixedPlanningEngineFileSlotV1, FIXED_PLANNING_ENGINE_MAX_OBJECTS};
 pub(crate) use fixed_probe::{
-    FixedPlanningEngineTaskObservedV1, FixedPlanningEngineTaskV1, FixedProbeDiscoverSourceV1,
-    FixedProbeDiscoverTaskObservedV1, FixedProbeDiscoverTaskV1, FixedProbeMetadataV1,
-    FixedProbeTaskV1,
+    FixedPlanningEngineTaskObservedV1, FixedPlanningEngineTaskObservedV2,
+    FixedPlanningEngineTaskV1, FixedProbeDiscoverSourceV1, FixedProbeDiscoverTaskObservedV1,
+    FixedProbeDiscoverTaskV1, FixedProbeMetadataV1, FixedProbeTaskV1,
 };
 pub(crate) use retained_v2::*;
 use serde::{Deserialize, Serialize};
@@ -575,6 +577,9 @@ pub(crate) enum Observed {
     },
     FixedPlanningEngineTaskV1 {
         task: FixedPlanningEngineTaskObservedV1,
+    },
+    FixedPlanningEngineTaskV2 {
+        task: FixedPlanningEngineTaskObservedV2,
     },
     FixedProbeMetadataV1 {
         metadata: FixedProbeMetadataV1,
@@ -1177,6 +1182,10 @@ pub(crate) fn validate_envelope_members(
             MemberPlan::FixedPlanningEngineTaskV1 { task, .. },
             Some(Observed::FixedPlanningEngineTaskV1 { task: observed }),
         ) => fixed_probe::validate_engine_task_observed(task, observed)?,
+        (
+            MemberPlan::FixedPlanningEngineTaskV1 { task, .. },
+            Some(Observed::FixedPlanningEngineTaskV2 { task: observed }),
+        ) => fixed_probe::validate_engine_task_observed_v2(task, observed)?,
         (
             MemberPlan::FixedProbeMetadataV1 { metadata, .. },
             Some(Observed::FixedProbeMetadataV1 { metadata: observed }),

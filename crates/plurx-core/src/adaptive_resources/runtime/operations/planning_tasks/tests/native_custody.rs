@@ -86,6 +86,38 @@ async fn cancelled_original_engine_custody_wait_resumes_the_same_registered_nati
         assert_ne!(bundle.roles[0].phase, Phase::UnknownHeld);
     }
     assert_eq!(super::resumption::original_ids(&selection).await, ids);
+    // The ordinary admitted manifest already fits the row bound. Inject
+    // only an oversized in-memory audit locator to exercise refusal ordering;
+    // no journal row, native witness or original handle is replaced.
+    let original_locator = {
+        let mut bundle = selection.state.lock().await;
+        let tasks = bundle.roles[0].planning_tasks.as_mut().unwrap();
+        std::mem::replace(
+            &mut tasks.engine_plan.configured_ffmpeg_locator,
+            "x".repeat(64 * 1024),
+        )
+    };
+    let error = owner
+        .collect_and_refine(native_deadline)
+        .await
+        .err()
+        .expect("oversized audit digest refuses before waiting on the paused native task");
+    assert!(matches!(error.0, OperationError::Custody(_)));
+    {
+        let mut bundle = selection.state.lock().await;
+        let tasks = bundle.roles[0].planning_tasks.as_mut().unwrap();
+        assert_eq!(tasks.engine.as_ref().unwrap().id(), original_task);
+        assert!(tasks.engine_closed.is_none() && tasks.engine_observed.is_none());
+        tasks.engine_plan.configured_ffmpeg_locator = original_locator;
+    }
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("same original charge after digest refusal")
+            .used,
+        charge
+    );
+    assert_eq!(super::resumption::original_ids(&selection).await, ids);
     gate.release();
     gate.release(); // idempotent release creates no second native task
     let report = owner
