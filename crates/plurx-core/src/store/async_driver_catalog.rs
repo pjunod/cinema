@@ -485,6 +485,11 @@ impl Catalog {
         Ok(transaction)
     }
     pub fn begin_temporal(&self, unit: u64) -> CatalogResult<WriteTransaction> {
+        if self.oldest_pending()?.is_some() {
+            return Err(CatalogError::IncompleteExpansion(
+                "temporal publication before complete source closure".into(),
+            ));
+        }
         self.begin(
             WriteContext {
                 phase: CommitPhase::Temporal,
@@ -506,6 +511,11 @@ impl Catalog {
         }
         {
             let mut usage = self.inner.usage.borrow_mut();
+            if usage.unit.is_some_and(|old| context.unit_ordinal < old) {
+                return Err(CatalogError::SnapshotMismatch(
+                    "unit ordinal moved backwards".into(),
+                ));
+            }
             if usage.unit != Some(context.unit_ordinal) {
                 *usage = UnitUsage {
                     unit: Some(context.unit_ordinal),
@@ -562,6 +572,66 @@ impl Catalog {
     fn append(&self, record: Record) -> CatalogResult<RecordRef> {
         self.require_write()?;
         record.validate()?;
+        let phase = self
+            .inner
+            .pending
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| CatalogError::IncompleteExpansion("append without transaction".into()))?
+            .context
+            .phase;
+        let allowed = match phase {
+            CommitPhase::Initial => matches!(
+                record.kind.as_str(),
+                "PhysicalRows"
+                    | "Episode"
+                    | "BoundaryObservation"
+                    | "Store"
+                    | "Product"
+                    | "InitialImage"
+            ),
+            CommitPhase::Source => matches!(
+                record.kind.as_str(),
+                "PhysicalRows"
+                    | "Episode"
+                    | "BoundaryObservation"
+                    | "Store"
+                    | "Product"
+                    | "OracleEvidence"
+                    | "Applied"
+                    | "Candidate"
+                    | "Demand"
+                    | "ProductEdge"
+                    | "FairPair"
+                    | "Enabledness"
+                    | "Expansion"
+            ),
+            CommitPhase::Temporal => matches!(
+                record.kind.as_str(),
+                "MonitorNode"
+                    | "MonitorEdge"
+                    | "Scc"
+                    | "Counterexample"
+                    | "Outcome"
+                    | "Counts"
+                    | "ContextRoot"
+            ),
+        };
+        if record.kind == "Outcome"
+            && matches!(
+                record.record["actual"].as_str(),
+                Some("pending" | "incomplete")
+            )
+        {
+            return Err(CatalogError::IncompleteExpansion(
+                "pending/incomplete Outcome belongs only to private progress".into(),
+            ));
+        }
+        if !allowed {
+            return Err(CatalogError::IncompleteExpansion(
+                "record kind does not belong to active phase".into(),
+            ));
+        }
         let reference = record.reference()?;
         if let Some(existing) = self
             .inner
@@ -931,6 +1001,10 @@ impl Catalog {
             || work_unit.record["resource_plan_sha256"] != self.resource_plan().sha256()
             || checkpoint.record["previous_checkpoint"]
                 != work_unit.record["expected_prior_checkpoint"]
+            || !matches!(
+                work_unit.record["status"].as_str(),
+                Some("checkpointed_incomplete" | "closed_unqualified")
+            )
             || !work_unit.record["artifact_roots"]
                 .as_array()
                 .is_some_and(Vec::is_empty)
@@ -1711,6 +1785,12 @@ impl ReadSnapshot {
             || checkpoint.record["catalog_logical_digest"] != self.logical_digest()?
             || checkpoint.record["counts"] != self.counts()?
             || checkpoint.record["contexts"] != json!(self.context_snapshots()?)
+            || self
+                .catalog
+                .control("initial_image")?
+                .as_ref()
+                .map(|image| &image["record"]["image_sha256"])
+                != Some(&checkpoint.record["initial_image_id"])
             || checkpoint.record["oldest_pending_ticket"]
                 != json!(self
                     .catalog
@@ -2275,6 +2355,547 @@ impl ReadSnapshot {
     }
 }
 
+/// Private controller request. This object is not an immutable proof envelope
+/// and grants no completion authority; M4 authenticates its external origin.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuantumRequest {
+    pub schema_version: u64,
+    pub operation: String,
+    pub deadline_monotonic: Value,
+    pub work_unit: Value,
+    pub resource_plan: Record,
+    pub initial_image: Option<Record>,
+    pub prior_checkpoint: Option<Record>,
+    pub checkpoint: Option<Record>,
+    pub catalog_path: PathBuf,
+    pub output_dir: PathBuf,
+    pub dependency_index: PathBuf,
+    pub source_files: BTreeMap<String, String>,
+    pub runtime: Value,
+    pub driver_graph: PathBuf,
+    pub tlc: Value,
+    pub verifier_work_db: PathBuf,
+    pub prepare_path: PathBuf,
+    pub reservation_path: PathBuf,
+    pub previous_verifier_progress_sha256: Option<String>,
+    pub previous_verifier_backup_sha256: Option<String>,
+    pub temporal_publication: Option<PathBuf>,
+    pub temporal_import: Option<PathBuf>,
+}
+impl QuantumRequest {
+    pub fn read(path: &Path) -> CatalogResult<Self> {
+        const CONTROL_BYTES: u64 = 8 * 1024 * 1024;
+        if !path.is_absolute()
+            || path.symlink_metadata()?.file_type().is_symlink()
+            || !path.is_file()
+        {
+            return Err(CatalogError::Io("unsafe private request path".into()));
+        }
+        if path.metadata()?.len() > CONTROL_BYTES {
+            return Err(CatalogError::ResourceIncomplete(
+                "private control decoded allowance".into(),
+            ));
+        }
+        let value = strict_json(&std::fs::read(path)?)?;
+        let base = [
+            "schema_version",
+            "operation",
+            "deadline_monotonic",
+            "work_unit",
+            "resource_plan",
+            "initial_image",
+            "prior_checkpoint",
+            "checkpoint",
+            "catalog_path",
+            "output_dir",
+            "dependency_index",
+            "source_files",
+            "runtime",
+            "driver_graph",
+            "tlc",
+            "verifier_work_db",
+            "prepare_path",
+            "reservation_path",
+            "previous_verifier_progress_sha256",
+            "previous_verifier_backup_sha256",
+        ];
+        let mut fields = base.to_vec();
+        if value["operation"] == "temporal_import" {
+            fields.extend(["temporal_publication", "temporal_import"]);
+        }
+        closed_fields(&value, &fields)?;
+        let request: Self = serde_json::from_value(value)?;
+        if request.schema_version != 6
+            || !matches!(
+                request.operation.as_str(),
+                "expand" | "temporal_import" | "validate_restore"
+            )
+            || !request
+                .deadline_monotonic
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value > 0.0)
+        {
+            return Err(CatalogError::SourceMismatch(
+                "unsupported private quantum request".into(),
+            ));
+        }
+        for path in [
+            &request.catalog_path,
+            &request.output_dir,
+            &request.dependency_index,
+            &request.driver_graph,
+            &request.verifier_work_db,
+            &request.prepare_path,
+            &request.reservation_path,
+        ] {
+            if !path.is_absolute()
+                || path
+                    .symlink_metadata()
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(CatalogError::Io("unsafe private quantum path".into()));
+            }
+        }
+        for path in [&request.temporal_publication, &request.temporal_import]
+            .into_iter()
+            .flatten()
+        {
+            if !path.is_absolute() || path.symlink_metadata()?.file_type().is_symlink() {
+                return Err(CatalogError::Io("unsafe temporal import path".into()));
+            }
+        }
+        let unit = request.unit()?;
+        let config = request.config()?;
+        config.validate()?;
+        if unit.record["session_id"] != json!(config.session_id)
+            || unit.record["resource_plan_sha256"] != config.resource_plan.sha256()
+            || unit.record["mode"] != "unit"
+            || !unit.record["artifact_roots"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        {
+            return Err(CatalogError::SourceMismatch(
+                "private running unit/plan binding".into(),
+            ));
+        }
+        if request.operation == "expand" && unit.record["stage"] != "expand" {
+            return Err(CatalogError::SourceMismatch("expand request stage".into()));
+        }
+        if request.operation == "temporal_import"
+            && (unit.record["stage"] == "expand" || unit.record["stage"] == "complete")
+        {
+            return Err(CatalogError::SourceMismatch(
+                "publication request stage".into(),
+            ));
+        }
+        Ok(request)
+    }
+    pub fn unit(&self) -> CatalogResult<Record> {
+        Record::new("WorkUnit", self.work_unit.clone())
+    }
+    pub fn config(&self) -> CatalogResult<CatalogConfig> {
+        Ok(CatalogConfig {
+            path: self.catalog_path.clone(),
+            source: serde_json::from_value(self.work_unit["source"].clone())?,
+            session_id: serde_json::from_value(self.work_unit["session_id"].clone())?,
+            resource_plan: self.resource_plan.clone(),
+        })
+    }
+    pub fn deadline(&self) -> CatalogResult<std::time::Instant> {
+        // M4 separately enforces the controller's absolute monotonic deadline.
+        // Rust's private Instant has no portable external epoch; this local
+        // watchdog can only shorten work relative to the fixed unit duration.
+        Ok(std::time::Instant::now()
+            + std::time::Duration::from_secs(number(&self.resource_plan.record, "unit_seconds")?))
+    }
+    pub fn verify_source(
+        &self,
+        compiled: &BTreeMap<String, String>,
+        deadline: std::time::Instant,
+    ) -> CatalogResult<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()?;
+        let mut files = Vec::new();
+        for (name, advertised) in &self.source_files {
+            let relative = Path::new(name);
+            if relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(CatalogError::SourceMismatch(
+                    "unsafe source closure relative path".into(),
+                ));
+            }
+            validate_definition("Sha256", &json!(advertised))?;
+            let path = root.join(relative);
+            if path.symlink_metadata()?.file_type().is_symlink()
+                || !path.canonicalize()?.starts_with(&root)
+            {
+                return Err(CatalogError::SourceMismatch(
+                    "source closure leaves archive".into(),
+                ));
+            }
+            let (_, actual) = hash_file(&path, PAGE_BYTES, deadline)?;
+            if actual != *advertised {
+                return Err(CatalogError::SourceMismatch(format!(
+                    "source closure bytes differ: {name}"
+                )));
+            }
+            files.push(json!([name, actual]));
+        }
+        let source = &self.config()?.source;
+        if files.is_empty() || digest(canonical(&files).as_bytes()) != source.source_closure_sha256
+        {
+            return Err(CatalogError::SourceMismatch(
+                "complete source closure digest".into(),
+            ));
+        }
+        for (name, hash) in compiled {
+            if self.source_files.get(name) != Some(hash) {
+                return Err(CatalogError::SourceMismatch(format!(
+                    "compiled source differs from registered archive: {name}"
+                )));
+            }
+        }
+        let names = [
+            "PAGED-CONTRACT.md",
+            "paged-proof.schema.json",
+            "paged-catalog.sql",
+            "finite-inventory.json",
+            "paged-outcomes.json",
+            "paged-catalog-transport.schema.json",
+            "paged-verifier-continuation.schema.json",
+            "paged-verifier-state.sql",
+            "source-bound-formulas.json",
+            "source-bound-receipt.schema.json",
+            "paged-control-carrier.schema.json",
+        ];
+        let mut proof = Vec::new();
+        for name in names {
+            let path = format!("verification/async-driver-refinement/{name}");
+            let hash = self.source_files.get(&path).ok_or_else(|| {
+                CatalogError::MissingDependency(format!("proof contract source {path}"))
+            })?;
+            proof.push(json!([path, hash]));
+        }
+        proof.sort_by(|a, b| a[0].as_str().cmp(&b[0].as_str()));
+        if digest(canonical(&proof).as_bytes()) != source.proof_contract_sha256
+            || self
+                .source_files
+                .get("verification/async-driver-refinement/finite-inventory.json")
+                != Some(&source.finite_inventory_sha256)
+            || self
+                .source_files
+                .get(".github/workflows/async-proof-session.yml")
+                != Some(&source.workflow_sha256)
+            || !self.runtime.is_object()
+            || digest(canonical(&self.runtime).as_bytes()) != source.toolchain_sha256
+        {
+            return Err(CatalogError::SourceMismatch(
+                "proof/finite/workflow/runtime binding".into(),
+            ));
+        }
+        let (_, driver_hash) = hash_file(&self.driver_graph, PAGE_BYTES, deadline)?;
+        if driver_hash != source.driver_sha256 {
+            return Err(CatalogError::SourceMismatch(
+                "actual driver graph bytes".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub fn initial_path(&self, deadline: std::time::Instant) -> CatalogResult<PathBuf> {
+        let image = self.initial_image.as_ref().ok_or_else(|| {
+            CatalogError::InitialImageMismatch("resumed request lacks actual Init".into())
+        })?;
+        image.validate()?;
+        if image.kind != "InitialImage" || image.record["source"] != self.work_unit["source"] {
+            return Err(CatalogError::InitialImageMismatch(
+                "resumed Init source".into(),
+            ));
+        }
+        let connection = rusqlite::Connection::open_with_flags(
+            &self.dependency_index,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut statement=connection.prepare("SELECT local_path FROM authenticated_members WHERE member_path=?1 AND bytes=?2 AND sha256=?3 ORDER BY unit_ordinal,part_ordinal")?;
+        let mut rows = statement.query(rusqlite::params![
+            string(&image.record, "member_path")?,
+            number(&image.record, "image_bytes")? as i64,
+            string(&image.record, "image_sha256")?
+        ])?;
+        let mut selected: Option<PathBuf> = None;
+        while let Some(row) = rows.next()? {
+            let path = PathBuf::from(row.get::<_, String>(0)?);
+            if !path.is_absolute() || path.symlink_metadata()?.file_type().is_symlink() {
+                return Err(CatalogError::InitialImageMismatch(
+                    "unsafe authenticated Init path".into(),
+                ));
+            }
+            let (bytes, hash) = hash_file(&path, number(&image.record, "image_bytes")?, deadline)?;
+            if bytes != number(&image.record, "image_bytes")?
+                || hash != string(&image.record, "image_sha256")?
+            {
+                return Err(CatalogError::InitialImageMismatch(
+                    "actual authenticated Init bytes".into(),
+                ));
+            }
+            if let Some(prior) = selected.as_ref() {
+                same_file_bytes(prior, &path, deadline)?;
+            } else {
+                selected = Some(path);
+            }
+        }
+        selected.ok_or_else(|| {
+            CatalogError::InitialImageMismatch("authenticated Init member unavailable".into())
+        })
+    }
+    pub fn dependency_member(
+        &self,
+        reference: &RecordRef,
+        deadline: std::time::Instant,
+    ) -> CatalogResult<PathBuf> {
+        use rusqlite::OptionalExtension;
+        let connection = rusqlite::Connection::open_with_flags(
+            &self.dependency_index,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT digest,path FROM objects WHERE kind=?1 AND key=?2",
+                rusqlite::params![reference.kind, reference.id.canonical().as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (advertised, path) = row.ok_or_else(|| {
+            CatalogError::MissingDependency("authenticated external member".into())
+        })?;
+        let path = PathBuf::from(path);
+        if advertised != reference.sha256
+            || !path.is_absolute()
+            || path.symlink_metadata()?.file_type().is_symlink()
+        {
+            return Err(CatalogError::CorruptRecord(
+                "external member reference/path".into(),
+            ));
+        }
+        let (_, actual) = hash_file(&path, PAGE_BYTES, deadline)?;
+        if actual != reference.sha256 {
+            return Err(CatalogError::CorruptRecord(
+                "actual external member bytes".into(),
+            ));
+        }
+        Ok(path)
+    }
+}
+impl QuantumRequest {
+    pub fn expected_backup(
+        &self,
+        checkpoint: &Record,
+        deadline: std::time::Instant,
+    ) -> CatalogResult<(u64, String)> {
+        let connection = rusqlite::Connection::open_with_flags(
+            &self.dependency_index,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut statement=connection.prepare("SELECT bytes,sha256,local_path FROM authenticated_members WHERE unit_ordinal=?1 AND part_ordinal=0 AND member_path='catalog-backup/root.json'")?;
+        let mut rows = statement
+            .query(rusqlite::params![
+                number(&checkpoint.record, "unit_ordinal")? as i64
+            ])?;
+        let row = rows.next()?.ok_or_else(|| {
+            CatalogError::MissingDependency("authenticated catalog backup root".into())
+        })?;
+        let bytes = sqlite::row_uint(row, 0)?;
+        let advertised: String = row.get(1)?;
+        let path = PathBuf::from(row.get::<_, String>(2)?);
+        if rows.next()?.is_some()
+            || !path.is_absolute()
+            || path.symlink_metadata()?.file_type().is_symlink()
+            || bytes > 8 * 1024 * 1024
+        {
+            return Err(CatalogError::CorruptRecord(
+                "catalog backup root identity/size".into(),
+            ));
+        }
+        if hash_file(&path, 8 * 1024 * 1024, deadline)? != (bytes, advertised) {
+            return Err(CatalogError::CorruptRecord(
+                "catalog backup root actual bytes".into(),
+            ));
+        }
+        let root = strict_json(&std::fs::read(&path)?)?;
+        closed_fields(
+            &root,
+            &[
+                "schema_version",
+                "kind",
+                "source",
+                "session_id",
+                "unit_ordinal",
+                "checkpoint_sha256",
+                "previous_checkpoint_sha256",
+                "resource_plan_sha256",
+                "initial_image_sha256",
+                "catalog_commit",
+                "catalog_logical_digest",
+                "semantic_manifest_root",
+                "snapshot_boundary",
+                "format",
+                "backup_method",
+                "catalog_bytes",
+                "catalog_sha256",
+                "chunk_bytes_limit",
+                "chunk_count",
+                "artifact_part_count",
+                "index_root",
+            ],
+        )?;
+        let c = &checkpoint.record;
+        if root["schema_version"] != 1
+            || root["kind"] != "catalog_backup"
+            || root["source"] != c["source"]
+            || root["session_id"] != c["session_id"]
+            || root["unit_ordinal"] != c["unit_ordinal"]
+            || root["checkpoint_sha256"] != checkpoint.sha256()
+            || root["previous_checkpoint_sha256"] != c["previous_checkpoint"]
+            || root["resource_plan_sha256"] != c["resource_plan_sha256"]
+            || root["initial_image_sha256"] != c["initial_image_id"]
+            || root["catalog_commit"] != c["committed_transaction"]
+            || root["catalog_logical_digest"] != c["catalog_logical_digest"]
+            || root["semantic_manifest_root"] != c["page_root"]
+            || root["snapshot_boundary"] != "post_checkpoint_pre_upload"
+            || root["format"] != "sqlite3"
+            || root["backup_method"] != "sqlite_backup_api_v1"
+            || root["chunk_bytes_limit"] != PAGE_BYTES
+            || number(&root, "catalog_bytes")? == 0
+            || number(&root, "chunk_count")? == 0
+            || !(1..=32).contains(&number(&root, "artifact_part_count")?)
+        {
+            return Err(CatalogError::SourceMismatch(
+                "authenticated backup root/checkpoint binding".into(),
+            ));
+        }
+        validate_definition("Sha256", &root["catalog_sha256"])?;
+        Ok((
+            number(&root, "catalog_bytes")?,
+            string(&root, "catalog_sha256")?.into(),
+        ))
+    }
+    pub fn check_continuation(&self, catalog: &Catalog) -> CatalogResult<Record> {
+        let checkpoint = self.checkpoint.as_ref().ok_or_else(|| {
+            CatalogError::SnapshotMismatch("missing continuation checkpoint".into())
+        })?;
+        checkpoint.validate()?;
+        if self.prior_checkpoint.as_ref() != Some(checkpoint)
+            || checkpoint.kind != "Checkpoint"
+            || checkpoint.record["source"] != self.work_unit["source"]
+            || checkpoint.record["session_id"] != self.work_unit["session_id"]
+            || checkpoint.record["resource_plan_sha256"] != self.work_unit["resource_plan_sha256"]
+            || self.work_unit["expected_prior_checkpoint"] != checkpoint.sha256()
+            || number(&self.work_unit, "unit_ordinal")?
+                != number(&checkpoint.record, "unit_ordinal")?
+                    .checked_add(1)
+                    .ok_or_else(|| CatalogError::NumericDomain("unit ordinal exhausted".into()))?
+            || catalog.latest_checkpoint()?.as_ref() != Some(checkpoint)
+        {
+            return Err(CatalogError::SnapshotMismatch(
+                "exact continuation checkpoint/unit identity".into(),
+            ));
+        }
+        let image = self.initial_image.as_ref().ok_or_else(|| {
+            CatalogError::InitialImageMismatch("continuation lacks actual Init descriptor".into())
+        })?;
+        if catalog.control("initial_image")? != Some(serde_json::to_value(image)?)
+            || image.record["image_sha256"] != checkpoint.record["initial_image_id"]
+        {
+            return Err(CatalogError::InitialImageMismatch(
+                "continuation actual Init descriptor".into(),
+            ));
+        }
+        Ok(checkpoint.clone())
+    }
+}
+pub fn compiled_catalog_sources() -> BTreeMap<String, String> {
+    [
+        (
+            "crates/plurx-core/src/store/async_driver_catalog.rs",
+            include_str!("async_driver_catalog.rs"),
+        ),
+        (
+            "crates/plurx-core/src/store/async_driver_catalog/records.rs",
+            include_str!("async_driver_catalog/records.rs"),
+        ),
+        (
+            "crates/plurx-core/src/store/async_driver_catalog/sqlite.rs",
+            include_str!("async_driver_catalog/sqlite.rs"),
+        ),
+        (
+            "crates/plurx-core/src/store/async_driver_catalog/memory.rs",
+            include_str!("async_driver_catalog/memory.rs"),
+        ),
+        (
+            "verification/async-driver-refinement/paged-proof.schema.json",
+            include_str!(
+                "../../../../verification/async-driver-refinement/paged-proof.schema.json"
+            ),
+        ),
+        (
+            "verification/async-driver-refinement/paged-catalog.sql",
+            include_str!("../../../../verification/async-driver-refinement/paged-catalog.sql"),
+        ),
+    ]
+    .into_iter()
+    .map(|(path, text)| (path.into(), digest(text.as_bytes())))
+    .collect()
+}
+pub fn checkpoint_session(checkpoint: &Record, unit: &Record) -> CatalogResult<Record> {
+    let c = &checkpoint.record;
+    let u = &unit.record;
+    let next = number(c, "unit_ordinal")?
+        .checked_add(1)
+        .filter(|n| *n <= i64::MAX as u64)
+        .ok_or_else(|| CatalogError::NumericDomain("session next unit exhausted".into()))?;
+    Record::new(
+        "Session",
+        json!({"session_id":c["session_id"],"source":c["source"],"pr":u["pr"],"repository":u["repository"],"event_base":u["event_base"],"initial_image_id":c["initial_image_id"],"resource_plan_sha256":c["resource_plan_sha256"],"phase":if u["status"]=="closed_unqualified" {"closed_unqualified"}else{"checkpointed_incomplete"},"checkpoint":checkpoint.sha256(),"next_unit":next,"counts":c["counts"]}),
+    )
+}
+pub fn same_file_bytes(
+    first: &Path,
+    second: &Path,
+    deadline: std::time::Instant,
+) -> CatalogResult<()> {
+    use std::io::Read;
+    let mut a = std::fs::File::open(first)?;
+    let mut b = std::fs::File::open(second)?;
+    if a.metadata()?.len() != b.metadata()?.len() {
+        return Err(CatalogError::CorruptRecord(
+            "full file identity length collision".into(),
+        ));
+    }
+    let mut x = [0u8; 8192];
+    let mut y = [0u8; 8192];
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(CatalogError::ResourceIncomplete(
+                "full byte identity deadline".into(),
+            ));
+        }
+        let n = a.read(&mut x)?;
+        b.read_exact(&mut y[..n])?;
+        if x[..n] != y[..n] {
+            return Err(CatalogError::CorruptRecord(
+                "equal file digest has unequal full bytes".into(),
+            ));
+        }
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn fixture_configuration(path: PathBuf) -> CatalogConfig {
     let source = SourceIdentity {
         commit: "0".repeat(40),
@@ -2342,6 +2963,44 @@ pub(super) fn fixture_configuration(path: PathBuf) -> CatalogConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MANUAL OPERATIONAL MEASUREMENT ENTRY. No behavioral regression or proof
+    /// credit: M4 registers the exact ignored invocation and captures its origin.
+    #[test]
+    #[ignore = "manual operational calibration requires an owned output path"]
+    fn catalog_sqlite_empty_schema_reports_actual_engine_geometry() {
+        use std::io::Write;
+        let output = PathBuf::from(
+            std::env::var_os("PLURX_ASYNC_CATALOG_CALIBRATION")
+                .expect("manual calibration output required"),
+        );
+        assert!(
+            output.is_absolute() && !output.exists(),
+            "fresh absolute owned measurement output"
+        );
+        let parent = output.parent().expect("owned measurement directory");
+        let directory = tempfile::tempdir_in(parent).expect("owned persistent measurement scratch");
+        let storage = sqlite::SqliteStorage::open(
+            &directory.path().join("empty-harness.sqlite"),
+            4 * 1024 * 1024,
+        )
+        .expect("actual empty harness DDL");
+        let report = storage
+            .empty_geometry()
+            .expect("actual linked engine geometry");
+        assert_eq!(report["acceptance"], false);
+        let bytes = canonical(&report);
+        assert!(bytes.len() <= 64 * 1024, "bounded operational marker");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)
+            .expect("owned report file");
+        file.write_all(bytes.as_bytes())
+            .expect("write actual operational report");
+        file.sync_all().expect("durable operational report");
+        eprintln!("async_paged_catalog_calibration={bytes}");
+    }
 
     // Synthetic storage values, deliberately not a Store-D proof certificate.
     // The test exercises the two actual catalog backends and their transaction

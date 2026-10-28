@@ -204,6 +204,50 @@ impl SqliteStorage {
             read_limit: resident_bytes / 4,
         })
     }
+    /// Manual operational measurement, never a behavioral/proof result.
+    /// The real empty harness open path installs DDL but inserts no metadata.
+    pub fn empty_geometry(&self) -> CatalogResult<Value> {
+        if self.context.is_some() || self.reading || self.sequence()? != 0 {
+            return Err(CatalogError::CorruptRecord(
+                "calibration requires empty unbound harness".into(),
+            ));
+        }
+        let normative =
+            include_str!("../../../../../verification/async-driver-refinement/paged-catalog.sql");
+        let mut preimage = normative.as_bytes().to_vec();
+        preimage.push(0);
+        preimage.extend_from_slice(AUX_SCHEMA.as_bytes());
+        let mut rows = serde_json::Map::new();
+        let mut statement = self
+            .connection
+            .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")?;
+        let mut tables = statement.query([])?;
+        while let Some(table) = tables.next()? {
+            let name: String = table.get(0)?;
+            let quoted = name.replace('"', "\"\"");
+            let count = self.connection.query_row(
+                &format!("SELECT count(*) FROM \"{quoted}\""),
+                [],
+                |row| row_uint(row, 0),
+            )?;
+            if count != 0 {
+                return Err(CatalogError::CorruptRecord(
+                    "calibration database contains rows".into(),
+                ));
+            }
+            rows.insert(name, json!(count));
+        }
+        let scalar = |sql: &str| -> CatalogResult<u64> {
+            Ok(self.connection.query_row(sql, [], |row| row_uint(row, 0))?)
+        };
+        Ok(
+            json!({"schema_version":1,"engine":"rust_rusqlite","source_path":"verification/async-driver-refinement/paged-catalog.sql","acceptance":false,
+            "sqlite_version":rusqlite::version(),"sqlite_source_id":self.connection.query_row("SELECT sqlite_source_id()",[],|row|row.get::<_,String>(0))?,
+            "ddl_sha256":digest(&preimage),"source_sha256":digest(normative.as_bytes()),"auxiliary_ddl_sha256":digest(AUX_SCHEMA.as_bytes()),
+            "compiled_sources":super::compiled_catalog_sources(),"page_size":scalar("PRAGMA page_size")?,"page_count":scalar("PRAGMA page_count")?,"freelist_count":scalar("PRAGMA freelist_count")?,
+            "tables":scalar("SELECT count(*) FROM sqlite_schema WHERE type='table'")?,"indexes":scalar("SELECT count(*) FROM sqlite_schema WHERE type='index'")?,"empty_table_rows":rows}),
+        )
+    }
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -1102,6 +1146,15 @@ impl Storage for SqliteStorage {
             ] {
                 self.connection.execute("INSERT INTO catalog_control(key,payload) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",params![key,canonical(&value).as_bytes()])?;
             }
+            let binding = self
+                .get_control("binding")?
+                .ok_or_else(|| CatalogError::SourceMismatch("checkpoint binding".into()))?;
+            let plan = &binding["resource_plan"];
+            self.connection.execute("INSERT INTO resource_plans(digest,descriptor,admission) VALUES(?1,?2,'admitted') ON CONFLICT(digest) DO NOTHING",params![string(c,"resource_plan_sha256")?,canonical(plan).as_bytes()])?;
+            let session = super::checkpoint_session(checkpoint, work_unit)?;
+            let v = &session.record;
+            self.connection.execute("INSERT INTO sessions(id,source_json,initial_image_sha256,resource_plan_sha256,phase,checkpoint_digest,next_unit,descriptor) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET phase=excluded.phase,checkpoint_digest=excluded.checkpoint_digest,next_unit=excluded.next_unit,descriptor=excluded.descriptor",params![string(v,"session_id")?,canonical(&v["source"]).as_bytes(),string(v,"initial_image_id")?,string(v,"resource_plan_sha256")?,string(v,"phase")?,checkpoint.sha256(),number(v,"next_unit")?,session.bytes()])?;
+            self.connection.execute("INSERT INTO catalog_control(key,payload) VALUES('session',?1) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",params![session.bytes()])?;
             Ok(())
         })();
         match result {
@@ -1355,6 +1408,158 @@ impl Storage for SqliteStorage {
                     "restored {kind} lifetime allowance"
                 )));
             }
+        }
+        let current_unit = self
+            .get_control(&format!(
+                "work_unit:{}",
+                number(&checkpoint.record, "unit_ordinal")?
+            ))?
+            .ok_or_else(|| CatalogError::CorruptRecord("checkpoint private unit missing".into()))?;
+        let current_unit: Record = serde_json::from_value(current_unit)?;
+        current_unit.validate()?;
+        let session = super::checkpoint_session(checkpoint, &current_unit)?;
+        if self.get_control("session")? != Some(serde_json::to_value(&session)?)
+            || self.get_control("latest_checkpoint")? != Some(serde_json::to_value(checkpoint)?)
+        {
+            return Err(CatalogError::CorruptRecord(
+                "current controller/session bookkeeping differs".into(),
+            ));
+        }
+        let plans: u64 =
+            self.connection
+                .query_row("SELECT count(*) FROM resource_plans", [], |row| {
+                    row_uint(row, 0)
+                })?;
+        let sessions: u64 =
+            self.connection
+                .query_row("SELECT count(*) FROM sessions", [], |row| row_uint(row, 0))?;
+        let actual_plan: Vec<u8> = self.connection.query_row(
+            "SELECT descriptor FROM resource_plans WHERE digest=?1 AND admission='admitted'",
+            params![plan.sha256()],
+            |row| row.get(0),
+        )?;
+        let actual_session:Vec<u8>=self.connection.query_row("SELECT descriptor FROM sessions WHERE id=?1 AND source_json=?2 AND initial_image_sha256=?3 AND resource_plan_sha256=?4 AND checkpoint_digest=?5 AND next_unit=?6 AND phase=?7",params![string(&session.record,"session_id")?,canonical(&session.record["source"]).as_bytes(),string(&session.record,"initial_image_id")?,plan.sha256(),checkpoint.sha256(),number(&session.record,"next_unit")?,string(&session.record,"phase")?],|row|row.get(0))?;
+        if plans != 1
+            || sessions != 1
+            || actual_plan != plan.bytes()
+            || actual_session != session.bytes()
+        {
+            return Err(CatalogError::CorruptRecord(
+                "private admitted plan/session row differs".into(),
+            ));
+        }
+        let mut exports=self.connection.prepare("SELECT key,length(payload),payload FROM catalog_control WHERE key LIKE 'export:%' ORDER BY key")?;
+        let mut exported = exports.query([])?;
+        let mut export_counts = std::collections::BTreeMap::<String, u64>::new();
+        while let Some(row) = exported.next()? {
+            if row_uint(row, 1)? > limits.resident_bytes / 4 {
+                return Err(CatalogError::ResourceIncomplete(
+                    "restored export decoded reservation".into(),
+                ));
+            }
+            let bytes: Vec<u8> = row.get(2)?;
+            let record = Record::parse(&bytes)?;
+            if !matches!(record.kind.as_str(), "Page" | "ManifestNode")
+                || record.record["source"] != binding["source"]
+                || record.record["session_id"] != binding["session_id"]
+                || row.get::<_, String>(0)?
+                    != format!("export:{}:{}", record.kind, record.key()?.canonical())
+                || record.bytes() != bytes
+                || bytes.len() as u64 > limits.allowance(&record.kind)?.max_encoded_bytes
+            {
+                return Err(CatalogError::CorruptRecord(
+                    "private exported envelope binding".into(),
+                ));
+            }
+            *export_counts.entry(record.kind.clone()).or_default() += 1;
+            if record.kind == "Page" {
+                let v = &record.record;
+                let matches:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM pages WHERE id=?1 AND kind=?2 AND first_key=?3 AND last_key=?4 AND record_count=?5 AND bytes=?6 AND descriptor=?7 AND previous_checkpoint IS ?8 AND transaction_high_water=?9)",params![string(v,"page_id")?,string(v,"kind")?,canonical(&v["first_key"]).as_bytes(),canonical(&v["last_key"]).as_bytes(),number(v,"record_count")?,number(v,"utf8_bytes")?,bytes,v["previous_checkpoint"].as_str(),number(v,"transaction_high_water")?],|row|row.get(0))?;
+                if !matches || number(v, "transaction_high_water")? > sequence {
+                    return Err(CatalogError::CorruptRecord(
+                        "private page index differs".into(),
+                    ));
+                }
+                let count: u64 = self.connection.query_row(
+                    "SELECT count(*) FROM page_dependencies WHERE page_id=?1",
+                    params![string(v, "page_id")?],
+                    |row| row_uint(row, 0),
+                )?;
+                if count
+                    != v["dependencies"]
+                        .as_array()
+                        .expect("validated dependencies")
+                        .len() as u64
+                {
+                    return Err(CatalogError::CorruptRecord(
+                        "private page dependency count differs".into(),
+                    ));
+                }
+                for dependency in v["dependencies"]
+                    .as_array()
+                    .expect("validated dependencies")
+                {
+                    let found:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM page_dependencies WHERE page_id=?1 AND target_kind=?2 AND target_id=?3 AND sha256=?4)",params![string(v,"page_id")?,string(dependency,"kind")?,canonical(&dependency["id"]),string(dependency,"sha256")?],|row|row.get(0))?;
+                    if !found {
+                        return Err(CatalogError::CorruptRecord(
+                            "private page dependency differs".into(),
+                        ));
+                    }
+                }
+            } else {
+                for child in record.record["children"]
+                    .as_array()
+                    .expect("validated manifest children")
+                {
+                    let child_kind = string(child, "kind")?;
+                    let child_key: RecordKey = serde_json::from_value(child["id"].clone())?;
+                    let target = self
+                        .get_control(&format!("export:{child_kind}:{}", child_key.canonical()))?
+                        .ok_or_else(|| {
+                            CatalogError::CorruptRecord("private manifest child missing".into())
+                        })?;
+                    let target: Record = serde_json::from_value(target)?;
+                    target.validate()?;
+                    let level = number(&record.record, "level")?;
+                    if target.sha256() != string(child, "sha256")?
+                        || target.key() != Ok(child_key)
+                        || target.kind != child_kind
+                        || (level == 0 && child_kind != "Page")
+                        || (level > 0
+                            && (child_kind != "ManifestNode"
+                                || number(&target.record, "level")?.checked_add(1) != Some(level)))
+                    {
+                        return Err(CatalogError::CorruptRecord(
+                            "private manifest child identity/level differs".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        for kind in ["Page", "ManifestNode"] {
+            let count = export_counts.get(kind).copied().unwrap_or(0);
+            let indexed = self
+                .get_control(&format!("export_count:{kind}"))?
+                .map(|value| {
+                    value.as_u64().ok_or_else(|| {
+                        CatalogError::CorruptRecord("private export counter type".into())
+                    })
+                })
+                .transpose()?
+                .unwrap_or(0);
+            if count != indexed || count > limits.allowance(kind)?.records {
+                return Err(CatalogError::CorruptRecord(
+                    "private lifetime export counter differs".into(),
+                ));
+            }
+        }
+        let page_count: u64 =
+            self.connection
+                .query_row("SELECT count(*) FROM pages", [], |row| row_uint(row, 0))?;
+        if page_count != export_counts.get("Page").copied().unwrap_or(0) {
+            return Err(CatalogError::CorruptRecord(
+                "extra private page rows".into(),
+            ));
         }
         let finals: u64 =
             self.connection

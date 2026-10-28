@@ -1765,6 +1765,76 @@ fn source_bindings() -> BTreeMap<&'static str, String> {
     .collect()
 }
 
+pub(super) fn compiled_source_bindings() -> BTreeMap<&'static str, String> {
+    let mut sources = source_bindings();
+    sources.insert(
+        "store/async_driver_product.rs",
+        format!(
+            "{:x}",
+            Sha256::digest(include_str!("async_driver_product.rs").as_bytes())
+        ),
+    );
+    sources.insert(
+        "store/mod.rs",
+        format!("{:x}", Sha256::digest(include_str!("mod.rs").as_bytes())),
+    );
+    for (path, bytes) in [
+        ("Cargo.toml", include_str!("../../../../Cargo.toml")),
+        ("Cargo.lock", include_str!("../../../../Cargo.lock")),
+        (
+            "rust-toolchain.toml",
+            include_str!("../../../../rust-toolchain.toml"),
+        ),
+        (
+            "crates/plurx-core/Cargo.toml",
+            include_str!("../../Cargo.toml"),
+        ),
+        (
+            "crates/plurx-worker-control/Cargo.toml",
+            include_str!("../../../plurx-worker-control/Cargo.toml"),
+        ),
+        (
+            "crates/plurxd/Cargo.toml",
+            include_str!("../../../plurxd/Cargo.toml"),
+        ),
+        (
+            "crates/plurx-worker-control/src/lib.rs",
+            include_str!("../../../plurx-worker-control/src/lib.rs"),
+        ),
+        (
+            "crates/plurx-worker-control/src/library_driver.rs",
+            include_str!("../../../plurx-worker-control/src/library_driver.rs"),
+        ),
+        (
+            "crates/plurx-worker-control/src/library_lifecycle.rs",
+            include_str!("../../../plurx-worker-control/src/library_lifecycle.rs"),
+        ),
+        (
+            "crates/plurx-worker-control/src/retry_policy.rs",
+            include_str!("../../../plurx-worker-control/src/retry_policy.rs"),
+        ),
+        (
+            "crates/plurxd/src/background_jobs.rs",
+            include_str!("../../../plurxd/src/background_jobs.rs"),
+        ),
+        (
+            "crates/plurxd/src/library_work.rs",
+            include_str!("../../../plurxd/src/library_work.rs"),
+        ),
+        (
+            "crates/plurxd/src/library_work/env.rs",
+            include_str!("../../../plurxd/src/library_work/env.rs"),
+        ),
+        (
+            "crates/plurxd/src/state.rs",
+            include_str!("../../../plurxd/src/state.rs"),
+        ),
+    ] {
+        sources.insert(path, format!("{:x}", Sha256::digest(bytes.as_bytes())));
+    }
+    sources
+}
+
 async fn schema_bindings(fixture: &Fixture) -> Value {
     // Hash actual compiled migration strings, including every transitive SQL
     // include and Rust schema constant, rather than only their include sites.
@@ -1988,6 +2058,80 @@ pub(super) struct Oracle {
     pub(super) mutation: Value,
 }
 
+// The source-bound finite inventory applies to this actual fresh constructor
+// class. These checks inspect the restored/captured production database; they
+// neither rewrite raw UUIDs/startup timestamps nor impose an Episode horizon.
+async fn check_paged_initial_class(fixture: &Fixture) -> Result<(), String> {
+    fn uuid4(value: &str) -> bool {
+        uuid::Uuid::parse_str(value).is_ok_and(|parsed| {
+            parsed.to_string() == value
+                && parsed.get_version_num() == 4
+                && parsed.get_variant() == uuid::Variant::RFC4122
+        })
+    }
+    if fixture.library != 1
+        || fixture.jobs[0] == fixture.jobs[1]
+        || fixture.jobs.iter().any(|job| !uuid4(job))
+    {
+        return Err("InitialImage: fresh selected library/raw UUID class".into());
+    }
+    let statement="SELECT json_object('settings',json((SELECT json_group_array(json(row)) FROM (SELECT json_array(key,value,updated_at) row FROM settings ORDER BY key))),'libraries',json((SELECT json_group_array(json(row)) FROM (SELECT json_array(id,name,kind,paths,anime,created_at) row FROM libraries ORDER BY id))),'domains',json((SELECT json_group_array(json(row)) FROM (SELECT json_array(library_id,root_path,domain_id) row FROM background_storage_domains ORDER BY library_id,root_path))),'jobs',json((SELECT json_group_array(id) FROM (SELECT id FROM background_jobs ORDER BY id))),'requests',json((SELECT json_group_array(json(row)) FROM (SELECT json_array(request_id,library_id,job_id) row FROM background_library_requests ORDER BY request_id))),'waiters',json((SELECT json_group_array(json(row)) FROM (SELECT json_array(request_scope,request_id,job_id,state) row FROM background_job_waiters ORDER BY request_id))),'empty',json_array((SELECT count(*) FROM background_job_attempts),(SELECT count(*) FROM background_job_reservations),(SELECT count(*) FROM background_job_domain_leases),(SELECT count(*) FROM background_job_commands),(SELECT count(*) FROM job_leases))) WHERE json_valid($1)";
+    let rows = fixture
+        .store
+        .queue_sql(statement.into(), "null".into(), false, true)
+        .await
+        .map_err(|error| format!("InitialImage: initial class actual query: {error}"))?;
+    if rows.len() != 1 {
+        return Err("InitialImage: initial class query cardinality".into());
+    }
+    let value = paged::strict_json(rows[0].as_bytes()).map_err(|error| error.to_string())?;
+    let settings = value["settings"]
+        .as_array()
+        .ok_or("InitialImage: startup settings rows")?;
+    if settings.len() != 2
+        || settings[0][0] != "hdr_format_backfilled_v1"
+        || settings[0][1] != "1"
+        || settings[1][0] != "instance.id"
+        || !settings[1][1].as_str().is_some_and(uuid4)
+        || settings.iter().any(|row| row[2].as_i64().is_none())
+    {
+        return Err("InitialImage: exact startup settings class".into());
+    }
+    let libraries = value["libraries"]
+        .as_array()
+        .ok_or("InitialImage: library rows")?;
+    if libraries.len() != 1
+        || libraries[0].as_array().is_none_or(|row| row.len() != 6)
+        || libraries[0][0] != 1
+        || libraries[0][1] != "async-store-domain"
+        || libraries[0][2] != "movies"
+        || libraries[0][3] != "[\"/async-store-root\"]"
+        || libraries[0][4] != 0
+        || libraries[0][5].as_i64().is_none()
+        || value["domains"] != json!([[1, "/async-store-root", "shared-root"]])
+    {
+        return Err("InitialImage: fixed fresh library/storage mapping class".into());
+    }
+    let mut jobs = fixture.jobs.to_vec();
+    jobs.sort();
+    let mut requests = (0..2)
+        .map(|index| json!([REQUESTS[index], fixture.library, fixture.jobs[index]]))
+        .collect::<Vec<_>>();
+    requests.sort_by_key(|row| row[0].as_str().expect("fixed request").to_owned());
+    let mut waiters = (0..2)
+        .map(|index| json!(["library", REQUESTS[index], fixture.jobs[index], "pending"]))
+        .collect::<Vec<_>>();
+    waiters.sort_by_key(|row| row[1].as_str().expect("fixed waiter").to_owned());
+    if value["jobs"] != json!(jobs)
+        || value["requests"] != json!(requests)
+        || value["waiters"] != json!(waiters)
+        || value["empty"] != json!([0, 0, 0, 0, 0])
+    {
+        return Err("InitialImage: exact fresh jobs/requests/waiters class".into());
+    }
+    Ok(())
+}
+
 pub(super) struct InitialCapture {
     image_sha256: String,
     image_bytes: u64,
@@ -2044,6 +2188,10 @@ impl Oracle {
         if self.persistent.is_some() || self.root_savepoint || !self.prefix.is_empty() {
             return Err("InitialImage: capture must precede proof savepoints".into());
         }
+        if self.mutation != Value::Null || self.states.len() != 1 || !self.edges.is_empty() {
+            return Err("InitialImage: fresh unmutated constructor required".into());
+        }
+        check_paged_initial_class(&self.fixture).await?;
         let observed = self.observe(&Episode::initial()).await?;
         self.check_endpoint(0, &observed).await?;
         self.fixture
@@ -2165,6 +2313,7 @@ impl Oracle {
             jobs,
             omitted_dv_sequence: raw["omitted"]["sequence"].clone(),
         };
+        check_paged_initial_class(&fixture).await?;
         let schema = schema_bindings(&fixture).await;
         let initial = catalog.get_id("Store", 1).map_err(|e| e.to_string())?;
         if initial.record["sqlite_schema_sha256"]
@@ -2436,73 +2585,7 @@ impl Oracle {
     }
 
     pub(super) fn source_bindings(&self) -> BTreeMap<&'static str, String> {
-        let mut sources = source_bindings();
-        sources.insert(
-            "store/async_driver_product.rs",
-            format!(
-                "{:x}",
-                Sha256::digest(include_str!("async_driver_product.rs").as_bytes())
-            ),
-        );
-        sources.insert(
-            "store/mod.rs",
-            format!("{:x}", Sha256::digest(include_str!("mod.rs").as_bytes())),
-        );
-        for (path, bytes) in [
-            ("Cargo.toml", include_str!("../../../../Cargo.toml")),
-            ("Cargo.lock", include_str!("../../../../Cargo.lock")),
-            (
-                "rust-toolchain.toml",
-                include_str!("../../../../rust-toolchain.toml"),
-            ),
-            (
-                "crates/plurx-core/Cargo.toml",
-                include_str!("../../Cargo.toml"),
-            ),
-            (
-                "crates/plurx-worker-control/Cargo.toml",
-                include_str!("../../../plurx-worker-control/Cargo.toml"),
-            ),
-            (
-                "crates/plurxd/Cargo.toml",
-                include_str!("../../../plurxd/Cargo.toml"),
-            ),
-            (
-                "crates/plurx-worker-control/src/lib.rs",
-                include_str!("../../../plurx-worker-control/src/lib.rs"),
-            ),
-            (
-                "crates/plurx-worker-control/src/library_driver.rs",
-                include_str!("../../../plurx-worker-control/src/library_driver.rs"),
-            ),
-            (
-                "crates/plurx-worker-control/src/library_lifecycle.rs",
-                include_str!("../../../plurx-worker-control/src/library_lifecycle.rs"),
-            ),
-            (
-                "crates/plurx-worker-control/src/retry_policy.rs",
-                include_str!("../../../plurx-worker-control/src/retry_policy.rs"),
-            ),
-            (
-                "crates/plurxd/src/background_jobs.rs",
-                include_str!("../../../plurxd/src/background_jobs.rs"),
-            ),
-            (
-                "crates/plurxd/src/library_work.rs",
-                include_str!("../../../plurxd/src/library_work.rs"),
-            ),
-            (
-                "crates/plurxd/src/library_work/env.rs",
-                include_str!("../../../plurxd/src/library_work/env.rs"),
-            ),
-            (
-                "crates/plurxd/src/state.rs",
-                include_str!("../../../plurxd/src/state.rs"),
-            ),
-        ] {
-            sources.insert(path, format!("{:x}", Sha256::digest(bytes.as_bytes())));
-        }
-        sources
+        compiled_source_bindings()
     }
 
     async fn observe(&mut self, episode: &Episode) -> Result<BoundaryObservation, String> {
@@ -4178,6 +4261,21 @@ async fn oracle_catalog_image_resume_replays_all_applied_and_rollback() {
         max_bytes: paged::PAGE_BYTES,
         deadline: Instant::now() + Duration::from_secs(300),
     };
+    for statement in [
+        "UPDATE settings SET value='00000000-0000-1000-8000-000000000001' WHERE key='instance.id'",
+        "UPDATE libraries SET paths='[]' WHERE id=1",
+        "DELETE FROM background_library_requests WHERE request_id='selected-scan'",
+    ] {
+        let altered = Fixture::new().await;
+        check_paged_initial_class(&altered)
+            .await
+            .expect("fresh actual constructor class");
+        sql(&altered.store, statement, Value::Null).await;
+        assert!(
+            check_paged_initial_class(&altered).await.is_err(),
+            "fresh class guard rejects actual metadata mutation"
+        );
+    }
     let mut oracle = Oracle::new(None).await.expect("actual original fixture");
     let original_ids = oracle.fixture.jobs.clone();
     let capture = oracle

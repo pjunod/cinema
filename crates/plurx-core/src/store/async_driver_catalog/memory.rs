@@ -363,6 +363,10 @@ impl Storage for MemoryStorage {
             format!("work_unit:{}", number(&work_unit.record, "unit_ordinal")?),
             serde_json::to_value(work_unit)?,
         );
+        self.state.controls.insert(
+            "session".into(),
+            serde_json::to_value(super::checkpoint_session(checkpoint, work_unit)?)?,
+        );
         Ok(())
     }
     fn save_export(&mut self, record: &Record) -> CatalogResult<()> {
