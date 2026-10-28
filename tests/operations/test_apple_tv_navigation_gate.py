@@ -26,11 +26,17 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 self.assertIn("run: make apple-tv-navigation-test", step)
                 self.assertNotIn("continue-on-error", apple_job)
                 # This job also serves the native macOS tray. Mobile TV
-                # journeys remain mandatory whenever the mobile Apple lane
-                # executes; retained mobile evidence is handled separately.
+                # journeys execute unless verified compatible native evidence
+                # is retained. Compilation and promotion still depend on this job.
                 expected_guard = "needs.scope.outputs.apple == 'true'"
                 if path == ".github/workflows/ci.yml":
                     expected_guard += " && needs.scope.outputs.retain_apple != 'true'"
+                else:
+                    expected_guard += " && steps.native_receipts.outputs.tv_navigation != 'true'"
+                    self.assertIn("run: python3 -m validation.native_receipts", apple_job)
+                    self.assertIn("run: make apple-build", apple_job)
+                    self.assertIn("path: .main-preflight-receipts/native/receipt.json", apple_job)
+                    self.assertIn("name: native-adoption-${{ github.run_id }}-${{ github.run_attempt }}", apple_job)
                 self.assertEqual(
                     re.findall(r"^        if: (.+)$", step, re.MULTILINE),
                     [expected_guard],
