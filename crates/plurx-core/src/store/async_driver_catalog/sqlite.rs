@@ -736,6 +736,16 @@ impl Storage for SqliteStorage {
             |r| row_uint(r, 0),
         )?)
     }
+    fn oracle_edge_for_input(&self, from: u64, input: &str) -> CatalogResult<Option<u64>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id FROM oracle_edges WHERE from_store=?1 AND input=?2",
+                params![from, input.as_bytes()],
+                |r| row_uint(r, 0),
+            )
+            .optional()?)
+    }
     fn get_control(&self, key: &str) -> CatalogResult<Option<Value>> {
         let bytes: Option<Vec<u8>> = self
             .connection

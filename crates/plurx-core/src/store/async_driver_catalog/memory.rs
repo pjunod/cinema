@@ -207,6 +207,21 @@ impl Storage for MemoryStorage {
     fn count(&self, kind: &str) -> CatalogResult<u64> {
         Ok(self.state.records.keys().filter(|(k, _)| k == kind).count() as u64)
     }
+    fn oracle_edge_for_input(&self, from: u64, input: &str) -> CatalogResult<Option<u64>> {
+        for record in self
+            .state
+            .records
+            .values()
+            .filter(|record| record.kind == "OracleEvidence")
+        {
+            if record.record["applied"]["from_store"] == from
+                && record.record["applied"]["action_utf8"] == input
+            {
+                return Ok(record.record["id"].as_u64());
+            }
+        }
+        Ok(None)
+    }
     fn get_control(&self, key: &str) -> CatalogResult<Option<Value>> {
         Ok(self.state.controls.get(key).cloned())
     }

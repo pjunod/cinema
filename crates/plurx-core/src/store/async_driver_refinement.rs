@@ -17,6 +17,9 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::async_driver_catalog as paged;
+use std::path::Path;
+
 use super::background_jobs::{
     BackgroundJobStore, ClaimJob, ClaimOutcome, ClaimResolution, JobKind, JobSettlement, JobState,
     JobToken, QueueSql, RenewJobs, RenewOutcome, ResolveClaim, SettleJob,
@@ -612,7 +615,8 @@ const STATE_CAP: usize = 20_000;
 const ATTEMPTS_PER_JOB: u8 = 2;
 const DOMAIN_OWNERS: [&str; 3] = ["node-a", "node-b", "foreign-holder"];
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Episode {
     pub(super) now: i64,
     pub(super) claims: [u8; 2],
@@ -1555,6 +1559,7 @@ async fn invariants(fixture: &Fixture, episode: &Episode) -> Result<(), String> 
 /// omitted DV rows/sequence and empty handoff rows/marker are independently
 /// observed and checked each time.
 /// No SQL action or mutable Episode change may occur while carrying this value.
+#[derive(Clone)]
 struct BoundaryObservation {
     rows: Value,
     episode: Episode,
@@ -1768,9 +1773,22 @@ async fn schema_bindings(fixture: &Fixture) -> Value {
         .collect::<Vec<_>>();
     let rows = fixture.store.queue_sql("SELECT json_group_array(json_array(type,name,tbl_name,sql)) FROM (SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name,tbl_name,sql) WHERE json_valid($1)".into(),
         "null".into(), false, true).await.expect("installed production schema inventory");
+    let mut columns = serde_json::Map::new();
+    for table in SNAPSHOT_TABLES {
+        let sql=format!("SELECT json_group_array(name) FROM (SELECT name FROM pragma_table_info('{table}') ORDER BY cid) WHERE json_valid($1)");
+        let row = fixture
+            .store
+            .queue_sql(sql, "null".into(), false, true)
+            .await
+            .expect("actual table column inventory");
+        columns.insert(
+            table.into(),
+            serde_json::from_str::<Value>(&row[0]).expect("column inventory JSON"),
+        );
+    }
     json!({"compiled_sqlite_migrations": migrations,
         "installed_sqlite_schema_sha256": format!("{:x}", Sha256::digest(rows[0].as_bytes())),
-        "schema_inventory": serde_json::from_str::<Value>(&rows[0]).expect("installed schema JSON")})
+        "schema_inventory": serde_json::from_str::<Value>(&rows[0]).expect("installed schema JSON"),"table_columns":columns})
 }
 
 // Failure-only telemetry: no raw rows, opaque strings, or unbounded trace.
@@ -1902,6 +1920,7 @@ pub(super) struct OracleEdge {
     pub(super) job_read: Option<Value>,
 }
 
+#[derive(Clone)]
 pub(super) struct OracleState {
     pub(super) canonical: String,
     pub(super) episode: Episode,
@@ -1953,6 +1972,7 @@ macro_rules! oracle_timed {
 
 pub(super) struct Oracle {
     fixture: Fixture,
+    persistent: Option<paged::Catalog>,
     diagnostics: OracleDiagnostics,
     prefix: Vec<(Action, Episode)>,
     root_savepoint: bool,
@@ -1966,6 +1986,15 @@ pub(super) struct Oracle {
     pub(super) schema: Value,
     pub(super) failure: Option<Value>,
     pub(super) mutation: Value,
+}
+
+pub(super) struct InitialCapture {
+    image_sha256: String,
+    image_bytes: u64,
+    schema: Value,
+    schema_sha256: String,
+    raw_fixture: Value,
+    observed: BoundaryObservation,
 }
 
 impl Oracle {
@@ -1984,6 +2013,7 @@ impl Oracle {
         let schema = schema_bindings(&fixture).await;
         Ok(Self {
             fixture,
+            persistent: None,
             diagnostics: OracleDiagnostics::default(),
             prefix: Vec::new(),
             root_savepoint: false,
@@ -2006,10 +2036,181 @@ impl Oracle {
         })
     }
 
+    pub(super) async fn capture_initial_image(
+        &mut self,
+        path: &Path,
+        limits: &paged::BackupLimits,
+    ) -> Result<InitialCapture, String> {
+        if self.persistent.is_some() || self.root_savepoint || !self.prefix.is_empty() {
+            return Err("InitialImage: capture must precede proof savepoints".into());
+        }
+        let observed = self.observe(&Episode::initial()).await?;
+        self.check_endpoint(0, &observed).await?;
+        self.fixture
+            .store
+            .async_refinement_write_image(path, limits.max_bytes, limits.deadline)
+            .map_err(|e| e.to_string())?;
+        let (image_bytes, image_sha256) =
+            paged::hash_file(path, limits.max_bytes, limits.deadline).map_err(|e| e.to_string())?;
+        let schema = schema_bindings(&self.fixture).await;
+        if schema != self.schema {
+            return Err("InitialImage: schema changed during capture".into());
+        }
+        let after = self.observe(&Episode::initial()).await?;
+        if after.canonical != observed.canonical || after.omitted_dv != observed.omitted_dv {
+            return Err("InitialImage: writer changed during capture".into());
+        }
+        let raw_fixture = json!({"jobs":self.fixture.jobs,"library_id":self.fixture.library,"omitted":observed.omitted_dv,"initial_projection":self.states[0].view,"initial_inputs":self.states[0].inputs});
+        let schema_sha256 = paged::digest(paged::canonical(&schema).as_bytes());
+        Ok(InitialCapture {
+            image_sha256,
+            image_bytes,
+            schema,
+            schema_sha256,
+            raw_fixture,
+            observed,
+        })
+    }
+    pub(super) fn capture_schema(capture: &InitialCapture) -> &Value {
+        &capture.schema
+    }
+    pub(super) fn attach_catalog_initial(
+        &mut self,
+        catalog: &paged::Catalog,
+        capture: &InitialCapture,
+    ) -> Result<paged::Record, String> {
+        let result=(||->paged::CatalogResult<_>{
+            let (boundary,physical,episode)=self.persist_observation(catalog,&capture.observed,"initial",&capture.image_sha256,1)?;
+            let bytes=&capture.observed.canonical;
+            let store=catalog.intern_checked_store(paged::checked_store(json!({"physical_rows_id":physical,"episode_id":episode,"canonical_utf8":bytes,"sha256":paged::digest(bytes.as_bytes()),"initial_image_id":capture.image_sha256,"sqlite_schema_sha256":capture.schema_sha256,"omitted_observation_id":boundary.id,"certification":"actual_init_checked"})))?;
+            if store.get()!=1{return Err(paged::CatalogError::CorruptRecord("actual Init is not first Store".into()));}
+            let image=paged::Record::new("InitialImage",json!({"image_sha256":capture.image_sha256,"member_path":"initial-image.sqlite","image_bytes":capture.image_bytes,"schema_inventory":{"kind":"schema_inventory","id":"schema-inventory.json","sha256":capture.schema_sha256},"initial_store":store.get(),"raw_fixture_utf8":paged::canonical(&capture.raw_fixture),"omitted_observation":boundary,"source":catalog.source()}))?;
+            catalog.set_control("initial_image",&serde_json::to_value(&image)?)?;
+            Ok(image)
+        })().map_err(|e|e.to_string());
+        if result.is_ok() {
+            self.persistent = Some(catalog.clone());
+            self.states.clear();
+            self.edges.clear();
+            self.index.clear();
+            self.cache.clear();
+        }
+        result
+    }
+    fn persist_observation(
+        &self,
+        catalog: &paged::Catalog,
+        observed: &BoundaryObservation,
+        phase: &str,
+        image: &str,
+        epoch: u64,
+    ) -> paged::CatalogResult<(paged::RecordRef, u64, u64)> {
+        let physical = catalog.intern_physical(&serde_json::to_string(&observed.rows)?)?;
+        let episode = catalog.intern_episode(&serde_json::to_string(&observed.episode)?)?;
+        let boundary=catalog.append_checked_boundary(paged::checked_boundary(json!({"physical_rows_id":physical.get(),"episode_id":episode.get(),"omitted_utf8":paged::canonical(&observed.omitted_dv),"canonical_utf8":observed.canonical,"phase":phase,"source":catalog.source(),"writer_epoch":epoch,"initial_image_id":image})))?;
+        Ok((
+            catalog
+                .get_id("BoundaryObservation", boundary.get())?
+                .reference()?,
+            physical.get(),
+            episode.get(),
+        ))
+    }
+    pub(super) async fn from_catalog(
+        catalog: paged::Catalog,
+        path: &Path,
+        limits: &paged::BackupLimits,
+    ) -> Result<Self, String> {
+        let image: paged::Record = serde_json::from_value(
+            catalog
+                .control("initial_image")
+                .map_err(|e| e.to_string())?
+                .ok_or("InitialImage: missing actual descriptor")?,
+        )
+        .map_err(|e| e.to_string())?;
+        image.validate().map_err(|e| e.to_string())?;
+        let (bytes, hash) =
+            paged::hash_file(path, limits.max_bytes, limits.deadline).map_err(|e| e.to_string())?;
+        if image.record["image_sha256"] != hash
+            || image.record["image_bytes"] != bytes
+            || image.record["source"] != json!(catalog.source())
+        {
+            return Err("InitialImage: actual bytes/source mismatch".into());
+        }
+        let raw = paged::strict_json(
+            paged::string(&image.record, "raw_fixture_utf8")
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
+        )
+        .map_err(|e| e.to_string())?;
+        let jobs: Vec<String> =
+            serde_json::from_value(raw["jobs"].clone()).map_err(|e| e.to_string())?;
+        let jobs: [String; 2] = jobs
+            .try_into()
+            .map_err(|_| "InitialImage: expected two exact raw jobs")?;
+        let library = raw["library_id"]
+            .as_i64()
+            .ok_or("InitialImage: library ID")?;
+        let store =
+            SqliteStore::async_refinement_from_image(path, limits.max_bytes, limits.deadline)
+                .map_err(|e| e.to_string())?;
+        let restored_file =
+            paged::hash_file(path, limits.max_bytes, limits.deadline).map_err(|e| e.to_string())?;
+        if restored_file != (bytes, hash.clone()) {
+            return Err("InitialImage: file changed during restore".into());
+        }
+        let fixture = Fixture {
+            store,
+            library,
+            jobs,
+            omitted_dv_sequence: raw["omitted"]["sequence"].clone(),
+        };
+        let schema = schema_bindings(&fixture).await;
+        let initial = catalog.get_id("Store", 1).map_err(|e| e.to_string())?;
+        if initial.record["sqlite_schema_sha256"]
+            != paged::digest(paged::canonical(&schema).as_bytes())
+            || image.record["schema_inventory"]["sha256"] != initial.record["sqlite_schema_sha256"]
+        {
+            return Err("InitialImage: migrated schema inventory mismatch".into());
+        }
+        let mut oracle = Self {
+            fixture,
+            persistent: Some(catalog),
+            diagnostics: OracleDiagnostics::default(),
+            prefix: Vec::new(),
+            root_savepoint: false,
+            materialization_failed: false,
+            reuse_certificates: true,
+            states: Vec::new(),
+            edges: Vec::new(),
+            index: HashMap::new(),
+            cache: HashMap::new(),
+            schema,
+            failure: None,
+            mutation: Value::Null,
+        };
+        let observed = oracle.observe(&Episode::initial()).await?;
+        if observed.omitted_dv != raw["omitted"] {
+            return Err("InitialImage: omitted-state observation changed".into());
+        }
+        invariants(&oracle.fixture, &Episode::initial()).await?;
+        let actual_inputs = actions(&oracle.fixture, &Episode::initial()).await;
+        let actual_view =
+            projection(&oracle.fixture, &Episode::initial(), 0, &observed.canonical).await;
+        if actual_inputs != oracle.state(0).inputs || actual_view != oracle.state(0).view {
+            return Err("InitialImage: independent root queries changed".into());
+        }
+        oracle.check_endpoint(0, &observed).await?;
+        Ok(oracle)
+    }
+
     pub(super) async fn begin_paired_mutation(
         &mut self,
         mutation: TriggerMutation,
     ) -> Result<(), String> {
+        if self.persistent.is_some() {
+            return Err("PersistentOracle: source/schema mutation requires a separate fixed conformance fixture".into());
+        }
         self.restore_root().await?;
         for state in &mut self.states {
             state.certified = false;
@@ -2034,12 +2235,172 @@ impl Oracle {
         Ok(())
     }
 
+    pub(super) fn state_count(&self) -> usize {
+        self.persistent.as_ref().map_or_else(
+            || self.states.len(),
+            |catalog| {
+                usize::try_from(catalog.count("Store").expect("persistent Store count"))
+                    .expect("Store count fits host")
+            },
+        )
+    }
+    pub(super) fn edge_count(&self) -> usize {
+        self.persistent.as_ref().map_or_else(
+            || self.edges.len(),
+            |catalog| {
+                usize::try_from(
+                    catalog
+                        .count("OracleEvidence")
+                        .expect("persistent Oracle count"),
+                )
+                .expect("edge count fits host")
+            },
+        )
+    }
+    pub(super) fn state(&self, handle: StoreHandle) -> OracleState {
+        self.try_state(handle)
+            .expect("checked persistent Store and witness")
+    }
+    fn try_state(&self, handle: StoreHandle) -> Result<OracleState, String> {
+        let Some(catalog) = &self.persistent else {
+            return self
+                .states
+                .get(handle)
+                .cloned()
+                .ok_or_else(|| "OracleState: missing handle".into());
+        };
+        (||->paged::CatalogResult<_>{
+            let record=catalog.get_id("Store",handle as u64+1)?;
+            let canonical=paged::string(&record.record,"canonical_utf8")?.to_owned();
+            let raw=paged::strict_json(canonical.as_bytes())?;
+            let episode:Episode=serde_json::from_value(raw["episode"].clone())?;
+            let (witness,parent)=if let Some(edge)=record.record["replay_parent_edge"].as_u64(){
+                let edge=catalog.get_id("OracleEvidence",edge)?;
+                let witness=paged::strict_json(paged::string(&edge.record,"production_witness_utf8")?.as_bytes())?;
+                let action:Action=serde_json::from_str(paged::string(&edge.record["applied"],"action_utf8")?)?;
+                let from=paged::number(&edge.record["applied"],"from_store")?.checked_sub(1)
+                    .ok_or_else(||paged::CatalogError::CorruptRecord("zero source Store".into()))?;
+                (json!({"projection":witness["to_projection"],"inputs":witness["target_inputs"]}),Some((usize::try_from(from).map_err(|_|paged::CatalogError::NumericDomain("Store handle".into()))?,action)))
+            }else{
+                if handle!=0{return Err(paged::CatalogError::CorruptRecord("unrooted persistent Store".into()));}
+                let image: paged::Record=serde_json::from_value(catalog.control("initial_image")?.ok_or_else(||paged::CatalogError::MissingDependency("actual Init descriptor".into()))?)?;
+                let fixture=paged::strict_json(paged::string(&image.record,"raw_fixture_utf8")?.as_bytes())?;
+                (json!({"projection":fixture["initial_projection"],"inputs":fixture["initial_inputs"]}),None)
+            };
+            let view=witness["projection"].clone();
+            if view["id"]!=handle {return Err(paged::CatalogError::CorruptRecord("projection transport bijection".into()));}
+            let inputs:Vec<Action>=serde_json::from_value(witness["inputs"].clone())?;
+            Ok(OracleState {canonical,episode,view,parent,inputs,certified:true})
+        })().map_err(|error|error.to_string())
+    }
+    pub(super) fn edge(&self, id: usize) -> OracleEdge {
+        self.try_edge(id)
+            .expect("checked persistent Oracle evidence")
+    }
+    fn try_edge(&self, id: usize) -> Result<OracleEdge, String> {
+        let Some(catalog) = &self.persistent else {
+            return self
+                .edges
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "OracleEdge: missing handle".into());
+        };
+        (|| -> paged::CatalogResult<_> {
+            let record = catalog.get_id("OracleEvidence", id as u64 + 1)?;
+            let applied = &record.record["applied"];
+            let optional = |field: &str| -> paged::CatalogResult<Option<Value>> {
+                applied[field]
+                    .as_str()
+                    .map(|text| paged::strict_json(text.as_bytes()))
+                    .transpose()
+            };
+            Ok(OracleEdge {
+                from: usize::try_from(paged::number(applied, "from_store")? - 1)
+                    .map_err(|_| paged::CatalogError::NumericDomain("source handle".into()))?,
+                to: usize::try_from(paged::number(applied, "to_store")? - 1)
+                    .map_err(|_| paged::CatalogError::NumericDomain("target handle".into()))?,
+                action: serde_json::from_str(paged::string(applied, "action_utf8")?)?,
+                result: paged::string(applied, "result")?.into(),
+                resolved_token: applied["resolved_token"]
+                    .as_u64()
+                    .map(usize::try_from)
+                    .transpose()
+                    .map_err(|_| paged::CatalogError::NumericDomain("token capture".into()))?,
+                claim_snapshot: optional("claim_snapshot_utf8")?
+                    .map(serde_json::from_value)
+                    .transpose()?,
+                error: applied["error"].as_str().map(Into::into),
+                claim_request: optional("claim_request_utf8")?,
+                job_read: optional("job_read_utf8")?,
+            })
+        })()
+        .map_err(|error| error.to_string())
+    }
+    fn known_state(&self, bytes: &str) -> Option<StoreHandle> {
+        self.persistent.as_ref().map_or_else(
+            || self.index.get(bytes).copied(),
+            |catalog| {
+                catalog
+                    .find_canonical("Store", bytes)
+                    .expect("persistent exact Store lookup")
+                    .map(|record| {
+                        usize::try_from(paged::number(&record.record, "id").expect("Store ID") - 1)
+                            .expect("host Store handle")
+                    })
+            },
+        )
+    }
+    fn cached_edge(&self, from: StoreHandle, input: &Action) -> Option<usize> {
+        self.persistent.as_ref().map_or_else(
+            || self.cache.get(&(from, input.clone())).copied(),
+            |catalog| {
+                catalog
+                    .oracle_edge_for_input(from as u64 + 1, &paged::canonical(input))
+                    .expect("persistent exact input lookup")
+                    .map(|id| usize::try_from(id - 1).expect("host Oracle handle"))
+            },
+        )
+    }
+    fn certify_state(&mut self, handle: StoreHandle) {
+        if self.persistent.is_none() {
+            self.states[handle].certified = true;
+        }
+    }
+    fn try_trace(&self, mut handle: StoreHandle) -> Result<Vec<Action>, String> {
+        let mut trace = Vec::new();
+        let mut bytes = 0u64;
+        let limit = self.persistent.as_ref().map(|c| {
+            paged::number(&c.resource_plan().record, "resident_bytes")
+                .expect("admitted resident bytes")
+                / 4
+        });
+        while let Some((parent, action)) = self.try_state(handle)?.parent {
+            bytes = bytes
+                .checked_add(
+                    serde_json::to_vec(&action)
+                        .map_err(|e| e.to_string())?
+                        .len() as u64
+                        + std::mem::size_of::<Action>() as u64,
+                )
+                .ok_or("ResourceIncomplete: replay path bytes overflow")?;
+            if limit.is_some_and(|limit| bytes > limit) {
+                return Err(
+                    "ResourceIncomplete: indivisible replay path exceeds resident allowance".into(),
+                );
+            }
+            trace.push(action);
+            handle = parent;
+        }
+        trace.reverse();
+        Ok(trace)
+    }
+
     pub(super) fn initial(&self) -> StoreHandle {
         0
     }
 
-    pub(super) fn domain_inputs(&self, handle: StoreHandle) -> &[Action] {
-        &self.states[handle].inputs
+    pub(super) fn domain_inputs(&self, handle: StoreHandle) -> Vec<Action> {
+        self.state(handle).inputs
     }
 
     pub(super) fn normalize(&self, value: &Value) -> Value {
@@ -2052,7 +2413,7 @@ impl Oracle {
     }
 
     pub(super) fn export_state(&self, handle: StoreHandle) -> Value {
-        let state = &self.states[handle];
+        let state = &self.state(handle);
         let mut view = state.view.clone();
         view["raw"] = serde_json::from_str(&state.canonical).expect("full canonical raw view");
         view["canonical_json"] = json!(state.canonical);
@@ -2062,26 +2423,16 @@ impl Oracle {
     pub(super) fn export_product_state(&self, handle: StoreHandle) -> Value {
         // Logical export preserves original bytes; schema5 packs exact fragments.
         // The standalone Store export keeps its existing redundant raw view.
-        let state = &self.states[handle];
+        let state = &self.state(handle);
         let mut view = state.view.clone();
         view["canonical_json"] = json!(state.canonical);
         self.normalize(&view)
     }
 
     pub(super) fn export_states(&self) -> Vec<Value> {
-        (0..self.states.len())
+        (0..self.state_count())
             .map(|id| self.export_state(id))
             .collect()
-    }
-
-    pub(super) fn trace(&self, mut handle: StoreHandle) -> Vec<Action> {
-        let mut trace = Vec::new();
-        while let Some((parent, action)) = &self.states[handle].parent {
-            trace.push(action.clone());
-            handle = *parent;
-        }
-        trace.reverse();
-        trace
     }
 
     pub(super) fn source_bindings(&self) -> BTreeMap<&'static str, String> {
@@ -2176,7 +2527,7 @@ impl Oracle {
         handle: StoreHandle,
         observed: &BoundaryObservation,
     ) -> Result<(), String> {
-        let expected = &self.states[handle];
+        let expected = &self.state(handle);
         if observed.canonical != expected.canonical
             || serde_json::to_value(&observed.episode).expect("observed Episode")
                 != serde_json::to_value(&expected.episode).expect("certified Episode")
@@ -2208,23 +2559,25 @@ impl Oracle {
         if inputs != expected.inputs || view != expected.view {
             return Err("StateCertificate: independently derived input/projection mismatch".into());
         }
-        self.states[handle].certified = true;
+        self.certify_state(handle);
         self.diagnostics.certifications = self.diagnostics.certifications.saturating_add(1);
         Ok(())
     }
 
     fn replay_edge(&self, from: StoreHandle, action: &Action) -> Result<OracleEdge, String> {
-        // Fixtures may remove a memo lookup to force actual execution, but the
-        // immutable certified edge still supplies the complete expected outcome.
-        if let Some(id) = self.cache.get(&(from, action.clone())) {
-            return Ok(self.edges[*id].clone());
+        if let Some(id) = self.cached_edge(from, action) {
+            return self.try_edge(id);
         }
-        self.edges
-            .iter()
-            .rev()
-            .find(|edge| edge.from == from && &edge.action == action)
-            .cloned()
-            .ok_or_else(|| "ReplayCertificate: missing certified transition".into())
+        if self.persistent.is_none() {
+            return self
+                .edges
+                .iter()
+                .rev()
+                .find(|edge| edge.from == from && &edge.action == action)
+                .cloned()
+                .ok_or_else(|| "ReplayCertificate: missing certified transition".into());
+        }
+        Err("ReplayCertificate: missing persistent certified transition".into())
     }
 
     fn compare_replay(
@@ -2402,7 +2755,7 @@ impl Oracle {
                 checkpoint,
             } => {
                 *job < 2
-                    && *token < self.states[handle].episode.tokens[*job].len()
+                    && *token < self.state(handle).episode.tokens[*job].len()
                     && *not_before_ms >= 0
                     && *request_now_ms >= 0
                     && checkpoint.is_none()
@@ -2414,7 +2767,7 @@ impl Oracle {
                 *job < 2
                     && request.job_id == self.fixture.jobs[*job]
                     && request.fence.is_none()
-                    && request.now_ms == self.states[handle].episode.now
+                    && request.now_ms == self.state(handle).episode.now
                     && request.dispatched_at_ms >= 0
                     && request.now_ms >= request.dispatched_at_ms
                     && NODES.contains(&request.node_id.as_str())
@@ -2422,32 +2775,32 @@ impl Oracle {
                     && uuid::Uuid::parse_str(&request.claim_id).is_ok()
             }
             Action::ReadClaimJob { job } => *job < 2,
-            Action::ClockAdvance { now } => *now > self.states[handle].episode.now,
+            Action::ClockAdvance { now } => *now > self.state(handle).episode.now,
             _ => false,
         };
         if !contextual && !self.domain_inputs(handle).contains(input) {
             return Err("OracleInputDomain: demanded input is outside exact D".into());
         }
-        if let Some(edge) = self.cache.get(&(handle, input.clone())) {
+        if let Some(edge) = self.cached_edge(handle, input) {
             self.diagnostics.hits = self.diagnostics.hits.saturating_add(1);
-            return Ok(*edge);
+            return Ok(edge);
         }
         self.diagnostics.misses = self.diagnostics.misses.saturating_add(1);
         let replay_started = Instant::now();
-        let trace = self.trace(handle);
+        let trace = self.try_trace(handle)?;
         self.diagnostics.replay_depth_total = self
             .diagnostics
             .replay_depth_total
             .saturating_add(trace.len());
         self.diagnostics.replay_depth_max = self.diagnostics.replay_depth_max.max(trace.len());
         let parent_observed = self.materialize(&trace).await?;
-        if parent_observed.canonical != self.states[handle].canonical {
+        if parent_observed.canonical != self.state(handle).canonical {
             self.materialization_failed = true;
             return Err("MaterializationRoundTrip: demanded parent differs".into());
         }
         let mut episode = parent_observed.episode.clone();
-        let parent_canonical = self.states[handle].canonical.clone();
-        let parent_view = self.states[handle].view.clone();
+        let parent_canonical = self.state(handle).canonical.clone();
+        let parent_view = self.state(handle).view.clone();
         oracle_timed!(
             self.diagnostics,
             controls,
@@ -2474,20 +2827,20 @@ impl Oracle {
             let checks_started = Instant::now();
             let observed = self.observe(&episode).await?;
             parent_observed.compare_action(input, &applied, &observed)?;
-            let next = observed.canonical;
+            let next = observed.canonical.clone();
             // Look up COMPLETE bytes before reusing only derived checks. Every
             // novel exact state still gets independent production-query checks.
-            let known = self.index.get(&next).copied();
+            let known = self.known_state(&next);
             let (view, inputs, invariant) = if let Some(to) =
-                known.filter(|to| self.reuse_certificates && self.states[*to].certified)
+                known.filter(|to| self.reuse_certificates && self.state(*to).certified)
             {
                 self.diagnostics.certificate_reuses =
                     self.diagnostics.certificate_reuses.saturating_add(1);
-                let mut view = self.states[to].view.clone();
-                view["id"] = json!(self.states.len());
-                (view, self.states[to].inputs.clone(), Ok(()))
+                let mut view = self.state(to).view.clone();
+                view["id"] = json!(self.state_count());
+                (view, self.state(to).inputs.clone(), Ok(()))
             } else {
-                let view = projection(&self.fixture, &episode, self.states.len(), &next).await;
+                let view = projection(&self.fixture, &episode, self.state_count(), &next).await;
                 let inputs =
                     oracle_timed!(self.diagnostics, actions, actions(&self.fixture, &episode));
                 let mut invariant = oracle_timed!(
@@ -2496,9 +2849,9 @@ impl Oracle {
                     invariants(&self.fixture, &episode)
                 );
                 if let Some(to) = known {
-                    let mut expected = self.states[to].view.clone();
-                    expected["id"] = json!(self.states.len());
-                    if invariant.is_ok() && (inputs != self.states[to].inputs || view != expected) {
+                    let mut expected = self.state(to).view.clone();
+                    expected["id"] = json!(self.state_count());
+                    if invariant.is_ok() && (inputs != self.state(to).inputs || view != expected) {
                         invariant = Err(
                             "StateCertificate: independently derived input/projection mismatch"
                                 .into(),
@@ -2525,6 +2878,7 @@ impl Oracle {
                 applied.claim_request,
                 applied.job_read,
                 invariant,
+                observed,
             ))
         }
         .await;
@@ -2542,18 +2896,22 @@ impl Oracle {
             self.materialization_failed = true;
             format!("RollbackRoundTrip: {error}")
         })?;
-        let restored = async {
+        let restored: Result<BoundaryObservation, String> = async {
             let observed = self.observe(&parent_observed.episode).await?;
             if observed.omitted_dv != parent_observed.omitted_dv {
                 return Err("OmittedDvState: demand rollback changed omitted rows".into());
             }
-            self.check_endpoint(handle, &observed).await
+            self.check_endpoint(handle, &observed).await?;
+            Ok(observed)
         }
         .await;
-        if let Err(error) = restored {
-            self.materialization_failed = true;
-            return Err(error);
-        }
+        let rollback_observed = match restored {
+            Ok(observed) => observed,
+            Err(error) => {
+                self.materialization_failed = true;
+                return Err(error);
+            }
+        };
         self.diagnostics.rollback = self
             .diagnostics
             .rollback
@@ -2568,10 +2926,14 @@ impl Oracle {
             claim_request,
             job_read,
             invariant,
+            after_observed,
         ) = evaluated.inspect_err(|_| {
             self.materialization_failed = true;
         })?;
-        if invariant.is_err() || (!self.index.contains_key(&next) && self.states.len() >= STATE_CAP)
+        if invariant.is_err()
+            || (self.persistent.is_none()
+                && self.known_state(&next).is_none()
+                && self.state_count() >= STATE_CAP)
         {
             self.failure = Some(self.normalize(&json!({
                 "complete": false, "from": handle, "action": input, "result": result,
@@ -2606,17 +2968,36 @@ impl Oracle {
         } else {
             None
         };
-        let to = if let Some(to) = self.index.get(&next) {
-            let to = *to;
-            self.states[to].certified = true;
+        if let Some(catalog) = self.persistent.clone() {
+            let outcome=(||->paged::CatalogResult<_>{
+                let image:paged::Record=serde_json::from_value(catalog.control("initial_image")?.ok_or_else(||paged::CatalogError::MissingDependency("actual Init".into()))?)?;
+                let image_hash=paged::string(&image.record,"image_sha256")?;
+                let epoch=catalog.active_unit()?.checked_add(1).filter(|n|*n<=i64::MAX as u64).ok_or_else(||paged::CatalogError::NumericDomain("writer epoch".into()))?;
+                let (before,_,_)=self.persist_observation(&catalog,&parent_observed,"pre_apply",image_hash,epoch)?;
+                let (after,physical,episode)=self.persist_observation(&catalog,&after_observed,"post_apply",image_hash,epoch)?;
+                let (rollback,_,_)=self.persist_observation(&catalog,&rollback_observed,"post_rollback",image_hash,epoch)?;
+                let initial=catalog.get_id("Store",1)?;
+                let target=catalog.intern_checked_store(paged::checked_store(json!({"physical_rows_id":physical,"episode_id":episode,"canonical_utf8":next,"sha256":paged::digest(next.as_bytes()),"initial_image_id":image_hash,"sqlite_schema_sha256":initial.record["sqlite_schema_sha256"],"omitted_observation_id":after.id,"certification":"novel_actual_state_checked"})))?;
+                let to=usize::try_from(target.get()-1).map_err(|_|paged::CatalogError::NumericDomain("target handle".into()))?;
+                view["id"]=json!(to);
+                let edge=OracleEdge {from:handle,to,action:input.clone(),result:result.clone(),resolved_token,claim_snapshot:claim_snapshot.clone(),claim_request:claim_request.clone(),job_read:job_read.clone(),error:match result.as_str(){"validation_error_yield_time"=>Some("invalid background checkpoint or yield time".into()),"validation_error_retry_time"=>Some("invalid background failure retry".into()),_=>None}};
+                let target_record=catalog.get_id("Store",target.get())?;
+                let target_boundary=catalog.get_id("BoundaryObservation",paged::number(&target_record.record,"omitted_observation_id")?)?.reference()?;
+                let applied=json!({"from_store":handle as u64+1,"to_store":target.get(),"action_utf8":paged::canonical(input),"result":result,"resolved_token":resolved_token,"claim_snapshot_utf8":claim_snapshot.as_ref().map(paged::canonical),"error":edge.error,"claim_request_utf8":claim_request.as_ref().map(paged::canonical),"job_read_utf8":job_read.as_ref().map(paged::canonical)});
+                let evidence=catalog.append_oracle_evidence(json!({"applied":applied,"source":catalog.source(),"initial_image_id":image_hash,"before_boundary":before,"after_boundary":after,"rollback_boundary":rollback,"production_witness_utf8":paged::canonical(&json!({"from_projection":parent_view,"to_projection":view,"applied":edge,"target_inputs":inputs})),"independent_checks_utf8":paged::canonical(&json!({"before_boundary":before,"after_boundary":after,"rollback_boundary":rollback,"target_certification":target_record.record["certification"],"target_boundary":target_boundary}))}))?;
+                usize::try_from(evidence.get()-1).map_err(|_|paged::CatalogError::NumericDomain("edge handle".into()))
+            })().map_err(|error|error.to_string());
+            self.failure = None;
+            return outcome;
+        }
+        let to = if let Some(to) = self.known_state(&next) {
+            self.certify_state(to);
             to
         } else {
-            if self.states.len() >= STATE_CAP {
-                return Err(format!(
-                    "DomainStateCap: closure exceeded {STATE_CAP} concrete states; no closed relation emitted"
-                ));
+            if self.state_count() >= STATE_CAP {
+                return Err(format!("DomainStateCap: bounded reference fixture exceeded {STATE_CAP} concrete states; no closed relation emitted"));
             }
-            let to = self.states.len();
+            let to = self.state_count();
             view["id"] = json!(to);
             self.index.insert(next.clone(), to);
             self.states.push(OracleState {
@@ -3785,4 +4166,82 @@ async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
         .expect_err("root reset must check omitted state")
         .starts_with("OmittedDvState:"));
     assert!(reset.materialization_failed);
+}
+
+/// Actual image/writer conformance, not a complete product certificate. The
+/// small registered primitive corpus does not replace independent D/Next proof.
+#[tokio::test]
+async fn oracle_catalog_image_resume_replays_all_applied_and_rollback() {
+    let directory = tempfile::tempdir().expect("owned proof scratch");
+    let image_path = directory.path().join("initial-image.sqlite");
+    let limits = paged::BackupLimits {
+        max_bytes: paged::PAGE_BYTES,
+        deadline: Instant::now() + Duration::from_secs(300),
+    };
+    let mut oracle = Oracle::new(None).await.expect("actual original fixture");
+    let original_ids = oracle.fixture.jobs.clone();
+    let capture = oracle
+        .capture_initial_image(&image_path, &limits)
+        .await
+        .expect("actual initial image");
+    assert_eq!(Oracle::capture_schema(&capture), &oracle.schema);
+    let catalog = paged::Catalog::disk(paged::fixture_configuration(
+        directory.path().join("catalog.sqlite"),
+    ))
+    .expect("persistent catalog");
+    super::async_driver_product::initialize_paged_catalog(&mut oracle, &catalog, &capture)
+        .expect("actual Init catalog roots");
+    assert!(
+        oracle.states.is_empty()
+            && oracle.edges.is_empty()
+            && oracle.index.is_empty()
+            && oracle.cache.is_empty(),
+        "persistent mode retains no global vectors/maps"
+    );
+    let (ticket, product) = catalog
+        .oldest_pending()
+        .expect("frontier")
+        .expect("base root");
+    let transaction = catalog
+        .begin_expansion(ticket, product, 1)
+        .expect("owned primitive conformance transaction");
+    let action = Action::Claim { job: 0, node: 0 };
+    let edge_id = oracle
+        .apply(0, &action)
+        .await
+        .expect("actual production claim");
+    let edge = oracle.edge(edge_id);
+    assert_eq!(edge.result, "claimed");
+    let candidate = catalog.allocate("Candidate").expect("candidate ID");
+    catalog.append_record("Candidate",json!({"id":candidate,"context":"base","predecessor":product.get(),"ordinal":0,"family":"primitive_conformance","worker":null,"choice_utf8":"{}","descriptor_utf8":"{}","classification":"eligible","reason":null})).expect("primitive fixture candidate");
+    let demand = catalog.allocate("Demand").expect("demand ID");
+    catalog.append_record("Demand",json!({"id":demand,"candidate":candidate,"ordinal":0,"from_store":1,"family":"primitive_conformance","worker":null,"role":"apply","input_utf8":paged::canonical(&action),"capture":null,"sample":null,"classification":"eligible","reason":null,"outcome_id":edge_id+1,"depends_on":[]})).expect("actual primitive outcome");
+    let enabled = catalog
+        .append_enabledness(
+            json!({"context":"base","product_id":product.get(),"full_graph_labels":[]}),
+        )
+        .expect("fixture no product edges");
+    let expansion = transaction.expansion_id().expect("expansion ID");
+    transaction.seal(json!({"id":expansion.get(),"context":"base","predecessor":product.get(),"fifo_ticket":ticket.get(),"candidates":[candidate],"demands":[demand],"oracle_evidence":[edge_id+1],"product_edges":[],"fair_pairs":[],"enabledness":enabled,"discovered_products":[],"capacity_only_stores":[],"unit_ordinal":1,"complete":true})).expect("atomic conformance storage, not product closure");
+    oracle
+        .restore_root()
+        .await
+        .expect("actual original root rollback");
+    drop(oracle);
+    let mut resumed = Oracle::from_catalog(catalog.clone(), &image_path, &limits)
+        .await
+        .expect("restore actual raw initial image");
+    assert_eq!(resumed.fixture.jobs, original_ids, "never reseed raw UUIDs");
+    let observed = resumed
+        .materialize(&[action])
+        .await
+        .expect("actual production replay with full Applied comparison");
+    assert_eq!(observed.canonical, resumed.state(edge.to).canonical);
+    assert!(resumed.diagnostics.replay_comparisons > 0);
+    resumed
+        .restore_root()
+        .await
+        .expect("actual restored writer rollback observation");
+    assert!(resumed.states.is_empty() && resumed.edges.is_empty());
+    assert_eq!(catalog.count("Store").expect("global identities"), 2);
 }

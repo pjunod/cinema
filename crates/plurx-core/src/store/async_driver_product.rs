@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use super::async_driver_catalog as paged;
 use super::background_jobs::JOB_LEASE_MS;
 use plurx_worker_control::library_driver::{Driver as RealDriver, Reply as RealReply, WorkOutcome};
 use plurx_worker_control::library_lifecycle::Settlement;
@@ -631,7 +632,7 @@ struct Step {
 
 fn done(oracle: &Oracle, handle: StoreHandle) -> Vec<usize> {
     (0..2)
-        .filter(|j| oracle.states[handle].view["jobs"][j]["request_done"] == true)
+        .filter(|j| oracle.state(handle).view["jobs"][j]["request_done"] == true)
         .collect()
 }
 fn move_sql(value: &mut Valuation, edge: &OracleEdge, oracle: &Oracle) {
@@ -669,7 +670,7 @@ fn deadline(issued: i64, expiry: i64, request: i64) -> i64 {
         .expect("finite selected monotonic deadline")
 }
 fn retain_anchors(value: &mut Valuation, oracle: &Oracle) {
-    let state = &oracle.states[value.sql];
+    let state = &oracle.state(value.sql);
     for token in state.episode.tokens.iter().flatten() {
         value.wall_anchors.push(token.lease_expires_ms);
     }
@@ -719,7 +720,7 @@ fn retain_anchors(value: &mut Valuation, oracle: &Oracle) {
     value.mono_anchors.dedup();
 }
 fn stable_wall(value: &Valuation, t: i64, driver: &Driver, oracle: &Oracle) -> bool {
-    let episode = &oracle.states[value.sql].episode;
+    let episode = &oracle.state(value.sql).episode;
     value.w.iter().all(|w| {
         let live = w.local_token || (w.stage == "claim" && w.reply == "Claimed");
         let queue = !live
@@ -861,7 +862,7 @@ fn input_for(
     oracle: &Oracle,
 ) -> Result<CandidateInput, String> {
     let w = &value.w[n];
-    let episode = &oracle.states[value.sql].episode;
+    let episode = &oracle.state(value.sql).episode;
     if pending == "AcquireDomain" {
         return Ok((Some(Action::AcquireDomain { node: n }), None, None));
     }
@@ -939,8 +940,8 @@ fn same_claim(w: &Worker, job: usize, token: usize, oracle: &Oracle, handle: Sto
     matches!(w.stage.as_str(), "claim" | "driver")
         && w.job == job as i64
         && w.token >= 0
-        && oracle.states[handle].episode.tokens[job][w.token as usize].claim_id
-            == oracle.states[handle].episode.tokens[job][token].claim_id
+        && oracle.state(handle).episode.tokens[job][w.token as usize].claim_id
+            == oracle.state(handle).episode.tokens[job][token].claim_id
 }
 fn environment_allowed(action: &Action, value: &Valuation, oracle: &Oracle) -> bool {
     match action {
@@ -948,7 +949,7 @@ fn environment_allowed(action: &Action, value: &Valuation, oracle: &Oracle) -> b
         Action::ClockAdvance { .. } => false,
         Action::AcquireDomain { node } => *node == 2,
         Action::ReleaseDomain { lease } => {
-            oracle.states[value.sql].episode.leases[*lease].owner_node_id == "foreign-holder"
+            oracle.state(value.sql).episode.leases[*lease].owner_node_id == "foreign-holder"
         }
         Action::Renew { job, token } => value.w.iter().all(|w| {
             !same_claim(w, *job, *token, oracle, value.sql)
@@ -989,7 +990,7 @@ fn initial_resolution(value: &Valuation, n: usize, oracle: &Oracle) -> Result<Ac
             claim_id: request.claim_id,
             fence: None,
             dispatched_at_ms: request.dispatched_at_ms,
-            now_ms: oracle.states[value.sql].episode.now,
+            now_ms: oracle.state(value.sql).episode.now,
         },
     })
 }
@@ -1110,7 +1111,7 @@ fn enumerate_candidates(
             });
         }
     }
-    if let Some(now) = next_neighbour(&value.wall_anchors, oracle.states[value.sql].episode.now) {
+    if let Some(now) = next_neighbour(&value.wall_anchors, oracle.state(value.sql).episode.now) {
         // Inventory the structural clock input even when a stable authority
         // window blocks it; classification certifies that exclusion explicitly.
         result.push(DemandSpec {
@@ -1125,7 +1126,7 @@ fn enumerate_candidates(
     }
     if !context.stable {
         for input in oracle.domain_inputs(value.sql) {
-            if environment_allowed(input, value, oracle) {
+            if environment_allowed(&input, value, oracle) {
                 result.push(DemandSpec {
                     oracle_from: value.sql,
                     family: "Environment",
@@ -1150,7 +1151,7 @@ fn classify_demand(
     if let Some(reason) = spec.capture {
         return Ok(Some(json!({"kind":"capture","reason":reason})));
     }
-    let episode = &oracle.states[spec.oracle_from].episode;
+    let episode = &oracle.state(spec.oracle_from).episode;
     if spec.sample.is_some_and(|sample| sample != episode.now) {
         return Ok(Some(json!({"kind":"sample","reason":"retirement_sample"})));
     }
@@ -1226,8 +1227,8 @@ fn classify_demand(
         Action::AcquireDomain { node }
             if node < 2
                 && !(0..2).any(|job| {
-                    oracle.states[value.sql].view["jobs"][job]["state"] == "running"
-                        && oracle.states[value.sql].view["jobs"][job]["owner"]
+                    oracle.state(value.sql).view["jobs"][job]["state"] == "running"
+                        && oracle.state(value.sql).view["jobs"][job]["owner"]
                             == ["node-a", "node-b"][node]
                 }) =>
         {
@@ -1246,13 +1247,13 @@ fn classify_demand(
     Ok(reason.map(|reason| json!({"kind":"domain","reason":reason})))
 }
 
-fn outcome<'a>(
+fn outcome(
     demands: &[Demand],
     family: &str,
     worker: Option<usize>,
     action: Option<&Action>,
-    oracle: &'a Oracle,
-) -> Option<&'a OracleEdge> {
+    oracle: &Oracle,
+) -> Option<OracleEdge> {
     demands
         .iter()
         .find(|d| {
@@ -1261,7 +1262,7 @@ fn outcome<'a>(
                 && action.is_none_or(|a| d.spec.input.as_ref() == Some(a))
         })
         .and_then(|d| d.edge)
-        .map(|id| &oracle.edges[id])
+        .map(|id| oracle.edge(id))
 }
 fn local_reply(value: &Valuation, n: usize, tag: &str, driver: &Driver) -> Option<Valuation> {
     if !driver.accepts(&value.w[n], tag) {
@@ -1285,7 +1286,7 @@ fn commit_reply(
     move_sql(&mut next, edge, oracle);
     next.w[n].accepted = matches!(edge.action, Action::Settle { .. }) && edge.result == "accepted";
     if matches!(edge.action, Action::AcquireDomain { .. }) && edge.result == "acquired" {
-        next.w[n].lease = (oracle.states[edge.to].episode.leases.len() - 1) as i64;
+        next.w[n].lease = (oracle.state(edge.to).episode.leases.len() - 1) as i64;
     }
     Some(next)
 }
@@ -1362,7 +1363,7 @@ fn ordinary_steps(
                     next.w[n].ordinary.observed_outcome = Some("clock_error".into());
                     next.w[n].fault_used = true;
                 } else {
-                    next.w[n].ordinary.request_now_ms = Some(oracle.states[value.sql].episode.now);
+                    next.w[n].ordinary.request_now_ms = Some(oracle.state(value.sql).episode.now);
                 }
                 add(
                     "OrdinaryLocal",
@@ -1378,7 +1379,7 @@ fn ordinary_steps(
                 .find(|d| d.spec.family == "OrdinaryCallReturn" && d.spec.worker == Some(n))
                 .ok_or("MissingOrdinaryApplyDemand")?;
             let id = demand.edge.ok_or("MissingOrdinaryApplyEdge")?;
-            let edge = &oracle.edges[id];
+            let edge = &oracle.edge(id);
             require(
                 matches!(
                     edge.result.as_str(),
@@ -1482,7 +1483,7 @@ fn claim_recovery_steps(
             .and_then(|d| d.edge)
             .ok_or("MissingInitialClaimResolutionEdge")?;
         primary = Some(id);
-        let resolved = &oracle.edges[id];
+        let resolved = &oracle.edge(id);
         move_sql(&mut next, resolved, oracle);
         match resolved.result.as_str() {
             "running" => {
@@ -1496,12 +1497,12 @@ fn claim_recovery_steps(
                     .and_then(|d| d.edge)
                     .ok_or("MissingInitialClaimReadEdge")?;
                 read_edge = Some(read);
-                let read = &oracle.edges[read];
+                let read = &oracle.edge(read);
                 move_sql(&mut next, read, oracle);
                 let token_index = resolved
                     .resolved_token
                     .ok_or("MissingInitialResolvedCapture")?;
-                let token = &oracle.states[resolved.to].episode.tokens[w.job as usize][token_index];
+                let token = &oracle.state(resolved.to).episode.tokens[w.job as usize][token_index];
                 let request: super::background_jobs::ClaimJob = serde_json::from_value(
                     w.claim_request.clone().ok_or("MissingActualClaimRequest")?,
                 )
@@ -1557,7 +1558,7 @@ fn claim_recovery_steps(
                     .and_then(|d| d.edge)
                     .ok_or("MissingInitialClaimCancelEdge")?;
                 cleanup_edge = Some(cleanup);
-                let cleanup = &oracle.edges[cleanup];
+                let cleanup = &oracle.edge(cleanup);
                 require(
                     matches!(cleanup.result.as_str(), "accepted" | "refused"),
                     "UnexpectedInitialClaimCancelResult",
@@ -1630,7 +1631,10 @@ fn successors(
     let edge_id = |edge: &OracleEdge| {
         demands
             .iter()
-            .find_map(|d| d.edge.filter(|id| std::ptr::eq(&oracle.edges[*id], edge)))
+            .find_map(|d| {
+                d.edge
+                    .filter(|id| encoded(&oracle.edge(*id)) == encoded(edge))
+            })
             .expect("demanded oracle edge")
     };
     for n in 0..2 {
@@ -1650,11 +1654,11 @@ fn successors(
         );
         if w.stage == "idle" && value.available[n] {
             for job in 0..2 {
-                if oracle.states[value.sql].view["jobs"][job]["state"] == "queued"
-                    && oracle.states[value.sql].view["jobs"][job]["request_done"] == false
-                    && oracle.states[value.sql].view["jobs"][job]["not_before_ms"]
+                if oracle.state(value.sql).view["jobs"][job]["state"] == "queued"
+                    && oracle.state(value.sql).view["jobs"][job]["request_done"] == false
+                    && oracle.state(value.sql).view["jobs"][job]["not_before_ms"]
                         .as_i64()
-                        .is_some_and(|t| t <= oracle.states[value.sql].episode.now)
+                        .is_some_and(|t| t <= oracle.state(value.sql).episode.now)
                     && (!context.stable || job == n)
                 {
                     let mut next = value.clone();
@@ -1680,7 +1684,7 @@ fn successors(
                         let nw = &mut next.w[n];
                         nw.call = "applied".into();
                         nw.claim_issued_mono_ms = Some(value.mono_now_ms);
-                        nw.claim_request_now_ms = Some(oracle.states[value.sql].episode.now);
+                        nw.claim_request_now_ms = Some(oracle.state(value.sql).episode.now);
                         nw.claim_request = Some(
                             edge.claim_request
                                 .clone()
@@ -1694,14 +1698,14 @@ fn successors(
                             nw.local_deadline_mono_ms = Some(deadline(
                                 value.mono_now_ms,
                                 snapshot.token_capture.lease_expires_ms,
-                                oracle.states[value.sql].episode.now,
+                                oracle.state(value.sql).episode.now,
                             ));
                             nw.claim_snapshot = Some(snapshot);
                             let token =
-                                oracle.states[edge.to].episode.tokens[w.job as usize].len() - 1;
+                                oracle.state(edge.to).episode.tokens[w.job as usize].len() - 1;
                             nw.reply = "Claimed".into();
                             nw.token = token as i64;
-                            nw.attempt = oracle.states[edge.to].episode.tokens[w.job as usize]
+                            nw.attempt = oracle.state(edge.to).episode.tokens[w.job as usize]
                                 [token]
                                 .claim_id
                                 .clone();
@@ -1710,7 +1714,7 @@ fn successors(
                             nw.token = -1;
                             nw.attempt = "".into();
                         }
-                        push("ClaimApply", Some(n), json!({}), next, Some(edge_id(edge)));
+                        push("ClaimApply", Some(n), json!({}), next, Some(edge_id(&edge)));
                     }
                 }
                 "applied" => {
@@ -1801,7 +1805,7 @@ fn successors(
             && (!context.stable
                 || (w.dropped
                     && !value.completed.contains(&(w.job as usize))
-                    && oracle.states[value.sql].episode.claims[w.job as usize] < 2))
+                    && oracle.state(value.sql).episode.claims[w.job as usize] < 2))
         {
             let mut next = value.clone();
             next.w[n] = Worker::idle();
@@ -1871,8 +1875,8 @@ fn successors(
                     && matches!(pending, "AcquireDomain" | "Bind")
                     && !matches!(edge.result.as_str(), "acquired" | "accepted");
                 if !filtered {
-                    if let Some(next) = commit_reply(value, n, edge, tag, driver, oracle) {
-                        push("StoreApply", Some(n), json!({}), next, Some(edge_id(edge)));
+                    if let Some(next) = commit_reply(value, n, &edge, tag, driver, oracle) {
+                        push("StoreApply", Some(n), json!({}), next, Some(edge_id(&edge)));
                     }
                 }
             }
@@ -1915,9 +1919,15 @@ fn successors(
                 if let Some(edge) = outcome(demands, "WorkSuccess", Some(n), None, oracle) {
                     if edge.result == "accepted" && !w.queue_lost {
                         if let Some(next) =
-                            commit_reply(value, n, edge, "WorkSucceeded", driver, oracle)
+                            commit_reply(value, n, &edge, "WorkSucceeded", driver, oracle)
                         {
-                            push("WorkSuccess", Some(n), json!({}), next, Some(edge_id(edge)));
+                            push(
+                                "WorkSuccess",
+                                Some(n),
+                                json!({}),
+                                next,
+                                Some(edge_id(&edge)),
+                            );
                         }
                     }
                 }
@@ -1987,7 +1997,7 @@ fn successors(
                             let sample = if clock_error {
                                 -1
                             } else {
-                                oracle.states[value.sql].episode.now
+                                oracle.state(value.sql).episode.now
                             };
                             nw.sample = sample;
                             nw.inner = "ready".into();
@@ -2036,14 +2046,20 @@ fn successors(
                                 outcome(demands, "RetireApply", Some(n), None, oracle)
                             {
                                 let mut next = value.clone();
-                                move_sql(&mut next, edge, oracle);
+                                move_sql(&mut next, &edge, oracle);
                                 next.w[n].inner = "applied".into();
                                 next.w[n].outcome = edge.result.clone();
                                 if matches!(edge.action, Action::Resolve { .. }) {
                                     next.w[n].resolved =
                                         edge.resolved_token.map_or(-1, |i| i as i64);
                                 }
-                                push("RetireApply", Some(n), json!({}), next, Some(edge_id(edge)));
+                                push(
+                                    "RetireApply",
+                                    Some(n),
+                                    json!({}),
+                                    next,
+                                    Some(edge_id(&edge)),
+                                );
                             }
                             if !w.fault_used {
                                 let mut next = value.clone();
@@ -2191,7 +2207,7 @@ fn successors(
                 now_ms: Some(if zero {
                     0
                 } else {
-                    oracle.states[value.sql].episode.now
+                    oracle.state(value.sql).episode.now
                 }),
                 retry_delay_ms: Some(retry),
             });
@@ -2223,7 +2239,7 @@ fn successors(
     }
     if let Some(edge) = outcome(demands, "WallAdvance", None, None, oracle) {
         let mut next = value.clone();
-        move_sql(&mut next, edge, oracle);
+        move_sql(&mut next, &edge, oracle);
         let Action::ClockAdvance { now } = edge.action else {
             return Err("WallAdvanceOracleAction".into());
         };
@@ -2232,7 +2248,7 @@ fn successors(
             None,
             json!({"now":now}),
             next,
-            Some(edge_id(edge)),
+            Some(edge_id(&edge)),
         );
     }
     if let Some(now) = next_neighbour(&value.mono_anchors, value.mono_now_ms) {
@@ -2247,7 +2263,7 @@ fn successors(
             let Some(id) = demand.edge else {
                 continue;
             };
-            let edge = &oracle.edges[id];
+            let edge = &oracle.edge(id);
             let input = demand.spec.input.as_ref().expect("environment input");
             let matching = if let Action::Renew { job, token } = input {
                 value
@@ -2303,7 +2319,7 @@ fn successors(
                     let mut next = value.clone();
                     move_sql(&mut next, edge, oracle);
                     if let Some(r) = resolution {
-                        move_sql(&mut next, &oracle.edges[r], oracle);
+                        move_sql(&mut next, &oracle.edge(r), oracle);
                     }
                     for n in &matching {
                         let nw = &mut next.w[*n];
@@ -2318,15 +2334,19 @@ fn successors(
                                 return Err("RenewInput".into());
                             };
                             Some((
-                                oracle.states[edge.to].episode.tokens[*job].len() - 1,
+                                oracle.state(edge.to).episode.tokens[*job].len() - 1,
                                 "running",
                             ))
                         } else {
-                            let r = &oracle.edges[resolution.ok_or("MissingRenewResolution")?];
+                            let r = &oracle.edge(resolution.ok_or("MissingRenewResolution")?);
                             match r.result.as_str() {
-                                "running" | "cancel_requested" => Some((
+                                "running" => Some((
                                     r.resolved_token.ok_or("MissingActualResolvedToken")?,
-                                    r.result.as_str(),
+                                    "running",
+                                )),
+                                "cancel_requested" => Some((
+                                    r.resolved_token.ok_or("MissingActualResolvedToken")?,
+                                    "cancel_requested",
                                 )),
                                 "settled" | "lost_ownership" | "expired_or_pruned" => None,
                                 _ => return Err("UnknownRenewResolutionResult".into()),
@@ -2350,11 +2370,11 @@ fn successors(
                                 continue;
                             }
                             let returned =
-                                &oracle.states[next.sql].episode.tokens[old.job as usize][token];
+                                &oracle.state(next.sql).episode.tokens[old.job as usize][token];
                             let local = deadline(
                                 value.mono_now_ms,
                                 returned.lease_expires_ms,
-                                oracle.states[value.sql].episode.now,
+                                oracle.state(value.sql).episode.now,
                             );
                             nw.local_deadline_mono_ms = Some(local);
                             if value.mono_now_ms >= local {
@@ -2379,7 +2399,7 @@ fn successors(
     for step in &mut steps {
         if step.branch.family == "ClaimRecover" && step.branch.choice["kind"] == "resolve" {
             let n = step.branch.worker.ok_or("InitialRecoveryWorker")?;
-            let primary = &oracle.edges[step.edge.ok_or("MissingInitialRecoveryEvidence")?];
+            let primary = &oracle.edge(step.edge.ok_or("MissingInitialRecoveryEvidence")?);
             let family = match primary.result.as_str() {
                 "running" => Some("ClaimRecoverRead"),
                 "cancel_requested" => Some("ClaimRecoverCancel"),
@@ -2408,7 +2428,7 @@ fn successors(
         let Some(id) = step.edge else {
             continue;
         };
-        let edge = &oracle.edges[id];
+        let edge = &oracle.edge(id);
         let Action::Renew { job, token } = edge.action else {
             continue;
         };
@@ -2449,7 +2469,7 @@ fn memberships(step: &Step, value: &Valuation, context: &Context, oracle: &Oracl
     }
     if step.branch.family == "WallAdvance"
         && context.stable
-        && oracle.states[value.sql].view["jobs"]
+        && oracle.state(value.sql).view["jobs"]
             .as_array()
             .expect("jobs")
             .iter()
@@ -2458,7 +2478,7 @@ fn memberships(step: &Step, value: &Valuation, context: &Context, oracle: &Oracl
                     && j["request_done"] == false
                     && j["not_before_ms"]
                         .as_i64()
-                        .is_some_and(|t| t > oracle.states[value.sql].episode.now)
+                        .is_some_and(|t| t > oracle.state(value.sql).episode.now)
             })
     {
         return vec!["EligibilityAdvance/global".into()];
@@ -2492,7 +2512,7 @@ fn memberships(step: &Step, value: &Valuation, context: &Context, oracle: &Oracl
     if f == "ClaimApply"
         && step
             .edge
-            .is_some_and(|id| oracle.edges[id].result == "claimed")
+            .is_some_and(|id| oracle.edge(id).result == "claimed")
     {
         labels.insert(format!("ClaimWin/{n}"));
     }
@@ -2817,7 +2837,7 @@ struct WirePools {
 }
 impl WirePools {
     fn oracle(&mut self, oracle: &Oracle, budget: &mut Budget) -> Result<(), String> {
-        while budget.stores < oracle.states.len() {
+        while budget.stores < oracle.state_count() {
             let view = oracle.export_product_state(budget.stores);
             let text = view["canonical_json"]
                 .as_str()
@@ -2844,7 +2864,7 @@ impl WirePools {
             self.store_states.push(json!(row));
             budget.stores += 1;
         }
-        while budget.oracle_edges < oracle.edges.len() {
+        while budget.oracle_edges < oracle.edge_count() {
             budget.charge("store_edges", &oracle.edges[budget.oracle_edges], 1)?;
             budget.oracle_edges += 1;
         }
@@ -3171,7 +3191,7 @@ fn cutoff(snapshot: Cutoff<'_>, reason: &str, action: Option<&Action>) {
     // Failure-only: never serialize the full frontier, rows or canonical keys.
     eprintln!(
         "async_product_cutoff={}",
-        json!({"complete":false,"bound":reason.split(':').next().unwrap_or("ResourceError"),"reason":sql::diagnostic_action(encoded(&json!({"reason":reason}))),"context":context.id,"store_states":oracle.states.len(),"store_edges":oracle.edges.len(),"product_states":states.len(),"expanded":expanded,"pending":queue.len(),"serialized_output_estimate":budget.bytes,"attempted_wire_component_bytes":budget.component_bytes,"attempted_wire_component_records":budget.component_records,"predecessor":from,"predecessor_sha256":states[from].hash,"rejected_action":action.map(|a|sql::diagnostic_action(encoded(a))),"oracle_predecessor_sha256":digest(oracle.states[states[from].key.sql].canonical.as_bytes()),"oracle_successor_sha256":oracle.failure.as_ref().and_then(|v|v.get("successor_sha256")),"trace_tail":tail,"trace_complete":states[cursor].parent.is_none()})
+        json!({"complete":false,"bound":reason.split(':').next().unwrap_or("ResourceError"),"reason":sql::diagnostic_action(encoded(&json!({"reason":reason}))),"context":context.id,"store_states":oracle.state_count(),"store_edges":oracle.edge_count(),"product_states":states.len(),"expanded":expanded,"pending":queue.len(),"serialized_output_estimate":budget.bytes,"attempted_wire_component_bytes":budget.component_bytes,"attempted_wire_component_records":budget.component_records,"predecessor":from,"predecessor_sha256":states[from].hash,"rejected_action":action.map(|a|sql::diagnostic_action(encoded(a))),"oracle_predecessor_sha256":digest(oracle.states[states[from].key.sql].canonical.as_bytes()),"oracle_successor_sha256":oracle.failure.as_ref().and_then(|v|v.get("successor_sha256")),"trace_tail":tail,"trace_complete":states[cursor].parent.is_none()})
     );
 }
 // Bounded host diagnostics only; never a field in valuations, pools or certificate.
@@ -3232,7 +3252,7 @@ async fn close_product(
     let mut oracle = Oracle::new(None).await?;
     runtime.emit(
         "oracle_initialized",
-        json!({"store_states":oracle.states.len(),"store_edges":oracle.edges.len()}),
+        json!({"store_states":oracle.state_count(),"store_edges":oracle.edge_count()}),
     );
     let semantic = semantic_bindings()?;
     let mut budget = Budget::default();
@@ -3294,7 +3314,7 @@ async fn close_product(
                 runtime.emit($phase, json!({"context":context.id,"expanded":expanded,
                     "context_states":context_states.len(),"pending":queue.len(),"active":$active,
                     "product_states":states.len(),"product_edges":edge_count,"demands":demand_count,
-                    "store_states":oracle.states.len(),"store_edges":oracle.edges.len(),
+                    "store_states":oracle.state_count(),"store_edges":oracle.edge_count(),
                     "values":pools.values.len(),"workers":pools.workers.len(),"canonical_fragments":pools.fragments.nodes.len(),"edge_descriptors":edge_descriptors.rows.len(),"demand_descriptors":demand_descriptors.rows.len(),
                     "budget_bytes":budget.bytes,"component_bytes":budget.component_bytes,"component_records":budget.component_records,
                     "oracle":oracle.diagnostic_summary(),"timing_scope":"cumulative_since_test_entry",
@@ -3710,7 +3730,7 @@ async fn close_product(
     runtime.emit("closure_complete", json!({"oracle":oracle.diagnostic_summary(),"product_states":states.len(),"product_edges":edge_count,"demands":demand_count}));
     runtime.emit("assembly_start", json!({}));
     let assembly_started = Instant::now();
-    let coverage = json!({"complete":true,"no_skipped_demands":true,"store_state_count":oracle.states.len(),"store_edge_count":oracle.edges.len(),"product_state_count":states.len(),"product_edge_count":edge_count,"demand_count":demand_count,"by_context":by_context});
+    let coverage = json!({"complete":true,"no_skipped_demands":true,"store_state_count":oracle.state_count(),"store_edge_count":oracle.edge_count(),"product_state_count":states.len(),"product_edge_count":edge_count,"demand_count":demand_count,"by_context":by_context});
     require(
         enabled.len() == states.len()
             && edges.len() == states.len()
@@ -3816,6 +3836,52 @@ async fn actual_sql_two_worker_product_is_closed() {
         json!({"duration_ms":write_started.elapsed().as_millis()}),
     );
     eprintln!("async_product_coverage={}", bundle["coverage"]);
+}
+
+pub(super) fn initialize_paged_catalog(
+    oracle: &mut Oracle,
+    catalog: &paged::Catalog,
+    capture: &sql::InitialCapture,
+) -> Result<paged::Record, String> {
+    let transaction = catalog.begin_initial(0).map_err(|e| e.to_string())?;
+    let contexts = contexts();
+    catalog
+        .set_control(
+            "context_descriptors",
+            &json!(contexts
+                .iter()
+                .map(|c| json!({"id":c.id,"stable_success":c.stable,"mutation":c.mutation}))
+                .collect::<Vec<_>>()),
+        )
+        .map_err(|e| e.to_string())?;
+    let image = oracle.attach_catalog_initial(catalog, capture)?;
+    let mut roots = Vec::new();
+    for context in contexts {
+        let mut initial = Valuation {
+            sql: 0,
+            w: [Worker::idle(), Worker::idle()],
+            available: [true, true],
+            completed: done(oracle, 0),
+            mono_now_ms: 0,
+            wall_anchors: Vec::new(),
+            mono_anchors: Vec::new(),
+            claim_loss_keys: Vec::new(),
+            real_drivers: [None, None],
+        };
+        retain_anchors(&mut initial, oracle);
+        let product = catalog
+            .intern_product(
+                context.id,
+                &canonical(&product_payload(&context, &initial)),
+                paged::StoreId::new(1).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        roots.push((context.id.into(), product.get()));
+    }
+    transaction
+        .seal_initial(image.clone(), &roots)
+        .map_err(|e| e.to_string())?;
+    Ok(image)
 }
 
 pub(super) fn catalog_fixture_payload(id: &str) -> Value {

@@ -102,6 +102,7 @@ pub trait Storage {
         limits: &ReadLimits,
     ) -> CatalogResult<RecordBatch>;
     fn count(&self, kind: &str) -> CatalogResult<u64>;
+    fn oracle_edge_for_input(&self, from: u64, input: &str) -> CatalogResult<Option<u64>>;
     fn get_control(&self, key: &str) -> CatalogResult<Option<Value>>;
     fn set_control(&mut self, key: &str, value: &Value) -> CatalogResult<()>;
     fn enqueue(&mut self, product: u64) -> CatalogResult<u64>;
@@ -210,6 +211,14 @@ impl Catalog {
     pub fn resource_plan(&self) -> &Record {
         &self.inner.config.resource_plan
     }
+    pub fn active_unit(&self) -> CatalogResult<u64> {
+        self.inner
+            .pending
+            .borrow()
+            .as_ref()
+            .map(|p| p.context.unit_ordinal)
+            .ok_or_else(|| CatalogError::IncompleteExpansion("no active unit".into()))
+    }
     pub fn current_transaction(&self) -> CatalogResult<TransactionId> {
         TransactionId::new(self.inner.storage.borrow().sequence()?)
     }
@@ -235,6 +244,12 @@ impl Catalog {
     pub fn set_control(&self, key: &str, value: &Value) -> CatalogResult<()> {
         self.require_write()?;
         self.inner.storage.borrow_mut().set_control(key, value)
+    }
+    pub fn oracle_edge_for_input(&self, from: u64, input: &str) -> CatalogResult<Option<u64>> {
+        self.inner
+            .storage
+            .borrow()
+            .oracle_edge_for_input(from, input)
     }
     pub fn count(&self, kind: &str) -> CatalogResult<u64> {
         self.inner.storage.borrow().count(kind)
@@ -664,6 +679,52 @@ impl Catalog {
     }
 }
 
+/// Bounded streaming digest for actual images/artifacts, never a whole-file Vec.
+pub fn hash_file(
+    path: &Path,
+    max_bytes: u64,
+    deadline: std::time::Instant,
+) -> CatalogResult<(u64, String)> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > max_bytes {
+        return Err(CatalogError::ResourceIncomplete(
+            "invalid/over-budget file".into(),
+        ));
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut bytes = 0u64;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(CatalogError::ResourceIncomplete(
+                "file digest deadline".into(),
+            ));
+        }
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| CatalogError::NumericDomain("file length overflow".into()))?;
+        if bytes > max_bytes {
+            return Err(CatalogError::ResourceIncomplete(
+                "file grew beyond bound".into(),
+            ));
+        }
+        hash.update(&buffer[..read]);
+    }
+    if bytes != metadata.len() {
+        return Err(CatalogError::CorruptRecord(
+            "file changed while hashing".into(),
+        ));
+    }
+    Ok((bytes, format!("{:x}", hash.finalize())))
+}
+
 /// Private checked inputs are constructed by the actual Oracle only. They do
 /// not carry catalog-assigned identities or invented transition predicates.
 pub struct CheckedBoundary(Value);
@@ -769,7 +830,6 @@ impl WriteTransaction {
         for (field, kind) in [
             ("candidates", "Candidate"),
             ("demands", "Demand"),
-            ("oracle_evidence", "OracleEvidence"),
             ("product_edges", "ProductEdge"),
         ] {
             let expected = self
@@ -786,6 +846,107 @@ impl WriteTransaction {
                 )));
             }
         }
+        let mut evidence = Vec::new();
+        let mut evidence_seen = BTreeSet::new();
+        let mut capacity_targets = BTreeSet::new();
+        for key in self.written_ids("Demand") {
+            let demand = self.catalog.get("Demand", &key)?;
+            let candidate = self
+                .catalog
+                .get_id("Candidate", number(&demand.record, "candidate")?)?;
+            if candidate.record["predecessor"] != pred
+                || candidate.record["context"] != context
+                || demand.record["ordinal"] != 0
+            {
+                return Err(CatalogError::IncompleteExpansion(
+                    "demand/candidate predecessor or ordinal".into(),
+                ));
+            }
+            if demand.record["classification"] == "eligible" {
+                let id = number(&demand.record, "outcome_id")?;
+                let edge = self.catalog.get_id("OracleEvidence", id)?;
+                if edge.record["applied"]["from_store"] != demand.record["from_store"] {
+                    return Err(CatalogError::IncompleteExpansion(
+                        "demand source outcome".into(),
+                    ));
+                }
+                if evidence_seen.insert(id) {
+                    evidence.push(id);
+                }
+                if demand.record["role"] == "capacity" {
+                    capacity_targets.insert(number(&edge.record["applied"], "to_store")?);
+                }
+            }
+        }
+        if record.record["oracle_evidence"] != json!(evidence) {
+            return Err(CatalogError::IncompleteExpansion(
+                "complete first-use Oracle outcome union".into(),
+            ));
+        }
+        for key in self.written_ids("OracleEvidence") {
+            if !matches!(key,RecordKey::Numeric(id) if evidence_seen.contains(&id)) {
+                return Err(CatalogError::IncompleteExpansion(
+                    "unreferenced new Oracle outcome".into(),
+                ));
+            }
+        }
+        let mut targets = BTreeSet::new();
+        let mut target_stores = BTreeSet::new();
+        for key in self.written_ids("ProductEdge") {
+            let edge = self.catalog.get("ProductEdge", &key)?;
+            if edge.record["from_product"] != pred || edge.record["context"] != context {
+                return Err(CatalogError::IncompleteExpansion(
+                    "product edge predecessor".into(),
+                ));
+            }
+            let target = number(&edge.record, "to_product")?;
+            targets.insert(target);
+            target_stores.insert(number(
+                &self.catalog.get_id("Product", target)?.record,
+                "store_id",
+            )?);
+        }
+        let mut pair_refs = Vec::new();
+        let mut labels = BTreeSet::new();
+        for target in targets {
+            let pair = self.catalog.get(
+                "FairPair",
+                &RecordKey::Text(canonical(&json!([context, pred, target]))),
+            )?;
+            if pair.record["nonstuttering"] != json!(pred != target) {
+                return Err(CatalogError::IncompleteExpansion(
+                    "nonstuttering pair identity".into(),
+                ));
+            }
+            if pred != target {
+                for label in pair.record["labels"]
+                    .as_array()
+                    .ok_or_else(|| CatalogError::CorruptRecord("pair labels".into()))?
+                {
+                    labels.insert(
+                        label
+                            .as_str()
+                            .ok_or_else(|| CatalogError::CorruptRecord("pair label".into()))?
+                            .to_owned(),
+                    );
+                }
+            }
+            pair_refs.push(pair.reference()?);
+        }
+        if record.record["fair_pairs"] != json!(pair_refs) {
+            return Err(CatalogError::IncompleteExpansion(
+                "complete target-ordered fair-pair union".into(),
+            ));
+        }
+        let capacity_only = capacity_targets
+            .difference(&target_stores)
+            .copied()
+            .collect::<Vec<_>>();
+        if record.record["capacity_only_stores"] != json!(capacity_only) {
+            return Err(CatalogError::IncompleteExpansion(
+                "capacity-only Store identity union".into(),
+            ));
+        }
         if record.record["discovered_products"] != json!(self.discovered_products()) {
             return Err(CatalogError::IncompleteExpansion(
                 "discovery FIFO list".into(),
@@ -793,6 +954,11 @@ impl WriteTransaction {
         }
         let en: RecordRef = serde_json::from_value(record.record["enabledness"].clone())?;
         let enabled = self.catalog.validate_ref(&en)?;
+        if enabled.record["full_graph_labels"] != json!(labels) {
+            return Err(CatalogError::IncompleteExpansion(
+                "full-graph nonstuttering enabledness union".into(),
+            ));
+        }
         if enabled.kind != "Enabledness" || enabled.record["product_id"] != pred {
             return Err(CatalogError::IncompleteExpansion(
                 "enabledness predecessor".into(),
@@ -1075,6 +1241,53 @@ impl Drop for ReadSnapshot {
     }
 }
 
+pub(super) fn fixture_configuration(path: PathBuf) -> CatalogConfig {
+    let source = SourceIdentity {
+        commit: "0".repeat(40),
+        tree: "1".repeat(40),
+        source_closure_sha256: "2".repeat(64),
+        driver_sha256: "3".repeat(64),
+        finite_inventory_sha256: "4".repeat(64),
+        proof_contract_sha256: "5".repeat(64),
+        toolchain_sha256: "6".repeat(64),
+        workflow_sha256: "7".repeat(64),
+    };
+    let session_id = uuid::Uuid::from_u128(1);
+    let mut plan: Value = serde_json::from_str(include_str!(
+        "../../../../verification/async-driver-refinement/paged-resource-plan.example.json"
+    ))
+    .expect("example");
+    let p = &mut plan["record"];
+    p["admission"] = json!("admitted");
+    p["session_id"] = json!(session_id);
+    p["source"] = json!(source);
+    for field in [
+        "resident_bytes",
+        "resident_rss_bytes",
+        "total_session_disk_bytes",
+        "total_retained_artifact_bytes",
+        "maximum_units",
+        "unit_predecessor_allowance",
+        "unit_record_allowance",
+        "unit_byte_allowance",
+    ] {
+        p[field] = json!(1_000_000);
+    }
+    p["available_disk_receipt"] =
+        json!({"kind":"runtime_receipt","id":"synthetic-fixture","sha256":"8".repeat(64)});
+    p["plan_sha256"] = json!("0".repeat(64));
+    let provisional: Record = serde_json::from_value(plan).expect("plan shape");
+    let hash = provisional.sha256();
+    let mut value = provisional.record;
+    value["plan_sha256"] = json!(hash);
+    CatalogConfig {
+        path,
+        source,
+        session_id,
+        resource_plan: Record::new("ResourcePlan", value).expect("fixture plan"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1082,52 +1295,6 @@ mod tests {
     // Synthetic storage values, deliberately not a Store-D proof certificate.
     // The test exercises the two actual catalog backends and their transaction
     // boundaries; production transition correctness remains the Oracle's job.
-    fn configuration(path: PathBuf) -> CatalogConfig {
-        let source = SourceIdentity {
-            commit: "0".repeat(40),
-            tree: "1".repeat(40),
-            source_closure_sha256: "2".repeat(64),
-            driver_sha256: "3".repeat(64),
-            finite_inventory_sha256: "4".repeat(64),
-            proof_contract_sha256: "5".repeat(64),
-            toolchain_sha256: "6".repeat(64),
-            workflow_sha256: "7".repeat(64),
-        };
-        let session_id = uuid::Uuid::from_u128(1);
-        let mut plan: Value = serde_json::from_str(include_str!(
-            "../../../../verification/async-driver-refinement/paged-resource-plan.example.json"
-        ))
-        .expect("example");
-        let p = &mut plan["record"];
-        p["admission"] = json!("admitted");
-        p["session_id"] = json!(session_id);
-        p["source"] = json!(source);
-        for field in [
-            "resident_bytes",
-            "resident_rss_bytes",
-            "total_session_disk_bytes",
-            "total_retained_artifact_bytes",
-            "maximum_units",
-            "unit_predecessor_allowance",
-            "unit_record_allowance",
-            "unit_byte_allowance",
-        ] {
-            p[field] = json!(1_000_000);
-        }
-        p["available_disk_receipt"] =
-            json!({"kind":"runtime_receipt","id":"synthetic-fixture","sha256":"8".repeat(64)});
-        p["plan_sha256"] = json!("0".repeat(64));
-        let provisional: Record = serde_json::from_value(plan).expect("plan shape");
-        let hash = provisional.sha256();
-        let mut value = provisional.record;
-        value["plan_sha256"] = json!(hash);
-        CatalogConfig {
-            path,
-            source,
-            session_id,
-            resource_plan: Record::new("ResourcePlan", value).expect("fixture plan"),
-        }
-    }
     fn seed(catalog: &Catalog) -> CatalogResult<()> {
         let transaction = catalog.begin_initial(0)?;
         catalog.set_control(
@@ -1174,7 +1341,7 @@ mod tests {
     #[test]
     fn catalog_reference_and_sqlite_atomic_fifo_snapshots_agree() {
         let directory = tempfile::tempdir().expect("owned test scratch");
-        let config = configuration(directory.path().join("catalog.sqlite"));
+        let config = fixture_configuration(directory.path().join("catalog.sqlite"));
         let memory =
             Catalog::memory(config.clone(), 256, 4 * 1024 * 1024).expect("bounded reference");
         let disk = Catalog::disk(config).expect("persistent catalog");
@@ -1249,7 +1416,7 @@ mod tests {
             br#"{"schema_version":6,"kind":"Counts","kind":"Store","record":{}}"#
         )
         .is_err());
-        let mut source = configuration(PathBuf::from("unused-reference-path")).source;
+        let mut source = fixture_configuration(PathBuf::from("unused-reference-path")).source;
         source.proof_contract_sha256 = "not-a-digest".into();
         assert!(source.validate().is_err());
         let left = Record::new(

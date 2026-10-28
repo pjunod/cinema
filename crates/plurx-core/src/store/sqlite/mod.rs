@@ -1583,6 +1583,86 @@ impl SqliteStore {
         Self::init(Connection::open_in_memory()?)
     }
 
+    /// Save the actual initial proof writer before it owns any savepoint.
+    /// Test harness only; this is the production connection, not row replay.
+    #[cfg(test)]
+    pub(super) fn async_refinement_write_image(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+        deadline: std::time::Instant,
+    ) -> Result<(), StoreError> {
+        let connection = self
+            .conn
+            .lock()
+            .map_err(|error| StoreError::Task(error.to_string()))?;
+        if !connection.is_autocommit() {
+            return Err(StoreError::Task(
+                "initial image capture after proof savepoint".into(),
+            ));
+        }
+        super::async_driver_catalog::sqlite::backup_connection(
+            &connection,
+            path,
+            max_bytes,
+            deadline,
+        )
+        .map_err(|error| StoreError::Task(error.to_string()))
+    }
+
+    /// Restore the exact migrated initial image into an isolated actual writer.
+    /// Do not call init/migrate/backfill or generate replacement raw UUIDs.
+    #[cfg(test)]
+    pub(super) fn async_refinement_from_image(
+        path: &Path,
+        max_bytes: u64,
+        deadline: std::time::Instant,
+    ) -> Result<Self, StoreError> {
+        use rusqlite::backup::{Backup, StepResult};
+        let metadata =
+            std::fs::symlink_metadata(path).map_err(|error| StoreError::Task(error.to_string()))?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() == 0
+            || metadata.len() > max_bytes
+        {
+            return Err(StoreError::Task(
+                "invalid or over-budget initial image".into(),
+            ));
+        }
+        let source = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut connection = Connection::open_in_memory()?;
+        {
+            let backup = Backup::new(&source, &mut connection)?;
+            loop {
+                if std::time::Instant::now() >= deadline {
+                    return Err(StoreError::Task("initial image restore deadline".into()));
+                }
+                match backup.step(128)? {
+                    StepResult::Done => break,
+                    StepResult::More => {}
+                    StepResult::Busy | StepResult::Locked => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    _ => {
+                        return Err(StoreError::Task(
+                            "unknown initial image restore result".into(),
+                        ))
+                    }
+                }
+            }
+        }
+        housekeeping::configure_writer(&connection)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(connection)),
+            reads: None,
+            token_activity: Arc::default(),
+            path: None,
+            #[cfg(feature = "fixtures")]
+            settings_reads: Arc::default(),
+        })
+    }
+
     /// Count local cache/offline rows still keyed by a legacy instance id.
     /// M0 uses this before accepting a distinct node id so rollback or a
     /// restored database cannot silently strand and later delete those bytes.
