@@ -271,8 +271,9 @@ fn ready_v1_open_upgrades_same_inode_without_replacing_witness() {
     let inode = std::fs::metadata(&path).unwrap().ino();
     // Build a historical installation fixture, NOT a production downmigration.
     let mut db = Connection::open(&path).unwrap();
-    db.execute_batch("DROP TABLE retained_asset_owners; DROP TABLE members; DROP TABLE family_roles; DROP TABLE operations; DROP TABLE obligations; DROP TABLE journal_meta; DROP TABLE owners;").unwrap();
+    db.execute_batch("DROP TABLE members; DROP TABLE family_roles; DROP TABLE retained_asset_owners; DROP TABLE recovered_s_holders; DROP TABLE recovered_r_holders; DROP TABLE asset_operation_membership; DROP TABLE operations; DROP TABLE obligations; DROP TABLE journal_meta; DROP TABLE owners;").unwrap();
     populated_v1(&mut db, &witness);
+    validate(&db).expect("exact historical v1 fixture before storage reopen");
     drop(db);
     let reopened = storage::Storage::open(&options(
         root.path(),

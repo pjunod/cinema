@@ -197,13 +197,30 @@ pub(super) fn load(
                     } = member
                     {
                         let custody_json: String = connection.query_row("SELECT custody_json FROM retained_asset_owners WHERE obligation_id=?1 AND asset_id=?2", params![target_obligation_id.uuid().as_bytes(), asset_id.uuid().as_bytes()], |r| r.get(0))?;
-                        let custody: v2::RetainedAssets = codec::decode(&custody_json)?;
-                        if custody.producer_obligation_id.uuid() != id
-                            || custody.producer_graph_id != manifest.graph_id
-                            || custody.target_graph_id != *target_graph_id
-                            || custody.transfer_operation_id != *operation_id
-                            || !custody.transfers.contains(transfer)
-                        {
+                        // A settled producer keeps its original transfer record
+                        // across both retained document versions. V2 stores one
+                        // compact V3 transfer; it cannot decode as the V1 DTO.
+                        let bound = match v2::decode_retained_assets(&custody_json)? {
+                            v2::RetainedAssetsDocument::V1(custody) => {
+                                custody.producer_obligation_id.uuid() == id
+                                    && custody.producer_graph_id == manifest.graph_id
+                                    && custody.target_obligation_id == *target_obligation_id
+                                    && custody.target_graph_id == *target_graph_id
+                                    && custody.asset_id == *asset_id
+                                    && custody.transfer_operation_id == *operation_id
+                                    && custody.transfers.contains(transfer)
+                            }
+                            v2::RetainedAssetsDocument::V2(custody) => {
+                                custody.producer_obligation_id.uuid() == id
+                                    && custody.producer_graph_id == manifest.graph_id
+                                    && custody.target_obligation_id == *target_obligation_id
+                                    && custody.target_graph_id == *target_graph_id
+                                    && custody.asset_id == *asset_id
+                                    && custody.transfer_operation_id == *operation_id
+                                    && custody.transfer == *transfer
+                            }
+                        };
+                        if !bound {
                             return Err(codec::invalid());
                         }
                     }

@@ -289,6 +289,50 @@ fn corrupt_frozen_snapshot_rolls_back_source_target_and_retains_receipt() {
     assert_eq!(retained, 0);
 }
 
+#[test]
+fn settled_v3_retirement_inventory_requires_exact_retained_transfer() {
+    let mut f = make_fixture(false);
+    execute(&mut f.source.storage, &f.command, f.source.owner).unwrap();
+    let db = &f.source.storage.connection;
+    let settlement: String = db
+        .query_row(
+            "SELECT settlement_json FROM obligations WHERE obligation_id=?1",
+            [f.source.handle.obligation_id().as_bytes()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let manifest = codec::encode(&f.source.manifest).unwrap();
+    let load_original = || {
+        super::super::inventory::load(
+            db,
+            f.source.handle.obligation_id(),
+            f.source.owner,
+            f.source.handle.graph_id(),
+            Phase::Settled,
+            &manifest,
+            Some(&settlement),
+        )
+    };
+    assert!(matches!(
+        load_original().expect("V2 retained document binds the original settled producer"),
+        ObligationInventory::TypedV2 { .. }
+    ));
+    let mut changed = f.retained.clone();
+    changed.transfer.target_member_id = v2::Id::new(Uuid::new_v4()).unwrap();
+    db.execute(
+        "UPDATE retained_asset_owners SET custody_json=?2 WHERE obligation_id=?1",
+        params![
+            changed.target_obligation_id.uuid().as_bytes(),
+            codec::encode(&changed).unwrap()
+        ],
+    )
+    .unwrap();
+    assert!(
+        load_original().is_err(),
+        "a different retained transfer is not the original settlement"
+    );
+}
+
 /// These are complete journal AUDIT fixtures, not a NativeRetainedSImportProof
 /// or positive process-exit witness. The tested authority is schema migration.
 fn retained_v6_with_adoption_history() -> RetirementFixture {
@@ -299,6 +343,10 @@ fn retained_v6_with_adoption_history() -> RetirementFixture {
     else {
         panic!("original fixture retirement");
     };
+    let before_adoption = snapshot(&f.source.storage.connection, &f.source.storage.witness)
+        .expect("real V3 retirement must reconstruct before adding adoption audit history");
+    assert_eq!(before_adoption.retained_assets.len(), 1);
+    assert!(before_adoption.recovered_s_holders.is_empty());
     let db = &mut f.source.storage.connection;
     let mut next_owner =
         super::super::load_owner(db, f.source.owner, &f.source.storage.witness).unwrap();
