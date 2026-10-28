@@ -368,7 +368,52 @@ public roots together in an old-key-signed release before retiring the old key.
 **macOS publication has a separate Apple requirement:** the Ed25519 update key
 is not a code-signing certificate. An existing paid Apple Developer Program
 membership can create a Developer ID Application certificate for direct macOS
-distribution, but an iOS signing certificate cannot substitute for it. Configure
-Developer ID signing and notarization before the first official macOS desktop
-release; the release workflow rejects ad-hoc builds. Follow
-[Apple's Developer ID setup](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/).
+distribution, but an iOS signing certificate cannot substitute for it.
+The release workflow assembles an ad-hoc candidate without Apple credentials,
+then signs and notarizes it in the separate `macos_signing` job. That job never
+executes the candidate. It signs every loadable Mach-O image with a secure
+timestamp and Hardened Runtime, keeps the daemon's source-parser entitlement,
+submits the complete package to Apple, staples the accepted app ticket, and
+checks the existing Developer ID/team/notarization/Gatekeeper policy. The final
+closure and component hashes describe the signed, stapled bytes; the original
+build manifests remain in `provenance/apple-signing.json`.
+
+Create the `macos-release-signing` GitHub environment with required reviewers
+and trusted branch/tag restrictions. Add these environment secrets (private
+bytes belong in GitHub's secret UI or files passed to `gh secret set`, never
+shell arguments or repository files):
+
+| Secret | Value |
+|---|---|
+| `PLURX_MACOS_CERTIFICATE_P12_BASE64` | Base64 of the exported Developer ID Application certificate **and private key** in a password-protected `.p12`. |
+| `PLURX_MACOS_CERTIFICATE_PASSWORD` | Password for that `.p12`. |
+| `PLURX_MACOS_NOTARY_PRIVATE_KEY` | App Store Connect team API private key, including its PEM delimiters. |
+
+Add these environment variables:
+
+| Variable | Value |
+|---|---|
+| `PLURX_MACOS_SIGNING_IDENTITY` | Exact `Developer ID Application: … (TEAMID)` certificate name. |
+| `PLURX_MACOS_DEVELOPER_TEAM_ID` | Ten-character Apple team ID matching the certificate. |
+| `PLURX_MACOS_NOTARY_KEY_ID` | Ten-character App Store Connect team API key ID. |
+| `PLURX_MACOS_NOTARY_ISSUER_ID` | API key issuer UUID. |
+| `PLURX_TRUSTED_PACKAGING_COMMIT` | Exact reviewed workflow commit, matching the dispatch commit; also required by desktop metadata signing. |
+
+The signing job imports the certificate into a temporary keychain and removes
+it and the notarization key on success, failure or cancellation. Missing
+configuration, rejected notarization, or failed distribution verification
+prevents the upload and publication. Configure the existing desktop update
+signing environment and compatibility variables above as well; publication
+requires the complete platform cohort and signed update metadata.
+
+A dry run needs neither Apple credentials nor environment approval. It uploads
+an ad-hoc `release-macos` workflow artifact without publishing a GitHub release.
+A tag publication uploads only the verified archive under that artifact name;
+the unsigned intermediate is `macos-candidate`. Dispatch the reviewed workflow
+with an existing `release_tag` to publish that tag, or push a new annotated
+release tag. The artifact is `plurxd-X.Y.Z-macos-universal.tar.gz`; unpack it and
+run `./install`. Existing published releases are never overwritten.
+
+Follow [Apple's Developer ID setup](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/)
+and [notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+for certificate and team API key provisioning.

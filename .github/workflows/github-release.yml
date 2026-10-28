@@ -27,7 +27,8 @@ run-name: github release ${{ inputs.release_tag || (github.event_name == 'push' 
 # holds this file to its own contract instead of the self-hosted one.
 #
 # The build jobs hold a read-only token and hand their output on as workflow
-# artifacts. Only `publish`, which compiles and runs nothing from the source,
+# artifacts. A separate protected macOS job signs/notarizes the archive without
+# executing its contents. Only `publish`, which compiles and runs nothing from the source,
 # can write: it checks that it holds exactly the expected files, computes
 # SHA256SUMS over them, and creates the release in one step.
 #
@@ -537,14 +538,6 @@ jobs:
             --control-dir "$RUNNER_TEMP/universal/bin" --version "$VERSION" \
             --source-commit "${{ needs.resolve.outputs.commit }}" --output "$PWD/dist/$name"
           test "$("dist/$name/runtime/plurxd" --version)" = "$EXPECT_VERSION"
-          if [ "${{ needs.resolve.outputs.mode }}" = release ]; then
-            # Actual Apple evidence is mandatory. A candidate assembled with
-            # ad-hoc signing fails closed here; no env flag can bless it.
-            # Protected Developer ID/notary configuration must precede the
-            # first official desktop-cohort release; local dry runs remain usable.
-            python3 scripts/package-macos --verify-distribution "$PWD/dist/$name" \
-              --team-id "${{ vars.PLURX_MACOS_DEVELOPER_TEAM_ID }}"
-          fi
           python3 scripts/package-macos --archive "$PWD/dist/$name" --output "$PWD/dist/$name.tar.gz"
           rm -rf "dist/$name"
           ls -l dist
@@ -563,6 +556,88 @@ jobs:
           codesign --verify --deep --strict "$package/Plurx Server.app"
           # Actual login/stop/reboot and rollback are native qualification,
           # separate from archive assembly; this job does not claim them.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ needs.resolve.outputs.mode == 'release' && 'macos-candidate' || 'release-macos' }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 7
+
+  macos_signing:
+    name: sign and notarize the macOS install archive
+    needs: [resolve, macos]
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'release'
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: macos-release-signing
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
+      SOURCE_DATE_EPOCH: ${{ needs.resolve.outputs.source_date_epoch }}
+      PACKAGING_COMMIT: ${{ github.sha }}
+      TRUSTED_PACKAGING_COMMIT: ${{ vars.PLURX_TRUSTED_PACKAGING_COMMIT }}
+    steps:
+      - name: Fetch only the explicitly approved immutable packaging code
+        run: |
+          set -euo pipefail
+          [[ "$TRUSTED_PACKAGING_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$PACKAGING_COMMIT" = "$TRUSTED_PACKAGING_COMMIT"
+          git init -q trusted
+          git -C trusted fetch -q --depth 1 "$REPO_URL" "$TRUSTED_PACKAGING_COMMIT"
+          git -C trusted checkout -q --detach FETCH_HEAD
+          test "$(git -C trusted rev-parse HEAD)" = "$TRUSTED_PACKAGING_COMMIT"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-candidate
+          path: candidate
+      - name: Sign every native image, notarize, staple and verify the complete archive
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.PLURX_MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.PLURX_MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_PRIVATE_KEY: ${{ secrets.PLURX_MACOS_NOTARY_PRIVATE_KEY }}
+          SIGNING_IDENTITY: ${{ vars.PLURX_MACOS_SIGNING_IDENTITY }}
+          TEAM_ID: ${{ vars.PLURX_MACOS_DEVELOPER_TEAM_ID }}
+          NOTARY_KEY_ID: ${{ vars.PLURX_MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ vars.PLURX_MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          for name in CERTIFICATE_BASE64 CERTIFICATE_PASSWORD NOTARY_PRIVATE_KEY SIGNING_IDENTITY TEAM_ID NOTARY_KEY_ID NOTARY_ISSUER_ID; do
+            test -n "${!name}" || { echo "::error::missing macOS release configuration: $name"; exit 1; }
+          done
+          credentials="$RUNNER_TEMP/macos-release-credentials"
+          mkdir "$credentials"
+          keychain="$credentials/signing.keychain-db"
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -rf "$credentials"
+          }
+          trap cleanup EXIT
+          python3 -c 'import base64,os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"macos-release-credentials","certificate.p12").write_bytes(base64.b64decode(os.environ["CERTIFICATE_BASE64"],validate=True))'
+          printf '%s\n' "$NOTARY_PRIVATE_KEY" > "$credentials/notary.p8"
+          keychain_password=$(openssl rand -hex 32)
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$credentials/certificate.p12" -P "$CERTIFICATE_PASSWORD" -t cert -f pkcs12 -k "$keychain" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          rm -f "$credentials/certificate.p12"
+          unset CERTIFICATE_BASE64 CERTIFICATE_PASSWORD NOTARY_PRIVATE_KEY keychain_password
+          mkdir dist
+          python3 trusted/scripts/sign-macos-release \
+            --archive "$PWD/candidate/plurxd-$VERSION-macos-universal.tar.gz" \
+            --output "$PWD/dist/plurxd-$VERSION-macos-universal.tar.gz" \
+            --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
+            --identity "$SIGNING_IDENTITY" --team-id "$TEAM_ID" \
+            --key "$credentials/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID"
+      - name: Remove Apple credentials even after cancellation
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/macos-release-credentials/signing.keychain-db" >/dev/null 2>&1 || true
+          rm -rf "$RUNNER_TEMP/macos-release-credentials"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-macos
@@ -652,8 +727,8 @@ jobs:
 
   desktop_metadata:
     name: validate complete desktop cohort (fixture signatures on dry runs)
-    needs: [resolve, linux, macos, windows, windows_smoke]
-    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
+    needs: [resolve, linux, macos, macos_signing, windows, windows_smoke]
+    if: github.server_url == 'https://github.com' && !cancelled() && !failure() && needs.resolve.outputs.mode != 'qualification'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # No environment or secrets: candidate qualification needs no owner approval.
@@ -804,7 +879,7 @@ jobs:
 
   publish:
     name: publish the release (a dry run stops at the check)
-    needs: [resolve, linux, macos, windows, windows_smoke, desktop_signing]
+    needs: [resolve, linux, macos, macos_signing, windows, windows_smoke, desktop_signing]
     if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'release'
     runs-on: ubuntu-24.04
     timeout-minutes: 30

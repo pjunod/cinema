@@ -1469,6 +1469,7 @@ paths = [
   "scripts/install-compose-tray",
   "scripts/linux-tray-release",
   "scripts/package-macos",
+  "scripts/sign-macos-release",
   "scripts/build-subtitle-engine",
   "scripts/subtitle-engine-manifest.json",
   "scripts/subtitle-engine-self-test",

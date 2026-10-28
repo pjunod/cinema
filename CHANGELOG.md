@@ -113,6 +113,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- GitHub macOS releases sign and notarize the complete install archive in a
+  protected job before publication, retaining component hashes and the stapled
+  app ticket. Dry-run builds remain available without Apple credentials.
+
 - Fresh macOS source installs build Automake without creating a circular
   GNUmakefile symlink when the temporary directory uses a symlinked path.
 
