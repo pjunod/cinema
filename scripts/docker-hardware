@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a per-invocation Compose GPU overlay without editing host config."""
+"""Generate a per-invocation Compose hardware/HTTPS overlay without editing host config."""
 
 from __future__ import annotations
 
@@ -11,10 +11,14 @@ import importlib.util
 import os
 from pathlib import Path
 import platform
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
+
+
+HTTPS = runpy.run_path(str(Path(__file__).with_name("docker-https-ports.py")))
 
 
 class HardwareError(ValueError):
@@ -262,6 +266,7 @@ def resolved_compose_inputs() -> tuple[dict[str, str], dict]:
                         "COMPOSE_FILE": "${COMPOSE_FILE:-}",
                         "COMPOSE_PATH_SEPARATOR": "${COMPOSE_PATH_SEPARATOR:-}",
                         "PLURX_DOCKER_GPU": "${PLURX_DOCKER_GPU:-auto}",
+                        "PLURX_HTTPS_HOST_PORT": "${PLURX_HTTPS_HOST_PORT:-}",
                     },
                 }
             }
@@ -335,6 +340,7 @@ def prepare(output: Path, prepare_pi: bool = False) -> str:
             "docker hardware: using existing configuration (manual mode or non-local/native-Linux engine)",
             file=sys.stderr,
         )
+    overlay["services"]["plurxd"].update(HTTPS["https_port_overlay"](document, environment))
     output.write_text(json.dumps(overlay) + "\n", encoding="utf-8")
     files.append(os.path.abspath(output))
     if any(os.pathsep in name for name in files):
@@ -349,7 +355,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         print(prepare(args.output, args.prepare_pi))
-    except (HardwareError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+    except (HardwareError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(
             f"docker hardware preparation failed; this helper did not start Compose: {error}",
             file=sys.stderr,
