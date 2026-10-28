@@ -2,6 +2,24 @@ version = 1
 enforce_after = "e8a910f"
 
 
+# PR #1307: Cinema quality and next episode retain native playback ownership.
+[[fixes]]
+id = "linux-player.cinema-quality-transition"
+commits = ["ab880ed254a09b5f822e7048f8b3248528e31b29"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def change_quality(self, choice):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "test_quality_preserves_absolute_position_pause_and_heartbeat_selection"
+
+[[fixes]]
+id = "linux-player.cinema-next-transition"
+commits = []
+supplements = "linux-player.cinema-quality-transition"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def next_episode(self):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "test_explicit_next_finishes_predecessor_then_opens_resolved_successor"
+
 # PR #1306: native handoff is limited to the selected Dolby Vision file on Linux.
 [[fixes]]
 id = "web.linux-dolby-vision-player-handoff"
