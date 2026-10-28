@@ -2193,6 +2193,7 @@ mod syscall_failures {
 
     async fn pausing_root(
         root: &Path,
+        enter_parser: bool,
     ) -> (
         Arc<NodeResourceRuntime>,
         CopyVodOwner,
@@ -2250,12 +2251,25 @@ int main(void) { alarm(20); for (;;) pause(); }
             .await
             .expect("same original R");
         let preparation = NodeResourceRuntime::fixture_copy_original_preparation(&owner);
-        cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::RootRegistered).await;
+        if enter_parser {
+            // Complete original registration and send its one-shot start latch
+            // before sealing. No borrowed sender or non-entry adapter is used.
+            owner
+                .start(deadline())
+                .await
+                .expect("actual original parser entry");
+        } else {
+            cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::RootRegistered).await;
+        }
         let (graph, child) = {
             let mut bundle = preparation.state.lock().await;
             let role = &mut bundle.roles[0];
             let copy = role.copy_vod.as_ref().expect("original copy");
-            assert!(copy.task.is_none() && copy.fixed_image.is_some());
+            if enter_parser {
+                assert!(copy.task.is_some() && copy.start_released && copy.task_observed_committed);
+            } else {
+                assert!(copy.task.is_none() && copy.fixed_image.is_some());
+            }
             let child = role.roots[&copy.root_member];
             role.sealed = Some(role.graph.take().expect("same original graph").seal());
             (
@@ -2367,7 +2381,7 @@ int main(void) { alarm(20); for (;;) pause(); }
             return;
         };
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
-            let (runtime, mut owner, preparation, graph, child) = pausing_root(&root).await;
+            let (runtime, mut owner, preparation, graph, child) = pausing_root(&root, false).await;
             let charge = runtime.accounting().unwrap().used;
             let ids = original_ids(&preparation).await;
             let output = owner.output();
@@ -2432,7 +2446,8 @@ int main(void) { alarm(20); for (;;) pause(); }
             .build()
             .unwrap()
             .block_on(async move {
-                let (runtime, mut owner, preparation, graph, child) = pausing_root(&root).await;
+                let (runtime, mut owner, preparation, graph, child) =
+                    pausing_root(&root, false).await;
                 let charge = runtime.accounting().unwrap().used;
                 let ids = original_ids(&preparation).await;
                 let output = owner.output();
@@ -2514,5 +2529,152 @@ int main(void) { alarm(20); for (;;) pause(); }
                 .await;
                 complete();
             });
+    }
+
+    // R19: original ENTERED parser JoinHandle is genuinely pending on stdout
+    // with no bytes/EOF. Cancellation leaves that handle in original custody.
+    #[tokio::test]
+    async fn copy_entered_parser_join_cancellation_preserves_same_task_until_original_eof() {
+        use crate::adaptive_resources::physical_graph::copy_vod::CopyStartDisposition;
+        use std::os::unix::process::ExitStatusExt;
+        let root = tempfile::tempdir().expect("actual entered-join cancellation fixture");
+        let (runtime, owner, preparation, graph, child) = pausing_root(root.path(), true).await;
+        let charge = runtime.accounting().expect("same original full R").used;
+        let ids = original_ids(&preparation).await;
+        let output = owner.output();
+        let application = owner
+            .take_application_lease(1024)
+            .expect("original app alias before cleanup");
+        let (task, observation) = {
+            let bundle = preparation.state.lock().await;
+            let copy = bundle.roles[0]
+                .copy_vod
+                .as_ref()
+                .expect("same original registered parser");
+            assert!(copy.start_released && copy.task_observed_committed);
+            (
+                copy.task.expect("same original task"),
+                copy.task_observation,
+            )
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !graph.fixture_copy_task_entered(task).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("original task must receive its actual start latch before join cancellation");
+        let mut join = Box::pin(graph.join_copy_vod(task));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut join)
+                .await
+                .is_err(),
+            "actual entered parser join must remain pending while original child owns open stdout"
+        );
+        drop(join); // ONLY the borrowed waiter; no abort, reset or replacement.
+        let snapshot = graph.snapshot().await;
+        assert_eq!(
+            (
+                snapshot.roots,
+                snapshot.waited_roots,
+                snapshot.writers,
+                snapshot.joined_writers,
+                snapshot.abandoned_writers
+            ),
+            (1, 0, 1, 0, 0)
+        );
+        assert!(!graph.fixture_copy_task_finished(task).await);
+        assert_eq!(
+            graph.fixture_copy_disposition(task).await,
+            Some(CopyStartDisposition::TakenBeforeSeal)
+        );
+        assert!(graph
+            .try_wait_root(child)
+            .await
+            .expect("same original live child")
+            .is_none());
+        {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            let copy = role
+                .copy_vod
+                .as_ref()
+                .expect("same original copy survives cancelled join");
+            assert_eq!(copy.task, Some(task));
+            assert_eq!(copy.task_observation, observation);
+            assert_eq!(role.roots[&copy.root_member], child);
+            assert!(copy.terminal.is_none() && copy.process_closure.is_none());
+            assert!(copy.permanent_hold.is_none() && role.pending_finite_close.is_none());
+            assert_eq!(
+                (
+                    copy.root_member,
+                    copy.task_member,
+                    copy.acquisition_id,
+                    copy.settlement_operation_id
+                ),
+                ids
+            );
+        }
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        graph
+            .start_kill_root(child)
+            .await
+            .expect("actual same-root SIGKILL");
+        let waited = tokio::time::timeout(Duration::from_secs(10), graph.wait_root(child))
+            .await
+            .expect("original wait watchdog")
+            .expect("actual same Child wait");
+        assert_eq!(
+            waited.signal(),
+            Some(libc::SIGKILL),
+            "fixture alarm is no substitute"
+        );
+        let terminal = tokio::time::timeout(Duration::from_secs(10), graph.join_copy_vod(task))
+            .await
+            .expect("same original JoinHandle watchdog")
+            .expect("original entered task joins after real EOF");
+        assert!(matches!(terminal, CopyTaskTerminal::Entered(summary) if !summary.completed),
+            "empty real stream must report actual entered parser failure, not NeverEntered: {terminal:?}");
+        let snapshot = graph.snapshot().await;
+        assert_eq!(
+            (
+                snapshot.waited_roots,
+                snapshot.joined_writers,
+                snapshot.abandoned_writers
+            ),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            graph.fixture_copy_disposition(task).await,
+            Some(CopyStartDisposition::TakenBeforeSeal)
+        );
+        assert_eq!(graph.fixture_copy_pipe_close_calls(task).await, [1, 1]);
+        assert_eq!(
+            runtime.accounting().unwrap().used,
+            charge,
+            "real wait/join alone cannot refund R"
+        );
+        {
+            let bundle = preparation.state.lock().await;
+            let copy = bundle.roles[0]
+                .copy_vod
+                .as_ref()
+                .expect("same original task for runtime cleanup");
+            assert_eq!(copy.task, Some(task));
+            assert_eq!(copy.task_observation, observation);
+            assert_eq!(
+                (
+                    copy.root_member,
+                    copy.task_member,
+                    copy.acquisition_id,
+                    copy.settlement_operation_id
+                ),
+                ids
+            );
+        }
+        drop(graph);
+        // Normal owner cleanup reuses the actual original join and root wait,
+        // then emits acquired-task owner facts and waits both original aliases.
+        retire_with_retained_aliases(runtime, owner, preparation, true, output, application).await;
     }
 }

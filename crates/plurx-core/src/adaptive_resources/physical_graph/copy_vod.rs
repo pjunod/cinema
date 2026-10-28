@@ -191,6 +191,12 @@ impl CopyTaskHoldReason {
 }
 #[derive(Default)]
 struct CopyTaskState {
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    entered: bool,
     terminal: Option<CopyTaskTerminal>,
     hold: Option<CopyTaskHoldReason>,
 }
@@ -355,6 +361,16 @@ async fn original_copy_task(
         drop(work);
         publish_copy_terminal(&finished, &completion, CopyTaskTerminal::NeverEntered);
         return;
+    }
+    // Read-only fixture observation at the actual entered boundary. It is
+    // not a gate or a terminal/native-close fact and allocates no new owner.
+    #[cfg(all(
+        test,
+        feature = "fixtures",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    if let Ok(mut state) = finished.lock() {
+        state.entered = true;
     }
     // The task and sink MUST NOT acquire graph.members: join retains that
     // lock while this SAME task finishes. The sink uses the bundle lock;
@@ -1004,6 +1020,22 @@ impl SealedPhysicalGraph {
             }
         }
     }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub(in crate::adaptive_resources) async fn fixture_copy_task_entered(
+        &self,
+        task: GraphCopyTask,
+    ) -> bool {
+        let members = self.custody.members.lock().await;
+        let record = members.writers[task.index]
+            .copy
+            .as_ref()
+            .expect("original copy");
+        assert_eq!(record.selection, task);
+        let entered = record.finished.lock().is_ok_and(|state| state.entered);
+        drop(members);
+        entered
+    }
+
     pub(in crate::adaptive_resources) async fn fixture_copy_task_finished(
         &self,
         task: GraphCopyTask,
