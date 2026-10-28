@@ -193,10 +193,12 @@ local function playback_info()
             h=osd.h-osd.mt-osd.mb},'w','h'))
     else row('Video display area') end
     row('Pixel format',joined(observed(p.pixelformat),observed(p['hw-pixelformat'])))
-    local range=observed(p.colormatrix)
-    if range=='dolbyvision' then range='Dolby Vision (mpv matrix)'
+    local range
+    local sdr={srgb=true,['bt.1886']=true,['gamma2.2']=true,['gamma2.4']=true}
+    if p.colormatrix=='dolbyvision' then range='Dolby Vision (mpv matrix)'
     elseif p.gamma=='pq' then range='PQ HDR'
-    elseif p.gamma=='hlg' then range='HLG HDR' end
+    elseif p.gamma=='hlg' then range='HLG HDR'
+    elseif sdr[p.gamma] then range='SDR (mpv transfer)' end
     row('Dynamic range',range)
     row('Input color',joined(observed(p.primaries),observed(p.gamma),observed(p.colormatrix),observed(p['colorlevels'])))
     row('VO target color',joined(observed(target.primaries),observed(target.gamma)))
@@ -217,8 +219,11 @@ local function playback_info()
     row('Decoded audio',audio_format(table_prop('audio-params')))
     row('Device audio output',joined(observed(prop('current-ao')),audio_format(table_prop('audio-out-params'))))
     row('Audio bitrate (packets)',bitrate(prop('audio-bitrate')))
-    row('AV sync difference',number(prop('avsync')) and string.format('%+.0f ms',prop('avsync')*1000) or nil)
-    row('Audio delay (applied)',number(prop('audio-delay')) and string.format('%+.0f ms',prop('audio-delay')*1000) or nil)
+    -- mpv keeps decoding while a script runs: capture once before checking,
+    -- since a property may disappear between requests during reattachment.
+    local sync, delay=prop('avsync'),prop('audio-delay')
+    row('AV sync difference',number(sync) and string.format('%+.0f ms',sync*1000) or nil)
+    row('Audio delay (applied)',number(delay) and string.format('%+.0f ms',delay*1000) or nil)
     row('Buffered on device (demuxer estimate)',measurement(cache['cache-duration'],'%.1f s'))
     row('Observed input rate (mpv estimate)',number(cache['raw-input-rate']) and bitrate(cache['raw-input-rate']*8) or nil)
     row('Demuxer buffered bytes',measurement(cache['fw-bytes'],'%.0f B'))

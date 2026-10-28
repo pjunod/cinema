@@ -1,10 +1,14 @@
 -- Behavioral tests execute the shipped script; mpv's API is replaced at its boundary.
 local script = arg[1] or 'plurx_player/scripts/cinema.lua'
 local P, bindings, watchers, events, commands, timers, overlay = {}, {}, {}, {}, {}, {}, {}
-local reads = {}
+local reads, read_overrides = {}, {}
 local now, mx, my, width, height = 0, 0, 0, 1280, 720
 package.preload['mp'] = function() return {
-    get_property_native=function(n) reads[n]=(reads[n] or 0)+1; return P[n] end,
+    get_property_native=function(n)
+        reads[n]=(reads[n] or 0)+1
+        if read_overrides[n] then return read_overrides[n]() end
+        return P[n]
+    end,
     set_property=function(n,v) P[n]=v; commands[#commands+1]={'set',n,v} end,
     set_property_number=function(n,v) P[n]=v; commands[#commands+1]={'set',n,v} end,
     commandv=function(...) commands[#commands+1]={...} end,
@@ -195,6 +199,51 @@ local function test_info_buttons_report_live_observations()
     width=1280;reset()
 end
 test_info_buttons_report_live_observations()
+-- The core can lose a property between separate Lua requests. Alternating
+-- getters prove each sample is checked and formatted from the same value.
+local function test_info_reads_each_sync_sample_once()
+    width=1280;reset();click(1125,681)
+    for i=1,60 do
+        if overlay.data:find('Audio delay (applied):',1,true) then break end
+        press('down')
+    end
+    local calls={avsync=0,['audio-delay']=0}
+    for name in pairs(calls) do
+        local property=name
+        read_overrides[property]=function()
+            calls[property]=calls[property]+1
+            if calls[property]%2==1 then return property=='avsync' and 0.012 or 0.025 end
+        end
+    end
+    timers[1]();eq(calls.avsync,1);eq(calls['audio-delay'],1)
+    assert(overlay.data:find('AV sync difference: +12 ms',1,true))
+    assert(overlay.data:find('Audio delay (applied): +25 ms',1,true))
+    timers[1]();eq(calls.avsync,2);eq(calls['audio-delay'],2)
+    assert(overlay.data:find('AV sync difference: Unavailable',1,true))
+    assert(overlay.data:find('Audio delay (applied): Unavailable',1,true))
+    read_overrides={};reset()
+end
+test_info_reads_each_sync_sample_once()
+local function test_info_dynamic_range_requires_transfer()
+    width=1280;reset();click(1125,681)
+    for i=1,60 do
+        if overlay.data:find('Dynamic range:',1,true) then break end
+        press('down')
+    end
+    press('down');press('down') -- keep the adjacent Input color row visible too
+    for _,matrix in ipairs({'bt.709','bt.2020-ncl'}) do
+        P['video-params']={colormatrix=matrix};timers[1]()
+        assert(overlay.data:find('Dynamic range: Unavailable',1,true))
+        assert(overlay.data:find('Input color: '..matrix,1,true))
+    end
+    for _,sample in ipairs({{'srgb','SDR (mpv transfer)'},{'bt.1886','SDR (mpv transfer)'},
+            {'pq','PQ HDR'},{'hlg','HLG HDR'},{'unrecognized','Unavailable'}}) do
+        P['video-params']={gamma=sample[1],colormatrix='bt.709'};timers[1]()
+        assert(overlay.data:find('Dynamic range: '..sample[2],1,true))
+    end
+    reset()
+end
+test_info_dynamic_range_requires_transfer()
 -- Open menus win input over the underlying Next card at the same coordinates.
 reset();update('user-data/cinema',context());click(930,681)
 click(1070,565);assert(not last() or last()[2]~='cinema-next')
@@ -226,4 +275,4 @@ update('user-data/cinema',original);click(930,681);press('down');press('enter')
 eq(#commands,0);assert(not overlay.data:find('Playback quality',1,true))
 click(1035,681);for i=1,9 do press('down') end;press('enter')
 eq(last()[2],'cinema-autoplay');eq(last()[3],'no')
-print('Cinema overlay: 32 control scenarios and live playback Info regression passed')
+print('Cinema overlay: 32 control scenarios and 3 live playback Info regressions passed')
