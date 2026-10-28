@@ -8,7 +8,8 @@ use crate::adaptive_resources::physical_graph::copy_vod::{
 };
 use crate::adaptive_resources::physical_graph::finite_vod::FiniteVodNeverRootClosure;
 use crate::adaptive_resources::runtime::copy_vod::{
-    CopyCleanupHoldDiagnostic, CopyCleanupHoldReason, CopyPipeCommand,
+    CopyCleanupCustody, CopyCleanupHoldDiagnostic, CopyCleanupHoldReason, CopyCloseClaim,
+    CopyPipeCommand,
 };
 use std::process::Stdio;
 #[cfg(all(test, feature = "fixtures"))]
@@ -54,7 +55,6 @@ pub(super) struct CopyLaunch {
     // Original close intent, distinct from sealing native entry for a natural
     // parser join. Its structural bytes are charged before R.
     pub(super) closing: bool,
-    pub(super) cleanup_requested: Arc<std::sync::atomic::AtomicBool>,
     pub(super) progress: Arc<tokio::sync::Notify>,
 }
 
@@ -238,7 +238,7 @@ impl NodeResourceRuntime {
         command: CopyPipeCommand,
         work: Option<CopyWork>,
         app_state: Arc<crate::adaptive_resources::runtime::finite_lifetime::FiniteAppState>,
-        cleanup_requested: Arc<std::sync::atomic::AtomicBool>,
+        cleanup_custody: Arc<CopyCleanupCustody>,
         progress: Arc<tokio::sync::Notify>,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
@@ -246,6 +246,7 @@ impl NodeResourceRuntime {
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded
             || role.copy_vod.is_some()
+            || role.copy_cleanup.is_some()
             || role.finite_vod.is_some()
             || role.graph.is_none()
             || acquisition_id.is_nil()
@@ -263,6 +264,7 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
+        role.copy_cleanup = Some(cleanup_custody);
         role.copy_vod = Some(CopyLaunch {
             root_member,
             task_member,
@@ -290,7 +292,6 @@ impl NodeResourceRuntime {
             retryable_hold: None,
             source_drifted: false,
             closing: false,
-            cleanup_requested,
             progress,
         });
         role.finite_app = Some(app_state);
@@ -312,9 +313,10 @@ impl NodeResourceRuntime {
         let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
         if role.refunded
             || copy.closing
-            || copy
-                .cleanup_requested
-                .load(std::sync::atomic::Ordering::Acquire)
+            || role
+                .copy_cleanup
+                .as_ref()
+                .is_none_or(|custody| custody.closing())
             || role.pending_finite_close.is_some()
             || role.phase != Phase::AcquisitionPossible
             || role
@@ -364,15 +366,16 @@ impl NodeResourceRuntime {
         &self,
         owner: &OwnedPreparation,
         index: usize,
-    ) -> Result<(), OperationError> {
+    ) -> Result<CopyCloseClaim, OperationError> {
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded || role.copy_vod.is_none() {
             return Err(OperationError::State);
         }
-        role.copy_admission_failed = true;
-        Ok(())
+        let custody = role.copy_cleanup.as_ref().ok_or(OperationError::State)?;
+        custody.request_repair();
+        custody.try_claim_owner().ok_or(OperationError::State)
     }
 
     pub(in crate::adaptive_resources::runtime) fn install_copy_work(

@@ -7,6 +7,7 @@ use crate::adaptive_resources::physical_graph::copy_vod::{
 };
 use crate::adaptive_resources::physical_graph::finite_vod::FiniteVodNeverRootClosure;
 use crate::adaptive_resources::runtime::copy_vod::CopyCleanupHoldReason;
+use crate::adaptive_resources::runtime::copy_vod::CopyCloseClaim;
 use crate::adaptive_resources::runtime::operations::bootstrap::retirement::ProducerFiniteClosure;
 use crate::resource_custody::{MemberKind, PhysicalTypedSettlement};
 
@@ -77,8 +78,8 @@ impl CopyCancellationClosure {
 }
 
 impl NodeResourceRuntime {
-    /// Existing daemon maintenance may retry only the original failed copy
-    /// admissions. This projection never creates another R or native owner;
+    /// Existing daemon maintenance retries original failed constructors and
+    /// abandoned close attempts. This projection creates no R or native owner;
     /// an unknown prepare/settlement leaves the exact book entry charged.
     pub(in crate::adaptive_resources::runtime) fn has_failed_copy_admission_inner(&self) -> bool {
         let Ok(book) = self.operations.lock() else {
@@ -87,11 +88,9 @@ impl NodeResourceRuntime {
         book.bundles.values().any(|state| {
             state.try_lock().map_or(true, |bundle| {
                 bundle.roles.iter().any(|role| {
-                    (role.copy_admission_failed
-                        || role.copy_vod.as_ref().is_some_and(|copy| {
-                            copy.cleanup_requested
-                                .load(std::sync::atomic::Ordering::Acquire)
-                        }))
+                    role.copy_cleanup
+                        .as_ref()
+                        .is_some_and(|custody| custody.repair_requested())
                         && !role.refunded
                         && role
                             .copy_vod
@@ -112,7 +111,7 @@ impl NodeResourceRuntime {
             if Instant::now() >= deadline {
                 break;
             }
-            let selected =
+            let cleanup_claim =
                 {
                     let bundle =
                         match tokio::time::timeout_at(deadline.into(), preparation.state.lock())
@@ -121,21 +120,23 @@ impl NodeResourceRuntime {
                             Ok(bundle) => bundle,
                             Err(_) => break,
                         };
-                    bundle.roles.len() == 1
-                        && !bundle.roles[0].refunded
-                        && bundle.roles[0]
+                    if bundle.roles.len() != 1
+                        || bundle.roles[0].refunded
+                        || bundle.roles[0]
                             .copy_vod
                             .as_ref()
-                            .is_none_or(|copy| copy.permanent_hold.is_none())
-                        && (bundle.roles[0].copy_admission_failed
-                            || bundle.roles[0].copy_vod.as_ref().is_some_and(|copy| {
-                                copy.cleanup_requested
-                                    .load(std::sync::atomic::Ordering::Acquire)
-                            }))
+                            .is_some_and(|copy| copy.permanent_hold.is_some())
+                    {
+                        continue;
+                    }
+                    bundle.roles[0]
+                        .copy_cleanup
+                        .as_ref()
+                        .and_then(|custody| custody.try_claim_repair())
                 };
-            if !selected {
+            let Some(cleanup_claim) = cleanup_claim else {
                 continue;
-            }
+            };
             let accepted = match tokio::time::timeout_at(
                 deadline.into(),
                 self.acknowledge_copy_preparation_for_cleanup(&preparation),
@@ -149,7 +150,7 @@ impl NodeResourceRuntime {
                 if !matches!(
                     tokio::time::timeout_at(
                         deadline.into(),
-                        self.prepare_unaccepted_copy_close(&preparation)
+                        self.prepare_unaccepted_copy_close(&preparation, &cleanup_claim)
                     )
                     .await,
                     Ok(Ok(()))
@@ -165,6 +166,7 @@ impl NodeResourceRuntime {
                     .await,
                     Ok(Ok(()))
                 ) {
+                    cleanup_claim.complete();
                     completed += 1;
                 }
                 continue;
@@ -204,7 +206,14 @@ impl NodeResourceRuntime {
                 if !matches!(
                     tokio::time::timeout_at(
                         deadline.into(),
-                        self.prepare_copy_close(&preparation, 0, output_member, true, deadline)
+                        self.prepare_copy_close(
+                            &preparation,
+                            &cleanup_claim,
+                            0,
+                            output_member,
+                            true,
+                            deadline
+                        )
                     )
                     .await,
                     Ok(Ok(()))
@@ -221,6 +230,7 @@ impl NodeResourceRuntime {
                 .await,
                 Ok(Ok(()))
             ) {
+                cleanup_claim.complete();
                 completed += 1;
             }
         }
@@ -233,6 +243,7 @@ impl NodeResourceRuntime {
     pub(in crate::adaptive_resources::runtime) async fn prepare_unaccepted_copy_close(
         &self,
         owner: &OwnedPreparation,
+        cleanup_claim: &CopyCloseClaim,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.lock().await;
@@ -240,6 +251,13 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         let role = &mut bundle.roles[0];
+        if !role
+            .copy_cleanup
+            .as_ref()
+            .is_some_and(|custody| cleanup_claim.matches(custody))
+        {
+            return Err(OperationError::State);
+        }
         if role.refunded
             || role.finite_vod.is_some()
             || role.handle.is_some()
@@ -258,9 +276,6 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
-        // Retain maintenance selection even after the original CopyLaunch
-        // drops its cleanup_requested Arc and a borrowed final waiter drops.
-        role.copy_admission_failed = true;
         if role.receipt.is_some() && role.copy_vod.is_none() {
             return Ok(());
         }
@@ -344,18 +359,20 @@ impl NodeResourceRuntime {
     pub(in crate::adaptive_resources::runtime) async fn prepare_copy_close(
         &self,
         owner: &OwnedPreparation,
+        cleanup_claim: &CopyCloseClaim,
         index: usize,
         output_member: Uuid,
         abort: bool,
         deadline: Instant,
     ) -> Result<(), OperationError> {
-        self.prepare_failed_copy_close(owner, index, output_member, abort, deadline)
+        self.prepare_failed_copy_close(owner, cleanup_claim, index, output_member, abort, deadline)
             .await
     }
 
     async fn prepare_failed_copy_close(
         &self,
         owner: &OwnedPreparation,
+        cleanup_claim: &CopyCloseClaim,
         index: usize,
         output_member: Uuid,
         abort: bool,
@@ -365,7 +382,13 @@ impl NodeResourceRuntime {
         {
             let mut bundle = owner.state.lock().await;
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
-            role.copy_admission_failed = true;
+            if !role
+                .copy_cleanup
+                .as_ref()
+                .is_some_and(|custody| cleanup_claim.matches(custody))
+            {
+                return Err(OperationError::State);
+            }
             if role.refunded
                 || role.pending_finite_close.is_some()
                 || role

@@ -264,3 +264,28 @@ other platform/static passes are historical results, not current-head credit.
 Behavioral/native-workload/model/mutation tests remain **NOT RUN** and held by
 the user's instruction. Fresh current-head compile-only CI is still required;
 no current CI pass, merge, deployment, restart or final acceptance is claimed.
+
+
+## 8. C5 follow-up — source work, 2026-10-28
+
+The later source change separates original close custody from repair selection.
+A private non-Clone claim moves from the preparing future into its actual
+returned ticket. A live claim excludes maintenance; cancellation before ticket
+exposure or destruction of an unfinished ticket requests repair. Cancellation
+of a borrowed finish future keeps custody in the surviving ticket. Repeated
+preparation while a ticket lives refuses rather than revoking that claim.
+
+The original role retains the same atomic custody allocation after CopyLaunch
+is removed. It owns no native/application/preparation payload. All three close
+callers validate that identity before touching the application fence or native
+proof. Only the existing successful finalizer marks the control finished; all
+native witnesses, original journal IDs, application barriers and permanent
+holds remain authoritative. Actual Arc layout, retained-role pointer, ticket
+storage and projected async frames are included before reservation.
+
+Three actual lifecycle regression bodies are authored, and the original
+COMMIT-reply cancellation case now checks maintenance exclusion. They have not
+run. New compiler checks are pending. The earlier compiler pins and passing
+compile-only CI6081 at 2c0228f remain historical evidence for that source; the
+existing manifest still pins that preceding implementation until new checks
+finish. This follow-up adds no independent-review or behavioral acceptance.

@@ -8,11 +8,15 @@ use crate::copy_segmenter::Limits;
 use crate::fmp4::FragmentReaderBounds;
 use std::time::Duration;
 
+mod cleanup_custody;
 pub(in crate::adaptive_resources::runtime) mod cleanup_memory;
 mod command;
 mod owner;
 mod sink;
 
+pub(in crate::adaptive_resources::runtime) use cleanup_custody::{
+    CopyCleanupCustody, CopyCloseClaim,
+};
 pub use command::CopyPipeCommand;
 pub use owner::{
     CopyCleanupHoldDiagnostic, CopyCleanupHoldReason, CopyCloseTicket, CopyFile, CopyOutput,
@@ -21,8 +25,8 @@ pub use owner::{
 pub(in crate::adaptive_resources) use sink::CopySink;
 
 impl NodeResourceRuntime {
-    /// Read-only maintenance diagnostic for an admitted copy constructor that
-    /// failed after its original R was charged. Busy book cells conservatively
+    /// Read-only maintenance diagnostic for original copy cleanup without a
+    /// live close claim. Busy book cells conservatively
     /// report true; a false answer is never physical close authority.
     pub fn has_failed_copy_admission(&self) -> bool {
         self.has_failed_copy_admission_inner()

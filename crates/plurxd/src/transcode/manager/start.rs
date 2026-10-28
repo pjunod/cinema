@@ -3107,7 +3107,7 @@ impl TranscodeManager {
                 .ok_or("selected copy actor budget exceeds client partition")?;
             // queue_copy_vod already retained this SAME preparation before
             // returning owner. Cancellation drops owner, setting its original
-            // cleanup_requested flag; ordinary maintain_failed_copy_admissions
+            // cleanup repair request; ordinary maintain_failed_copy_admissions
             // selects that book entry through retained_preparations(). No
             // detached registration race or lost local selector is introduced.
             let output = owner.output();

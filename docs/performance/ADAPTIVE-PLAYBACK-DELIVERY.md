@@ -29,7 +29,8 @@ and proven pre-reservation refusals do not invent native uncertainty.
 Genuine uncertainty retains its existing operation reservation and blocks
 planned-restart drain/commit; unrelated starts use normal capacity, phase,
 readiness and identity checks. No sticky uncertainty is cleared or refunded.
-C5's normal-retirement labeling/repair-selector split remains deferred.
+C5's later source follow-up separates live-ticket custody from repair selection;
+its regression bodies are authored and new compiler checks are pending.
 
 Preparation retains its controller through positive join and same-operation
 Store proof. Selected Linux software SDR Source planning retains original P/M

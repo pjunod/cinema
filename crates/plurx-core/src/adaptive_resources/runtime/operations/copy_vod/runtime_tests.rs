@@ -496,6 +496,208 @@ async fn copy_cancelled_close_before_ticket_exposure_retains_same_receipt_and_la
     retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
 }
 
+// C5: scheduling custody never replaces the actual native/journal facts.
+async fn retained_copy_close_operation(preparation: &OwnedPreparation) -> Uuid {
+    let bundle = preparation.state.lock().await;
+    let role = &bundle.roles[0];
+    assert!(!role.refunded && role.copy_vod.is_none());
+    if let Some(pending) = role.pending_finite_close.as_ref() {
+        pending.key.operation_id
+    } else {
+        let transition = role.transition.as_ref().expect("same original settlement");
+        assert!(transition.effect == Effect::Settle);
+        transition.operation.id
+    }
+}
+
+#[tokio::test]
+async fn copy_live_close_ticket_excludes_maintenance_and_repeated_preparation() {
+    let root = tempfile::tempdir().expect("actual live close custody fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::TaskArmed).await;
+    let charge = runtime.accounting().expect("actual original R").used;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("actual app lease");
+    let mut ticket = owner
+        .prepare_retirement(true, deadline())
+        .await
+        .expect("actual native close");
+    let operation = pending_command(&preparation, false).await;
+    assert!(
+        !runtime.has_failed_copy_admission(),
+        "live ticket owns close custody"
+    );
+    assert!(
+        owner.prepare_retirement(true, deadline()).await.is_err(),
+        "no duplicate live ticket"
+    );
+    assert!(
+        !runtime.has_failed_copy_admission(),
+        "busy refusal cannot revoke the first claim"
+    );
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "real aliases block release"
+    );
+    assert!(
+        !runtime.has_failed_copy_admission(),
+        "a borrowed finish timeout keeps the actual ticket"
+    );
+    drop(owner);
+    drop(output);
+    drop(application);
+    assert_eq!(ticket.fixture_application_released(), Some(true));
+    assert_eq!(
+        runtime
+            .maintain_failed_copy_admissions(deadline())
+            .await
+            .expect("same maintenance"),
+        0
+    );
+    // Old maintenance could move the pending command even while the ticket's
+    // preparation alias prevented refund. Check the untouched command itself.
+    assert_eq!(pending_command(&preparation, false).await, operation);
+    assert_eq!(runtime.accounting().expect("same full R").used, charge);
+    drop(preparation); // inspection must not obstruct actual rich-bundle destruction
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("same ticket finalizes once");
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("same completed ticket is idempotent");
+    drop(ticket);
+    assert!(!runtime.has_failed_copy_admission());
+    assert_eq!(
+        runtime
+            .maintain_failed_copy_admissions(deadline())
+            .await
+            .expect("no resurrected repair"),
+        0
+    );
+    assert_eq!(
+        runtime.accounting().expect("one original refund").used,
+        ResourceVector::default()
+    );
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole runtime")
+        .drain()
+        .expect("same journal drained");
+}
+
+#[tokio::test]
+async fn copy_lost_close_ticket_requests_original_repair_while_owner_remains_alive() {
+    let root = tempfile::tempdir().expect("actual lost ticket live owner fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::TaskArmed).await;
+    let charge = runtime.accounting().expect("actual original R").used;
+    let ticket = owner
+        .prepare_retirement(true, deadline())
+        .await
+        .expect("actual original ticket");
+    let operation = pending_command(&preparation, false).await;
+    drop(ticket); // owner is still alive: its Drop cannot be the repair signal
+    assert!(runtime.has_failed_copy_admission());
+    assert_eq!(
+        runtime
+            .maintain_failed_copy_admissions(Instant::now() + Duration::from_millis(100))
+            .await
+            .expect("repair keeps live application owner"),
+        0
+    );
+    assert_eq!(retained_copy_close_operation(&preparation).await, operation);
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("same owner still retains R")
+            .used,
+        charge
+    );
+    drop(owner);
+    drop(preparation);
+    assert_eq!(
+        runtime
+            .maintain_failed_copy_admissions(deadline())
+            .await
+            .expect("original repair after last actual owner"),
+        1
+    );
+    assert!(!runtime.has_failed_copy_admission());
+    assert_eq!(
+        runtime.accounting().expect("one original refund").used,
+        ResourceVector::default()
+    );
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole runtime")
+        .drain()
+        .expect("same journal drained");
+}
+
+#[tokio::test]
+async fn copy_cancelled_close_before_ticket_exposure_hands_original_custody_to_maintenance() {
+    let root = tempfile::tempdir().expect("actual pre-exposure repair fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::TaskArmed).await;
+    let charge = runtime.accounting().expect("actual original R").used;
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
+    let mut close = Box::pin(owner.prepare_retirement(true, deadline()));
+    tokio::select! {
+        result=&mut close=>panic!("close returned before original handoff gate: {}",result.is_ok()),
+        ()=gate.reached()=>{},
+        ()=tokio::time::sleep(Duration::from_secs(15))=>panic!("actual close handoff watchdog"),
+    }
+    assert!(
+        !runtime.has_failed_copy_admission(),
+        "the preparation future owns custody"
+    );
+    drop(close);
+    drop(gate);
+    let operation = pending_command(&preparation, false).await;
+    assert!(
+        runtime.has_failed_copy_admission(),
+        "cancellation hands back original custody before owner Drop"
+    );
+    assert_eq!(
+        runtime
+            .maintain_failed_copy_admissions(Instant::now() + Duration::from_millis(100))
+            .await
+            .expect("repair retains actual owner"),
+        0
+    );
+    assert_eq!(retained_copy_close_operation(&preparation).await, operation);
+    assert_eq!(
+        runtime.accounting().expect("full R while owner lives").used,
+        charge
+    );
+    drop(owner);
+    drop(preparation);
+    assert_eq!(
+        runtime
+            .maintain_failed_copy_admissions(deadline())
+            .await
+            .expect("same original repair"),
+        1
+    );
+    assert_eq!(
+        runtime.accounting().expect("one original refund").used,
+        ResourceVector::default()
+    );
+    assert!(!runtime.has_failed_copy_admission());
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole runtime")
+        .drain()
+        .expect("same journal drained");
+}
+
 // R2: the real clock expires after the SAME root Arm commits. The actual
 // launcher queues a Hold, which cleanup must retry under that captured ID.
 #[tokio::test]
@@ -747,6 +949,17 @@ async fn copy_cancelled_settlement_reply_after_real_commit_reuses_same_ticket_op
         charge
     );
     drop(finish); // borrowed waiter only; original receiver stays in runtime
+    assert!(
+        !runtime.has_failed_copy_admission(),
+        "cancelled borrowed finish retains the live ticket claim"
+    );
+    assert_eq!(
+        runtime
+            .maintain_failed_copy_admissions(deadline())
+            .await
+            .expect("maintenance skips claimed original reply"),
+        0
+    );
     {
         let bundle = preparation.state.lock().await;
         let role = &bundle.roles[0];

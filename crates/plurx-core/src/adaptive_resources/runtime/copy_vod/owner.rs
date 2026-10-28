@@ -101,8 +101,15 @@ fn known_copy_memory(
         })
         .and_then(|n| n.checked_add(copy_task_structural_bytes()?))
         .ok_or_else(invalid)?;
+    // One retained role pointer survives CopyLaunch removal. The returned
+    // ticket and exclusive claim are compact selectors; account their inline
+    // storage in addition to the actual nested async-frame projection.
     let owner = std::mem::size_of::<CopyVodOwner>()
-        .checked_add(std::mem::size_of::<PathBuf>() + 2 * std::mem::size_of::<usize>())
+        .checked_add(std::mem::size_of::<Option<Arc<CopyCleanupCustody>>>())
+        .and_then(|n| n.checked_add(std::mem::size_of::<CopyCloseTicket>()))
+        .and_then(|n| {
+            n.checked_add(std::mem::size_of::<PathBuf>() + 2 * std::mem::size_of::<usize>())
+        })
         .and_then(|n| n.checked_add(selected_directory_capacity))
         .and_then(|n| n.checked_add(request.source.path.capacity()))
         .and_then(|n| n.checked_add(binary_path_capacity))
@@ -126,12 +133,7 @@ fn known_copy_memory(
                 std::mem::size_of::<tokio::sync::Mutex<()>>() + 2 * std::mem::size_of::<usize>(),
             )
         })
-        .and_then(|n| {
-            n.checked_add(
-                std::mem::size_of::<std::sync::atomic::AtomicBool>()
-                    + 2 * std::mem::size_of::<usize>(),
-            )
-        })
+        .and_then(|n| n.checked_add(CopyCleanupCustody::requested_allocation_bytes()?))
         .and_then(|n| {
             n.checked_add(
                 std::mem::size_of::<tokio::sync::Notify>() + 2 * std::mem::size_of::<usize>(),
@@ -165,7 +167,7 @@ pub struct CopyVodOwner {
     playlist_capacity: usize,
     target_seconds: u32,
     app_state: Arc<super::super::finite_lifetime::FiniteAppState>,
-    cleanup_requested: Arc<std::sync::atomic::AtomicBool>,
+    cleanup_custody: Arc<CopyCleanupCustody>,
     progress: Arc<tokio::sync::Notify>,
     // Last: this guard observes destruction of the rich owner fields above.
     _app_guard: Arc<super::super::finite_lifetime::FiniteAppGuard>,
@@ -234,6 +236,7 @@ pub struct CopyCloseTicket {
     runtime: Arc<NodeResourceRuntime>,
     preparation: Option<OwnedPreparation>,
     app_state: Option<Arc<super::super::finite_lifetime::FiniteAppState>>,
+    cleanup_claim: Option<CopyCloseClaim>,
 }
 impl CopyCloseTicket {
     /// Observes this ticket's same application fence; never native/settlement proof.
@@ -263,7 +266,11 @@ impl CopyCloseTicket {
         )
         .await
         .map_err(|_| super::super::operations::OperationError::Deadline)?
-        .map_err(Into::into)
+        .map_err(FiniteVodError::from)?;
+        if let Some(claim) = self.cleanup_claim.take() {
+            claim.complete();
+        }
+        Ok(())
     }
 }
 
@@ -764,6 +771,12 @@ impl CopyVodOwner {
         abort: bool,
         deadline: Instant,
     ) -> Result<CopyCloseTicket, FiniteVodError> {
+        // Claim before the first await; cancellation queues the same original
+        // close for repair. An already live ticket keeps its exclusive claim.
+        let cleanup_claim = self
+            .cleanup_custody
+            .try_claim_owner()
+            .ok_or(super::super::operations::OperationError::State)?;
         let accepted = tokio::time::timeout_at(
             deadline.into(),
             self.runtime
@@ -776,6 +789,7 @@ impl CopyVodOwner {
                 deadline.into(),
                 self.runtime.prepare_copy_close(
                     &self.preparation,
+                    &cleanup_claim,
                     0,
                     self.scratch_member,
                     abort,
@@ -788,7 +802,7 @@ impl CopyVodOwner {
             tokio::time::timeout_at(
                 deadline.into(),
                 self.runtime
-                    .prepare_unaccepted_copy_close(&self.preparation),
+                    .prepare_unaccepted_copy_close(&self.preparation, &cleanup_claim),
             )
             .await
             .map_err(|_| super::super::operations::OperationError::Deadline)??;
@@ -797,6 +811,7 @@ impl CopyVodOwner {
             runtime: Arc::clone(&self.runtime),
             preparation: Some(self.preparation.clone()),
             app_state: Some(Arc::clone(&self.app_state)),
+            cleanup_claim: Some(cleanup_claim),
         })
     }
 }
@@ -805,8 +820,7 @@ impl Drop for CopyVodOwner {
         // A cancelled manager start or lost session selector is never a
         // native close fact. The original charged role remains in the
         // runtime book for its ordinary same-operation repair pass.
-        self.cleanup_requested
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.cleanup_custody.request_repair();
         self.progress.notify_waiters();
     }
 }
@@ -1231,7 +1245,7 @@ impl NodeResourceRuntime {
         let app_state = super::super::finite_lifetime::FiniteAppState::with_application_limit(
             usize::try_from(request.application_owner_bytes).map_err(|_| invalid())?,
         );
-        let cleanup_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup_custody = Arc::new(CopyCleanupCustody::new());
         let progress = Arc::new(tokio::sync::Notify::new());
         let parser_source = request.command.source().clone();
         let video = request.command.video();
@@ -1245,7 +1259,7 @@ impl NodeResourceRuntime {
             request.command,
             None,
             Arc::clone(&app_state),
-            Arc::clone(&cleanup_requested),
+            Arc::clone(&cleanup_custody),
             Arc::clone(&progress),
         )?;
         let pending_preparation = preparation.clone();
@@ -1315,7 +1329,7 @@ impl NodeResourceRuntime {
                 playlist_capacity,
                 target_seconds: request.parser_limits.target_seconds.max(1),
                 app_state: Arc::clone(&app_state),
-                cleanup_requested,
+                cleanup_custody,
                 progress,
                 _app_guard: app_guard,
             })
@@ -1327,7 +1341,7 @@ impl NodeResourceRuntime {
                 // Register maintenance selection before the first await;
                 // cancellation or an unknown journal result keeps this SAME
                 // original R available to the existing supervisor cadence.
-                self.mark_copy_admission_failed(&preparation, 0)?;
+                let cleanup_claim = self.mark_copy_admission_failed(&preparation, 0)?;
                 let accepted = tokio::time::timeout_at(
                     deadline.into(),
                     self.acknowledge_copy_preparation_for_cleanup(&preparation),
@@ -1339,6 +1353,7 @@ impl NodeResourceRuntime {
                         deadline.into(),
                         self.prepare_copy_close(
                             &preparation,
+                            &cleanup_claim,
                             0,
                             scratch_member.uuid(),
                             true,
@@ -1350,7 +1365,7 @@ impl NodeResourceRuntime {
                 } else {
                     tokio::time::timeout_at(
                         deadline.into(),
-                        self.prepare_unaccepted_copy_close(&preparation),
+                        self.prepare_unaccepted_copy_close(&preparation, &cleanup_claim),
                     )
                     .await
                     .map_err(|_| super::super::operations::OperationError::Deadline)??;
@@ -1362,6 +1377,7 @@ impl NodeResourceRuntime {
                 )
                 .await
                 .map_err(|_| super::super::operations::OperationError::Deadline)??;
+                cleanup_claim.complete();
                 Err(error)
             }
         }

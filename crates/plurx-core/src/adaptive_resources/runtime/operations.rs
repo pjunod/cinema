@@ -120,7 +120,7 @@ struct OwnedRole {
     #[cfg(target_os = "linux")]
     copy_vod: Option<copy_vod::CopyLaunch>,
     #[cfg(target_os = "linux")]
-    copy_admission_failed: bool,
+    copy_cleanup: Option<Arc<super::copy_vod::CopyCleanupCustody>>,
     #[cfg(unix)]
     finite_app: Option<Arc<super::finite_lifetime::FiniteAppState>>,
     #[cfg(target_os = "linux")]
@@ -701,7 +701,7 @@ impl NodeResourceRuntime {
                 #[cfg(target_os = "linux")]
                 copy_vod: None,
                 #[cfg(target_os = "linux")]
-                copy_admission_failed: false,
+                copy_cleanup: None,
                 #[cfg(unix)]
                 finite_app: None,
                 #[cfg(target_os = "linux")]
