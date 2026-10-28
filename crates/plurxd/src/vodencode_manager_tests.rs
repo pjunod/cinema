@@ -210,7 +210,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         let verdict = plurx_core::transcode::dv_fel_qualification::FelVerdict {
             schema: plurx_core::transcode::dv_fel_qualification::SCHEMA,
             identity: manager
-                .fel_identity(&tools.scanner_digest())
+                .fel_identity(&tools.backend_digest())
                 .await
                 .expect("this node's FEL verdict identity"),
             source_size: file.size,

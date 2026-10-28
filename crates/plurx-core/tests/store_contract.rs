@@ -599,10 +599,12 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "put_dv_fel_verdict",
     "request_dv_fel_requalification",
     "dv_fel_verdict_counts",
+    "dv_fel_stale_titles",
     "dv_title_readiness",
     "dv_title_demands",
     "bind_dv_title_demand",
     "publish_dv_title_job",
+    "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
     // Progressive translation's actual source-bind/publication/Stop/read-lease
     // contract below exercises these on every backend, including three voters.
