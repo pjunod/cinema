@@ -113,6 +113,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- macOS source upgrades wait through transient process-inspection failures,
+  recover interrupted clean shutdowns, and print a directly runnable recovery
+  command with the complete executable path.
+
 - Fresh macOS source installs build Automake without creating a circular
   GNUmakefile symlink when the temporary directory uses a symlinked path.
 
