@@ -45,6 +45,9 @@ def source_generation_tools(prepared, env):
     archives.mkdir()
     prefix = directory / "prefix"
     env["PATH"] = os.pathsep.join([str(prefix / "bin"), env["PATH"]])
+    # The source-built aclocal only searches its own prefix; keep Homebrew macros such as pkg.m4 visible.
+    env["ACLOCAL_PATH"] = os.pathsep.join(str(path / "share/aclocal") for path in BREW_PREFIXES
+                                          if (path / "share/aclocal").is_dir())
     helper = recipe("build-macos-vulkan")
     for name, version, sha256 in [
         ("automake", "1.19", "79e8b1f7a967e87ce8a9ded76bee7f793d0ce1886ab2002feb1b0510f578b75a"),
