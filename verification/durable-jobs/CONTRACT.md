@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37` · **Scope:** bound `library_scan` and
+`d03c8abdf17dea7147e112a32fec274834151fca` (scoped author audit below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,32 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Unit-coverage repair — scoped author audit on 2026-10-28
+
+Codex agent `/root/diagnose_core_failures` compared immutable base
+`24d1bad72bed328b6de9a568a3537f375f9c206f` with runtime/test source
+`d03c8abdf17dea7147e112a32fec274834151fca`. The base file hashes match the
+previous pins. This agent authored the core fixture repairs; this audit is
+source-author correspondence, not independent review of that implementation.
+Independent Codex agent `coverage_review` reviewed the implementation diff and this metadata disposition on 2026-10-28, finding no blockers. That review ran no builds, tests or TLC checks and supplies no new qualification claim.
+
+[State](../../crates/plurxd/src/state.rs) adds only a `cfg(test)` backfill
+module declaration; the five mapped production callers are byte-identical.
+The [Store parent](../../crates/plurx-core/tests/store_contract.rs) registers
+four existing caption methods, corrects the method inventory, and validates
+exact empty caption/handoff extensions before historical fixture teardown.
+Its `formal_publication` registration and selected examples are unchanged.
+The selected library claim, binding, renewal, cancellation, publication and
+cleanup transitions retain their existing correspondence. Caption methods
+and historical schema teardown remain outside this finite model.
+
+Six whole-file row pins follow the inspected source; exact anchors remain
+unique. Model/configuration/toolchain bytes, bounds, properties, scope,
+validators and historical source-anchor snapshots are unchanged. This audit
+supplies no new runtime or TLC execution, refinement theorem, liveness,
+physical acceptance or qualification. Historical receipts retain their
+recorded source identities; fresh affected execution is separate evidence.
 
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 

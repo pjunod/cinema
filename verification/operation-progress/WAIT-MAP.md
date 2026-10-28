@@ -4,6 +4,34 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Unit-coverage repair — scoped author audit on 2026-10-28
+
+Codex agent `/root/diagnose_core_failures` compared immutable base
+`24d1bad72bed328b6de9a568a3537f375f9c206f` with runtime/test source
+`d03c8abdf17dea7147e112a32fec274834151fca`. Previous pins match the base.
+This agent authored the core SQL repairs; this audit is source-author
+correspondence, not independent review of that implementation. Independent Codex agent `coverage_review` reviewed the implementation diff and this metadata disposition on 2026-10-28, finding no blockers. That review ran no builds, tests or TLC checks and supplies no new qualification claim.
+
+[Membership](../../crates/plurx-core/src/cluster/membership.rs) corrects
+Hiqlite parameter binding in maintenance lease consumption, heartbeat
+acknowledgment and status capability/active-session projection. Exact
+node/claim/lease, maintenance and active-session predicates remain; values
+now reach their intended predicates in first-appearance order. Tables 31–32
+retain byte-identical `ClusterJobAuthority` and `may_run_cluster_jobs`
+bodies: local maintenance and absent committed-voter authority still refuse
+selected library work. Membership lifecycle, status and drain behavior are
+outside this selected-worker model; this audit does not prove them.
+
+[State](../../crates/plurxd/src/state.rs) adds only a `cfg(test)` backfill
+module declaration. Tables 42–43 retain the scheduler/worker bodies, selected
+claim/bind/renew/settle/publication flow and token/publication wait and lock
+ordering. Four whole-file row pins follow this source; exact anchors remain
+unique. Model/configuration/toolchain bytes, bounds, fairness premises,
+properties, scope, validators and historical source-anchor snapshots are
+unchanged. This audit supplies no new runtime or TLC execution, refinement,
+liveness, physical acceptance or qualification; earlier receipts retain only
+their recorded source identities. Fresh affected execution is separate.
+
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 
 Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.

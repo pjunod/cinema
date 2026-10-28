@@ -1,3 +1,46 @@
+# Unit coverage repair ownership author audit (2026-10-28):
+# Base 24d1bad72 -> repair candidate, including its native HEVC fixture.
+# Codex coverage_opportunities authored the HTTP/subtitle fixtures and audited
+# the exact source delta here; this is author audit, not independent approval.
+# Independent Codex coverage_review checked all 15 deltas, source hashes and
+# ownership claims on 2026-10-28; that review did not execute the fixtures.
+# No production owner, new task site or kill-on-drop constructor is introduced.
+# +1 method-spawn/+1 Command/+1 launch is observe_tests.rs's /bin/true child.
+# The test transfers it to ProducerSlot::attach_registered_job_owned, settles
+# writers, requests exact registration retirement and awaits confirmed reap
+# before retaining only its registration identity for observation. This normal
+# path is a reap receipt, not a claim of cleanup after every fixture panic.
+# +1 Command/+1 launch is hevc_census.rs's synchronous output() observation of
+# the production copy argv over the finite four-second 160x96 fixture. output
+# owns/drains both pipes and waits for the direct child before returning; it
+# has no separate wall timeout/output cap or asynchronous cancellation owner.
+# +2 Commands are runtime_tests.rs's real FFmpeg/FFprobe fixture construction.
+# Both await runtime::child_output with 15s/64KiB limits through the existing
+# clean-environment bounded collector/ChildWork guard; no launcher is added.
+# The other +11 launch-shaped matches are HTTP Response::status assertions:
+# DVR five, library channels one, Live TV one, subtitle translation API four.
+# They inspect response values and start no process or producer.
+# +4 timers are test-only: API's awaited 5ms source-verifying poll under a 5s
+# observation horizon; runtime's awaited 10ms start-marker poll, bounded by
+# its 15s startup timeout, and its 5s cancellation/join observation. The
+# operation is pinned in the test, not detached. The latter completes before
+# attempt-directory and exact announced PID absence assertions. Timeout/panic
+# alone is not confirmed reap. +1 UFCS lifecycle call is kill(pid, 0): an
+# existence observation, never a signal, after successful cancellation return.
+# +1 lifecycle-method is ReleaseSettlement::wait after the elected fixture
+# response owner has awaited complete_release_settlement. It observes a
+# completed shared response, not a child wait or an independent repair owner.
+# All nine durable-symbol deltas are in media_sessions/cleanup_tests.rs:
+# projection completion +1, exact release completion +3, publication fence +13,
+# durable safety window +2, blocked sentinel +2, terminal safety window +3,
+# shared settlement +1, client release intent +7, terminal cause +2. Real
+# SQLite activation/End/projection calls and awaited cleanup use the existing
+# exact owner/epoch fence; assertions preserve pending proof and cache authority
+# for unreachable peers, early boundaries, wrong epochs and uncommitted End.
+# Updated structural totals: 80 method spawns, 1899 namespaced timers,
+# 307 Commands, 821 launch shapes, 355 lifecycle methods, 73 UFCS lifecycle
+# sites. Module roots, patterns, exact equality and forbidden zeroes unchanged.
+
 # DV title analysis ownership review (PR #1301, 2026-10-28; source 7d2d4a9c7):
 # +1 namespaced task and +1 Command are DvTitleRide's companion scanner.
 # build_attested_pass retains DvTitleScan through the index pass and finish;
@@ -1584,7 +1627,7 @@ pattern = "MediaSessionProjectionCompletion"
 # PR1225: +1 in manager/processed_reuse_tests.rs:1541, the existing
 # PredecessorAcknowledged proof after awaited exact-predecessor retirement.
 # This test helper does not add a proof variant or a shipped release owner.
-expected_occurrences = 20
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-activation-handoff-proof"
@@ -1599,7 +1642,7 @@ expected_occurrences = 10
 [[module_symbols]]
 id = "m4-exact-release-proof-completion"
 pattern = "complete_release_(?:with_route|absent|settlement)"
-expected_occurrences = 26
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-terminal-route-proof-cache"
@@ -1711,7 +1754,7 @@ pattern = "publication_ready_at_ms"
 # sentinel. None moves a shipped fence.
 # #978: +2, test-only. The create.rs epoch-fence regression builds a blocked
 # activation and then the confirmed row a takeover produces.
-expected_occurrences = 147
+expected_occurrences = 160
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -1730,7 +1773,7 @@ pattern = "MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS"
 # fixture cannot drift away from the window it is meant to represent.
 # 5 -> 6 with the control plane's owner-loss answer: its publication-fence test
 # builds the same fixture from the same constant rather than a literal.
-expected_occurrences = 6
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-durable-publication-blocked-sentinel"
@@ -1779,13 +1822,13 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # #978: +1, test-only, the same blocked activation as the handoff fence above.
 # PR1225: +1 in manager/processed_reuse_tests.rs:1425, the test incumbent's
 # blocked activation before its existing Confirm settlement; no shipped write.
-expected_occurrences = 55
+expected_occurrences = 57
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
 pattern = "TERMINAL_PROJECTION_SAFETY_WINDOW"
-expected_occurrences = 10
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-cluster-make-before-break"
@@ -1895,12 +1938,12 @@ expected_occurrences = 15
 [[module_symbols]]
 id = "m4-release-shared-settlement"
 pattern = "ReleaseSettlement"
-expected_occurrences = 13
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-release-terminal-intent"
 pattern = "ReleaseIntent"
-expected_occurrences = 10
+expected_occurrences = 17
 
 [[module_symbols]]
 id = "m4-durable-terminal-cause"
@@ -1954,7 +1997,7 @@ pattern = "terminal_reason"
 # 50 -> 52 with the VOD index recovery (PR1299), both test-only: the budget
 # test's outcome fixture initializes the field to None, and the vod test reads
 # the `attempt_limit` cause the recovery wrote. No route cause changes.
-expected_occurrences = 52
+expected_occurrences = 54
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -3480,7 +3523,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # kill_on_drop guard; no production launcher or separate reap owner is added.
 # Main contributes one HTTPS transport JoinSet.spawn; its driver is joined by
 # the listener owner. Both parent additions are present in the source union.
-expected_occurrences = 79
+expected_occurrences = 80
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4938,7 +4981,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps that let the pass and the speech pass take their places in the
 # heavy lane's queue, four timeouts bounding those awaited tasks, and one
 # sleep in the ride-along worker test's polling loop.
-expected_occurrences = 1895
+expected_occurrences = 1899
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5420,7 +5463,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 303
+expected_occurrences = 307
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6067,7 +6110,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in-process responses, while the finite FFmpeg fixture is explicitly awaited.
 # Main's HTTPS admin/transport/startup owners and source/status reads remain in
 # the source scan; none changes launch authorization.
-expected_occurrences = 808
+expected_occurrences = 821
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6363,7 +6406,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 354
+expected_occurrences = 355
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6442,7 +6485,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 72
+expected_occurrences = 73
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
