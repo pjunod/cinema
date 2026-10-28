@@ -94,8 +94,18 @@ Installation, firewall, upgrade, and removal commands are in the
 
 HTTPS is off by default. In Settings → Developer → HTTPS, edit the addressed
 node, save, then restart that node to activate the desired configuration.
-The additional listener defaults to port `32443` on `server.bind`'s IP; the
-existing HTTP listener remains available. Saving never restarts the service.
+The TLS listener defaults to port `32443` on `server.bind`'s IP. While active,
+HTTP app/API requests return a temporary `307` redirect to HTTPS, preserving
+hostname, path, query, request method and body. Redirects use `no-store` so
+turning HTTPS off does not leave a permanent browser redirect. Saving alone
+changes neither the listener nor redirects; apply at restart.
+
+Health/readiness, metrics, discovery, internal cluster RPC and Plex/Jellyfin
+compatibility stay on their existing HTTP paths. The separate Jellyfin
+listener is unchanged. These exceptions keep machine clients operational;
+this is not a blanket ban on plaintext service traffic. TLS requests never
+redirect to themselves. Forwarded scheme headers do not bypass this policy;
+a TLS-terminating proxy should use the native HTTPS upstream when it is enabled.
 The card distinguishes saved intent, environment-overridden desired intent,
 and the listener/certificate actually loaded in this process. It remains
 usable when replicated settings cannot load, subject to ordinary admin auth
@@ -106,8 +116,9 @@ every DNS name and concrete IP clients will use before first enable; startup
 creates the identity, and saving alone creates no key. Alternatively, enter
 absolute paths to a leaf-first PEM chain and matching unencrypted private key.
 These are paths on the server or inside its container, never on the browser's
-computer. Supplied material is loaded at restart. With Docker, publish the
-chosen container port explicitly and mount supplied files read-only; see
+computer. Supplied material is loaded at restart. Docker rollout targets
+publish HTTPS conditionally and forward a remapped host port for redirects.
+Mount supplied files read-only; see
 [deployment instructions](../deploy/README.md#optional-native-https).
 
 After restart, verify the active fingerprint and download the **active public
@@ -3309,8 +3320,9 @@ membership addresses and token-file paths are intentionally file-only:
 | Env var | TOML | Default | What it does |
 |---|---|---|---|
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
-| `PLURX_HTTPS_ENABLED` | `server.https.enabled` | `false` | Additional public HTTPS listener after restart; existing HTTP remains available |
+| `PLURX_HTTPS_ENABLED` | `server.https.enabled` | `false` | Public HTTPS after restart; HTTP app/API requests temporarily redirect while active |
 | `PLURX_HTTPS_PORT` | `server.https.port` | `32443` | HTTPS port on `server.bind`'s IP; must not collide with configured listeners |
+| `PLURX_HTTPS_REDIRECT_PORT` | — | active HTTPS port | Reachable public HTTPS port for HTTP redirects; Docker rollout derives it from the published mapping. Set explicitly for a proxy or ambiguous manual mappings. Changes apply at restart |
 | `PLURX_HTTPS_CERT_FILE` | `server.https.cert_file` | empty | Absolute server/container leaf-first certificate-chain PEM path; empty with key empty selects persistent generated identity |
 | `PLURX_HTTPS_KEY_FILE` | `server.https.key_file` | empty | Absolute server/container matching unencrypted private-key PEM path; never returned in API responses |
 | `PLURX_HTTPS_SANS` | `server.https.sans` | localhost and loopback IPs | Comma-separated generated DNS names/IPs; concrete bind IP is also added. Existing generated SAN changes require explicit replacement while stopped |

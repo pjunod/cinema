@@ -727,11 +727,11 @@ into the owner-only file.
 Listing these is the point, not an apology — an honest boundary is what makes
 the protections above believable. plurx does **not**:
 
-- **Force encrypted public access or install client trust.** Optional native
-  HTTPS keeps HTTP available; it does not redirect, add HSTS, provision a
-  public CA certificate or alter browser/native trust stores. Choose and
-  qualify trusted client URLs explicitly. Hiqlite and sharing TLS use separate
-  identities and do not confer trust on the public HTTPS listener.
+- **Encrypt every service or install client trust.** Active native HTTPS
+  temporarily redirects public HTTP app/API requests, while health, discovery,
+  cluster RPC and compatibility traffic retain their HTTP paths. It adds no
+  HSTS, public CA certificate or browser/native trust. Qualify client trust
+  explicitly; Hiqlite and sharing TLS identities do not confer public trust.
 - **Authenticate cluster peers with a certificate authority.** Hiqlite's
   automatic self-signed certificates are accepted without verification. The
   shared Raft/API secrets authenticate requests, but an active LAN attacker who

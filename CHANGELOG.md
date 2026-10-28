@@ -109,6 +109,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **HTTP app addresses forward to HTTPS while it is active.** Temporary,
+  non-cached redirects preserve the requested path, query, method and body,
+  including remapped Docker HTTPS ports. Health, discovery, cluster RPC and
+  compatibility traffic keep working over their existing HTTP paths.
+
 - Restrict the Linux external player preference to Dolby Vision files on Linux;
   other formats and operating systems retain web playback, including mixed-version titles.
 

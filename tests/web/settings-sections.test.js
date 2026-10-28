@@ -2307,6 +2307,8 @@ test("HTTPS card keeps exact node revision, env ownership, public facts and a to
   const url=new Function("location",`${shippedSource("httpsConnectionUrl")} return httpsConnectionUrl;`)({href:"http://user:secret@[::1]:32400/path?token=SECRET#/settings/developer"});
   assert.equal(url({active:{enabled:true,port:32443}}),"https://[::1]:32443/");
   assert.equal(url({active:{enabled:false,port:32443}}),null);
+  assert.equal(url({active:{enabled:true,port:32443}},"https://media.example:8443/settings?token=SECRET"),"https://media.example:8443/");
+  assert.equal(url({active:{enabled:true,port:32443}},"https://media.example/settings"),"https://media.example/");
   const render=new Function("esc","setCard","cardHead","devGraduation","httpsConnectionUrl",`${shippedSource("httpsSettingsCard")} return httpsSettingsCard;`)(esc,value=>value,title=>title,(waiting,then)=>waiting+then,url);
   const value={node_id:'node"local',revision:"9007199254740993",saved:{enabled:false,port:32443,cert_file:"",key_file:"",sans:["localhost"]},desired:{enabled:true,port:32443,cert_file:"",key_file:"",sans:["localhost"]},active:{enabled:false,port:32443,cert_file:"",key_file:"",sans:["localhost"]},restart_required:true,overrides:["port"],durability_confirmed:false};
   const html=render(value);

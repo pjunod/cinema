@@ -1,5 +1,6 @@
 //! Public HTTPS identity, independent of sharing pins and replicated settings.
 mod admin;
+pub(crate) mod redirect;
 mod transport;
 pub(crate) use admin::{Control, SaveError, Update};
 pub(crate) use transport::{Prepared, Serving};

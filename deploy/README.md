@@ -506,9 +506,11 @@ Nothing mapping to `/var/lib/plurx` means the next rebuild loses everything.
 ## Optional native HTTPS
 
 HTTPS is an additional listener, off by default. Settings → Developer → HTTPS
-edits the addressed node and applies changes at its next restart; HTTP remains
-available. The same public API, web app and playback handlers run on both
-listeners. Discovery still advertises HTTP, so select HTTPS explicitly by URL.
+edits the addressed node and applies changes at its next restart. While HTTPS
+is active, HTTP app/API requests temporarily redirect to HTTPS on the same
+hostname, preserving path, query, method and body. Health/readiness, metrics,
+discovery, internal RPC and Plex/Jellyfin compatibility retain their HTTP paths.
+Discovery may still advertise HTTP; opening the app follows the redirect.
 Trust installation and physical browser/native playback qualification remain
 open in [the build ledger](../docs/server/HTTPS-BUILD.md).
 
@@ -523,6 +525,11 @@ same command to remove the generated publication.
 
 The host port defaults to the configured HTTPS port (32443 initially). Set
 `PLURX_HTTPS_HOST_PORT` in `deploy/.env` to choose a different host port.
+The rollout forwards a remapped port as `PLURX_HTTPS_REDIRECT_PORT` inside the
+container, so `443:32443` redirects to HTTPS port 443. A single fixed manual
+publication is handled the same way. For multiple or dynamically allocated
+host ports, explicitly set `PLURX_HTTPS_REDIRECT_PORT` in the container's
+`environment` to the port clients should use; ambiguous mappings are refused.
 Existing explicit TCP publications for the configured container port retain
 their operator-chosen host address and port. Remove an old manual HTTPS
 publication from your override if you want disabling HTTPS to remove it too.

@@ -340,7 +340,11 @@ def prepare(output: Path, prepare_pi: bool = False) -> str:
             "docker hardware: using existing configuration (manual mode or non-local/native-Linux engine)",
             file=sys.stderr,
         )
-    overlay["services"]["plurxd"].update(HTTPS["https_port_overlay"](document, environment))
+    https_overlay = HTTPS["https_port_overlay"](document, environment)
+    https_environment = https_overlay.pop("environment", {})
+    if https_environment:
+        overlay["services"]["plurxd"].setdefault("environment", {}).update(https_environment)
+    overlay["services"]["plurxd"].update(https_overlay)
     output.write_text(json.dumps(overlay) + "\n", encoding="utf-8")
     files.append(os.path.abspath(output))
     if any(os.pathsep in name for name in files):
