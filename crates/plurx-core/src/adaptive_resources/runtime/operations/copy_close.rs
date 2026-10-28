@@ -521,6 +521,8 @@ impl NodeResourceRuntime {
                 ) {
                     role.bootstrap.remove(&output_member);
                 }
+                // A retained acquired prefix is not NeverAcquired: native
+                // output retirement below must close that same BootstrapMember.
             }
             self.close_retained_entry(role.binding)?;
         }

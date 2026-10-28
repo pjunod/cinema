@@ -372,3 +372,20 @@ and native workspace. Total original R stays256MiB, and intentional rejection
 fields stay unchanged. Production profiles already reserve128MiB scratch memory
 with1MiB bootstrap and are unchanged. Actual admission still bounds readers and
 other overlaps; this correction establishes no full native/allocator peak.
+
+## 13. Acquired scratch prefix without a process — source repair, 2026-10-28
+
+At `db5f8a3c39a50839d63fc342ce6cd4ff9d8613ee`, both compiler loops passed.
+The first of69 selected core cases reached accepted preparation, original
+source opens and scratch root/sink acquisition, then failed physical retirement
+with State. One case ran and failed; the other68 did not run.
+
+The shared classifier previously accepted only an Unstarted scratch bootstrap
+when the producer process never entered. It now distinguishes a RetainedPrefix
+from an unarmed placeholder and an observed NeverEntered root. Both copy and
+software retain that same prefix for the existing native retirement driver.
+Only the exact unarmed placeholder may be removed. No schema, witness, refund,
+application-alias barrier or change/next-arm guard is relaxed. Missing native
+owners still prevent the driver from issuing a close fact. The existing actual
+copy-prefix and software cleanup regressions cover this repair; compilation
+and execution of the new source remain pending.

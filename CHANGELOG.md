@@ -109,6 +109,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Cancelling a producer that never started still retires its acquired scratch
+  root and sink through their original native owners before releasing charge.
 - Selected finite software and copy starts use valid output generations;
   malformed zero-generation requests refuse before reserving capacity.
 - Selected copy preparation installs its original response budget and parser

@@ -177,6 +177,8 @@ impl NodeResourceRuntime {
                 // and no native owner; the planned slot remains unacquired.
                 role.bootstrap.remove(&member);
             }
+            // Advanced scratch state stays owned for actual native retirement;
+            // producer-process non-entry never turns it into a placeholder.
         }
         self.close_retained_entry(role.binding)?;
         if let Some(graph) = role.graph.take() {

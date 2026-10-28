@@ -62,10 +62,15 @@ pub(super) fn btree_requested_upper_bound<K, V>(len: usize) -> Option<usize> {
     node.checked_mul(len)?.checked_mul(2)
 }
 
+/// Scratch routing while the producer process root never entered. These
+/// dispositions do not close an acquired filesystem prefix or grant a refund.
 #[cfg(unix)]
 pub(super) enum NeverRootBootstrap {
     UnarmedPlaceholder,
     ObservedNeverEntered,
+    /// Keep the same advanced scratch prefix for its actual native driver.
+    /// This is neither absence nor an observed NeverEntered witness.
+    RetainedPrefix,
 }
 
 /// Fully validated target fold while the actual native cells remain owned by
@@ -229,11 +234,14 @@ impl BootstrapMember {
     ) -> Result<NeverRootBootstrap, OperationError> {
         let fold = self.fold.as_ref().ok_or(OperationError::State)?;
         let state = fold.state();
-        if self.change.is_some()
-            || self.next_arm.is_some()
-            || state.bootstrap.phase != BootstrapPhase::Unstarted
-        {
+        if self.change.is_some() || self.next_arm.is_some() {
             return Err(OperationError::State);
+        }
+        if state.bootstrap.phase != BootstrapPhase::Unstarted {
+            // A process-root absence proof says nothing about scratch-root or
+            // sink acquisition. Preserve every original owner; the normal
+            // close_producer_finite_native driver still owes actual closure.
+            return Ok(NeverRootBootstrap::RetainedPrefix);
         }
         if self.root_arm.is_none() {
             if armed
