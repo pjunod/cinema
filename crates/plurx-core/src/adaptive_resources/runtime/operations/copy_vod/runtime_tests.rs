@@ -2970,14 +2970,14 @@ int main(void) { alarm(20); for (;;) pause(); }
         };
         assert_eq!(runtime.accounting().unwrap().used, charge);
         assert_eq!(original_ids(&preparation).await, ids);
-        // Cleanup itself reaches the same original step join. Its borrowed
-        // future may disappear without aborting or replacing that worker.
+        // Cleanup must join the same pending step BEFORE applying the strict
+        // prefix classifier. No original start/open waiter will be resumed.
         let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut cleanup)
-                .await
-                .is_err()
-        );
+        match tokio::time::timeout(Duration::from_millis(100), &mut cleanup).await {
+            Err(_) => {}
+            Ok(Err(error)) => panic!("copy cleanup refused its original pending step: {error:?}"),
+            Ok(Ok(_)) => panic!("copy cleanup returned before the original step result"),
+        }
         drop(cleanup);
         {
             let bundle = preparation.state.lock().await;
@@ -2986,25 +2986,34 @@ int main(void) { alarm(20); for (;;) pause(); }
                 role.bootstrap[&member].fixture_root_job_identity(),
                 Some(identity)
             );
-            assert!(role.sources.values().all(|source| source.parent_closed()));
-            assert!(
-                role.copy_vod.as_ref().unwrap().never_root_closure.is_some(),
-                "cleanup passed original Source closure and is waiting for the same bootstrap arm"
-            );
             assert!(role.pending_finite_close.is_none() && !role.refunded);
+            assert!(
+                role.copy_vod.as_ref().unwrap().never_root_closure.is_none(),
+                "pending prefix is reconciled before the no-process-root proof/classifier"
+            );
         }
         assert_eq!(runtime.accounting().unwrap().used, charge);
-        // Traversal cleanup also tests the distinct one-directory partial
-        // prefix close. Child cleanup's two-directory close is swept below.
-        let close_gate = (!child).then(|| Gate::install_next(Kind::CleanupCloseHandles, member));
+        // After release, ordinary cleanup ALONE must Observe this same step.
+        // Stop at an actual later cleanup result so its folded acquired IO and
+        // original RootCell identity remain inspectable before destruction.
+        let close_kind = if child {
+            Kind::CleanupRemoveChild
+        } else {
+            Kind::CleanupCloseHandles
+        };
+        let close_gate = Gate::install_next(close_kind, member);
         drop(gate);
-        runtime
-            .observe_finite_bootstrap_arm(&preparation, 0, member, deadline())
-            .await
-            .expect("Observe SAME completed traversal/mkdir job, never launch another step");
+        let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
+        let job = tokio::select! {
+            result = &mut cleanup => panic!("ordinary cleanup failed before actual acquired-prefix close: {}", result.is_ok()),
+            result = tokio::time::timeout(Duration::from_secs(10), close_gate.reached()) =>
+                result.expect("actual acquired-prefix cleanup watchdog"),
+        };
+        drop(cleanup);
         {
             let bundle = preparation.state.lock().await;
-            let prefix = &bundle.roles[0].bootstrap[&member];
+            let role = &bundle.roles[0];
+            let prefix = &role.bootstrap[&member];
             let joined = prefix.fixture_root_job_identity().unwrap();
             assert_eq!(
                 (joined.0, joined.1, joined.2),
@@ -3012,48 +3021,37 @@ int main(void) { alarm(20); for (;;) pause(); }
             );
             assert!(joined.3.is_none());
             let state = prefix.fold().unwrap().state();
-            assert_eq!(state.asset.totals.pending_jobs, 0);
             let acquired = if child {
                 state
                     .asset
                     .directory
                     .as_ref()
-                    .expect("actual original created child")
+                    .expect("same actually created child")
             } else {
                 &state
                     .bootstrap
                     .current
                     .as_ref()
-                    .expect("actual traversed directory")
+                    .expect("same traversed prefix")
                     .observed
             };
-            assert_eq!(acquired.acquisition_io_id.uuid(), identity.0);
-            if child {
-                assert_eq!(
-                    state.bootstrap.phase,
-                    v2::scratch::bootstrap::BootstrapPhase::SinkReady
-                );
-            }
-        }
-        assert_eq!(runtime.accounting().unwrap().used, charge);
-        if let Some(close_gate) = close_gate {
-            let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
-            let job = tokio::select! {
-                result = &mut cleanup => panic!("prefix retirement returned before actual checked close: {}", result.is_ok()),
-                result = tokio::time::timeout(Duration::from_secs(10), close_gate.reached()) =>
-                    result.expect("actual partial-prefix close watchdog"),
-            };
-            drop(cleanup);
-            let close = pending_native_io(&preparation, member, Kind::CleanupCloseHandles).await;
-            assert_eq!((close.0, close.3), (close_gate.identity().0, Some(job)));
-            assert_ne!(close.0, identity.0);
-            assert_eq!(runtime.accounting().unwrap().used, charge);
-            drop(close_gate);
             assert_eq!(
-                pending_native_io(&preparation, member, Kind::CleanupCloseHandles).await,
-                close
+                acquired.acquisition_io_id.uuid(),
+                identity.0,
+                "ordinary cleanup Observed the original step, not a replacement open/mkdir"
             );
+            assert!(role.sources.values().all(|source| source.parent_closed()));
+            assert!(role.copy_vod.as_ref().unwrap().never_root_closure.is_some());
         }
+        let close = pending_native_io(&preparation, member, close_kind).await;
+        assert_eq!((close.0, close.3), (close_gate.identity().0, Some(job)));
+        assert_ne!(close.0, identity.0);
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(close_gate);
+        assert_eq!(
+            pending_native_io(&preparation, member, close_kind).await,
+            close
+        );
         let ticket = owner
             .prepare_retirement(true, deadline())
             .await

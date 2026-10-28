@@ -91,6 +91,23 @@ fn original_owner(
     )
 }
 
+/// The existing actual Software fixture with its same private preparation
+/// selector. This grants no native owner, outcome, FD or closure capability.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(in crate::adaptive_resources::runtime) fn original_entered_prefix_fixture(
+    root: &Path,
+) -> (
+    Arc<NodeResourceRuntime>,
+    SoftwareVodOwner,
+    OwnedPreparation,
+    Uuid,
+) {
+    let (runtime, owner) = original_owner(root, false);
+    let preparation = owner.preparation.clone();
+    let member = owner.scratch_member;
+    (runtime, owner, preparation, member)
+}
+
 fn original_owner_at_generation(
     root: &Path,
     reject_prepare: bool,

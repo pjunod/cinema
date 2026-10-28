@@ -309,6 +309,11 @@ impl NodeResourceRuntime {
         if let Some(initial_member) = initial_member {
             self.observe_finite_bootstrap_root(owner, index, initial_member, deadline)
                 .await?;
+            // Only the proven pre-process-root path reaches this branch.
+            // Join/Observe its ORIGINAL pending traversal/create arm before
+            // the unchanged strict prefix classifier. No new step is entered.
+            self.observe_finite_bootstrap_arm(owner, index, initial_member, deadline)
+                .await?;
         }
         let never_root = self.close_finite_never_root(owner, index).await?;
         let member = if never_root {
@@ -650,5 +655,217 @@ impl NodeResourceRuntime {
             effect: Effect::Settle,
         });
         Ok(())
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "fixtures",
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod entered_prefix_tests {
+    use super::super::native_result_fixture::{Gate, Kind};
+    use super::*;
+    use std::time::Duration;
+
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+
+    #[tokio::test]
+    async fn software_entered_child_step_cleanup_replays_same_original_job_without_start_waiter() {
+        let root = tempfile::tempdir().expect("actual Software entered prefix fixture");
+        let (runtime, mut owner, preparation, member) =
+            crate::adaptive_resources::runtime::finite_vod::cleanup_tests::original_entered_prefix_fixture(root.path());
+        owner
+            .prepare_inputs(deadline())
+            .await
+            .expect("same original Software inputs");
+        runtime
+            .arm_scratch_bootstrap(&preparation, 0, member, deadline())
+            .await
+            .unwrap();
+        runtime
+            .open_scratch_bootstrap_root(&preparation, 0, member, deadline())
+            .await
+            .expect("actual original namespace prefix");
+        let charge = runtime.accounting().unwrap().used;
+        let output_alias = owner.output();
+        let control_alias = owner.control();
+        let gate = Gate::install_next(Kind::BootstrapChild, member);
+        let mut open =
+            Box::pin(runtime.open_scratch_bootstrap_sink(&preparation, 0, member, deadline()));
+        let job = tokio::select! {
+            result = &mut open => panic!("Software sink returned before actual child result: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(10), gate.reached()) =>
+                result.expect("actual Software mkdir/openat result watchdog"),
+        };
+        drop(open); // no original start/sink waiter is ever resumed below.
+        let identity = {
+            let bundle = preparation.state.lock().await;
+            let prefix = &bundle.roles[0].bootstrap[&member];
+            let identity = prefix.fixture_root_job_identity().unwrap();
+            assert_eq!((identity.0, identity.3), (gate.identity().0, Some(job)));
+            assert_eq!(prefix.fold().unwrap().state().asset.totals.pending_jobs, 1);
+            identity
+        };
+        let mut cleanup = Box::pin(owner.prepare_cancel(deadline()));
+        match tokio::time::timeout(Duration::from_millis(100), &mut cleanup).await {
+            Err(_) => {}
+            Ok(Err(error)) => {
+                panic!("Software cleanup refused its original pending child: {error:?}")
+            }
+            Ok(Ok(_)) => panic!("Software cleanup returned before the original child result"),
+        }
+        drop(cleanup);
+        {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            assert_eq!(
+                role.bootstrap[&member].fixture_root_job_identity(),
+                Some(identity)
+            );
+            assert!(role
+                .finite_vod
+                .as_ref()
+                .unwrap()
+                .never_root_closure
+                .is_none());
+            assert!(role.pending_finite_close.is_none() && !role.refunded);
+        }
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        let close_gate = Gate::install_next(Kind::CleanupRemoveChild, member);
+        drop(gate);
+        // Ordinary Software cancellation must Observe the SAME entered mkdir
+        // and reach real native child removal, without any manual Observe call.
+        let mut cleanup = Box::pin(owner.prepare_cancel(deadline()));
+        let close_job = tokio::select! {
+            result = &mut cleanup => panic!("Software cleanup failed before actual child removal: {}", result.is_ok()),
+            result = tokio::time::timeout(Duration::from_secs(10), close_gate.reached()) =>
+                result.expect("actual Software child removal watchdog"),
+        };
+        drop(cleanup);
+        let close_identity = {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            let prefix = &role.bootstrap[&member];
+            let joined = prefix.fixture_root_job_identity().unwrap();
+            assert_eq!(
+                (joined.0, joined.1, joined.2),
+                (identity.0, identity.1, identity.2)
+            );
+            assert!(joined.3.is_none());
+            assert_eq!(
+                prefix
+                    .fold()
+                    .unwrap()
+                    .state()
+                    .asset
+                    .directory
+                    .as_ref()
+                    .expect("same actually created Software child")
+                    .acquisition_io_id
+                    .uuid(),
+                identity.0
+            );
+            assert!(role.sources.values().all(|source| source.parent_closed()));
+            assert!(role
+                .finite_vod
+                .as_ref()
+                .unwrap()
+                .never_root_closure
+                .is_some());
+            assert!(role.pending_finite_close.is_none() && !role.refunded);
+            let close = prefix.fixture_cleanup_job_identity().unwrap();
+            assert_eq!(
+                (close.0, close.3),
+                (close_gate.identity().0, Some(close_job))
+            );
+            assert!(!close.4);
+            close
+        };
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(close_gate);
+        assert_eq!(
+            preparation.state.lock().await.roles[0].bootstrap[&member]
+                .fixture_cleanup_job_identity(),
+            Some(close_identity)
+        );
+        let mut ticket = owner
+            .prepare_cancel(deadline())
+            .await
+            .expect("same original child result/Observe and positive Software closure");
+        let settlement = {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            let pending = role
+                .pending_finite_close
+                .as_ref()
+                .expect("same original typed close");
+            let Mutation::SettleTyped(closed) = &pending.mutation else {
+                panic!("typed Software settlement");
+            };
+            assert!(closed.settlement.members.iter().any(|fact| matches!(fact,
+                v2::MemberDisposition::Closed { member_id, fact: v2::ClosedFact::ScratchAssetsV3 { .. } }
+                    if member_id.uuid() == member)),
+                "actual acquired child must positively close, never become NeverAcquired");
+            assert_eq!(
+                closed.settlement.operation_id.uuid(),
+                pending.key.operation_id
+            );
+            pending.key.operation_id
+        };
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        assert!(
+            ticket
+                .finish_retirement(Instant::now() + Duration::from_millis(1))
+                .await
+                .is_err(),
+            "the original Software owner still retains application state"
+        );
+        assert_eq!(
+            preparation.state.lock().await.roles[0]
+                .pending_finite_close
+                .as_ref()
+                .unwrap()
+                .key
+                .operation_id,
+            settlement
+        );
+        drop(owner);
+        assert!(
+            ticket
+                .finish_retirement(Instant::now() + Duration::from_millis(1))
+                .await
+                .is_err(),
+            "original output/control aliases still retain application state"
+        );
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(output_alias);
+        assert!(
+            ticket
+                .finish_retirement(Instant::now() + Duration::from_millis(1))
+                .await
+                .is_err(),
+            "the final original control alias still gates release"
+        );
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        drop(control_alias);
+        drop(preparation);
+        ticket
+            .finish_retirement(deadline())
+            .await
+            .expect("exact original Software settlement after last alias");
+        assert_eq!(
+            runtime.accounting().unwrap().used,
+            ResourceVector::default()
+        );
+        drop(ticket);
+        Arc::try_unwrap(runtime)
+            .ok()
+            .expect("no original Software native/app owner remains")
+            .drain()
+            .expect("original Software journal drain");
     }
 }

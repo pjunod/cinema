@@ -443,6 +443,14 @@ impl NodeResourceRuntime {
                 .await?;
         }
         if never_root {
+            if initial_bootstrap {
+                // A cancelled sink waiter may leave the ORIGINAL traversal or
+                // mkdir job registered. Reconcile that arm before the strict
+                // no-process-root classifier inspects the retained prefix.
+                // This observer cannot release fresh native entry.
+                self.observe_finite_bootstrap_arm(owner, index, output_member, deadline)
+                    .await?;
+            }
             self.close_copy_never_root(owner, index, output_member)
                 .await?;
         } else if root_only {
