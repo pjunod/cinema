@@ -10,9 +10,13 @@ function textTranslationStatus(state,message,slot="status"){
   if(!state.current())return;const node=state.panel.querySelector(`[data-text-${slot}]`);if(node&&node.textContent!==message)node.textContent=message;
 }
 function textTranslationRetire(state){if(!state)return;state.retired=true;clearTimeout(state.timer);for(const controller of state.controllers)controller.abort();}
+function textTranslationSourceCurrent(state){
+  try{return playbackFileKey(playbackFileContextForPlayer(state.player))===playbackFileKey(state.fileContext);}
+  catch(error){return false;}
+}
 function textTranslationState(kind,panel){
   const state={kind,panel,capture:translationCapture(),controllers:new Set(),retired:false,timer:null,attempt:0,pollEpoch:0,busy:false,saving:false,using:false,operation:null,job:null};
-  state.current=()=>translationPageCurrent(state)&&document.getElementById(kind==="setup"?"text-subtitle-translation-settings":"watch-subtitle-text-translation")===panel&&(kind==="setup"?TEXT_TRANSLATION_SETUP===state&&!!ME?.is_admin:SUBTITLE_TEXT_TRANSLATION===state&&PLAYER===state.player&&String(PLAYER?.fileId)===state.fileId);
+  state.current=()=>translationPageCurrent(state)&&document.getElementById(kind==="setup"?"text-subtitle-translation-settings":"watch-subtitle-text-translation")===panel&&(kind==="setup"?TEXT_TRANSLATION_SETUP===state&&!!ME?.is_admin:SUBTITLE_TEXT_TRANSLATION===state&&PLAYER===state.player&&String(PLAYER?.fileId)===state.fileId&&textTranslationSourceCurrent(state));
   return state;
 }
 function textTranslationConfig(value){if(value?.version!==1||!translationCounter(value.revision)||typeof value.enabled!=="boolean"||value.model_id!==TEXT_TRANSLATION_MODEL||value.target_language!=="en")throw Error("Invalid text translation settings");return value;}
@@ -114,9 +118,9 @@ async function openTextSubtitleTranslation(button){
   let context;try{context=typeof playbackFileContextForPlayer==="function"?playbackFileContextForPlayer(player):null;}catch(error){context=null;}
   if(context?.source_ref?.kind!=="local"){if(typeof toast==="function")toast("Text translation is available for local library subtitles.");return;}
   if(SUBTITLE_TEXT_TRANSLATION?.current()){panel.hidden=false;panel.scrollIntoView?.({block:"nearest"});return;}
-  textTranslationRetire(SUBTITLE_TEXT_TRANSLATION);const state=textTranslationState("watch",panel);state.player=player;state.fileId=String(player.fileId);SUBTITLE_TEXT_TRANSLATION=state;panel.hidden=false;panel.textContent="Loading existing text subtitle choices…";if(button)button.disabled=true;
+  textTranslationRetire(SUBTITLE_TEXT_TRANSLATION);const state=textTranslationState("watch",panel);state.player=player;state.fileContext=context;state.fileId=context.source_ref.file_id;SUBTITLE_TEXT_TRANSLATION=state;panel.hidden=false;panel.textContent="Loading existing text subtitle choices…";if(button)button.disabled=true;
   try{
-    const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-text-translation/options`);if(!state.current())return;state.options=textTranslationOptions(data,state);
+    const {data}=await translationRequest(state,playbackFileApiPath(state.fileContext,"subtitle-text-translation/options"));if(!state.current())return;state.options=textTranslationOptions(data,state);
     panel.innerHTML=`<h3>Translate existing subtitles to English</h3><p class="hint">The local text model translates an existing text subtitle. Bitmap subtitles need captions generated from audio.</p><label>Source subtitle <select data-text-source aria-label="Source text subtitle">${data.subtitles.map(row=>`<option value="${row.index}"${row.text_eligible?"":" disabled"}>${esc(row.title||row.language||`Subtitle ${row.index}`)}${row.text_eligible?"":" · bitmap"}</option>`).join("")}</select></label><label>Language written in the source subtitle <select data-text-language aria-label="Source subtitle language"><option value="">Choose the source language</option>${data.input_languages.map(code=>`<option value="${esc(code)}">${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("")}</select></label><label class="chk"><input type="checkbox" data-text-confirm> I confirm the source subtitle language</label><button type="button" class="ghost sm" data-text-refresh-choices>Refresh choices</button> <button type="button" class="sm" data-text-start>Translate text to English</button> <button type="button" class="ghost sm" data-text-stop hidden>Stop</button> <button type="button" class="ghost sm" data-text-retry hidden>Retry</button> <button type="button" class="sm" data-text-use hidden>Use English translated subtitle</button><p data-text-status role="status" aria-live="polite"></p>`;
     for(const selector of ["source","language"]){state.panel.querySelector(`[data-text-${selector}]`).addEventListener("change",()=>{state.panel.querySelector("[data-text-confirm]").checked=false;textTranslationRenderJob(state);});}
     panel.querySelector("[data-text-refresh-choices]").addEventListener("click",()=>void textTranslationRefreshChoices());
@@ -127,7 +131,7 @@ async function openTextSubtitleTranslation(button){
 async function textTranslationRefreshChoices(){
   const state=SUBTITLE_TEXT_TRANSLATION;if(!state?.current()||state.refreshing||state.busy)return;state.refreshing=true;
   const source=state.panel.querySelector("[data-text-source]"),language=state.panel.querySelector("[data-text-language]"),oldSource=source.value,oldLanguage=language.value;
-  try{const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-text-translation/options`);if(!state.current())return;state.options=textTranslationOptions(data,state);
+  try{const {data}=await translationRequest(state,playbackFileApiPath(state.fileContext,"subtitle-text-translation/options"));if(!state.current())return;state.options=textTranslationOptions(data,state);
     source.innerHTML=data.subtitles.map(row=>`<option value="${row.index}"${row.text_eligible?"":" disabled"}>${esc(row.title||row.language||`Subtitle ${row.index}`)}</option>`).join("");if(data.subtitles.some(row=>String(row.index)===oldSource&&row.text_eligible))source.value=oldSource;
     language.innerHTML=`<option value="">Choose the source language</option>`+data.input_languages.map(code=>`<option value="${esc(code)}">${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");if(data.input_languages.includes(oldLanguage))language.value=oldLanguage;
     state.panel.querySelector("[data-text-confirm]").checked=false;textTranslationRenderJob(state);textTranslationStatus(state,"Choices refreshed. Confirm the source subtitle language.");if(state.operation)void textTranslationPoll(state);
@@ -141,7 +145,7 @@ async function textTranslationStart(){
   if(state.createIntent?.key!==key)state.stopRequested=false;
   const body=textTranslationPending(state,"createIntent",key,()=>({version:1,request_id:translationUuid(),source_size:state.options.source_size,source_mtime:state.options.source_mtime,source_language:language,target_language:"en",model_id:state.options.model_id}));state.busy=true;textTranslationRenderJob(state);
   try{
-    const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitles/${source.index}/translation`,{method:"POST",body});if(!state.current()||selectionKey!==textTranslationSelectionKey(state))return;
+    const {data}=await translationRequest(state,playbackFileApiPath(state.fileContext,`subtitles/${source.index}/translation`),{method:"POST",body});if(!state.current()||selectionKey!==textTranslationSelectionKey(state))return;
     const receipt=textTranslationReceipt(data);state.createIntent=null;state.operation={job_id:receipt.job_id,source_size:body.source_size,source_mtime:body.source_mtime,source_index:source.index,source_language:language,selectionKey};state.job=textTranslationObservedReceipt(receipt);state.pollEpoch++;
     if(state.stopRequested)await textTranslationStopJob(state);void textTranslationPoll(state);
   }catch(error){if(state.current()){if(!textTranslationAmbiguous(error))state.createIntent=null;textTranslationStatus(state,textTranslationExplain(error.code||"network_error"));}}
@@ -161,7 +165,7 @@ async function textTranslationRetry(){
 }
 async function textTranslationUse(){
   const state=SUBTITLE_TEXT_TRANSLATION;if(!state?.current()||state.using||!state.job?.result)return;const operation=state.operation,result=state.job.result;state.using=true;textTranslationRenderJob(state);
-  try{const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-text-translation/options`);if(!state.current()||state.operation!==operation)return;const latest=textTranslationOptions(data,state);const verifiedResult=textTranslationResult(state,result,latest);state.options=latest;await textTranslationUseResult(state,verifiedResult);}
+  try{const {data}=await translationRequest(state,playbackFileApiPath(state.fileContext,"subtitle-text-translation/options"));if(!state.current()||state.operation!==operation)return;const latest=textTranslationOptions(data,state);const verifiedResult=textTranslationResult(state,result,latest);state.options=latest;await textTranslationUseResult(state,verifiedResult);}
   catch(error){if(state.current())textTranslationStatus(state,textTranslationExplain(error.code||"invalid_result"));}finally{state.using=false;textTranslationRenderJob(state);}
 }
 function textTranslationWatchChanged(){const state=SUBTITLE_TEXT_TRANSLATION;if(state&&!state.current()){textTranslationRetire(state);if(document.getElementById("watch-subtitle-text-translation")===state.panel){state.panel.hidden=true;state.panel.replaceChildren();}}}
@@ -173,11 +177,11 @@ async function textTranslationUseResult(state,result){
   const current=()=>state.current()&&state.operation===operation&&(player.captionIntentSerial||0)===serial&&textTranslationSelectionKey(state)===selection;
   // Decision is a read-only capability query. Refresh track descriptors without
   // opening media or borrowing a new playback owner.
-  const {data:decision}=await translationRequest(state,playbackFileApiPath(playbackFileContextForPlayer(player),"decision",{force:"auto"}),{method:"POST",body:{caps:currentCapsDocument(player)}});
+  const {data:decision}=await translationRequest(state,playbackFileApiPath(state.fileContext,"decision",{force:"auto"}),{method:"POST",body:{caps:currentCapsDocument(player)}});
   if(!current())return;
   const matches=(decision.subtitles||[]).filter(track=>track.downloaded_subtitle_id===result.downloaded_subtitle_id);
   if(matches.length!==1||matches[0].source!=="downloaded"||matches[0].text!==true||!Number.isSafeInteger(matches[0].index))throw Object.assign(Error("Translated subtitle identity changed"),{code:"invalid_result"});
-  const {data}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-text-translation/options`);
+  const {data}=await translationRequest(state,playbackFileApiPath(state.fileContext,"subtitle-text-translation/options"));
   if(!current())return;
   const latest=textTranslationOptions(data,state),verified=textTranslationResult(state,result,latest);
   if(verified.subtitle_index!==matches[0].index)throw Object.assign(Error("Translated subtitle moved during refresh"),{code:"invalid_result"});
