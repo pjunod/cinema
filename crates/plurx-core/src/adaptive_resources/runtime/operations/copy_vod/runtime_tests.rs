@@ -2352,11 +2352,7 @@ int main(void) { alarm(20); for (;;) pause(); }
 
     fn complete() -> ! {
         use std::io::Write;
-        writeln!(
-            std::io::stdout(),
-            "original-root-errno-and-alias-closure-verified"
-        )
-        .unwrap();
+        println!("original-root-errno-and-alias-closure-verified");
         std::io::stdout().flush().unwrap();
         // R reached zero only through actual wait/native close/journal/alias
         // finalization above. Teardown of this filtered harness is no witness.
