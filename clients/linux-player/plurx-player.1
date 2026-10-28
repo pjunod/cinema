@@ -1,4 +1,4 @@
-.TH PLURX-PLAYER 1 2026-10-26 "plurx-player 0.3.2" "User Commands"
+.TH PLURX-PLAYER 1 2026-10-28 "plurx-player 0.4.0" "User Commands"
 .SH NAME
 plurx-player \- play a plurx title handed over by the plurx web app
 .SH SYNOPSIS
@@ -45,6 +45,23 @@ with
 and
 .B code
 is refused.
+.SH PLAYBACK CONTROLS
+Cinema-style controls replace mpv's stock on-screen controller inside the
+same video surface. Drag the full-film timeline and release to seek.
+Left/Right seek ten seconds. Tab focuses controls; when the timeline has
+focus, Left/Right preview and Enter commits. Escape cancels a preview or
+closes a menu. Space commits a preview and toggles playback.
+Controls hide after four seconds while playing, except during a preview or
+an open menu, and stay visible while paused.
+.PP
+Audio and CC select tracks available in the current stream. Settings offers
+speed and audio sync; Playback info shows mpv's decoded/output properties.
+Library title, episode identity and synopsis come from the scoped server
+context. Quality offers Auto, Original and advertised heights, preserving
+position and pause; a failed replacement restores the incumbent stream.
+Next resolves the immediate successor on the server. Autoplay and selected
+quality are saved in playback.json under the player's config directory.
+Early stream EOF offers Retry rather than marking the whole title watched.
 .SH OPTIONS
 .TP
 .BI \-\-ca " FILE"

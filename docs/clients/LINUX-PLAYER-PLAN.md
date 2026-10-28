@@ -186,6 +186,16 @@ used: yes" only when the BL really came from the composed picture.
 
 ## 4. Client contract
 
+**UI extension, 2026-10-28:** the owner requested Cinema's web playback
+appearance in the existing mpv player. Package 0.4.0 source adds a native
+Cinema-style overlay, keeping the decoder, display management and launcher
+session owner. [The launcher README](../../clients/linux-player/README.md#playback-controls)
+records controls, track/menu limits and the focused Lua scenarios. This
+supersedes the original stock-controller scope for playback chrome only;
+[The release ledger](LINUX-PLAYER-CINEMA-UI.md) tracks metadata, sequential
+Next authorization, quality controls, package qualification and ROG install;
+physical acceptance is distinct from those software checks.
+
 ### 4.1 Web — one Playback setting, one action
 
 - **The setting:** Settings → Playback → **Dolby Vision playback on Linux**:
