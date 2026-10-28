@@ -810,7 +810,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # owns no producer and decides nothing.
 # +1 in the same releaser: a 50 ms stand-in for the qualification's kill and
 # reap before it drops the slot. Test-only, joined.
-expected_occurrences = 81
+# +1 in `transcode/manager/construct.rs::admit_progressive_speech`: a
+# cancellation-aware poll holds the live capacity waiter across its bounded
+# admission deadline. The waiter is dropped on admission, cancellation or
+# timeout; the sleep neither owns inference nor starts work by itself.
+expected_occurrences = 82
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -3250,7 +3254,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # PR1299 VOD index recovery: +4 test-only tasks in state/tests.rs: three runs
 # of the queued local index pass and one queued speech admission behind it.
 # Each is awaited under a timeout; none outlives its test.
-expected_occurrences = 1022
+# +2 with progressive subtitle admission: `state/tests.rs` adds one joined
+# fixture task that releases its real background permit after observing live
+# pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
+# the cancellation regression, which explicitly aborts and awaits it. Both
+# are test-only and settle their handles before fixture teardown.
+expected_occurrences = 1024
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4949,7 +4958,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps that let the pass and the speech pass take their places in the
 # heavy lane's queue, four timeouts bounding those awaited tasks, and one
 # sleep in the ride-along worker test's polling loop.
-expected_occurrences = 1897
+# +4 with progressive subtitle admission: one QUEUE_WAIT-bounded observation
+# and its 10 ms poll in `state/tests.rs`, one bounded admission poll in
+# `subtitle_work.rs`, and one cancellation-aware admission poll in
+# `transcode/manager/construct.rs`. The fixture timers are awaited; production
+# polls stay inside the registered live-waiter owners and cap each sleep by
+# their existing admission deadline.
+expected_occurrences = 1901
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
