@@ -460,7 +460,7 @@ def certify_tlc_numbers(value,label='model input'):
         for item in value: certify_tlc_numbers(item,label+'[]')
 
 
-def certify_tlc_arithmetic(p,store):
+def certify_tlc_arithmetic(p,store,*,local_index_counts=None):
     """Check every arithmetic operand/result used by original Next at this state.
 
     Source helpers retain full i64 behavior. This finite artifact certificate
@@ -470,7 +470,9 @@ def certify_tlc_arithmetic(p,store):
     s = store['states'][p['sql']]
     for anchor in p['wall_anchors']+p['mono_anchors']:
         certify_tlc_numbers((anchor-1,anchor+1),'boundary neighbours')
-    certify_tlc_numbers((len(store['states'])+1,len(store['edges'])+1,len(p['claim_loss_keys'])+1),'index/count arithmetic')
+    index_counts=(len(store['states']),len(store['edges'])) if local_index_counts is None else local_index_counts
+    require(type(index_counts) is tuple and len(index_counts)==2 and all(type(n) is int and n>=0 for n in index_counts),'invalid exact local index counts')
+    certify_tlc_numbers((*[n+1 for n in index_counts],len(p['claim_loss_keys'])+1),'index/count arithmetic')
     for w in p['w']:
         if w['claim_recovery']['phase'] != 'off': certify_tlc_numbers(p['mono_now_ms']+250,'source retry wake addition')
         issued = w['claim_issued_mono_ms']
@@ -655,9 +657,9 @@ def environment_inputs(p,s):
         yield a
 
 
-def expected_product_demands(p, driver, store):
+def expected_product_demands(p, driver, store, *, collection=list):
     """All structural primary demands, before consulting any oracle outcome."""
-    s = store['states'][p['sql']]; stable,_ = CONTEXTS[p['context']]; out = []
+    s = store['states'][p['sql']]; stable,_ = CONTEXTS[p['context']]; out = collection()
     def add(family,n,role,op,**fields):
         w = p['w'][n] if n is not None else None; missing = None; sample = None
         if fields.get('token') == -1: missing = 'missing_token'
@@ -754,9 +756,9 @@ def ordinary_successors(p,s,store,n,w,put,lookup):
             put('OrdinaryObserve',n,{'lost':lost},observe)
 
 
-def expected_product_successors(p,driver,store,oracle):
+def expected_product_successors(p,driver,store,oracle, *, collection=list):
     """Full donor Next, independently transcribed. No fairness prefix pruning."""
-    stable,mutation = CONTEXTS[p['context']]; s = store['states'][p['sql']]; out = []
+    stable,mutation = CONTEXTS[p['context']]; s = store['states'][p['sql']]; out = collection()
     demands = expected_product_demands(p,driver,store)
     primary = list(demands)
     demands += dependent_resolve_demands(p,driver,store,oracle,primary) + dependent_claim_demands(p,store,oracle,primary)
@@ -1030,6 +1032,116 @@ def expected_product_successors(p,driver,store,oracle):
     return out
 
 
+def validate_store_state(s, *, product=False):
+    """One exact state; callers independently check identity and inventory."""
+    fields = {'id','now','jobs','domain','captured_tokens','captured_leases','budgets','cutoffs','canonical_sha256'}
+    exact_keys(s, fields | ({'raw','canonical_json'} if product else set()), 'Store state')
+    if product: validate_raw_store(s)
+    require(integer(s.get('now'),-(2**63),2**63-1), 'non-i64 concrete time')
+    require(re.fullmatch('[0-9a-f]{64}',s.get('canonical_sha256','')) is not None, 'missing canonical state hash')
+    require(isinstance(s.get('jobs'),list) and len(s['jobs']) == 2, 'two raw job projections required')
+    require(isinstance(s.get('captured_tokens'),list) and len(s['captured_tokens']) == 2, 'missing captured token inventory')
+    require(isinstance(s.get('captured_leases'),list), 'missing captured lease inventory')
+    require(isinstance(s.get('cutoffs'),list), 'missing visible input cutoffs')
+    for cutoff in s['cutoffs']:
+        require(re.fullmatch(r'attempt_budget_j[01]|renewal_budget_.+|domain_acquire_budget(?:_node-a|_node-b|_foreign-holder)?|'+('no_intrinsic_expiry_boundary' if product else 'no_future_boundary'),cutoff) is not None,
+                f'unknown cutoff class: {cutoff}')
+    exact_keys(s['budgets'], {'claims','renewed_claims','domain_acquired','removed'}, 'episode budgets')
+    require(len(s['budgets']['claims']) == 2 and all(integer(x,0,2) for x in s['budgets']['claims']), 'invalid claim budgets')
+    require(len(s['budgets']['domain_acquired']) == 3 and all(type(x) is bool for x in s['budgets']['domain_acquired']), 'invalid domain acquisition flags')
+    require(len(s['budgets']['removed']) == 2 and all(type(x) is bool for x in s['budgets']['removed']), 'invalid removal flags')
+    if s['domain'] is not None: exact_keys(s['domain'], {'resource','owner','fence','revision','expiry'}, 'domain row')
+    for j, job in enumerate(s['jobs']):
+        exact_keys(job, {'state','owner','fence','revision','expiry','failed_attempts','active','request_done','request_state','reservation_count','not_before_ms'}, 'raw job projection')
+        require(integer(job['not_before_ms'],0,I64_MAX) and integer(job['failed_attempts'],0,I64_MAX), 'invalid queued eligibility/failed count')
+        require(job.get('state') in {'queued','running','succeeded','failed','cancelled'}, 'unknown job state')
+        require(job.get('request_state') in {'pending','succeeded','failed','cancelled'}, 'unknown request state')
+        require(type(job.get('active')) is bool and type(job.get('request_done')) is bool, 'missing raw activity/request flags')
+        require(job.get('owner') in {None,'node-a','node-b'}, 'unknown queue owner')
+        require(integer(job.get('reservation_count'),0,6), 'invalid raw reservation count')
+        for token in s['captured_tokens'][j]:
+            exact_keys(token, {'job_id','node_id','boot_id','claim_id','fence','revision','lease_expires_ms'}, 'captured JobToken')
+            for f in ('fence','revision','lease_expires_ms'):
+                require(integer(token[f],1,I64_MAX), 'invalid positive source token payload')
+    validate_job_projection(s)
+    for lease in s['captured_leases']:
+        require(lease.get('owner_node_id') in {'node-a','node-b','foreign-holder'}, 'unknown opaque lease owner')
+        for field in ('fence','revision'): require(integer(lease.get(field),0,2**64-1), 'invalid u64 domain field')
+        require(integer(lease.get('expires_at_unix_ms'),-(2**63),2**63-1), 'invalid i64 domain expiry')
+        exact_keys(lease, {'resource','owner_node_id','fence','revision','expires_at_unix_ms'}, 'captured lease')
+
+
+def validate_store_edge(e, before, after):
+    """All original Applied fields against complete observed endpoints."""
+    exact_keys(e, {'from','to','action','result','resolved_token','claim_snapshot','error','claim_request','job_read'}, 'Store edge')
+    a = e['action']; op = a.get('op')
+    encoded = canonical(a)
+    require(op in ACTIONS, f'unknown Store action: {op}')
+    exact_keys(a, ACTIONS[op] | {'op'}, f'Store action {op}')
+    require(e['result'] in RESULTS_BY_OP[op], f'unknown result for {op}: {e["result"]}')
+    require(e['result'] not in {'refused','cancelled','expired_or_pruned','held','validation_error_yield_time','validation_error_retry_time'} or e['from'] == e['to'],
+            'FailedCasAtomicity: refused operation changed canonical state')
+    for field in ACTIONS[op] - {'kind','error_code','checkpoint','request'}:
+        require(integer(a[field]), f'noninteger Store action {field}')
+    if 'job' in a: require(a['job'] in (0,1), 'invalid job index')
+    if 'node' in a: require(a['node'] in ((0,1,2) if op == 'acquire_domain' else (0,1)), 'invalid node index')
+    if 'token' in a: require(0 <= a['token'] < len(before['captured_tokens'][a['job']]), 'missing token target')
+    if 'lease' in a: require(0 <= a['lease'] < len(before['captured_leases']), 'missing lease target')
+    if 'disposition' in a: require(a['disposition'] in range(4), 'unknown disposition')
+    if op == 'clock_advance':
+        require(a['now'] > before['now'] and integer(a['now'],0,I64_MAX) and after['now'] == a['now'], 'clock input/projection mismatch')
+        expected_raw = logical_copy(before['raw']);expected_raw['episode']['now'] = a['now']
+        require(after['raw'] == expected_raw, 'clock changed non-clock canonical data')
+    if op == 'ordinary_settle':
+        validate_payload({key:a[key] for key in ('kind','not_before_ms','error_code','checkpoint')})
+        require(integer(a['request_now_ms'],0,I64_MAX), 'invalid captured SettleJob request time')
+        expected_error = 'validation_error_yield_time' if a['kind'] == 'yield' else 'validation_error_retry_time'
+        if a['not_before_ms'] < a['request_now_ms']:
+            require(e['result'] == expected_error and e['error'] == VALIDATION_ERRORS[expected_error], 'ordinary stale deadline validation outcome mismatch')
+        else: require(e['result'] not in VALIDATION_ERRORS and e['error'] is None, 'spurious ordinary validation error')
+    else: require(e['error'] is None, 'non-ordinary edge has API validation error')
+    before_snapshots,after_snapshots = before['raw']['episode']['claim_snapshots'],after['raw']['episode']['claim_snapshots']
+    if op == 'claim' and e['result'] == 'claimed':
+        require(e['claim_snapshot']['token_capture']['node_id'] == ('node-a','node-b')[a['node']], 'claim returned another node token')
+        validate_snapshot(e['claim_snapshot'],after,a['job'])
+        require(e['claim_snapshot']['failed_attempts'] == after['jobs'][a['job']]['failed_attempts'] and
+                e['claim_snapshot']['token_capture'] == after['captured_tokens'][a['job']][-1], 'claim snapshot not actual committed response')
+        require(after_snapshots == before_snapshots+[e['claim_snapshot']], 'claim snapshot history drift')
+    else: require(e['claim_snapshot'] is None and after_snapshots == before_snapshots, 'non-claim captured another snapshot')
+    if op == 'claim':
+        request = e['claim_request'];exact_keys(request,CLAIM_REQUEST_FIELDS,'actual original ClaimJob')
+        expected_claim = f"00000000-0000-4000-8000-{10+a['job']*4+before['budgets']['claims'][a['job']]:012}"
+        require(request['node_id'] == ('node-a','node-b')[a['node']] and
+            request['boot_id'] == f"00000000-0000-4000-8000-{a['node']+1:012}" and
+            request['claim_id'] == expected_claim and request['expected_revision'] == before['jobs'][a['job']]['revision'] and
+            request['kind'] == ('library_scan','metadata_refresh')[a['job']] and request['payload_version'] == 1 and
+            request['now_ms'] == request['dispatched_at_ms'] == before['now'], 'actual ClaimJob input/source mismatch')
+    else: require(e['claim_request'] is None, 'non-claim supplied an original request')
+    if op == 'resolve_initial_claim':
+        exact_keys(a['request'],{'job_id','node_id','boot_id','claim_id','fence','dispatched_at_ms','now_ms'},'initial ResolveClaim')
+        require(a['request']['fence'] is None and a['request']['now_ms'] == before['now'], 'initial resolve lost original no-fence/current-sample semantics')
+    if op == 'read_claim_job':
+        require(e['from'] == e['to'], 'actual job reread changed full canonical identity')
+        if e['result'] == 'present':
+            job = e['job_read'];exact_keys(job,JOB_READ_FIELDS,'actual recovered BackgroundJob')
+            for field in ('payload_version','fence','revision','failed_attempts','attempt_limit','retry_deadline_ms','yield_count','abandoned_count','not_before_ms','created_at_ms','updated_at_ms'):
+                require(integer(job[field],-(2**63),I64_MAX), 'invalid actual reread i64: '+field)
+            require(integer(job['priority'],0,255) and all(isinstance(job[field],str) for field in ('id','dedupe_key','attempt_errors','index_diagnostic_json')), 'invalid actual reread scalar types')
+            require(all(job[field] is None or isinstance(job[field],str) for field in ('result_ref','last_error_code')), 'invalid nullable reread string')
+            projection = before['jobs'][a['job']]
+            require(all(job[field] == projection[field] for field in ('state','fence','revision','failed_attempts','not_before_ms')),
+                'actual reread differs from durable projection')
+            require(job['token'] is None or job['token'] in before['captured_tokens'][a['job']], 'actual reread returned an uncaptured token')
+        else: require(e['job_read'] is None,'missing reread carried a row')
+    else: require(e['job_read'] is None,'non-reread supplied a recovered row')
+    validate_resolution(e,before,after)
+    for j in range(2):
+        old, new = before['captured_tokens'][j], after['captured_tokens'][j]
+        require(new[:len(old)] == old, 'captured token identity is not append-only')
+    require(after['captured_leases'][:len(before['captured_leases'])] == before['captured_leases'],
+            'captured lease identity is not append-only')
+
+
 def validate_store(g, verify_sources=True, *, product=False):
     exact_keys(g, {'schema_version','scope','initial','source_bindings','schema_bindings','domain','coverage','states','edges'}, 'Store root')
     graph_structure(g, 20000)
@@ -1079,116 +1191,17 @@ def validate_store(g, verify_sources=True, *, product=False):
     outgoing = [set() for _ in g['states']]
     hashes = set()
     for s in g['states']:
-        fields = {'id','now','jobs','domain','captured_tokens','captured_leases','budgets','cutoffs','canonical_sha256'}
-        exact_keys(s, fields | ({'raw','canonical_json'} if product else set()), 'Store state')
-        if product: validate_raw_store(s)
+        validate_store_state(s, product=product)
         require(s['canonical_sha256'] not in hashes, 'duplicate canonical state identity')
         hashes.add(s['canonical_sha256'])
-        require(integer(s.get('now'),-(2**63),2**63-1), 'non-i64 concrete time')
-        require(re.fullmatch('[0-9a-f]{64}',s.get('canonical_sha256','')) is not None, 'missing canonical state hash')
-        require(isinstance(s.get('jobs'),list) and len(s['jobs']) == 2, 'two raw job projections required')
-        require(isinstance(s.get('captured_tokens'),list) and len(s['captured_tokens']) == 2, 'missing captured token inventory')
-        require(isinstance(s.get('captured_leases'),list), 'missing captured lease inventory')
-        require(isinstance(s.get('cutoffs'),list), 'missing visible input cutoffs')
-        for cutoff in s['cutoffs']:
-            require(re.fullmatch(r'attempt_budget_j[01]|renewal_budget_.+|domain_acquire_budget(?:_node-a|_node-b|_foreign-holder)?|'+('no_intrinsic_expiry_boundary' if product else 'no_future_boundary'),cutoff) is not None,
-                    f'unknown cutoff class: {cutoff}')
-            cutoffs[cutoff] += 1
-        exact_keys(s['budgets'], {'claims','renewed_claims','domain_acquired','removed'}, 'episode budgets')
-        require(len(s['budgets']['claims']) == 2 and all(integer(x,0,2) for x in s['budgets']['claims']), 'invalid claim budgets')
-        require(len(s['budgets']['domain_acquired']) == 3 and all(type(x) is bool for x in s['budgets']['domain_acquired']), 'invalid domain acquisition flags')
-        require(len(s['budgets']['removed']) == 2 and all(type(x) is bool for x in s['budgets']['removed']), 'invalid removal flags')
-        if s['domain'] is not None: exact_keys(s['domain'], {'resource','owner','fence','revision','expiry'}, 'domain row')
-        for j, job in enumerate(s['jobs']):
-            exact_keys(job, {'state','owner','fence','revision','expiry','failed_attempts','active','request_done','request_state','reservation_count','not_before_ms'}, 'raw job projection')
-            require(integer(job['not_before_ms'],0,I64_MAX) and integer(job['failed_attempts'],0,I64_MAX), 'invalid queued eligibility/failed count')
-            require(job.get('state') in {'queued','running','succeeded','failed','cancelled'}, 'unknown job state')
-            require(job.get('request_state') in {'pending','succeeded','failed','cancelled'}, 'unknown request state')
-            require(type(job.get('active')) is bool and type(job.get('request_done')) is bool, 'missing raw activity/request flags')
-            require(job.get('owner') in {None,'node-a','node-b'}, 'unknown queue owner')
-            require(integer(job.get('reservation_count'),0,6), 'invalid raw reservation count')
-            for token in s['captured_tokens'][j]:
-                exact_keys(token, {'job_id','node_id','boot_id','claim_id','fence','revision','lease_expires_ms'}, 'captured JobToken')
-                for f in ('fence','revision','lease_expires_ms'):
-                    require(integer(token[f],1,I64_MAX), 'invalid positive source token payload')
-        validate_job_projection(s)
-        for lease in s['captured_leases']:
-            require(lease.get('owner_node_id') in {'node-a','node-b','foreign-holder'}, 'unknown opaque lease owner')
-            for field in ('fence','revision'): require(integer(lease.get(field),0,2**64-1), 'invalid u64 domain field')
-            require(integer(lease.get('expires_at_unix_ms'),-(2**63),2**63-1), 'invalid i64 domain expiry')
-            exact_keys(lease, {'resource','owner_node_id','fence','revision','expires_at_unix_ms'}, 'captured lease')
+        cutoffs.update(s['cutoffs'])
     for e in g['edges']:
-        exact_keys(e, {'from','to','action','result','resolved_token','claim_snapshot','error','claim_request','job_read'}, 'Store edge')
-        a = e['action']; op = a.get('op')
-        encoded = canonical(a)
+        encoded = canonical(e['action'])
         require(encoded not in outgoing[e['from']], 'duplicate/nondeterministic Store input')
         outgoing[e['from']].add(encoded)
-        require(op in ACTIONS, f'unknown Store action: {op}')
-        exact_keys(a, ACTIONS[op] | {'op'}, f'Store action {op}')
-        require(e['result'] in RESULTS_BY_OP[op], f'unknown result for {op}: {e["result"]}')
-        counts[op] += 1; results[e['result']] += 1
-        before, after = g['states'][e['from']], g['states'][e['to']]
-        require(e['result'] not in {'refused','cancelled','expired_or_pruned','held','validation_error_yield_time','validation_error_retry_time'} or e['from'] == e['to'],
-                'FailedCasAtomicity: refused operation changed canonical state')
-        for field in ACTIONS[op] - {'kind','error_code','checkpoint','request'}:
-            require(integer(a[field]), f'noninteger Store action {field}')
-        if 'job' in a: require(a['job'] in (0,1), 'invalid job index')
-        if 'node' in a: require(a['node'] in ((0,1,2) if op == 'acquire_domain' else (0,1)), 'invalid node index')
-        if 'token' in a: require(0 <= a['token'] < len(before['captured_tokens'][a['job']]), 'missing token target')
-        if 'lease' in a: require(0 <= a['lease'] < len(before['captured_leases']), 'missing lease target')
-        if 'disposition' in a: require(a['disposition'] in range(4), 'unknown disposition')
-        if op == 'clock_advance':
-            require(a['now'] > before['now'] and integer(a['now'],0,I64_MAX) and after['now'] == a['now'], 'clock input/projection mismatch')
-            expected_raw = logical_copy(before['raw']);expected_raw['episode']['now'] = a['now']
-            require(after['raw'] == expected_raw, 'clock changed non-clock canonical data')
-        if op == 'ordinary_settle':
-            validate_payload({key:a[key] for key in ('kind','not_before_ms','error_code','checkpoint')})
-            require(integer(a['request_now_ms'],0,I64_MAX), 'invalid captured SettleJob request time')
-            expected_error = 'validation_error_yield_time' if a['kind'] == 'yield' else 'validation_error_retry_time'
-            if a['not_before_ms'] < a['request_now_ms']:
-                require(e['result'] == expected_error and e['error'] == VALIDATION_ERRORS[expected_error], 'ordinary stale deadline validation outcome mismatch')
-            else: require(e['result'] not in VALIDATION_ERRORS and e['error'] is None, 'spurious ordinary validation error')
-        else: require(e['error'] is None, 'non-ordinary edge has API validation error')
-        before_snapshots,after_snapshots = before['raw']['episode']['claim_snapshots'],after['raw']['episode']['claim_snapshots']
-        if op == 'claim' and e['result'] == 'claimed':
-            require(e['claim_snapshot']['token_capture']['node_id'] == ('node-a','node-b')[a['node']], 'claim returned another node token')
-            validate_snapshot(e['claim_snapshot'],after,a['job'])
-            require(e['claim_snapshot']['failed_attempts'] == after['jobs'][a['job']]['failed_attempts'] and
-                    e['claim_snapshot']['token_capture'] == after['captured_tokens'][a['job']][-1], 'claim snapshot not actual committed response')
-            require(after_snapshots == before_snapshots+[e['claim_snapshot']], 'claim snapshot history drift')
-        else: require(e['claim_snapshot'] is None and after_snapshots == before_snapshots, 'non-claim captured another snapshot')
-        if op == 'claim':
-            request = e['claim_request'];exact_keys(request,CLAIM_REQUEST_FIELDS,'actual original ClaimJob')
-            expected_claim = f"00000000-0000-4000-8000-{10+a['job']*4+before['budgets']['claims'][a['job']]:012}"
-            require(request['node_id'] == ('node-a','node-b')[a['node']] and
-                request['boot_id'] == f"00000000-0000-4000-8000-{a['node']+1:012}" and
-                request['claim_id'] == expected_claim and request['expected_revision'] == before['jobs'][a['job']]['revision'] and
-                request['kind'] == ('library_scan','metadata_refresh')[a['job']] and request['payload_version'] == 1 and
-                request['now_ms'] == request['dispatched_at_ms'] == before['now'], 'actual ClaimJob input/source mismatch')
-        else: require(e['claim_request'] is None, 'non-claim supplied an original request')
-        if op == 'resolve_initial_claim':
-            exact_keys(a['request'],{'job_id','node_id','boot_id','claim_id','fence','dispatched_at_ms','now_ms'},'initial ResolveClaim')
-            require(a['request']['fence'] is None and a['request']['now_ms'] == before['now'], 'initial resolve lost original no-fence/current-sample semantics')
-        if op == 'read_claim_job':
-            require(e['from'] == e['to'], 'actual job reread changed full canonical identity')
-            if e['result'] == 'present':
-                job = e['job_read'];exact_keys(job,JOB_READ_FIELDS,'actual recovered BackgroundJob')
-                for field in ('payload_version','fence','revision','failed_attempts','attempt_limit','retry_deadline_ms','yield_count','abandoned_count','not_before_ms','created_at_ms','updated_at_ms'):
-                    require(integer(job[field],-(2**63),I64_MAX), 'invalid actual reread i64: '+field)
-                require(integer(job['priority'],0,255) and all(isinstance(job[field],str) for field in ('id','dedupe_key','attempt_errors','index_diagnostic_json')), 'invalid actual reread scalar types')
-                require(all(job[field] is None or isinstance(job[field],str) for field in ('result_ref','last_error_code')), 'invalid nullable reread string')
-                projection = before['jobs'][a['job']]
-                require(all(job[field] == projection[field] for field in ('state','fence','revision','failed_attempts','not_before_ms')),
-                    'actual reread differs from durable projection')
-                require(job['token'] is None or job['token'] in before['captured_tokens'][a['job']], 'actual reread returned an uncaptured token')
-            else: require(e['job_read'] is None,'missing reread carried a row')
-        else: require(e['job_read'] is None,'non-reread supplied a recovered row')
-        validate_resolution(e,before,after)
-        for j in range(2):
-            old, new = before['captured_tokens'][j], after['captured_tokens'][j]
-            require(new[:len(old)] == old, 'captured token identity is not append-only')
-        require(after['captured_leases'][:len(before['captured_leases'])] == before['captured_leases'],
-                'captured lease identity is not append-only')
+        validate_store_edge(e, g['states'][e['from']], g['states'][e['to']])
+        counts[e['action']['op']] += 1
+        results[e['result']] += 1
     for s,actual in zip(g['states'],outgoing):
         expected = expected_actions(s)
         intrinsic_actual = {encoded for encoded in actual if json.loads(encoded)['op'] not in {'ordinary_settle','clock_advance','resolve_initial_claim','read_claim_job'}}
@@ -1750,12 +1763,12 @@ def complete_product_demands(p,driver,store,oracle):
     return complete,used
 
 
-def product_pair_obligations(p,candidates,by_payload):
+def product_pair_obligations(p,candidates,by_payload, *, collection=list):
     pair_members = {}
     encoded_candidates = [canonical(candidate[1]) for candidate in candidates]
     for encoded,(_,_,_,members,_,_,_) in zip(encoded_candidates,candidates):
         pair_members.setdefault(encoded,set()).update(members)
-    edges = []; targets = []; enabled = set(); original = canonical(product_payload(p))
+    edges = collection(); targets = collection(); enabled = set(); original = canonical(product_payload(p))
     for encoded,(branch,q,index,members,resolution,read,cleanup) in zip(encoded_candidates,candidates):
         to = by_payload.get(encoded)
         require(to is not None, 'MissingProductSuccessor: original Next target absent')
