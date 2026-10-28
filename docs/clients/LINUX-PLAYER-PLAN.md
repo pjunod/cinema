@@ -1,6 +1,10 @@
 # Linux player — Dolby Vision on Linux through plurx
 
-**Status:** open: M6 (acceptance on the ROG) next. M1–M5 are in (#1295), and package 0.3.1 with its server change fixes the four faults the owner's first real playback found (2026-10-26) · **Owner:** Claude
+**Status:** open: M6 (physical acceptance on the ROG) pending. M1–M5 landed
+through #1295; Cinema controls and scoped server changes landed through #1307,
+and package 0.4.0 is installed (2026-10-28). See the
+[release and installation ledger](LINUX-PLAYER-CINEMA-UI.md) for qualification
+and remaining acceptance · **Owner:** Claude
 (Opus 5.5, Linux Dolby Vision session) · **Written:** 2026-10-25
 
 Companion to [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) (the browser half) and
