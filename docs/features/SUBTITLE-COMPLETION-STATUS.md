@@ -1,6 +1,6 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** deployed acceptance in progress · live setup delays and stale-panel recovery fixes under review
+**Status:** deployed acceptance incomplete · reviewed repair in PR #1309, qualification running
 
 **Date:** 2026-10-25 · **Updated:** 2026-10-28 · **Owner:** Codex /root · **Branch:** `codex/subtitle-live-acceptance`
 
@@ -19,8 +19,11 @@ time before an operation exists, leaving Start unable to recover after its
 four-minute action clock expires. Foreground existing-subtitle extraction also
 tries CPU admission once without registering live wait pressure, so background
 work never receives the cooperative yield signal. Active progressive inference
-also needs that signal before acquiring the shared heavy-worker lane. The fixes are implemented and
-in final adversarial review; unit tests have not run yet.
+also needs that signal before acquiring the shared heavy-worker lane. The fixes are implemented in [PR #1309](http://forge.lan:3000/noirr/plurx/pulls/1309),
+owned by Codex /root. Final adversarial review and the normal compile/lint hook
+passed. The two transactional SQLite upgrade regressions passed. Remaining
+focused tests and the fast lane are running; the replicated fixture startup
+and reviewed formal source mappings need correction before qualification.
 No production database edits, service restart or agent deployment has occurred.
 
 The selected physical Apple TV remains unavailable to the Mac's

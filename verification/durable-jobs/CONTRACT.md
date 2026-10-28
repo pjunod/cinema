@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37` · **Scope:** bound `library_scan` and
+`c3d764a01` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,37 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Subtitle resource admission — scoped refresh on 2026-10-28
+
+Codex reviewed `c3d764a01` against `f2120bd9a`. The shared claim SQL adds
+qualified progressive caption preparation/range demand to the reserved live
+source-reader slot. A new claim requires the current operation, source,
+configuration and unexpired administrative demand; a held range can retain its
+exact claim-fence continuity grant while that demand remains valid. These
+branches require caption job and waiter kinds. Ordinary `library_scan` and
+`metadata_refresh` callers do not gain that authority. The existing two-reader
+ceiling and one-speculative-reader ceiling remain unchanged.
+
+The managed v2 resource view exempts artifact-only text model setup from
+`source_io`; both selected library kinds retain their existing source-domain
+and provider rows. SQLite v120 validates the exact v1 predecessor inside its
+migration transaction. The replicated installer checks the predecessor marker
+and exact view in one transaction, accepts a verified v2 winner after ambiguous
+acknowledgement, and preserves that view during bootstrap. Existing queue
+owners, leases, attempts and reservations are retained. Mapping now pins this
+active view, its historical predecessor and the shape/transaction guards;
+valid installed schema remains a premise, not a modeled migration theorem.
+
+The changed queue trait/token/adapter, renewal, expiry, resource-currentness,
+fenced SQLite transaction, replicated timeout and retention anchors remain
+unique and unchanged. Selected library claim identity, binding, publication,
+renewal and settlement authority is unchanged. Nineteen whole-file pins are
+refreshed after this review; model, configuration, property, bound and toolchain
+bytes retain their identities. Caption fairness, online upgrade correctness and
+physical playback are outside this model. Runtime regressions for model
+contention, upgrade preservation and demand-bound caption admission are separate
+source evidence; this mapping refresh claims no new execution or qualification.
 
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 

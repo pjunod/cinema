@@ -638,7 +638,13 @@ async fn progressive_caption_admission_requests_cooperative_background_yield() {
     let mut queued = Box::pin(manager.admit_progressive_speech(&cancel));
     std::future::poll_fn(|cx| {
         assert!(queued.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
+        if manager.admissions.live_is_waiting() {
+            Poll::Ready(())
+        } else {
+            // Budget lookup may yield before the admission waiter exists.
+            // Its registered database waker schedules the next poll.
+            Poll::Pending
+        }
     })
     .await;
     assert!(manager.admissions.live_is_waiting());
@@ -733,7 +739,13 @@ async fn progressive_caption_admission_timeout_and_cancellation_release_waiter()
     let mut queued = Box::pin(manager.admit_progressive_speech(&cancel));
     std::future::poll_fn(|cx| {
         assert!(queued.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
+        if manager.admissions.live_is_waiting() {
+            Poll::Ready(())
+        } else {
+            // Budget lookup may yield before the admission waiter exists.
+            // Its registered database waker schedules the next poll.
+            Poll::Pending
+        }
     })
     .await;
     assert!(manager.admissions.live_is_waiting());
@@ -744,7 +756,13 @@ async fn progressive_caption_admission_timeout_and_cancellation_release_waiter()
     let mut abandoned = Box::pin(manager.admit_progressive_speech(&alive));
     std::future::poll_fn(|cx| {
         assert!(abandoned.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
+        if manager.admissions.live_is_waiting() {
+            Poll::Ready(())
+        } else {
+            // Budget lookup may yield before the admission waiter exists.
+            // Its registered database waker schedules the next poll.
+            Poll::Pending
+        }
     })
     .await;
     drop(abandoned);
