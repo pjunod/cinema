@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -22,6 +23,49 @@ def load(name):
 
 
 class MediaSupportMatrixTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("autoconf") and shutil.which("make"),
+                         "requires autoconf and make")
+    def test_cold_generation_tools_build_through_symlinked_temporary_directory(self):
+        media = load("build-macos-source-media")
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work).resolve()
+            fixture = root / "fixture"
+            fixture.mkdir()
+            # Exercise Automake's real Autoconf link handling, without downloading
+            # upstream archives or building the full media dependency tree.
+            (fixture / "configure.ac").write_text(
+                "AC_INIT([generation-tool-fixture], [1])\n"
+                "AC_CONFIG_SRCDIR([GNUmakefile])\n"
+                "AC_CONFIG_LINKS([GNUmakefile:GNUmakefile])\n"
+                "AC_OUTPUT\n")
+            makefile = "all:\n\t@touch built\ninstall: all\n\t@touch installed\n"
+            (fixture / "GNUmakefile").write_text(makefile)
+            subprocess.run(["autoconf"], cwd=fixture, check=True, capture_output=True)
+            physical = root / "physical"
+            physical.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(physical, target_is_directory=True)
+            prepared = alias / "prepared"
+            prepared.mkdir()
+
+            def extract_fixture(archive, destination):
+                destination.mkdir()
+                for name in ("configure", "GNUmakefile"):
+                    shutil.copyfile(fixture / name, destination / name)
+
+            helper = mock.Mock()
+            helper.extract.side_effect = extract_fixture
+            with mock.patch.object(media, "recipe", return_value=helper):
+                media.source_generation_tools(prepared, dict(os.environ))
+
+            sources = list((prepared / "source-generation-tools").glob("*/installed"))
+            self.assertEqual(len(sources), 2, "both generation tools must install")
+            for installed in sources:
+                source = installed.parent
+                self.assertTrue((source / "built").is_file())
+                self.assertFalse((source / "GNUmakefile").is_symlink())
+                self.assertEqual((source / "GNUmakefile").read_text(), makefile)
+
     def test_cold_build_discovers_homebrew_and_new_tools_with_system_only_path(self):
         media = load("build-macos-source-media")
         with tempfile.TemporaryDirectory() as work:

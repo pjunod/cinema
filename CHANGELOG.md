@@ -113,6 +113,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Fresh macOS source installs build Automake without creating a circular
+  GNUmakefile symlink when the temporary directory uses a symlinked path.
+
 - Restrict the Linux external player preference to Dolby Vision files on Linux;
   other formats and operating systems retain web playback, including mixed-version titles.
 
