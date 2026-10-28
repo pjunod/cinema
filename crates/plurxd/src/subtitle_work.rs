@@ -5,6 +5,36 @@ use plurx_core::store::background_jobs::{
     BackgroundJob, EnqueueOutcome, JobKind, JobPayload, JobSettlement,
 };
 
+// Keep foreground pressure registered across the bounded wait so existing
+// background workers observe it and cooperatively release their CPU permits.
+async fn admit_foreground_subtitle(
+    admissions: &crate::admission::Admissions,
+    budget: usize,
+) -> Option<crate::admission::TranscodePermit> {
+    let mut waiting = admissions.software_pool().queue_for_capacity();
+    let deadline = tokio::time::Instant::now() + crate::admission::QUEUE_WAIT;
+    loop {
+        if let Some(permit) = admissions.try_admit_bundle(
+            0,
+            budget,
+            &crate::admission::TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: 1,
+                decoder_threads: None,
+            },
+            crate::admission::Priority::Live,
+        ) {
+            return Some(permit);
+        }
+        waiting.mark_capacity_blocked();
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        tokio::time::sleep(crate::transcode::ADMISSION_POLL.min(deadline - now)).await;
+    }
+}
+
 impl JobManager {
     pub(crate) fn share_subtitle_admissions(&self, admissions: crate::admission::Admissions) {
         *self
@@ -163,16 +193,7 @@ impl JobManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let Some(_admission) = admissions.try_admit_bundle(
-            0,
-            budget,
-            &crate::admission::TranscodeResourceEstimate {
-                hardware_slot: false,
-                cpu_threads: 1,
-                decoder_threads: None,
-            },
-            crate::admission::Priority::Live,
-        ) else {
+        let Some(_admission) = admit_foreground_subtitle(&admissions, budget).await else {
             return false;
         };
         let Some((job, active)) = self.claim_subtitle_work(Some(request_id)).await else {
@@ -332,5 +353,61 @@ impl JobManager {
             lost,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod foreground_admission_tests {
+    use super::admit_foreground_subtitle;
+    use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
+
+    fn background(admissions: &Admissions) -> crate::admission::TranscodePermit {
+        admissions
+            .try_admit_bundle(
+                0,
+                2,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: 2,
+                    decoder_threads: None,
+                },
+                Priority::Speculative,
+            )
+            .expect("real background CPU holder")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn foreground_subtitle_admission_timeout_releases_live_waiter() {
+        let admissions = Admissions::new();
+        let held = background(&admissions);
+        let started = tokio::time::Instant::now();
+        assert!(admit_foreground_subtitle(&admissions, 2).await.is_none());
+        assert_eq!(started.elapsed(), crate::admission::QUEUE_WAIT);
+        assert!(!admissions.live_is_waiting());
+        assert_eq!(admissions.software_in_use(), 2);
+        drop(held);
+        drop(background(&admissions));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_foreground_subtitle_admission_releases_live_waiter() {
+        let admissions = Admissions::new();
+        let held = background(&admissions);
+        let shared = admissions.clone();
+        let waiting = tokio::spawn(async move { admit_foreground_subtitle(&shared, 2).await });
+        tokio::task::yield_now().await;
+        assert!(
+            admissions.live_is_waiting(),
+            "foreground registers pressure before sleeping"
+        );
+        waiting.abort();
+        assert!(waiting
+            .await
+            .expect_err("cancelled admission")
+            .is_cancelled());
+        assert!(!admissions.live_is_waiting());
+        assert_eq!(admissions.software_in_use(), 2);
+        drop(held);
+        drop(background(&admissions));
     }
 }

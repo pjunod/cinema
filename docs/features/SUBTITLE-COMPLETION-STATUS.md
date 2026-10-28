@@ -1,22 +1,33 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** built · final gate and landing tracked on PR #1303
+**Status:** deployed acceptance in progress · live setup delays and stale-panel recovery fixes under review
 
-**Date:** 2026-10-25 · **Updated:** 2026-10-28 · **Owner:** Codex /root · **Branch:** `codex/subtitle-final-qualification`
+**Date:** 2026-10-25 · **Updated:** 2026-10-28 · **Owner:** Codex /root · **Branch:** `codex/subtitle-live-acceptance`
 
-The original integration [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292)
-was merged by the maintainer before its final web correction landed. Its final
-lane passed Rust, Apple compile/native TV navigation and Android compilation;
-the web and promotion jobs failed. The merged PR is therefore not an all-green
-qualification receipt.
+PR #1303 landed as `4be5ff26`; the maintainer deployed a later main containing
+that work. The live media worker reports revision `f2120bd9`. A fresh text-model
+download and three-cue production inference test succeeded. The installed Small
+speech model also passed its same-language caption test. These setup results do
+not yet prove captions render during playback or on the physical Apple TV.
 
-The owned [follow-up PR #1303](http://forge.lan:3000/noirr/plurx/pulls/1303) retains the reviewed captured-file-context correction and
-its seven passing final/new app cases. It integrates current main, preserves
-both branches' caption fixture assertions, and adds authenticated reuse of
-native successes only when their tested inputs still match. The final diff review is complete. Its new focused checks run in the applicable
-fast lane; PR #1303 records the current candidate, gate and merge receipt. Passing compatible results are
-retained; failures alone are rerun. The maintainer deploys. Physical Apple TV
-acceptance remains separate from simulator and controlled server evidence.
+Live acceptance found concrete blockers. Text-model installation incorrectly
+shares the media-reader pool with library metadata work, causing a long setup
+queue before any download begins. Progressive range demand also needs the
+existing reserved live-reader slot under its durable authority predicates.
+The paused web panel's Refresh status action does not refresh choices or server
+time before an operation exists, leaving Start unable to recover after its
+four-minute action clock expires. Foreground existing-subtitle extraction also
+tries CPU admission once without registering live wait pressure, so background
+work never receives the cooperative yield signal. Active progressive inference
+also needs that signal before acquiring the shared heavy-worker lane. The fixes are implemented and
+in final adversarial review; unit tests have not run yet.
+No production database edits, service restart or agent deployment has occurred.
+
+The selected physical Apple TV remains unavailable to the Mac's
+device connection; actual-device playback and rendering are still unverified.
+The maintainer is enabling its foreground phone-control receiver so acceptance
+can continue. Final review and the applicable fast lane follow the complete
+repair; passing compatible receipts are retained. The maintainer owns deployment.
 
 Companion to the [subtitle generation plan](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md)
 and [progressive translation plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).
