@@ -390,6 +390,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **Docker publishes native HTTPS only when enabled.** The supported Docker
+  startup targets derive the HTTPS mapping from the node's desired settings,
+  including its configured port, and remove the generated mapping on disable.
+  `PLURX_HTTPS_HOST_PORT` selects an independent host port when needed.
+
 - **Consistent reads on a cluster no longer wait 40 ms each.** Every
   linearizable read opens a stream to each other voter to confirm leadership,
   and the accepting node wrote its handshake challenge behind Nagle, so each
