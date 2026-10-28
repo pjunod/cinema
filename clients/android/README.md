@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.7.0**, build `182` — the player shows the server's Dolby
+> Status: **v0.7.0**, build `183` — the player shows the server's Dolby
 > Vision enhancement: one teal `FEL` / `RPU` / `DYN` pill per active
 > enhancement after the dynamic-range chip, and an "Enhancement" info row
 > with one line per enhancement (why it is or is not in use). A processed
