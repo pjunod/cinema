@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37` · **Scope:** bound `library_scan` and
+`4d524906ce16f0878dd607d5bbebd0b57b085e2f` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,24 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## macOS compilation repair — scoped refresh on 2026-10-28
+
+Source `4d524906c`, compared with its parent `93f8ac997c`, adds Linux
+platform guards to `TITLE_SCAN_INDEX_WAIT` and
+`JobManager::title_scan_awaits_index_pass` in
+[state.rs](../../crates/plurxd/src/state.rs). The existing test-only
+`set_local_index_pass` setter also becomes Linux-only. Their Linux bodies
+and values are unchanged. These title-index helpers remain outside the
+selected library-worker protocol; claim, binding, renewal, cancellation,
+settlement, fenced publication and worker wait/lock ordering are unchanged.
+
+Five reviewed whole-file references in [mapping.json](mapping.json) follow
+the changed file because its hash covers those platform guards. All exact
+anchors remain unique. Models, configurations, toolchain pins, bounds,
+properties, validators and historical source anchors retain their identities.
+This is a source correspondence review; fresh affected smoke receipts are
+required separately and no new execution or qualification is claimed here.
 
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 

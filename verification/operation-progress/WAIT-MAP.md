@@ -4,6 +4,24 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## macOS compilation repair — scoped refresh on 2026-10-28
+
+Source `4d524906c`, compared with its parent `93f8ac997c`, adds Linux
+platform guards to `TITLE_SCAN_INDEX_WAIT` and
+`JobManager::title_scan_awaits_index_pass` in
+[state.rs](../../crates/plurxd/src/state.rs). The existing test-only
+`set_local_index_pass` setter also becomes Linux-only. Their Linux bodies
+and values are unchanged. These title-index helpers remain outside the
+selected library-worker protocol; claim, binding, renewal, cancellation,
+settlement, fenced publication and worker wait/lock ordering are unchanged.
+
+Two reviewed whole-file references in [mapping.json](mapping.json) follow
+the changed file because its hash covers those platform guards. All exact
+anchors remain unique. Models, configurations, toolchain pins, bounds,
+properties, validators and historical source anchors retain their identities.
+This is a source correspondence review; fresh affected smoke receipts are
+required separately and no new execution or qualification is claimed here.
+
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 
 Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.
