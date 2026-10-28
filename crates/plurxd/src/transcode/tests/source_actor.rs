@@ -147,9 +147,37 @@ fn source_fixture_store(
             + '_,
     >,
 > {
-    Box::pin(crate::sharing_fixture_clock::select_applied_singleton(
-        config,
-    ))
+    Box::pin(async move {
+        // Only private, pre-admission Store bootstrap uses the daemon-main
+        // debug-frame allowance. Source factory/native work still runs on
+        // the ORIGINAL runtime's ordinary worker stacks after this returns.
+        // Construct the actual selector future INSIDE the owned thread.
+        let runtime = tokio::runtime::Handle::current();
+        assert!(
+            matches!(
+                runtime.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            ),
+            "Source fixture bootstrap requires its original multithread runtime"
+        );
+        std::thread::scope(|scope| {
+            let bootstrap = std::thread::Builder::new()
+                .name("source-fixture-store-bootstrap".into())
+                .stack_size(8 * 1024 * 1024)
+                .spawn_scoped(scope, move || {
+                    runtime.block_on(Box::pin(
+                        crate::sharing_fixture_clock::select_applied_singleton(config),
+                    ))
+                })
+                .expect("owned Source fixture Store bootstrap thread");
+            // No cancellable await or detached owner exists between launch
+            // and positive join. Scope also joins if this parent unwinds.
+            match bootstrap.join() {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        })
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

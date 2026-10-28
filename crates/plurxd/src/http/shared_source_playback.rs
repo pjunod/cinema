@@ -2408,7 +2408,15 @@ pub(crate) fn real_source_start_fixture_with(
     Box::pin(async move {
         let fixture_body_budget =
             crate::transcode::TranscodeManager::source_fixture_body_budget().await;
-        build_real_source_start_fixture(mode, recipient_server_id, None, fixture_body_budget).await
+        // Keep this forwarding fixture frame small without changing the
+        // original current-thread Direct test's scheduling or runtime.
+        Box::pin(build_real_source_start_fixture(
+            mode,
+            recipient_server_id,
+            None,
+            fixture_body_budget,
+        ))
+        .await
     })
 }
 #[cfg(test)]

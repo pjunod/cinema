@@ -12,6 +12,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     testfixtures::require_ffmpeg();
     let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
     std::fs::create_dir_all(&target).expect("repo-local fixture root");
+    let target = std::fs::canonicalize(target).expect("canonical native fixture ancestry");
     let base = tempfile::Builder::new()
         .prefix("finite-software-vod-")
         .tempdir_in(&target)
@@ -611,6 +612,7 @@ async fn finite_cancellation_fixture() -> FiniteCancellationFixture {
     testfixtures::require_ffmpeg();
     let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
     std::fs::create_dir_all(&target).expect("repo-local fixture root");
+    let target = std::fs::canonicalize(target).expect("canonical native fixture ancestry");
     let base = tempfile::Builder::new()
         .prefix("finite-software-vod-")
         .tempdir_in(&target)
