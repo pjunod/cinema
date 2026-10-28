@@ -809,11 +809,18 @@ async fn a_fel_verdict_lives_with_the_title_facts_and_requalification_reruns_the
         // A verdict measured under this identity is current; under any other
         // it is what a renderer change re-qualifies.
         assert!(
-            store.dv_fel_stale_titles(&identity, 16).await.expect("current").is_empty(),
+            store
+                .dv_fel_stale_titles(&identity, 16)
+                .await
+                .expect("current")
+                .is_empty(),
             "{backend}"
         );
         assert_eq!(
-            store.dv_fel_stale_titles(&"b".repeat(64), 16).await.expect("stale"),
+            store
+                .dv_fel_stale_titles(&"b".repeat(64), 16)
+                .await
+                .expect("stale"),
             vec![file.id],
             "{backend}"
         );
@@ -907,7 +914,10 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
         let mut stale = analysis(&file, &scanner);
         stale.source_size += 1;
         assert_eq!(
-            store.publish_dv_title_from_analysis(stale).await.expect("stale"),
+            store
+                .publish_dv_title_from_analysis(stale)
+                .await
+                .expect("stale"),
             AnalysisTitleOutcome::NoDemand,
             "{backend}"
         );
@@ -922,12 +932,20 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
             AnalysisTitleOutcome::Published,
             "{backend}"
         );
-        assert_eq!(stored_aggregate(&store, file.id).await, Some(stats()), "{backend}");
+        assert_eq!(
+            stored_aggregate(&store, file.id).await,
+            Some(stats()),
+            "{backend}"
+        );
         // Still open, same generation: the title worker's own bind changes
         // nothing, which is what lets its job reuse the aggregate.
         let open = demand(&store, file.id, &scanner).await;
         assert_eq!(open.probe_revision, before.probe_revision, "{backend}");
-        assert_eq!(DvTitleStats::from_probe_json(&open.probe_json), Some(stats()), "{backend}");
+        assert_eq!(
+            DvTitleStats::from_probe_json(&open.probe_json),
+            Some(stats()),
+            "{backend}"
+        );
         assert_eq!(
             store
                 .bind_dv_title_demand(open.probe_revision, &scanner)
@@ -936,7 +954,11 @@ async fn analysis_title_aggregate_is_fenced_to_source_scanner_and_generation() {
             Some(open.probe_revision),
             "{backend}"
         );
-        assert_eq!(stored_aggregate(&store, file.id).await, Some(stats()), "{backend}");
+        assert_eq!(
+            stored_aggregate(&store, file.id).await,
+            Some(stats()),
+            "{backend}"
+        );
 
         // Another scanner rotates the generation away with its aggregate.
         let other = "b".repeat(64);

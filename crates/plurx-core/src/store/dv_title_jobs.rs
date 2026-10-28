@@ -173,15 +173,19 @@ pub(super) async fn publish_from_analysis<T: QueueSql>(
         let rows = store
             .queue_sql(ANALYSIS_PUBLISH_SQL.into(), encode(&body)?, true, true)
             .await?;
-        let verdict = decode::<Verdict>(rows.first().ok_or_else(|| {
-            StoreError::Task("no analysis title publication verdict".into())
-        })?)?;
+        let verdict =
+            decode::<Verdict>(rows.first().ok_or_else(|| {
+                StoreError::Task("no analysis title publication verdict".into())
+            })?)?;
         match (verdict.outcome.as_str(), verdict.revision) {
             ("published", _) => return Ok(AnalysisTitleOutcome::Published),
             ("current", _) => return Ok(AnalysisTitleOutcome::Current),
             ("busy", _) => return Ok(AnalysisTitleOutcome::Busy),
             ("unbound", Some(revision)) => {
-                if bind(store, revision, &output.scanner_digest).await?.is_none() {
+                if bind(store, revision, &output.scanner_digest)
+                    .await?
+                    .is_none()
+                {
                     return Ok(AnalysisTitleOutcome::NoDemand);
                 }
             }

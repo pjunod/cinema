@@ -1433,7 +1433,10 @@ impl DvTitleRide {
             return None;
         }
         match crate::vodencode::dv_runtime::ToolSet::capture().await {
-            Ok(Some(tools)) => Some(Self { tools, stream_index }),
+            Ok(Some(tools)) => Some(Self {
+                tools,
+                stream_index,
+            }),
             Ok(None) => None,
             Err(error) => {
                 tracing::debug!(file_id = file.id, %error, "title scanner unavailable to the index pass");
@@ -1445,11 +1448,7 @@ impl DvTitleRide {
     /// Start the scanner on a duplicate of the pass's held source. The task
     /// owns the scanner: dropping or aborting it kills the child.
     #[cfg(target_os = "linux")]
-    fn spawn(
-        &self,
-        source: &std::fs::File,
-        wall_time: Duration,
-    ) -> Option<DvTitleScan> {
+    fn spawn(&self, source: &std::fs::File, wall_time: Duration) -> Option<DvTitleScan> {
         let held = match source.try_clone() {
             Ok(held) => held,
             Err(error) => {

@@ -3052,16 +3052,23 @@ mod title_scanner_identity_tests {
         let directory = tempfile::tempdir().expect("scratch");
         let first = scanner(&directory, "first", b"scanner one");
         let second = scanner(&directory, "second", b"scanner two");
-        let before = ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer one"), first.clone())
+        let before =
+            ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer one"), first.clone())
+                .expect("tools");
+        let new_renderer = ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer two"), first)
             .expect("tools");
-        let new_renderer =
-            ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer two"), first).expect("tools");
         let new_scanner = ToolSet::lifecycle_fixture_with_scanner(backend(b"renderer one"), second)
             .expect("tools");
         assert_ne!(before.backend_digest(), new_renderer.backend_digest());
-        assert_eq!(before.title_scanner_digest(), new_renderer.title_scanner_digest());
+        assert_eq!(
+            before.title_scanner_digest(),
+            new_renderer.title_scanner_digest()
+        );
         assert_eq!(before.backend_digest(), new_scanner.backend_digest());
-        assert_ne!(before.title_scanner_digest(), new_scanner.title_scanner_digest());
+        assert_ne!(
+            before.title_scanner_digest(),
+            new_scanner.title_scanner_digest()
+        );
     }
 
     /// Every title-demand reader and writer uses the scanner key; FEL verdicts
@@ -3076,12 +3083,16 @@ mod title_scanner_identity_tests {
             // The backend key appears only as the FEL identity it measures.
             assert_eq!(
                 source.matches("backend_digest()").count(),
-                source.matches("fel_identity(&tools.backend_digest())").count(),
+                source
+                    .matches("fel_identity(&tools.backend_digest())")
+                    .count(),
                 "{name}"
             );
         }
         let create = include_str!("transcode/manager/create.rs");
         assert!(create.contains("self.fel_identity(&tools.backend_digest())"));
-        assert!(create.contains("planning.probe_json.as_deref(),\n            &tools.title_scanner_digest(),"));
+        assert!(create.contains(
+            "planning.probe_json.as_deref(),\n            &tools.title_scanner_digest(),"
+        ));
     }
 }

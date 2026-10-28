@@ -686,9 +686,15 @@ fn title_discovery_waits_for_the_pass_then_reuses_by_generation() {
     let wait = source
         .find("state.jobs.title_scan_awaits_index_pass(file.id)")
         .expect("discovery waits for the index pass");
-    let bind = source.find(".bind_dv_title_demand(demand.probe_revision, &scanner)").expect("bind");
-    let reuse = source.find("let reused = reusable_aggregate(&demand, revision);").expect("reuse");
-    let moved = source.find("demand.probe_revision = revision;").expect("rebind");
+    let bind = source
+        .find(".bind_dv_title_demand(demand.probe_revision, &scanner)")
+        .expect("bind");
+    let reuse = source
+        .find("let reused = reusable_aggregate(&demand, revision);")
+        .expect("reuse");
+    let moved = source
+        .find("demand.probe_revision = revision;")
+        .expect("rebind");
     assert!(wait < bind && bind < reuse && reuse < moved);
     assert!(source.contains("let result = match reused {\n        Some(stats) => Ok(stats),"));
 }

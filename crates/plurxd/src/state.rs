@@ -1673,7 +1673,8 @@ impl IntegrationMetrics {
 /// How long a fresh title's Dolby Vision scan waits for the node-local index
 /// pass, which reads fresh files ahead of its backlog and scans the title in
 /// the same read. Past it, the title job reads the file itself.
-pub(crate) const TITLE_SCAN_INDEX_WAIT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+pub(crate) const TITLE_SCAN_INDEX_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
 
 pub struct JobManager {
     store: Arc<dyn Store>,

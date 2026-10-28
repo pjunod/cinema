@@ -2011,11 +2011,18 @@ mod dv_title_companion {
         assert_eq!(stats.max_l1_pq, Some(3000));
         assert!(dv_title_aggregate(&output(0, AGGREGATE, ""), false).is_err());
         let refused = dv_title_aggregate(
-            &output(1, "", "DV title scan refused: contiguous decoded title coverage\n"),
+            &output(
+                1,
+                "",
+                "DV title scan refused: contiguous decoded title coverage\n",
+            ),
             true,
         )
         .expect_err("refused");
-        assert!(refused.contains("contiguous decoded title coverage"), "{refused}");
+        assert!(
+            refused.contains("contiguous decoded title coverage"),
+            "{refused}"
+        );
         let incomplete = AGGREGATE.replace(r#""complete":true"#, r#""complete":false"#);
         assert!(dv_title_aggregate(&output(0, &incomplete, ""), true).is_err());
         assert!(dv_title_aggregate(&output(0, "{}", ""), true).is_err());
@@ -2028,11 +2035,23 @@ mod dv_title_companion {
         let source = include_str!("../fragindex.rs");
         let pass_start = source.find("fn shared_index_pass(").expect("pass");
         let pass_end = pass_start + source[pass_start..].find("\n}\n").expect("end");
-        assert!(!source[pass_start..pass_end].contains("dv_title"), "argv carries no scan");
-        let spawn = source.find("Some(ride) => ride.spawn(source, budget)").expect("spawn");
-        let finish = source.find("let pending = ride.finish(file.id, task, lead_built, wait).await;").expect("finish");
-        let build = source.find("let built = build_with_args_shared(").expect("build");
-        assert!(spawn < build && build < finish, "spawned before the pass, judged after it");
+        assert!(
+            !source[pass_start..pass_end].contains("dv_title"),
+            "argv carries no scan"
+        );
+        let spawn = source
+            .find("Some(ride) => ride.spawn(source, budget)")
+            .expect("spawn");
+        let finish = source
+            .find("let pending = ride.finish(file.id, task, lead_built, wait).await;")
+            .expect("finish");
+        let build = source
+            .find("let built = build_with_args_shared(")
+            .expect("build");
+        assert!(
+            spawn < build && build < finish,
+            "spawned before the pass, judged after it"
+        );
     }
 
     /// The daemon's own index pass on a real title, with an installed
@@ -2074,7 +2093,9 @@ mod dv_title_companion {
             })
             .await
             .expect("item");
-        let probe = plurx_core::scan::probe::probe(&source).await.expect("probe");
+        let probe = plurx_core::scan::probe::probe(&source)
+            .await
+            .expect("probe");
         let metadata = std::fs::metadata(&source).expect("metadata");
         let mtime = metadata
             .modified()
@@ -2083,7 +2104,13 @@ mod dv_title_companion {
             .expect("epoch")
             .as_secs() as i64;
         let id = store
-            .upsert_file(item, source.to_str().expect("path"), metadata.len() as i64, mtime, &probe)
+            .upsert_file(
+                item,
+                source.to_str().expect("path"),
+                metadata.len() as i64,
+                mtime,
+                &probe,
+            )
             .await
             .expect("file");
         let file = store.get_file(id).await.expect("file").expect("file");
@@ -2094,12 +2121,24 @@ mod dv_title_companion {
         let videos = video_identities(&file, None, true, false);
         let cache = crate::test_tempdir().expect("cache");
         let started = Instant::now();
-        let builds =
-            build_riding_shared(&file, &videos, cache.path(), Duration::from_secs(7200), None, None)
-                .await;
+        let builds = build_riding_shared(
+            &file,
+            &videos,
+            cache.path(),
+            Duration::from_secs(7200),
+            None,
+            None,
+        )
+        .await;
         let lead = builds.into_iter().next().expect("lead");
-        assert!(matches!(lead.outcome, IndexOutcome::Built(_)), "{:?}", lead.outcome);
-        let pending = lead.dv_title.expect("the companion scan kept its aggregate");
+        assert!(
+            matches!(lead.outcome, IndexOutcome::Built(_)),
+            "{:?}",
+            lead.outcome
+        );
+        let pending = lead
+            .dv_title
+            .expect("the companion scan kept its aggregate");
         assert_eq!(pending.stats, expected);
         assert_eq!(pending.scanner_digest, tools.title_scanner_digest());
         println!(
