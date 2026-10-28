@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37` · **Scope:** bound `library_scan` and
+`4d524906ce16f0878dd607d5bbebd0b57b085e2f` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,21 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## macOS title helper guards — scoped refresh on 2026-10-28
+
+Codex compared reviewed `state.rs` at `7d2d4a9c7` with PR #1314 source
+`4d524906c`. The diff only gates `TITLE_SCAN_INDEX_WAIT` and
+`title_scan_awaits_index_pass` to Linux and narrows `set_local_index_pass` to
+Linux tests. Their `title_work` consumers were already Linux-only.
+
+The selected library/metadata worker, scheduler, authority, publication and
+wait/lock bodies are unchanged. The five exact anchors remain unique; only
+their reviewed whole-file `state.rs` pins are refreshed. Models,
+configurations, bounds, scope, toolchain, historical source anchors and
+qualification identities retain their existing meanings and bytes. This is
+source correspondence; fresh mapping checks and smoke executions remain
+separate evidence.
 
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 

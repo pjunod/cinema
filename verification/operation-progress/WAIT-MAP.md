@@ -4,6 +4,21 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## macOS title helper guards — scoped refresh on 2026-10-28
+
+Codex compared reviewed `state.rs` at `7d2d4a9c7` with PR #1314 source
+`4d524906c`. The diff only gates `TITLE_SCAN_INDEX_WAIT` and
+`title_scan_awaits_index_pass` to Linux and narrows `set_local_index_pass` to
+Linux tests. Their `title_work` consumers were already Linux-only.
+
+The selected library/metadata worker, scheduler, authority, publication and
+wait/lock bodies are unchanged. The two exact anchors remain unique; only
+their reviewed whole-file `state.rs` pins are refreshed. Models,
+configurations, bounds, scope, toolchain, historical source anchors and
+qualification identities retain their existing meanings and bytes. This is
+source correspondence; fresh mapping checks and smoke executions remain
+separate evidence.
+
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 
 Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.
