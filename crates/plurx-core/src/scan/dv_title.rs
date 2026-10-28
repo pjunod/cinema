@@ -1,7 +1,9 @@
 //! Complete-title Dolby Vision metadata, stored in the source's probe document.
 //!
 //! This is not a window sample or a count of RPU NAL units. The scanner accounts
-//! for every decoded display frame, flushes the decoder and reaches clean EOF.
+//! for every display frame the decoder would output, judging each access unit
+//! by the renderer pipeline's own rules without decoding it, and reaches clean
+//! EOF.
 //! The probe publisher owns the source-revision fence and replaces the complete
 //! probe document atomically; these facts must never be copied to a new source.
 
@@ -44,7 +46,8 @@ pub struct MasteringPrimaries {
 #[serde(deny_unknown_fields)]
 pub struct DvTitleStats {
     pub schema: u32,
-    /// True only after successful demux EOF AND decoder drain, without errors.
+    /// True only after successful demux EOF over every access unit, without a
+    /// refusal.
     pub complete: bool,
     pub decoded_frames: u64,
     pub valid_l1_frames: u64,

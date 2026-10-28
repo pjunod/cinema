@@ -643,7 +643,7 @@ pub(super) async fn qualify_if_due(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Qualification, String> {
     let renderer = Renderer {
-        scanner: tools.scanner_digest(),
+        scanner: tools.backend_digest(),
         path: &tools.renderer,
         tools: Some(tools),
         env: tools.renderer_env.clone(),

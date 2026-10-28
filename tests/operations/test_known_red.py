@@ -225,6 +225,13 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/source_probe/title_work_tests.rs::source_probe::title_work::tests::"
             "physical_title_job_qualifies_a_p7_fel_title_and_stores_its_verdict"
         ] = "physical: the deployed processing helper, a radeonsi VA-API device and a P7 FEL title"
+        # The title/index parity check (#1301) needs a real title, the
+        # processing bundle and its standalone aggregate; ordinary unit
+        # runners do not provide those operator-owned inputs.
+        additional_fixture_reasons[
+            "crates/plurxd/src/fragindex/tests.rs::fragindex::tests::dv_title_companion::"
+            "physical_the_index_pass_reads_the_standalone_title_aggregate"
+        ] = "physical: a processing bundle (PLURX_DV_PROCESSING_DIR), a Dolby Vision title and its standalone aggregate"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -232,9 +239,9 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 14)
+        self.assertEqual(len(additional_fixtures), 15)
         # HDR/DV and the explicit Mac graph check are operator-run fixtures.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 38)
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 39)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

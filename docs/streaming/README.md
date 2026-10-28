@@ -2,8 +2,7 @@
 
 The index of `docs/streaming/`: every document in this folder, the question it
 answers, and its status. Routed from [the docs index](../README.md), which
-defines the status words. Add a row here, in the same commit, when you add
-a document to this folder.
+defines status words. Add each new document’s row in the same commit.
 
 Everything about what gets sent to a player and why: the VOD presentation
 programme, the capability negotiation that picks a grade, Dolby Vision
@@ -11,6 +10,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
+| [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Which playback files share `cache.max_gb`, how concurrent writes reserve capacity, and how global eviction protects readers and free disk space. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG backward-seek failure: subtitle reattachment cancelled the Auto request before commit; underlying repair, recovery ownership, quality indicators and remaining live qualification. | open |
 | [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari startup intent corruption, lifecycle ownership and remaining stale-session evidence. | open |
