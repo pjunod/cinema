@@ -7,7 +7,7 @@ separate and unmerged. The user-supplied Opus implementation review examined
 5267/c108. Its findings and the current source dispositions are recorded in
 [the review document](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md). No new independent
 approval is inferred. Behavioral/native-workload/model/mutation tests remain
-NOT RUN and explicitly held. No Hermes or external API review is dispatched.
+NOT RUN; the user authorizes required tests after the fixes. No Hermes or external API review is dispatched.
 V1–V5 and R1/M0–M7 remain OPEN.
 
 The copy driver retains the same NeverRoot/RootOnly/Joined witnesses and

@@ -53,14 +53,25 @@ impl CopyCleanupCustody {
     pub(in crate::adaptive_resources::runtime) fn try_claim_owner(
         self: &Arc<Self>,
     ) -> Option<CopyCloseClaim> {
-        self.state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                matches!(state, OWNED | REPAIR_REQUESTED).then_some(CLAIMED)
-            })
-            .ok()
-            .map(|_| CopyCloseClaim {
-                custody: Arc::clone(self),
-            })
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            if !matches!(state, OWNED | REPAIR_REQUESTED) {
+                return None;
+            }
+            match self.state.compare_exchange_weak(
+                state,
+                CLAIMED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(CopyCloseClaim {
+                        custody: Arc::clone(self),
+                    })
+                }
+                Err(current) => state = current,
+            }
+        }
     }
 
     pub(in crate::adaptive_resources::runtime) fn try_claim_repair(

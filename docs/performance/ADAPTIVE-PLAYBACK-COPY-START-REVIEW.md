@@ -1,6 +1,6 @@
 # Copy start cleanup — accepted decisions and implementation review
 
-**Status:** open · blocking review fixes implemented; behavioral qualification held.
+**Status:** open · fixes implemented; required behavioral qualification authorized after source checks.
 **Updated:** 2026-10-28.
 
 Companion to the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) and
@@ -289,3 +289,9 @@ run. New compiler checks are pending. The earlier compiler pins and passing
 compile-only CI6081 at 2c0228f remain historical evidence for that source; the
 existing manifest still pins that preceding implementation until new checks
 finish. This follow-up adds no independent-review or behavioral acceptance.
+
+
+The user subsequently directed continuous completion through qualification and
+merge, and explicitly authorized required behavioral tests after the fixes.
+Earlier execution holds above are historical. No behavior pass, main promotion,
+deployment or restart is inferred from that authorization.

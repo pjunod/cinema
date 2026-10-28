@@ -4,6 +4,25 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Metadata-only title analysis — scoped refresh on 2026-10-28
+
+Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.
+The two title-only trait/delegation additions preserve Table 30's selected
+library/metadata authority arm. Stale-FEL selection is a read; the analysis
+publisher uses title source/scanner/generation checks and the existing title
+trigger with `job_id` NULL, matching no queue/waiter settlement rows.
+
+`state.rs` adds fresh-title timestamps, local-index mode and an analysis-result
+offer. The selected scheduler/worker, claim/bind/renew/settle/publication paths
+and token/publication lock ordering are unchanged. Title scanning, local index
+waiting, FEL requalification and analysis publication remain outside this
+selected-worker model and add no admission fairness or liveness guarantee.
+
+Three whole-file pins are refreshed; their exact anchors remain unique.
+Models, configurations, bounds, fairness premises, toolchain and historical
+source anchors retain their identities. This is source correspondence only;
+fresh affected smoke receipts remain separate from historical qualification.
+
 ## Current main and adaptive effort source binding — 2026-10-28
 
 The merge of current main `77e985827` into effort `48eccfd74` preserves both

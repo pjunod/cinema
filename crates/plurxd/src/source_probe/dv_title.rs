@@ -94,7 +94,7 @@ pub(crate) async fn publish_title_with_tools_for_control(
             .await
             .ok_or("title probe admission unavailable")?,
     );
-    let scanner = tools.scanner_digest();
+    let scanner = tools.title_scanner_digest();
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let mut demand = store
         .dv_title_demands(&scanner, 0)
