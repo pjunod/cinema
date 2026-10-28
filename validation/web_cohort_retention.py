@@ -350,7 +350,7 @@ def policy_fingerprint():
         'runtime':RUNTIME,'python_policy':PYTHON_POLICY,'fresh_python_cache':PYTHON_CACHE_POLICY,'cache_roots':CACHE_ROOTS,
         'cache_bounds':[MAX_CACHE_FILES,MAX_CACHE_BYTES],'node_package_scopes':NODE_PACKAGE_SCOPES,'node_package_pins':NODE_PACKAGE_PINS,'script_resolver_families':SCRIPTS_RESOLVER_FAMILIES,'commands':COMMANDS,'legacy_job':digest(LEGACY_JOB.encode()),
         'adapter_job':digest(adapted_job().encode()),
-        'producer_eligibility':'terminal-failure-cancelled-skipped-no-cohort-artifact-typed-draft-execution-unknown-v2','baseline':'event-base+merge-base+bytes',
+        'producer_eligibility':'terminal-failure-cancelled-skipped-positive-attempt-no-cohort-artifact-typed-draft-execution-unknown-v3','baseline':'event-base+merge-base+bytes',
         'host':'Linux/X64 host; python3 stdlib and fixed Make recipe compatibility v1'}))
 
 
@@ -433,7 +433,7 @@ def check_nonproducer_job(job,scope,rid):
     require(type(job.get('id')) is int and job['id'] > 0 and job.get('name') == JOB
         and type(job.get('repo_id')) is int and job['repo_id'] == scope['repository']
         and type(job.get('run_id')) is int and job['run_id'] == rid
-        and type(job.get('attempt')) is int and job['attempt'] == 1
+        and type(job.get('attempt')) is int and job['attempt'] >= 1
         and type(job.get('task_id')) is int and job['task_id'] >= 0
         and job.get('status') in ('failure','cancelled','skipped'),
         'Web nonproducer job repository/run/task/attempt/status differs')
