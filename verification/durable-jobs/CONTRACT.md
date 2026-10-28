@@ -13,6 +13,24 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+## Linux-only title helper correspondence — 2026-10-28
+
+A source-only comparison of `state.rs` at `e1d42fb2afc0` and `947b9f86d`
+finds exactly three cfg changes: `TITLE_SCAN_INDEX_WAIT` and
+`title_scan_awaits_index_pass` become Linux-only, and the test setter
+`set_local_index_pass` becomes `all(test, target_os = "linux")`. The resulting
+file is byte-identical in composed effort `9ff0fb7b6` and candidate `78a3a4e3e2f6`.
+The consumers are in the already Linux-gated `source_probe::title_work` module
+and its test child; the helper bodies themselves do not change.
+
+The selected library scheduler/worker, authority, claim, bind, renewal,
+settlement, fenced publication and token/publication lock ordering are
+unchanged. Existing anchors remain unique. Only the affected whole-file pins
+are refreshed; earlier review identities and exclusions are retained. Models,
+configurations, bounds, fairness premises, action/check/test inventories and
+validators do not change. This correspondence audit runs no model or
+behavioral tests and grants no native closure, progress or new qualification.
+
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 
 Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.
