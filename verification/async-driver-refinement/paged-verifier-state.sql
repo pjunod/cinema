@@ -17,6 +17,14 @@ CREATE TABLE IF NOT EXISTS authenticated_units(unit INTEGER PRIMARY KEY,origin B
 CREATE TABLE IF NOT EXISTS export_members(unit INTEGER NOT NULL,path TEXT NOT NULL,kind TEXT NOT NULL,bytes INTEGER NOT NULL,digest TEXT NOT NULL,part INTEGER,PRIMARY KEY(unit,path));
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value BLOB NOT NULL);
 
+CREATE TABLE IF NOT EXISTS input_scopes(scope TEXT PRIMARY KEY,checkpoint BLOB NOT NULL,checkpoint_sha256 TEXT NOT NULL,high_water INTEGER NOT NULL,manifest_root TEXT NOT NULL,external_inventory BLOB NOT NULL,manifest_scope TEXT,status TEXT NOT NULL,resume_cursor BLOB NOT NULL,cursor BLOB NOT NULL,owner_result INTEGER NOT NULL REFERENCES check_results(sequence));
+CREATE TABLE IF NOT EXISTS input_members(scope TEXT NOT NULL,kind TEXT,key TEXT,reference BLOB NOT NULL,member_ref BLOB NOT NULL,status TEXT NOT NULL,owner_result INTEGER NOT NULL REFERENCES check_results(sequence),PRIMARY KEY(scope,kind,key));
+CREATE TABLE IF NOT EXISTS input_work(scope TEXT NOT NULL,pass TEXT NOT NULL,owner_kind TEXT NOT NULL,owner_key TEXT NOT NULL,kind TEXT NOT NULL,key TEXT NOT NULL,status TEXT NOT NULL,cursor BLOB NOT NULL,owner_result INTEGER NOT NULL REFERENCES check_results(sequence),PRIMARY KEY(scope,pass,owner_kind,owner_key,kind,key));
+CREATE INDEX IF NOT EXISTS input_pending ON input_work(scope,pass,owner_key,status,kind,key);
+CREATE INDEX IF NOT EXISTS input_member_identity ON input_members(kind,key,status,owner_result);
+CREATE TABLE IF NOT EXISTS record_members(kind TEXT,key TEXT,member_kind TEXT,member_key TEXT,PRIMARY KEY(kind,key,member_kind,member_key));
+CREATE TABLE IF NOT EXISTS blob_descriptors(kind TEXT,key TEXT,digest TEXT NOT NULL,bytes INTEGER NOT NULL,member_ref BLOB NOT NULL,PRIMARY KEY(kind,key));
+
 CREATE TABLE IF NOT EXISTS proposed_records(kind TEXT,key TEXT,payload BLOB NOT NULL,PRIMARY KEY(kind,key));
 CREATE TABLE IF NOT EXISTS canonical_values(kind TEXT,canonical BLOB,key TEXT,PRIMARY KEY(kind,canonical),UNIQUE(kind,key));
 CREATE TABLE IF NOT EXISTS factor_used(kind TEXT,id INTEGER,PRIMARY KEY(kind,id));
@@ -40,12 +48,12 @@ CREATE TABLE IF NOT EXISTS manifest_children(parent TEXT,child_kind TEXT,child_k
 
 CREATE TABLE IF NOT EXISTS loaded_members(path TEXT PRIMARY KEY,digest TEXT,reference BLOB);
 
-CREATE TABLE IF NOT EXISTS authoritative(kind TEXT,key TEXT,PRIMARY KEY(kind,key));
+CREATE TABLE IF NOT EXISTS authoritative(scope TEXT NOT NULL,kind TEXT,key TEXT,PRIMARY KEY(scope,kind,key));
 
-CREATE TABLE IF NOT EXISTS external_roots(kind TEXT,key TEXT,digest TEXT,PRIMARY KEY(kind,key));
+CREATE TABLE IF NOT EXISTS external_roots(scope TEXT NOT NULL,kind TEXT,key TEXT,digest TEXT,PRIMARY KEY(scope,kind,key));
 
-CREATE TABLE IF NOT EXISTS manifest_tally(kind TEXT,key TEXT,PRIMARY KEY(kind,key));
-CREATE TABLE IF NOT EXISTS selected(kind TEXT,key TEXT,PRIMARY KEY(kind,key));
+CREATE TABLE IF NOT EXISTS manifest_tally(scope TEXT NOT NULL,tally_manifest TEXT NOT NULL,kind TEXT,key TEXT,PRIMARY KEY(scope,tally_manifest,kind,key));
+CREATE TABLE IF NOT EXISTS selected(scope TEXT NOT NULL,kind TEXT,key TEXT,PRIMARY KEY(scope,kind,key));
 
 CREATE TABLE IF NOT EXISTS semantic_links(kind TEXT,key TEXT,relation TEXT,target INTEGER,PRIMARY KEY(kind,key,relation,target));
 
@@ -162,7 +170,7 @@ CREATE TABLE IF NOT EXISTS certificate_tree(src INTEGER,dst INTEGER PRIMARY KEY,
 CREATE INDEX IF NOT EXISTS certificate_tree_src ON certificate_tree(src,edge);
 
 -- Logical digest includes all columns of every table below in listed table/PK order.
--- Excluded relocatable/rebuilt input caches and current external export bookkeeping:
--- manifest_tally,canonical_values,export_evidence,export_result_members,cache_bindings,loaded_members,blobs,export_members,authenticated_units,records,links,page_members,page_deps,manifest_children,authoritative,external_roots,selected,semantic_links.
--- Their full immutable input/output bytes must be rebuilt from authenticated member/range inventories before use; none carries checked flags.
--- logical-order: {"boundary_owner":["id"],"boundary_used":["id"],"certificate_tree":["dst"],"check_results":["sequence"],"checked_monitor_edges":["id"],"checked_monitors":["id"],"completed_views":["view"],"component_rank":["component"],"credit_links":["table_name","row_key"],"dependency_work":["kind","key"],"dfs_components":["node"],"dfs_seen":["node"],"dfs_stack":["depth"],"execution_commits":["sequence"],"factor_used":["kind","id"],"fair_groups":["group_id","node"],"fair_work":["id"],"finite_failures":["family"],"finite_paths":["scope","node"],"finite_queue":["ticket"],"graph_edges":["edge"],"graph_nodes":["node"],"graph_queue":["ticket"],"inventory_entries":["result_sequence","purpose","ordinal"],"meta":["key"],"monitor_queue":["ticket"],"operation_state":["operation"],"path_seen":["node"],"proposed_records":["kind","key"],"restore_records":["kind","key"],"rooted_products_checked":["id"],"rooted_stores":["id"],"scc_check_state":["id"],"sqlite_sequence":["name"],"store_queue":["ticket"],"tlc_done":["tag"],"tm_edges":["id"],"tm_members":["view","node"],"tm_nodes":["id"],"tm_roots":["context"],"tm_views":["view"],"tree_certificates":["scope","node"],"tree_seen":["node"],"tree_status":["scope"],"unit_work":["unit"],"v_discovered":["product"],"v_edges":["id"],"v_fifo":["ticket"],"v_oracle":["id"],"v_owned":["kind","key"],"v_products":["id"],"v_progress":["phase"],"v_queue":["ticket"],"v_roots":["context"],"v_stores":["id"],"verified_scc_members":["view","node"],"verified_sccs":["id"],"verified_views":["view"],"verifier_meta":["singleton"],"view_check_state":["view"]}
+-- Excluded disposable host paths/current external export bookkeeping only:
+-- export_evidence,export_result_members,cache_bindings,loaded_members,blobs,export_members,authenticated_units.
+-- Path-free input payloads, exact provenance and scoped preparation work are durable.
+-- logical-order: {"authoritative":["scope","kind","key"],"blob_descriptors":["kind","key"],"boundary_owner":["id"],"boundary_used":["id"],"canonical_values":["kind","canonical"],"certificate_tree":["dst"],"check_results":["sequence"],"checked_monitor_edges":["id"],"checked_monitors":["id"],"completed_views":["view"],"component_rank":["component"],"credit_links":["table_name","row_key"],"dependency_work":["kind","key"],"dfs_components":["node"],"dfs_seen":["node"],"dfs_stack":["depth"],"execution_commits":["sequence"],"external_roots":["scope","kind","key"],"factor_used":["kind","id"],"fair_groups":["group_id","node"],"fair_work":["id"],"finite_failures":["family"],"finite_paths":["scope","node"],"finite_queue":["ticket"],"graph_edges":["edge"],"graph_nodes":["node"],"graph_queue":["ticket"],"input_members":["scope","kind","key"],"input_scopes":["scope"],"input_work":["scope","pass","owner_kind","owner_key","kind","key"],"inventory_entries":["result_sequence","purpose","ordinal"],"links":["owner_kind","owner_key","target_kind","target_key"],"manifest_children":["parent","child_kind","child_key"],"manifest_tally":["scope","tally_manifest","kind","key"],"meta":["key"],"monitor_queue":["ticket"],"operation_state":["operation"],"page_deps":["page","kind","key"],"page_members":["page","kind","key"],"path_seen":["node"],"proposed_records":["kind","key"],"record_members":["kind","key","member_kind","member_key"],"records":["kind","key"],"restore_records":["kind","key"],"rooted_products_checked":["id"],"rooted_stores":["id"],"scc_check_state":["id"],"selected":["scope","kind","key"],"semantic_links":["kind","key","relation","target"],"sqlite_sequence":["name"],"store_queue":["ticket"],"tlc_done":["tag"],"tm_edges":["id"],"tm_members":["view","node"],"tm_nodes":["id"],"tm_roots":["context"],"tm_views":["view"],"tree_certificates":["scope","node"],"tree_seen":["node"],"tree_status":["scope"],"unit_work":["unit"],"v_discovered":["product"],"v_edges":["id"],"v_fifo":["ticket"],"v_oracle":["id"],"v_owned":["kind","key"],"v_products":["id"],"v_progress":["phase"],"v_queue":["ticket"],"v_roots":["context"],"v_stores":["id"],"verified_scc_members":["view","node"],"verified_sccs":["id"],"verified_views":["view"],"verifier_meta":["singleton"],"view_check_state":["view"]}

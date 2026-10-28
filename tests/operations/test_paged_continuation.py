@@ -28,7 +28,7 @@ class PagedContinuationFixtures(unittest.TestCase):
     def test_resource_incomplete_rolls_back_rows_cursor_and_credit(self):
         before=self.state.sequence(),self.state.cursor(),self.state.logical_digest()
         with self.assertRaises(codec.Incomplete):
-            with self.state.quantum('materialize_store') as quantum:
+            with self.state.quantum('load_input') as quantum:
                 self.index.db.execute("INSERT INTO operation_state VALUES('fixture',?,?)",(codec.encoded(None),codec.encoded({'next':1})))
                 quantum.credit('fixture',1)
                 raise codec.Incomplete('indivisible operational allocation')
@@ -37,7 +37,7 @@ class PagedContinuationFixtures(unittest.TestCase):
         self.assertEqual(self.index.db.execute('SELECT count(*) FROM credit_links').fetchone()[0],0)
 
     def test_private_quantum_cursor_survives_exact_sqlite_backup(self):
-        with self.state.quantum('materialize_store'):
+        with self.state.quantum('load_input'):
             self.index.db.execute("INSERT INTO operation_state VALUES('fixture',?,?)",(codec.encoded(None),codec.encoded({'next':2})))
         descriptor=self.state.backup(self.root/'backup.sqlite')
         with sqlite3.connect((self.root/'backup.sqlite').as_uri()+'?mode=ro&immutable=1',uri=True) as restored:
@@ -47,6 +47,21 @@ class PagedContinuationFixtures(unittest.TestCase):
                              (codec.encoded({'next':2}),))
         self.assertEqual(descriptor['verifier_logical_digest'],self.state.logical_digest())
 
+    def test_logical_digest_stream_preserves_full_typed_row_preimage(self):
+        import hashlib
+        with self.state.quantum('load_input'):
+            self.index.db.execute("INSERT INTO operation_state VALUES('unicode-fixture',?,?)",(codec.encoded(None),codec.encoded({'text':'é🧪'*9000})))
+        order=codec.strict_json(next(line for line in self.state.sql_path.read_text().splitlines() if line.startswith('-- logical-order: ')).split(': ',1)[1])
+        expected=hashlib.sha256(b'plurx-independent-verifier-state-v1\0')
+        expected.update(bytes.fromhex(self.state.schema_sha256))
+        for table,keys in order.items():
+            columns=[r[1] for r in self.index.db.execute('PRAGMA table_info("'+table+'")')]
+            def cell(value):return {'blob_hex':value.hex()} if type(value) is bytes else value
+            for row in self.index.db.execute('SELECT * FROM "'+table+'" ORDER BY '+','.join('"'+key+'"' for key in keys)):
+                data=codec.encoded([table,[cell(row[columns.index(key)]) for key in keys],[cell(value) for value in row]])
+                expected.update(len(data).to_bytes(8,'big'));expected.update(data)
+        self.assertEqual(self.state.logical_digest(),expected.hexdigest())
+
     def test_unregistered_operation_transition_cannot_commit_progress(self):
         before=self.state.sequence(),self.state.cursor(),self.state.logical_digest()
         with self.assertRaisesRegex(codec.Invalid,'transition'):
@@ -55,7 +70,7 @@ class PagedContinuationFixtures(unittest.TestCase):
         self.assertEqual((self.state.sequence(),self.state.cursor(),self.state.logical_digest()),before)
 
     def test_local_checked_bits_without_uploaded_origin_chain_cannot_resume(self):
-        with self.state.quantum('materialize_store'):
+        with self.state.quantum('load_input'):
             self.index.db.execute("INSERT INTO operation_state VALUES('forged_checked',?,?)",(codec.encoded(None),codec.encoded(True)))
         auth=self.root/'authenticated.sqlite'
         with sqlite3.connect(auth) as db:

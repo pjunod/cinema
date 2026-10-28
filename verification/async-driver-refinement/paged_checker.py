@@ -14,7 +14,7 @@ import sys
 import time
 
 import checker as legacy
-from paged_codec import (BLOBS, BoundedList, Budget, ContinuationResolver, ExecutionState, Incomplete, Invalid, RecordIndex, bounded_json, canonical,
+from paged_codec import (BLOBS, COUNT_KINDS, BoundedList, Budget, ContinuationResolver, ExecutionState, Incomplete, Invalid, RecordIndex, bounded_json, canonical,
                          digest, encoded, envelope, inner, ref, require, sha_bytes,
                          strict_json)
 
@@ -100,7 +100,7 @@ class Semantic:
 
     def initial_image(self):
         image = self.image
-        row = self.db.execute("SELECT path,digest,bytes FROM blobs WHERE kind='initial_image_blob' AND key=?", (canonical(image['member_path']),)).fetchone()
+        row = self.index.blob('initial_image_blob',image['member_path'])
         require(row is not None and row[1] == image['image_sha256'] and row[2] == image['image_bytes'], 'initial image file identity')
         db = sqlite3.connect(Path(row[0]).resolve().as_uri() + '?mode=ro&immutable=1', uri=True)
         try:
@@ -109,7 +109,7 @@ class Semantic:
             schema = self.index.get('Store', image['initial_store'])['sqlite_schema_sha256']
             inventory_ref = image['schema_inventory']
             require(inventory_ref['kind'] == 'schema_inventory', 'initial schema inventory ref kind')
-            inventory_blob = self.db.execute('SELECT path,digest FROM blobs WHERE kind=? AND key=?', (inventory_ref['kind'], canonical(inventory_ref['id']))).fetchone()
+            inventory_blob = self.index.blob(inventory_ref['kind'],inventory_ref['id'])[:2]
             require(inventory_blob is not None and inventory_blob[1] == inventory_ref['sha256'], 'schema inventory authentication')
             inventory = strict_json(Path(inventory_blob[0]).read_bytes())
             legacy.exact_keys(inventory, {'compiled_sqlite_migrations', 'installed_sqlite_schema_sha256', 'schema_inventory', 'table_columns'}, 'actual installed schema inventory')
@@ -584,7 +584,7 @@ def run_unit(request):
     """Controller-authenticated request; semantic authority stays in this lane."""
     validate_private_request(request,'unit')
     unit = request['work_unit']
-    require(unit['stage'] in ('semantic_verify', 'monitor_scc_verify', 'temporal_components'), 'wrong verifier stage')
+    require(unit['stage'] in ('semantic_verify','monitor_scc_verify','temporal_components') or unit['stage']=='complete' and unit['mode']=='unit','wrong verifier stage/mode')
     output = Path(request['output_dir'])
     require(output.is_absolute() and not output.is_symlink(), 'owned absolute output required')
     output.mkdir(parents=True, exist_ok=True)
@@ -593,43 +593,35 @@ def run_unit(request):
         raise Incomplete('work-unit total deadline exhausted')
     budget = Budget(request['resource_plan']['record'], output,seconds=remaining)
     index = RecordIndex(Path(request['verifier_work_db']), source=unit['source'], session_id=unit['session_id'], budget=budget)
-    index.rebuild_input_cache()
     index.execution=ExecutionState(index,request['initial_image']['record']['image_sha256'])
     index.request=request
     begin_private_unit(index,request)
     index.schema.check(unit, 'WorkUnit')
     index.schema.check(request['checkpoint'])
     checkpoint = request['checkpoint']['record']
+    require(request['initial_image']['record']['image_sha256']==checkpoint['initial_image_id'],'input preparation Init/checkpoint identity mismatch')
     index.input_snapshot = request['checkpoint']
+    index.resolver_path=Path(request['dependency_index'])
     require(checkpoint['source'] == unit['source'] and checkpoint['session_id'] == unit['session_id'] and checkpoint['resource_plan_sha256'] == budget.plan['plan_sha256'], 'work-unit snapshot binding')
     require(unit['expected_prior_checkpoint'] == (None if request['prior_checkpoint'] is None else digest(request['prior_checkpoint'])), 'prior checkpoint authentication binding')
     artifacts, complete = [], False
     stage_ready=True
     try:
-        dep_path = Path(request['dependency_index'])
-        require(dep_path.is_absolute() and dep_path.is_file() and not dep_path.is_symlink(), 'dependency resolver path')
-        resolver = sqlite3.connect(dep_path.as_uri() + '?mode=ro&immutable=1', uri=True)
-        try:
-            for kind, key, expected in resolver.execute('SELECT kind,key,digest FROM roots ORDER BY kind,key'):
-                key = strict_json(key)
-                index.db.execute('INSERT OR REPLACE INTO external_roots VALUES(?,?,?)', (kind, canonical(key), expected))
-            for kind, key, expected, path in resolver.execute('SELECT kind,key,digest,path FROM objects ORDER BY kind,key'):
-                key = strict_json(key)
-                member = Path(path)
-                require(member.is_absolute() and member.is_relative_to(output.parent) and not member.is_symlink(), 'external object outside owned session')
-                if kind in BLOBS:
-                    index.add_blob(kind, key, member, expected)
-                else:
-                    value = index.load_member(member)
-                    require(value == {'kind': kind, 'id': key, 'sha256': expected}, 'resolver key/digest mismatch')
-        finally:
-            resolver.close()
         load_current_runtime(index,request)
-        index.verify_dependencies(checkpoint['page_root'], high_water=checkpoint['committed_transaction'])
-        index.rebind_proposals()
+        was_ready=index.db.execute("SELECT 1 FROM input_scopes WHERE checkpoint_sha256=? AND status='ready'",(digest(request['checkpoint']),)).fetchone() is not None
+        index.prepare_input(request)
+        prepare_catalog_input(index,request)
+        if unit['stage']=='complete':
+            raise Incomplete('final input preparation safe boundary; saved proof cursor remains suspended and nonqualifying')
+        if not was_ready:
+            raise Incomplete('authenticated input preparation ready; safe prefix awaits publication before semantic resume')
+        saved=strict_json(index.db.execute('SELECT resume_cursor FROM input_scopes WHERE scope=?',(index.scope,)).fetchone()[0])
+        if index.execution.cursor()['operation']=='check_input':
+            with index.execution.quantum(saved['operation'],stage=saved['stage'],scope=saved['scope'],position=saved['position']) as quantum:
+                quantum.credit('input_resume',index.scope)
         image = request['initial_image']['record']
         require(image['image_sha256'] == checkpoint['initial_image_id'], 'snapshot initial-image mismatch')
-        driver_row = index.db.execute("SELECT path FROM blobs WHERE kind='source_file' AND key=?", (canonical('driver-graph.json'),)).fetchone()
+        driver_row = index.blob('source_file','driver-graph.json')
         require(driver_row is not None, 'missing authenticated driver graph')
         driver_bytes = Path(driver_row[0]).read_bytes()
         require(sha_bytes(driver_bytes) == unit['source']['driver_sha256'], 'driver artifact hash mismatch')
@@ -648,7 +640,7 @@ def run_unit(request):
                     temporal.produce_monitors()
                 if index.db.execute("SELECT complete FROM v_progress WHERE phase='scc_build_complete'").fetchone() != (1,):
                     temporal.produce_sccs()
-                pending=index.db.execute("SELECT 1 FROM proposed_records p WHERE p.kind IN ('MonitorNode','MonitorEdge','Scc') AND NOT EXISTS (SELECT 1 FROM authoritative a WHERE a.kind=p.kind AND a.key=p.key) LIMIT 1").fetchone()
+                pending=index.db.execute("SELECT 1 FROM proposed_records p WHERE p.kind IN ('MonitorNode','MonitorEdge','Scc') AND NOT EXISTS (SELECT 1 FROM active_authoritative a WHERE a.kind=p.kind AND a.key=p.key) LIMIT 1").fetchone()
                 stage_ready=pending is None
                 if stage_ready:
                     temporal.verify_monitors()
@@ -728,7 +720,7 @@ def verify_proof_contract(index):
                  'PagedOneStep.tla', 'PagedComponent.tla', 'PropertyMonitors.tla', 'paged-one-step.cfg', 'paged-component.cfg', 'BoundaryControls.tla',
                  'paged_bounds.py', 'paged-verifier-state.sql', 'source-bound-formulas.json'):
         relative = 'verification/async-driver-refinement/' + name
-        row = index.db.execute("SELECT digest FROM blobs WHERE kind='source_file' AND key=?", (canonical(relative),)).fetchone()
+        row = (index.blob('source_file',relative)[1],)
         require(row is not None and row[0] == file_sha(package / name), 'actual semantic source closure mismatch: ' + name)
     from paged_bounds import derive
     from paged_codec import Schema
@@ -948,7 +940,7 @@ def invoke_tlc(index, directory, module, config, tlc, *, tag):
         require(file_sha(path) == tlc[name + '_sha256'], 'TLC runtime byte identity')
     require(hasattr(index,'current_runtime_ref'),'actual invocation lacks the fixed current runtime receipt')
     reference=index.current_runtime_ref
-    runtime=index.db.execute('SELECT path,digest FROM blobs WHERE kind=? AND key=?',(reference['kind'],canonical(reference['id']))).fetchone()
+    runtime=index.blob(reference['kind'],reference['id'])[:2]
     require(runtime is not None and runtime[1]==reference['sha256'] and file_sha(runtime[0])==reference['sha256'],'current invocation runtime bytes differ')
     runtime_value=strict_json(Path(runtime[0]).read_bytes())
     require(runtime_value['runtime']==index.request['runtime'] and sha_bytes(encoded(runtime_value['runtime']))==index.source['toolchain_sha256'] and
@@ -1226,6 +1218,10 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
         write_json(path, outcome)
         artifacts.append(path.name)
     require(index.count('Outcome') == 11, 'eleven semantic outcome families incomplete')
+    for context in semantic.checkpoint['contexts']:
+        require(context['frontier']==0 and context['reachable_products']==context['expanded_products'],
+                'final context publication before source closure')
+        index.propose(envelope('ContextRoot',context),'family_finish')
     index.propose(envelope('Counts',index.counts()),'family_finish')
     write_json(output / 'temporal-receipt.json', {'schema_version': 6, 'source': index.source,
         'session_id': index.session_id, 'all_original_predecessors': True, 'all_required_components': True,
@@ -1378,7 +1374,7 @@ def validate_restore(request):
     checkpoint_envelope = request['checkpoint']
     checkpoint = checkpoint_envelope['record']
     budget = Budget(request['resource_plan']['record'], output,seconds=request['deadline_monotonic']-time.monotonic())
-    index = RecordIndex(output / 'restore-index.sqlite', source=unit['source'], session_id=unit['session_id'], budget=budget)
+    index = private_input_view(request)
     index.schema.check(checkpoint_envelope)
     require(checkpoint['source'] == index.source and checkpoint['session_id'] == index.session_id and
             checkpoint['resource_plan_sha256'] == budget.plan['plan_sha256'], 'restore snapshot identity')
@@ -1387,18 +1383,6 @@ def validate_restore(request):
     resolver = sqlite3.connect(Path(request['dependency_index']).as_uri() + '?mode=ro&immutable=1', uri=True)
     catalog = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True)
     try:
-        for kind, key, expected in resolver.execute('SELECT kind,key,digest FROM roots ORDER BY kind,key'):
-            index.db.execute('INSERT OR REPLACE INTO external_roots VALUES(?,?,?)', (kind, canonical(strict_json(key)), expected))
-        for kind, key, expected, member in resolver.execute('SELECT kind,key,digest,path FROM objects ORDER BY kind,key'):
-            key = strict_json(key)
-            member = Path(member)
-            require(member.is_absolute() and member.is_relative_to(output.parent) and not member.is_symlink(), 'restore dependency outside owned session')
-            if kind in BLOBS:
-                index.add_blob(kind, key, member, expected)
-            else:
-                require(index.load_member(member) == {'kind': kind, 'id': key, 'sha256': expected}, 'restore resolver binding')
-        load_current_runtime(index,request)
-        index.verify_dependencies(checkpoint['page_root'], high_water=checkpoint['committed_transaction'])
         catalog.execute('PRAGMA query_only=ON')
         catalog.execute('PRAGMA temp_store=FILE')
         catalog.execute('PRAGMA cache_size=-2048')
@@ -1418,71 +1402,34 @@ def validate_restore(request):
         require(catalog.execute("SELECT length(payload) FROM catalog_control WHERE key='binding'").fetchone()==(len(binding),) and
                 catalog.execute("SELECT payload FROM catalog_control WHERE key='binding'").fetchone()==(binding,),
                 'restored private source/session/plan binding differs')
-        stored_checkpoint = catalog.execute('SELECT descriptor FROM checkpoints WHERE digest=?', (digest(checkpoint_envelope),)).fetchone()
-        require(stored_checkpoint is not None and strict_json(stored_checkpoint[0]) == checkpoint_envelope, 'catalog checkpoint payload differs')
-        h = hashlib.sha256(b'plurx-paged-catalog-v6\0')
-        h.update(encoded({'source': index.source, 'session_id': index.session_id,
-                          'resource_plan_sha256': budget.plan['plan_sha256'], 'transaction': checkpoint['committed_transaction']}))
-        index.db.execute('CREATE TABLE IF NOT EXISTS restore_records(kind TEXT,key TEXT,PRIMARY KEY(kind,key))')
-        index.db.execute('DELETE FROM restore_records')
-        for kind in CATALOG_KINDS:
-            if kind in LOGICAL_OMITTED:
-                continue
-            for key_type, number, text, key_json, payload, transport_digest, commit in catalog.execute(
-                    'SELECT key_type,key_integer,key_text,key_json,payload,digest,created_commit FROM catalog_records WHERE kind=? ORDER BY key_type,key_integer,key_text', (kind,)):
-                require(commit <= checkpoint['committed_transaction'], 'post-snapshot catalog record')
-                value = strict_json(payload)
-                index.schema.check(value)
-                from paged_codec import record_key
-                key = record_key(value)
-                require(value['kind'] == kind and strict_json(key_json) == key and
-                        ((key_type == 0 and type(key) is int and number == key and text is None) or
-                         (key_type == 1 and type(key) is str and text == key and number is None)), 'catalog typed key/ordinal mismatch')
-                require(encoded(value) == payload, 'catalog envelope canonical bytes differ')
-                actual = index.get_envelope(kind, key)
-                require(encoded(actual) == payload, 'catalog/page canonical disagreement')
-                expected = digest(value)
-                require(transport_digest in (expected, bytes.fromhex(expected)), 'catalog envelope digest differs')
-                h.update(len(payload).to_bytes(8, 'big'))
-                h.update(payload)
-                index.db.execute('INSERT INTO restore_records VALUES(?,?)', (kind, canonical(key)))
-                budget.check(records=1, bytes_=len(payload))
-        for kind in CATALOG_KINDS:
-            if kind not in LOGICAL_OMITTED and kind!='ResourcePlan':
-                require(index.db.execute('SELECT key FROM authoritative WHERE kind=? EXCEPT SELECT key FROM restore_records WHERE kind=?', (kind, kind)).fetchone() is None, 'authenticated page record missing from restored catalog')
-        counts = index.counts()
-        counts['frontier'] = catalog.execute("SELECT count(*) FROM frontier WHERE status='pending'").fetchone()[0]
-        require(counts == checkpoint['counts'], 'restored global unique counts differ')
+        scope_state=index.db.execute('SELECT checkpoint_sha256,status FROM input_scopes WHERE scope=?',(index.scope,)).fetchone()
+        if scope_state is None or scope_state!=(digest(checkpoint_envelope),'ready'):
+            receipt={'schema_version':6,'catalog_sha256':budget_file_sha(path,index.budget),'checkpoint_sha256':digest(checkpoint_envelope),
+                'source':index.source,'session_id':index.session_id,'catalog_logical_digest':checkpoint['catalog_logical_digest'],
+                'catalog_commit':checkpoint['committed_transaction'],'counts':checkpoint['counts'],'contexts':checkpoint['contexts'],
+                'manifest_root':checkpoint['page_root'],'complete':False,'acceptance':False,'scope':'input_preparation'}
+            write_json(output/'restore-semantic.json',receipt)
+            return receipt
+        certificate=index.db.execute("SELECT cursor,status,owner_result FROM input_work WHERE scope=? AND pass='catalog'",(index.scope,)).fetchone()
+        require(certificate is not None and certificate[1]=='done','ready input scope lacks catalog correspondence certificate')
+        checked=strict_json(certificate[0])
+        actual_sha=budget_file_sha(path,index.budget)
+        require(checked['checkpoint']==digest(checkpoint_envelope) and checked['phase']=='done' and
+                (checked['catalog_sha256'],checked['bytes'])==(actual_sha,path.stat().st_size),
+                'restored catalog differs from exact authenticated checked prefix')
+        require(index.db.execute("SELECT 1 FROM credit_links WHERE table_name='input_catalog' AND row_key=? AND result_sequence=?",
+            (encoded(index.scope),certificate[2])).fetchone() is not None,'catalog certificate lacks actual checked result')
+        # The actual result chain and immutable backup/hash preserve the prior
+        # complete row comparisons. Rebuilding a second index or comparing the
+        # entire prefix again would erase the continuation benefit.
         verify_proof_contract(index)
-        contexts = []
-        for name in legacy.CONTEXTS:
-            row = catalog.execute('SELECT initial_product FROM contexts WHERE name=?', (name,)).fetchone()
-            require(row is not None, 'restored context missing')
-            products = catalog.execute('SELECT count(*) FROM products WHERE context=?', (name,)).fetchone()[0]
-            expanded = catalog.execute('SELECT count(*) FROM products WHERE context=? AND expanded=1', (name,)).fetchone()[0]
-            pending = catalog.execute("SELECT count(*) FROM frontier f JOIN products p ON p.id=f.product_id WHERE p.context=? AND f.status='pending'", (name,)).fetchone()[0]
-            snapshot = {'context': name, 'initial_product': row[0], 'reachable_products': products, 'expanded_products': expanded, 'frontier': pending}
-            require(products == expanded + pending, 'restored per-context frontier correspondence')
-            contexts.append(snapshot)
-        require(contexts == checkpoint['contexts'], 'restored seven context snapshot differs')
-        h.update(encoded(counts))
-        h.update(encoded(contexts))
-        require(h.hexdigest() == checkpoint['catalog_logical_digest'], 'restored catalog semantic logical digest differs')
-        # Cross-check exact immutable factorings and edge identity references,
-        # independently of generic catalog_records payload redundancy.
-        for s in index.find('Store'):
-            raw = inner(s['canonical_utf8'])
-            require(raw == {'rows': inner(index.get('PhysicalRows', s['physical_rows_id'])['canonical_utf8']),
-                            'episode': inner(index.get('Episode', s['episode_id'])['canonical_utf8'])}, 'restore Store full canonical factoring')
-        for p in index.find('Product'):
-            value = inner(p['canonical_utf8'])
-            require(value['sql'] + 1 == p['store_id'] and value['context'] == p['context'], 'restore Product canonical/global mapping')
-        receipt = {'schema_version': 6, 'source': index.source, 'session_id': index.session_id,
-                   'checkpoint_sha256': digest(checkpoint_envelope), 'catalog_commit': checkpoint['committed_transaction'],
-                   'catalog_logical_digest': h.hexdigest(), 'manifest_root': checkpoint['page_root'], 'catalog_sha256': file_sha(path),
-                   'counts': counts, 'contexts': contexts, 'complete': True, 'acceptance': False,
-                   'scope': 'restored catalog/page identity correspondence; production replay and full semantic qualification remain separate'}
-        write_json(output / 'restore-semantic.json', receipt)
+        receipt={'schema_version':6,'source':index.source,'session_id':index.session_id,
+            'checkpoint_sha256':digest(checkpoint_envelope),'catalog_commit':checkpoint['committed_transaction'],
+            'catalog_logical_digest':checkpoint['catalog_logical_digest'],'manifest_root':checkpoint['page_root'],
+            'catalog_sha256':actual_sha,'counts':checkpoint['counts'],'contexts':checkpoint['contexts'],
+            'complete':True,'acceptance':False,
+            'scope':'restored catalog/page identity correspondence; production replay and full semantic qualification remain separate'}
+        write_json(output/'restore-semantic.json',receipt)
         return receipt
     finally:
         resolver.close()
@@ -1618,7 +1565,6 @@ def load_current_runtime(index,request):
         all(type(x) is str and x for x in value['runner'].values()),'current actual runner descriptor differs')
     reference={'kind':'runtime_receipt','id':relative,'sha256':sha_bytes(raw)}
     index.add_blob(reference['kind'],reference['id'],path,reference['sha256'])
-    index.db.execute('INSERT OR REPLACE INTO external_roots VALUES(?,?,?)',(reference['kind'],canonical(reference['id']),reference['sha256']))
     index.db.commit()
     index.current_runtime_ref=reference
     resources=Path(request['output_dir'])/'resources.json'
@@ -1630,39 +1576,132 @@ def load_current_runtime(index,request):
     require(index.budget.plan['available_disk_receipt']==resource_ref and
             index.budget.accounting['measurement_sha256']==resource_ref['sha256'],'admitted actual measurement receipt differs')
     index.add_blob(resource_ref['kind'],resource_ref['id'],resources,resource_ref['sha256'])
-    index.db.execute('INSERT OR REPLACE INTO external_roots VALUES(?,?,?)',(resource_ref['kind'],canonical(resource_ref['id']),resource_ref['sha256']))
     index.db.commit()
     return reference
 
 
-def authenticated_inputs(request,directory,*,database_name='input-index.sqlite',verify_snapshot=True):
-    unit=request['work_unit']
-    remaining=request['deadline_monotonic']-time.monotonic()
-    if remaining<=0:
-        raise Incomplete('shared work-unit deadline exhausted')
-    budget=Budget(request['resource_plan']['record'],directory,seconds=remaining)
-    index=RecordIndex(Path(directory)/database_name,source=unit['source'],session_id=unit['session_id'],budget=budget)
-    index.input_snapshot=request['checkpoint']
-    resolver=sqlite3.connect(Path(request['dependency_index']).as_uri()+'?mode=ro&immutable=1',uri=True)
+def budget_file_sha(path,budget):
+    h=hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        while chunk:=stream.read(65536):h.update(chunk);budget.check(bytes_=len(chunk))
+    return h.hexdigest()
+
+
+def prepare_catalog_input(index,request):
+    # The catalog is read-only until byte correspondence is independently
+    # established. This cursor is bound to the exact immutable backup file.
+    cp=request['checkpoint'];body=cp['record'];cp_sha=digest(cp)
+    state=index.db.execute('SELECT status FROM input_scopes WHERE scope=?',(index.scope,)).fetchone()[0]
+    if state=='ready':return
+    require(state=='dependencies_ready','catalog comparison before root-bound dependencies complete')
+    path=Path(request['catalog_path'])
+    require(path.is_file() and not path.is_symlink(),'missing immutable catalog during preparation')
+    file_digest=budget_file_sha(path,index.budget);file_bytes=path.stat().st_size
+    row=index.db.execute("SELECT cursor,status FROM input_work WHERE scope=? AND pass='catalog'",(index.scope,)).fetchone()
+    if row is None:
+        with index.input_quantum('check_input') as q:
+            cursor={'checkpoint':cp_sha,'catalog_sha256':file_digest,'bytes':file_bytes,'kind':0,'after':[-1,None,None],'phase':'records'}
+            index.db.execute('INSERT INTO input_work VALUES(?,?,?,?,?,?,?,?,?)',(index.scope,'catalog','Checkpoint',cp_sha,'catalog',cp_sha,'pending',encoded(cursor),q.sequence))
+    else:
+        cursor=strict_json(row[0])
+        require((cursor['checkpoint'],cursor['catalog_sha256'],cursor['bytes'])==(cp_sha,file_digest,file_bytes),'continued catalog comparison changed checkpoint/file')
+    catalog=sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)
+    catalog.execute('PRAGMA temp_store=FILE');catalog.execute('PRAGMA cache_size=-2048')
     try:
-        for kind,key,sha in resolver.execute('SELECT kind,key,digest FROM roots ORDER BY kind,key'):
-            index.db.execute('INSERT OR REPLACE INTO external_roots VALUES(?,?,?)',(kind,canonical(strict_json(key)),sha))
-        for kind,key,sha,path in resolver.execute('SELECT kind,key,digest,path FROM objects ORDER BY kind,key'):
-            key=strict_json(key)
-            if kind in BLOBS:
-                index.add_blob(kind,key,Path(path),sha)
-            else:
-                require(index.load_member(Path(path))=={'kind':kind,'id':key,'sha256':sha},'authenticated member/key mismatch')
-        load_current_runtime(index,request)
-        checkpoint=request['checkpoint']['record']
-        if verify_snapshot:
-            index.verify_dependencies(checkpoint['page_root'],high_water=checkpoint['committed_transaction'])
-        files=request['source_files']
-        require(type(files) is dict and sha_bytes(encoded(sorted(files.items())))==unit['source']['source_closure_sha256'],'complete actual source closure mismatch')
-        verify_proof_contract(index)
-        return index
-    finally:
-        resolver.close()
+        require(catalog.execute('PRAGMA integrity_check').fetchone()==('ok',),'preparation catalog integrity')
+        require(catalog.execute('PRAGMA foreign_key_check').fetchone() is None,'preparation catalog foreign key violation')
+        meta=catalog.execute('SELECT current_commit,schema_version,source_json,session_id,resource_plan_sha256 FROM catalog_meta WHERE singleton=1').fetchone()
+        require(meta is not None and meta[:2]==(body['committed_transaction'],6) and strict_json(meta[2])==index.source and
+            meta[3:]==(index.session_id,index.budget.plan['plan_sha256']),'preparation catalog identity/snapshot differs')
+        require(catalog.execute('SELECT descriptor FROM checkpoints WHERE digest=?',(cp_sha,)).fetchone()==(encoded(cp),),'catalog exact input checkpoint differs')
+        plan=request['resource_plan'];pk=digest(plan)
+        require(catalog.execute('SELECT descriptor,admission FROM resource_plans WHERE digest=?',(pk,)).fetchone()==(encoded(plan),'admitted') and
+            catalog.execute('SELECT count(*) FROM resource_plans').fetchone()==(1,),'catalog separate ResourcePlan differs')
+        binding=encoded({'source':index.source,'session_id':index.session_id,'resource_plan':plan})
+        require(catalog.execute("SELECT payload FROM catalog_control WHERE key='binding'").fetchone()==(binding,),'catalog source/session binding differs')
+        while cursor['kind']<len(CATALOG_KINDS):
+            kind=CATALOG_KINDS[cursor['kind']]
+            if kind in LOGICAL_OMITTED:
+                with index.input_quantum('check_input') as q:
+                    cursor['kind']+=1;cursor['after']=[-1,None,None]
+                    index.db.execute("UPDATE input_work SET cursor=?,owner_result=? WHERE scope=? AND pass='catalog'",(encoded(cursor),q.sequence,index.scope))
+                continue
+            if cursor['phase']=='records':
+                kt,kn,ks=cursor['after']
+                row=catalog.execute('SELECT key_type,key_integer,key_text,key_json,length(payload),digest,created_commit FROM catalog_records WHERE kind=? AND (key_type>? OR key_type=? AND ((key_type=0 AND key_integer>?) OR (key_type=1 AND key_text>?))) ORDER BY key_type,key_integer,key_text LIMIT 1',(kind,kt,kt,kn,ks)).fetchone()
+                if row:
+                    typ,num,text,key,size,d,commit=row
+                    require(commit<=body['committed_transaction'] and typ in (0,1),'post-snapshot/invalid typed catalog key')
+                    identity=num if typ==0 else text
+                    require(strict_json(key)==identity and key==encoded(identity),'catalog canonical typed key differs')
+                    if size>index.budget.member_limit():raise Incomplete('indivisible catalog record exceeds resident allowance')
+                    with index.input_quantum('check_input') as q:
+                        expected=index.get_envelope(kind,identity)
+                        raw=encoded(expected)
+                        actual=catalog.execute('SELECT payload FROM catalog_records WHERE kind=? AND key_json=?',(kind,key)).fetchone()
+                        require(actual==(raw,) and d in (digest(expected),bytes.fromhex(digest(expected))),'catalog/page complete envelope differs')
+                        cursor['after']=[typ,num,text]
+                        index.db.execute("UPDATE input_work SET cursor=?,owner_result=? WHERE scope=? AND pass='catalog'",(encoded(cursor),q.sequence,index.scope))
+                        q.credit('catalog_record',[index.scope,kind,identity]);index.budget.check(records=1,bytes_=size)
+                    continue
+                with index.input_quantum('check_input') as q:
+                    cursor['phase']='missing';cursor['after']=[-1,None,None]
+                    index.db.execute("UPDATE input_work SET cursor=?,owner_result=? WHERE scope=? AND pass='catalog'",(encoded(cursor),q.sequence,index.scope))
+                continue
+            # Check the other inclusion direction using actual selected members.
+            after=cursor['after'][2] or ''
+            missing=index.db.execute('SELECT key FROM active_authoritative WHERE kind=? AND key>? ORDER BY key LIMIT 1',(kind,after)).fetchone() if kind!='ResourcePlan' else None
+            if missing:
+                with index.input_quantum('check_input') as q:
+                    key=missing[0]
+                    require(catalog.execute('SELECT 1 FROM catalog_records WHERE kind=? AND key_json=?',(kind,key.encode())).fetchone() is not None,'selected page record missing from catalog')
+                    cursor['after']=[-1,None,key]
+                    index.db.execute("UPDATE input_work SET cursor=?,owner_result=? WHERE scope=? AND pass='catalog'",(encoded(cursor),q.sequence,index.scope))
+                    q.credit('catalog_member',[index.scope,kind,strict_json(key)]);index.budget.check(records=1)
+                continue
+            with index.input_quantum('check_input') as q:
+                cursor['kind']+=1;cursor['phase']='records';cursor['after']=[-1,None,None]
+                index.db.execute("UPDATE input_work SET cursor=?,owner_result=? WHERE scope=? AND pass='catalog'",(encoded(cursor),q.sequence,index.scope))
+        # Required whole logical-root authentication is indivisible, accounted,
+        # and may legitimately report resource_blocked. It does not re-add or
+        # re-debit the already compared records as newly created records.
+        h=hashlib.sha256(b'plurx-paged-catalog-v6\0')
+        h.update(encoded({'source':index.source,'session_id':index.session_id,'resource_plan_sha256':index.budget.plan['plan_sha256'],'transaction':body['committed_transaction']}))
+        for kind in CATALOG_KINDS:
+            if kind in LOGICAL_OMITTED:continue
+            for payload, in catalog.execute('SELECT payload FROM catalog_records WHERE kind=? ORDER BY key_type,key_integer,key_text',(kind,)):
+                h.update(len(payload).to_bytes(8,'big'));h.update(payload);index.budget.check(bytes_=len(payload))
+        counts={field:index.db.execute('SELECT count(*) FROM active_authoritative WHERE kind=?',(kind,)).fetchone()[0] for field,kind in COUNT_KINDS.items()}
+        counts['frontier']=counts['products']-counts['expansions']
+        require(counts==body['counts'],'catalog/source snapshot exact scoped counts differ')
+        contexts=[]
+        for name in legacy.CONTEXTS:
+            initial=catalog.execute('SELECT initial_product FROM contexts WHERE name=?',(name,)).fetchone()
+            require(initial is not None,'catalog initial context missing')
+            products=catalog.execute('SELECT count(*) FROM products WHERE context=?',(name,)).fetchone()[0]
+            expanded=catalog.execute('SELECT count(*) FROM products WHERE context=? AND expanded=1',(name,)).fetchone()[0]
+            pending=catalog.execute("SELECT count(*) FROM frontier f JOIN products p ON p.id=f.product_id WHERE p.context=? AND f.status='pending'",(name,)).fetchone()[0]
+            require(products==expanded+pending,'catalog context frontier differs')
+            contexts.append({'context':name,'initial_product':initial[0],'reachable_products':products,'expanded_products':expanded,'frontier':pending})
+        require(contexts==body['contexts'],'catalog seven context snapshots differ')
+        h.update(encoded(counts));h.update(encoded(contexts))
+        require(h.hexdigest()==body['catalog_logical_digest'],'catalog exact logical digest differs')
+        with index.input_quantum('check_input') as q:
+            cursor['phase']='done'
+            index.db.execute("UPDATE input_work SET cursor=?,status='done',owner_result=? WHERE scope=? AND pass='catalog'",(encoded(cursor),q.sequence,index.scope))
+            index.save_input_cursor('finish',status='ready');q.credit('input_catalog',index.scope);q.credit('input_ready',index.scope)
+    finally:catalog.close()
+
+
+def private_input_view(request):
+    unit=request['work_unit'];output=Path(request['output_dir'])
+    budget=Budget(request['resource_plan']['record'],output,seconds=request['deadline_monotonic']-time.monotonic())
+    index=RecordIndex.readonly_view(Path(request['verifier_work_db']),source=unit['source'],
+        session_id=unit['session_id'],budget=budget,resolver_path=request['dependency_index'])
+    index.request=request
+    row=index.db.execute('SELECT scope FROM input_scopes ORDER BY owner_result DESC LIMIT 1').fetchone()
+    if row:index.bind_scope(row[0])
+    return index
 
 
 def validate_restored_verifier(request):
@@ -1672,7 +1711,7 @@ def validate_restored_verifier(request):
     output.mkdir(parents=True,exist_ok=True)
     # Rebuild all excluded paths/input indexes separately. The staged private
     # database remains byte-identical from hash verification through install.
-    index=authenticated_inputs(request,output,database_name='verifier-restore-inputs.sqlite')
+    index=private_input_view(request)
     path=Path(request['verifier_work_db'])
     require(path.is_absolute() and path.is_file() and not path.is_symlink(),'staged verifier backup path')
     before_sha,before_bytes=file_sha(path),path.stat().st_size
@@ -1689,7 +1728,7 @@ def validate_restored_verifier(request):
     state.index,state.budget,state.active=index,index.budget,False
     state.sql_path=Path(__file__).resolve().parent/'paged-verifier-state.sql'
     state.schema_sha256=file_sha(state.sql_path)
-    state.db=sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)
+    state.db=index.db
     try:
         state.db.execute('PRAGMA query_only=ON')
         state.db.execute('PRAGMA temp_store=FILE')
@@ -1719,7 +1758,6 @@ def validate_restored_verifier(request):
         write_json(output/'verifier-restore-validation.json',receipt)
         return receipt
     finally:
-        state.db.close()
         resolver.close()
         index.close()
 
@@ -1730,7 +1768,12 @@ def complete_verification(request):
     validate_private_request(request,'completion_verify')
     output=Path(request['output_dir'])
     output.mkdir(parents=True,exist_ok=True)
-    index=authenticated_inputs(request,output,database_name='completion-inputs.sqlite')
+    index=private_input_view(request)
+    scope=index.db.execute('SELECT status,manifest_root,high_water,checkpoint FROM input_scopes WHERE scope=?',(index.scope,)).fetchone()
+    current=request['checkpoint']['record']
+    require(scope is not None and scope[:3]==('ready',current['page_root'],current['committed_transaction']) and
+            strict_json(scope[3])['record']['counts']==current['counts'] and strict_json(scope[3])['record']['contexts']==current['contexts'],
+            'completion before exact final manifest/highwater/count/context input certificate')
     resolver=ContinuationResolver(request['dependency_index'],output,source=index.source,session_id=index.session_id,budget=index.budget)
     state=ExecutionState.__new__(ExecutionState)
     state.index,state.budget,state.active=index,index.budget,False
@@ -1738,7 +1781,7 @@ def complete_verification(request):
     state.schema_sha256=file_sha(state.sql_path)
     path=Path(request['verifier_work_db'])
     require(path.is_file() and not path.is_symlink(),'completion private snapshot absent')
-    state.db=sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)
+    state.db=index.db
     try:
         state.db.execute('PRAGMA query_only=ON')
         state.db.execute('PRAGMA temp_store=FILE')
@@ -1772,8 +1815,11 @@ def complete_verification(request):
                 view=canonical([context,prop,obligation])
                 require(state.db.execute('SELECT 1 FROM verified_views WHERE view=?',(view,)).fetchone() is not None,'complete fixed obligation view absent')
         def authenticated_blob(reference):
-            row=index.db.execute('SELECT digest,path FROM blobs WHERE kind=? AND key=?',(reference['kind'],canonical(reference['id']))).fetchone()
+            row=(index.blob(reference['kind'],reference['id'])[1],index.blob(reference['kind'],reference['id'])[0])
             require(row is not None and row[0]==reference['sha256'] and file_sha(row[1])==reference['sha256'],'complete external evidence is missing or changed')
+        def expect_invocation(tag):
+            index.budget.check(records=1,bytes_=len(tag.encode())+64)
+            resolver.db.execute('INSERT INTO completion_invocations(tag) VALUES(?)',(tag,))
         outcomes=[]
         for family in mapping['families']:
             outcome=index.get('Outcome',family['family'])
@@ -1781,26 +1827,26 @@ def complete_verification(request):
                 'expected_first_failure_with_source_valid_witness':'named_semantic_counterexample'}[family['expected_result']]
             require(outcome['expected']==outcome['actual']==expected and
                     outcome['invocation_count']==len(outcome['component_receipts']) and outcome['invocation_count']>0,'complete named outcome differs')
-            index.db.execute('CREATE TABLE IF NOT EXISTS completion_invocations(tag TEXT PRIMARY KEY,seen INTEGER DEFAULT 0)')
-            index.db.execute('DELETE FROM completion_invocations')
+            resolver.db.execute('CREATE TABLE IF NOT EXISTS completion_invocations(tag TEXT PRIMARY KEY,seen INTEGER DEFAULT 0)')
+            resolver.db.execute('DELETE FROM completion_invocations')
             if family['scope']=='sparse_boundary_control':
-                index.db.execute('INSERT INTO completion_invocations(tag) VALUES(?)',(family['family'],))
+                expect_invocation(family['family'])
             else:
                 for product, in state.db.execute('SELECT id FROM v_products WHERE context=? ORDER BY id',(family['context'],)):
-                    index.db.execute('INSERT INTO completion_invocations(tag) VALUES(?)',(family['family']+'-one-step-'+str(product),))
+                    expect_invocation(family['family']+'-one-step-'+str(product))
                 for prop in family['source_descriptor'].get('properties',[]):
                     view='seen_goal_false' if prop=='BothSelectedCompletion' else 'capacity_ok_pending_true'
                     for component in index.find('Scc'):
                         if component['context']==family['context'] and component['property']==view:
-                            index.db.execute('INSERT INTO completion_invocations(tag) VALUES(?)',(family['family']+'-component-'+str(component['id']),))
+                            expect_invocation(family['family']+'-component-'+str(component['id']))
             for receipt in outcome['component_receipts']:
                 require(receipt['kind']=='tlc_receipt','outcome supplies a substituted component receipt')
                 authenticated_blob(receipt)
                 row=state.db.execute('SELECT invocation_key,receipt,tag FROM tlc_done WHERE relative_path=?',(receipt['id'],)).fetchone()
                 require(row is not None and sha_bytes(row[1])==receipt['sha256'] and
                         state.db.execute("SELECT 1 FROM credit_links WHERE table_name='tlc_invocation' AND row_key=?",(encoded(row[0]),)).fetchone() is not None,'outcome lacks exact authenticated TLC execution')
-                require(index.db.execute('UPDATE completion_invocations SET seen=1 WHERE tag=? AND seen=0',(row[2],)).rowcount==1,'duplicate/unrequired outcome invocation')
-            require(index.db.execute('SELECT 1 FROM completion_invocations WHERE seen=0 LIMIT 1').fetchone() is None,'omitted exact original predecessor/component invocation')
+                require(resolver.db.execute('UPDATE completion_invocations SET seen=1 WHERE tag=? AND seen=0',(row[2],)).rowcount==1,'duplicate/unrequired outcome invocation')
+            require(resolver.db.execute('SELECT 1 FROM completion_invocations WHERE seen=0 LIMIT 1').fetchone() is None,'omitted exact original predecessor/component invocation')
             if outcome['witness'] is not None:
                 witness=outcome['witness']
                 if witness['kind']=='Counterexample':
@@ -1811,7 +1857,7 @@ def complete_verification(request):
                 else:
                     authenticated_blob(witness)
                     if witness['kind']=='causal_receipt' and family['scope']!='sparse_boundary_control':
-                        file=index.db.execute('SELECT path FROM blobs WHERE kind=? AND key=?',(witness['kind'],canonical(witness['id']))).fetchone()[0]
+                        file=index.blob(witness['kind'],witness['id'])[0]
                         replay_finite_witness(index,state.db,family['family'],strict_json(Path(file).read_bytes()))
             outcomes.append(outcome)
             index.budget.check()
@@ -1829,14 +1875,13 @@ def complete_verification(request):
         write_json(output/'complete-verification.json',receipt)
         return receipt
     finally:
-        state.db.close()
         resolver.close()
         index.close()
 
 
 def export_temporal(index, request, stage_complete):
     output=Path(request['output_dir'])
-    kinds=('MonitorNode','MonitorEdge','Scc','Counterexample','Outcome','Counts')
+    kinds=('MonitorNode','MonitorEdge','Scc','Counterexample','Outcome','ContextRoot','Counts')
     if request['work_unit']['stage']=='temporal_components' and stage_complete:
         require(index.count('Outcome')==11 and index.count('Counts')==1,'final Counts must already be atomically sealed after all eleven outcomes')
     path=output/'temporal-import.ndjson'
@@ -1910,6 +1955,7 @@ def registered_staged_member(relative):
 
 def prepare_unit(request):
     validate_private_request(request,'unit')
+    require(request['work_unit']['stage']!='complete' or request['work_unit']['mode']=='unit','final preparation must run in ordinary unit mode')
     output=Path(request['output_dir'])
     output.mkdir(parents=True,exist_ok=True)
     path=Path(request['verifier_work_db'])
@@ -1920,7 +1966,7 @@ def prepare_unit(request):
             row=auth.execute('SELECT backup_root_path FROM verifier_chain ORDER BY unit_ordinal DESC LIMIT 1').fetchone()
             require(row is not None,'missing authenticated verifier snapshot chain')
             backup=strict_json(Path(row[0]).read_bytes())
-            cp=auth.execute("SELECT path FROM objects WHERE kind='Checkpoint' AND key=?",(canonical(backup['checkpoint_sha256']),)).fetchone()
+            cp=auth.execute("SELECT path FROM objects WHERE kind='Checkpoint' AND CAST(key AS TEXT)=?",(canonical(backup['checkpoint_sha256']),)).fetchone()
             require(cp is not None,'latest verifier authoritative checkpoint missing')
             restore={**request,'operation':'validate_restore','verifier_checkpoint':strict_json(Path(cp[0]).read_bytes()),'verifier_backup_root':row[0]}
             validate_restored_verifier(restore)
@@ -1929,9 +1975,8 @@ def prepare_unit(request):
     else:
         require(request['previous_verifier_progress_sha256'] is None and request['previous_verifier_backup_sha256'] is None,'missing required prior verifier DB')
     phase=run_unit(request)
-    index=authenticated_inputs(request,output,database_name='prepare-inputs.sqlite')
-    work=sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)
-    work.execute('PRAGMA query_only=ON')
+    index=private_input_view(request)
+    work=index.db
     # Transport cache reconstruction is separate; state rows remain the actual
     # trusted execution output from this current unit until final sealing.
     state=ExecutionState.__new__(ExecutionState)
@@ -1942,10 +1987,10 @@ def prepare_unit(request):
         state._validate_schema()
         # Derived temporal records are carried in the workDB input/output cache;
         # enumerate them read-only and emit exact immutable envelopes for M1.
-        index.db.close()
-        index.db=work
         index.execution=state
-        publication=export_temporal(index,request,phase['stage_complete'])
+        preparation_only=state.cursor()['operation'] in ('load_input','check_input')
+        require(request['work_unit']['stage']!='complete' or preparation_only,'final preparation cannot export or resume semantic work')
+        publication=None if preparation_only else export_temporal(index,request,phase['stage_complete'])
         if publication is not None and not publication['stage_complete']:
             phase['stage_complete']=False
             phase['work_unit']['status']='checkpointed_incomplete'
@@ -2029,6 +2074,8 @@ def prepare_unit(request):
             if nodes==1:break
             unit_inputs=nodes;level+=1
         reservations.append({'path':'verifier-progress/unit.json','maximum_bytes':metadata_cap('verifier_unit_progress'),'role':'progress'})
+        if request['work_unit']['stage']=='complete':
+            reservations.append({'path':'restore-semantic.json','maximum_bytes':min(8*1024*1024,index.budget.member_limit()),'role':'receipt'})
         prepare={'protocol':'verifier_prepare_v1','source':index.source,'session_id':index.session_id,
             'unit_ordinal':request['work_unit']['unit_ordinal'],'resource_plan_sha256':index.budget.plan['plan_sha256'],
             'initial_image_sha256':request['initial_image']['record']['image_sha256'],
@@ -2123,10 +2170,16 @@ def finalize_unit(request):
         require(prepare[key]==reservation[key],'late reservation binding differs: '+key)
     require(reservation['final_checkpoint']==request['checkpoint'],'finalize authoritative checkpoint differs')
     cp=request['checkpoint']['record']
-    require(cp['previous_checkpoint']==prepare['input_checkpoint_sha256'] and cp['committed_transaction']>=prepare['input_catalog_commit'] and
-            cp['source']==prepare['source'] and cp['session_id']==prepare['session_id'] and
-            cp['resource_plan_sha256']==prepare['resource_plan_sha256'] and cp['initial_image_id']==prepare['initial_image_sha256'],
-            'final authoritative checkpoint is not the exact registered append-only successor')
+    preparation_only=prepare['before_cursor']['operation'] in ('load_input','check_input')
+    if preparation_only:
+        require(digest(request['checkpoint'])==prepare['input_checkpoint_sha256'] and
+                cp['committed_transaction']==prepare['input_catalog_commit'] and cp['page_root']==prepare['input_manifest_root'],
+                'preparation-only unit changed authoritative checkpoint')
+    else:
+        require(cp['previous_checkpoint']==prepare['input_checkpoint_sha256'] and cp['committed_transaction']>=prepare['input_catalog_commit'] and
+                cp['source']==prepare['source'] and cp['session_id']==prepare['session_id'] and
+                cp['resource_plan_sha256']==prepare['resource_plan_sha256'] and cp['initial_image_id']==prepare['initial_image_sha256'],
+                'final checkpoint is not registered append-only successor')
     member_map={}
     for m in reservation['members']:
         require(set(m)=={'path','part_ordinal','bytes','sha256','role'} and m['role'] in PRIVATE_ROLES and
@@ -2140,39 +2193,35 @@ def finalize_unit(request):
         require(m['path'] in member_map and {k:member_map[m['path']][k] for k in ('path','bytes','sha256','role')}==m,'prepared member changed/renumbered at late reservation')
     metadata={}
     for m in reservation['metadata_reservations']:
-        require(set(m)=={'path','part_ordinal','maximum_bytes','role'} and m['role'] in ('result','evidence_index','progress') and
+        require(set(m)=={'path','part_ordinal','maximum_bytes','role'} and (m['role'] in ('result','evidence_index','progress') or m['role']=='receipt' and m['path']=='restore-semantic.json' and request['work_unit']['stage']=='complete' and request['work_unit']['mode']=='unit' or m['role']=='source_receipt' and m['path'] in ('restore-semantic-execution.json','restore-semantic.log') and request['work_unit']['stage']=='complete' and request['work_unit']['mode']=='unit') and
                 m['path'] not in metadata and 0<=m['part_ordinal']<reservation['fixed_prefix_part_count'] and 0<m['maximum_bytes']<=8*1024*1024,'invalid bounded future metadata reservation')
         metadata[m['path']]=m
     for m in prepare['metadata_reservations']:
         require(m['path'] in metadata and all(metadata[m['path']][k]==m[k] for k in ('path','maximum_bytes','role')),'future metadata reservation changed')
-    index=authenticated_inputs(request,output,database_name='finalize-inputs.sqlite',verify_snapshot=False)
-    # Current M1 outputs are not historical upload authority. Their exact bytes
-    # are bound to this unit's reserved source execution and checked here.
-    for m in reservation['members']:
-        if m['role'] in ('catalog_page','catalog_manifest'):
-            index.load_member(output/m['path'])
-    current_roots=output/'temporal-external-roots.ndjson'
-    if current_roots.is_file():
-        require(current_roots.name in member_map and member_map[current_roots.name]['role']=='temporal_publication',
-                'current external evidence inventory was not reserved')
-        with current_roots.open('rb') as roots:
-            for line in roots:
-                require(len(line)<=8*1024*1024,'oversized current external evidence binding')
-                value=strict_json(line)
-                require(set(value)=={'reference','member_path'} and encoded(value)+b'\n'==line,'closed canonical current external evidence binding differs')
-                reference=value['reference'];path=value['member_path']
-                index.schema.check(reference,'Ref')
-                require(reference['kind'] in ('tlc_receipt','causal_receipt','fairness_receipt') and
-                        reference['id']==path and path in member_map and member_map[path]['sha256']==reference['sha256'] and
-                        member_map[path]['role'] in ('receipt','witness'),'current external proof reference lacks exact source-produced member binding')
-                index.add_blob(reference['kind'],reference['id'],output/path,reference['sha256'])
-                index.db.execute('INSERT OR REPLACE INTO external_roots VALUES(?,?,?)',(reference['kind'],canonical(reference['id']),reference['sha256']))
-    index.add(request['checkpoint'])
-    checkpoint_key=digest(request['checkpoint'])
-    index.db.execute('INSERT OR IGNORE INTO authoritative VALUES(?,?)',('Checkpoint',canonical(checkpoint_key)))
-    index.db.execute('INSERT OR REPLACE INTO external_roots VALUES(?,?,?)',('Checkpoint',canonical(checkpoint_key),checkpoint_key))
-    index.verify_dependencies(cp['page_root'],high_water=cp['committed_transaction'])
+    index=private_input_view(request)
+    # Validate only this unit's bounded actual publication. Historical raw
+    # records remain the authenticated read-only private input view.
+    published=RecordIndex(output/'publication-index.sqlite',source=index.source,session_id=index.session_id,budget=index.budget)
+    try:
+        for m in reservation['members']:
+            if m['role'] in ('catalog_page','catalog_manifest'):
+                require(not preparation_only,'preparation-only unit published catalog pages')
+                published.load_member(output/m['path'])
+        if not preparation_only:
+            current=published.db.execute("SELECT payload FROM records WHERE kind='ManifestNode' AND key=?",(canonical(cp['page_root']),)).fetchone()
+            prior=index.db.execute("SELECT payload FROM records WHERE kind='ManifestNode' AND key=?",(canonical(cp['page_root']),)).fetchone()
+            if current is not None and prior is not None:require(current==prior,'immutable prior manifest full-byte conflict')
+            require(current is not None or cp['page_root']==prepare['input_manifest_root'] and prior is not None,
+                    'current publication lacks actual final manifest or exact authenticated unchanged root')
+    except BaseException:
+        published.close();index.close();raise
     for m in metadata.values():
+        if m['path']=='restore-semantic.json':
+            require(m['maximum_bytes']<=min(8*1024*1024,index.budget.member_limit()),'readonly readiness receipt exceeds fixed metadata reservation')
+            continue
+        if m['path'] in ('restore-semantic-execution.json','restore-semantic.log'):
+            require(m['maximum_bytes']<=8*1024*1024,'controller readonly execution evidence exceeds fixed metadata ceiling')
+            continue
         kind={'result':'verifier_check_result','evidence_index':'verifier_evidence_index','progress':'verifier_unit_progress'}[m['role']]
         require(kind in index.budget.allowances and m['maximum_bytes']<=index.budget.allowances[kind]['max_encoded_bytes'],'reserved metadata exceeds admitted operational byte allocation')
     state_db=sqlite3.connect(Path(request['verifier_work_db']))
@@ -2198,7 +2247,7 @@ def finalize_unit(request):
                     require(len(line)<=index.budget.member_limit(),'indivisible temporal publication record')
                     value=strict_json(line)
                     from paged_codec import record_key
-                    actual=index.get_envelope(value['kind'],record_key(value))
+                    actual=published.get_envelope(value['kind'],record_key(value))
                     require(encoded(actual)==encoded(value),'M1 did not publish byte-identical proposed temporal record')
                     publication.append({'entry_kind':'record','record_kind':value['kind'],'key':record_key(value),'sha256':digest(value)})
                     if len(encoded(publication))>index.budget.member_limit():raise Incomplete('publication input inventory exceeds resident budget')
@@ -2206,14 +2255,18 @@ def finalize_unit(request):
         row=state_db.execute('SELECT before_commit,before_digest,before_cursor,first_result,input_snapshot,origin FROM unit_work WHERE unit=?',(ordinal,)).fetchone()
         require(row is not None and sha_bytes(encoded(strict_json(row[4])))==prepare['input_checkpoint_sha256'],'private unit input checkpoint changed')
         original_input=strict_json(row[4])['record']
-        require(prepare['unit_ordinal']==ordinal==cp['unit_ordinal'] and cp['unit_ordinal']>original_input['unit_ordinal'] and
-                cp['sequence']==original_input['sequence']+1,'final checkpoint actual attempted-unit/sequence successor differs')
+        if preparation_only:
+            require(request['checkpoint']==strict_json(row[4]),'preparation-only checkpoint differs from actual unit input')
+        else:
+            require(prepare['unit_ordinal']==ordinal==cp['unit_ordinal'] and cp['unit_ordinal']>original_input['unit_ordinal'] and
+                    cp['sequence']==original_input['sequence']+1,'final checkpoint actual attempted-unit/sequence successor differs')
 
         final_sequence=state.sequence()[1]+1
         before_cursor=state.cursor();after_cursor={**before_cursor,'quantum':before_cursor['quantum']+1,
             'operation':'publish_temporal' if publication else before_cursor['operation']}
         common={'source':index.source,'session_id':index.session_id,'unit_ordinal':ordinal,'checkpoint_sha256':digest(request['checkpoint'])}
         phase=strict_json((output/'phase-result.json').read_bytes())
+        require(not preparation_only or not phase['stage_complete'] and not publication,'partial preparation claimed semantic completion/publication')
         require(set(phase)=={'work_unit','stage_complete'} and phase['work_unit']['progress']==before_cursor['position'],'phase after-position changed before seal')
         # Seal only after every fixed part assignment and authoritative import
         # has been validated. Failure rolls back result/credit finalization.
@@ -2284,6 +2337,7 @@ def finalize_unit(request):
             result_root=build_evidence(({'entry_kind':'result','result_sequence':seq,'member':strict_json(member)} for seq,member in state_db.execute('SELECT sequence,member FROM export_result_members WHERE unit=? ORDER BY sequence',(ordinal,))),
                 'results','unit-results',common,output,metadata,state_db)
             useful=state_db.execute('SELECT coalesce(sum(useful),0) FROM execution_commits WHERE sequence>? AND sequence<=?',(row[0],private_commit)).fetchone()[0]
+            if useful==0:raise Incomplete('resource_blocked: no useful committed verifier quantum; refuse zero-progress publication')
             progress={'schema_version':1,'kind':'verifier_unit_progress',**common,
                 'resource_plan_sha256':prepare['resource_plan_sha256'],'initial_image_sha256':prepare['initial_image_sha256'],
                 'previous_progress_sha256':request['previous_verifier_progress_sha256'],'previous_backup_manifest_sha256':request['previous_verifier_backup_sha256'],
@@ -2307,7 +2361,7 @@ def finalize_unit(request):
         if backup_path.exists():raise Invalid('refuse overwrite existing finalized verifier backup')
         descriptor=state.backup(backup_path)
         descriptor.update(source=index.source,session_id=index.session_id,unit_ordinal=ordinal,checkpoint_sha256=digest(request['checkpoint']),
-            previous_checkpoint_sha256=cp['previous_checkpoint'],resource_plan_sha256=prepare['resource_plan_sha256'],initial_image_sha256=prepare['initial_image_sha256'],
+            previous_checkpoint_sha256=request['work_unit']['expected_prior_checkpoint'],resource_plan_sha256=prepare['resource_plan_sha256'],initial_image_sha256=prepare['initial_image_sha256'],
             catalog_commit=cp['committed_transaction'],catalog_logical_digest=cp['catalog_logical_digest'],semantic_manifest_root=cp['page_root'],
             previous_verifier_progress_sha256=request['previous_verifier_progress_sha256'],progress_sha256=progress_member['sha256'],
             snapshot_boundary='post_verifier_commit_pre_upload',format='sqlite3',backup_method='sqlite_backup_api_v1',
@@ -2319,11 +2373,14 @@ def finalize_unit(request):
         write_json(output/'unit-result.json',result)
         return result
     finally:
-        state_db.close();index.close()
+        state_db.close();published.close();index.close()
 
 if __name__ == '__main__':
     try:
         sys.exit(main())
+    except Incomplete as error:
+        print('incomplete paged proof: resource_blocked: '+str(error),file=sys.stderr)
+        sys.exit(3)
     except (Invalid, legacy.Invalid) as error:
         print('invalid paged proof: ' + str(error), file=sys.stderr)
         sys.exit(2)

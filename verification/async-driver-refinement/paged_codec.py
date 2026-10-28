@@ -6,6 +6,7 @@ The scratch index is independently built; producer catalog SQL is not executed.
 from __future__ import annotations
 
 import hashlib
+import codecs
 import io
 import math
 import json
@@ -482,7 +483,7 @@ class PrivateConnection(sqlite3.Connection):
     meaningful_change=False
     FRAMING={'check_results','inventory_entries','execution_commits','verifier_meta','unit_work','authenticated_units',
         'export_members','export_evidence','export_result_members','records','links','page_members','page_deps','manifest_children',
-        'loaded_members','blobs','authoritative','external_roots','selected','semantic_links','cache_bindings','meta'}
+        'loaded_members','blobs','cache_bindings','meta'}
 
     def _track(self,sql,cursor):
         if self.protected and cursor.rowcount>0:
@@ -522,28 +523,86 @@ class RecordIndex:
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.execute('PRAGMA temp_store=FILE')
         self.db.execute('PRAGMA cache_size=-2048')
-        self.db.executescript('''
-        CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value BLOB NOT NULL);
-        CREATE TABLE IF NOT EXISTS records(kind TEXT,key TEXT,number INTEGER,text_key TEXT,digest TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(kind,key));
-        CREATE UNIQUE INDEX IF NOT EXISTS record_number ON records(kind,number) WHERE number IS NOT NULL;
-        CREATE INDEX IF NOT EXISTS record_text ON records(kind,text_key);
-        CREATE TABLE IF NOT EXISTS blobs(kind TEXT,key TEXT,digest TEXT,path TEXT,bytes INTEGER,PRIMARY KEY(kind,key));
-        CREATE TABLE IF NOT EXISTS links(owner_kind TEXT,owner_key TEXT,target_kind TEXT,target_key TEXT,digest TEXT,PRIMARY KEY(owner_kind,owner_key,target_kind,target_key));
-        CREATE TABLE IF NOT EXISTS page_members(page TEXT,kind TEXT,key TEXT,PRIMARY KEY(page,kind,key));
-        CREATE TABLE IF NOT EXISTS page_deps(page TEXT,kind TEXT,key TEXT,digest TEXT,PRIMARY KEY(page,kind,key));
-        CREATE TABLE IF NOT EXISTS manifest_children(parent TEXT,child_kind TEXT,child_key TEXT,PRIMARY KEY(parent,child_kind,child_key));
-        CREATE TABLE IF NOT EXISTS loaded_members(path TEXT PRIMARY KEY,digest TEXT,reference BLOB);
-        CREATE TABLE IF NOT EXISTS authoritative(kind TEXT,key TEXT,PRIMARY KEY(kind,key));
-        CREATE TABLE IF NOT EXISTS external_roots(kind TEXT,key TEXT,digest TEXT,PRIMARY KEY(kind,key));
-        CREATE TABLE IF NOT EXISTS selected(kind TEXT,key TEXT,PRIMARY KEY(kind,key));
-        CREATE TABLE IF NOT EXISTS semantic_links(kind TEXT,key TEXT,relation TEXT,target INTEGER,PRIMARY KEY(kind,key,relation,target));
-        CREATE INDEX IF NOT EXISTS semantic_target ON semantic_links(relation,target,kind,key);
-        ''')
+        self.scope = ''
+        self.resolver_path = None
+        self._scope_views()
         identity = encoded([source, session_id, budget.plan['plan_sha256']])
         old = self.db.execute("SELECT value FROM meta WHERE key='identity'").fetchone()
         require(old is None or old[0] == identity, 'scratch index identity drift')
         self.db.execute("INSERT OR IGNORE INTO meta VALUES('identity',?)", (identity,))
         self.db.commit()
+
+    def _scope_views(self):
+        # TEMP views never alter the pinned main database. Scope is explicitly
+        # bound by the authenticated input checkpoint, never inferred from paths.
+        self.db.create_function('input_scope', 0, lambda: self.scope)
+        for table in ('authoritative', 'external_roots', 'selected'):
+            selection='SELECT '+('kind,key,digest' if table=='external_roots' else 'kind,key')+' FROM main.'+table+' WHERE scope=input_scope()'
+            if table!='external_roots':
+                selection+=" UNION SELECT t.kind,t.key FROM main.manifest_tally t JOIN main.input_scopes s ON s.manifest_scope=t.scope AND s.manifest_root=t.tally_manifest WHERE s.scope=input_scope()"
+            self.db.execute('CREATE TEMP VIEW active_'+table+' AS '+selection)
+            columns = 'kind,key,digest' if table == 'external_roots' else 'kind,key'
+            values = ','.join('NEW.' + c for c in columns.split(','))
+            if not getattr(self, 'readonly', False):
+                self.db.execute('CREATE TEMP TRIGGER insert_' + table + ' INSTEAD OF INSERT ON active_' + table +
+                    ' BEGIN INSERT OR REPLACE INTO ' + table + '(scope,' + columns + ') VALUES(input_scope(),' + values + '); END')
+                self.db.execute('CREATE TEMP TRIGGER delete_' + table + ' INSTEAD OF DELETE ON active_' + table +
+                    ' BEGIN DELETE FROM ' + table + ' WHERE scope=input_scope() AND kind=OLD.kind AND key=OLD.key; END')
+
+    @classmethod
+    def readonly_view(cls, path, *, source, session_id, budget, resolver_path):
+        view = cls.__new__(cls)
+        view.path, view.source, view.session_id, view.budget = Path(path), source, session_id, budget
+        view.schema, view.readonly, view.scope = Schema(), True, ''
+        view.resolver_path = Path(resolver_path)
+        view.db = sqlite3.connect(view.path.as_uri() + '?mode=ro&immutable=1', uri=True)
+        view.db.execute('PRAGMA temp_store=FILE')
+        view.db.execute('PRAGMA cache_size=-2048')
+        view._scope_views()
+        return view
+
+    def bind_scope(self, scope):
+        require(self.db.execute('SELECT 1 FROM input_scopes WHERE scope=?', (scope,)).fetchone() is not None,
+                'unknown authenticated input scope')
+        self.scope = scope
+
+    def blob(self, kind, key):
+        """Resolve a durable descriptor lazily; a host path is never skip credit."""
+        row = self.db.execute('SELECT digest,bytes,member_ref FROM blob_descriptors WHERE kind=? AND key=?',
+                              (kind, canonical(key))).fetchone()
+        if not getattr(self,'readonly',False):
+            cached=self.db.execute('SELECT path,digest,bytes FROM blobs WHERE kind=? AND key=?',(kind,canonical(key))).fetchone()
+            request=getattr(self,'request',None)
+            if cached is not None and request is not None:
+                path=Path(cached[0]);output=Path(request['output_dir'])
+                if path.is_relative_to(output) and path.is_file() and not path.is_symlink():
+                    h=hashlib.sha256();count=0
+                    with path.open('rb') as stream:
+                        while chunk:=stream.read(65536):count+=len(chunk);h.update(chunk);self.budget.check(bytes_=len(chunk))
+                    require((h.hexdigest(),count)==(cached[1],cached[2]),'current staged blob bytes changed')
+                    return cached
+        require(row is not None,'missing durable immutable external descriptor')
+        member = strict_json(row[2])
+        path = self.member_path(member)
+        return str(path), row[0], row[1]
+
+    def member_path(self, member):
+        require(self.resolver_path is not None, 'authenticated input resolver unavailable')
+        auth = sqlite3.connect(Path(self.resolver_path).as_uri() + '?mode=ro&immutable=1', uri=True)
+        try:
+            row = auth.execute('SELECT bytes,sha256,local_path FROM authenticated_members WHERE unit_ordinal=? AND part_ordinal=? AND member_path=?',
+                (member['unit_ordinal'], member['part_ordinal'], member['member_path'])).fetchone()
+            require(row is not None and row[:2] == (member['bytes'], member['sha256']), 'missing/conflicting authenticated input member')
+            path = Path(row[2])
+            require(path.is_absolute() and path.is_file() and not path.is_symlink(), 'missing lazy authenticated input file')
+            h = hashlib.sha256(); count = 0
+            with path.open('rb') as stream:
+                while chunk := stream.read(65536):
+                    count += len(chunk); h.update(chunk); self.budget.check(bytes_=len(chunk))
+            require((count, h.hexdigest()) == (member['bytes'], member['sha256']), 'lazy input member bytes changed')
+            return path
+        finally:
+            auth.close()
 
     def close(self):
         self.db.close()
@@ -561,18 +620,17 @@ class RecordIndex:
                 h.update(chunk)
                 count += len(chunk)
         require(h.hexdigest() == expected_digest, 'external member digest mismatch')
-        prior = self.db.execute('SELECT digest,bytes,path FROM blobs WHERE kind=? AND key=?', (kind, canonical(key))).fetchone()
-        require(prior is None or prior[:2] == (expected_digest, count), 'conflicting external member')
-        if prior is not None and Path(prior[2]).resolve()!=path.resolve():
-            prior_path=Path(prior[2])
-            require(prior_path.is_file() and not prior_path.is_symlink(),'prior external member disappeared')
+        durable=self.db.execute('SELECT digest,bytes,member_ref FROM blob_descriptors WHERE kind=? AND key=?',(kind,canonical(key))).fetchone()
+        if durable is not None:
+            require(durable[:2]==(expected_digest,count),'conflicting immutable external descriptor')
+            prior_path=self.member_path(strict_json(durable[2]))
             with prior_path.open('rb') as left,path.open('rb') as right:
                 while True:
                     a,b=left.read(65536),right.read(65536)
                     require(a==b,'external member full-byte collision')
                     if not a:break
-                    self.budget.check()
-        self.db.execute('INSERT OR IGNORE INTO blobs VALUES(?,?,?,?,?)', (kind, canonical(key), expected_digest, str(path.resolve()), count))
+                    self.budget.check(bytes_=len(a)+len(b))
+        self.db.execute('INSERT OR REPLACE INTO blobs VALUES(?,?,?,?,?)', (kind, canonical(key), expected_digest, str(path.resolve()), count))
         self.db.commit()
 
     def add(self, value):
@@ -593,7 +651,7 @@ class RecordIndex:
             return key
         allocation=self.budget.allowances.get(kind)
         require(allocation is not None,'record kind absent from admitted accounting inventory')
-        if len(data)>allocation['max_encoded_bytes'] or self.count(kind)>=allocation['records']:
+        if len(data)>allocation['max_encoded_bytes'] or self.raw_count(kind)>=allocation['records']:
             raise Incomplete('operational full outer record/count allocation exhausted: '+kind)
         self.budget.check(records=1, bytes_=len(data))
         if kind in ('PhysicalRows','Episode','Store','Product'):
@@ -649,18 +707,6 @@ class RecordIndex:
             with execution.quantum(operation):insert()
         return record_key(value)
 
-    def rebuild_input_cache(self):
-        require(not getattr(self,'execution',None) or not self.execution.active,'cache rebuild inside semantic quantum')
-        for table in ('loaded_members','blobs','records','links','page_members','page_deps','manifest_children',
-                      'authoritative','external_roots','selected','semantic_links','cache_bindings','canonical_values','manifest_tally'):
-            self.db.execute('DELETE FROM '+table)
-        self.db.commit()
-
-    def rebind_proposals(self):
-        for payload, in self.db.execute('SELECT payload FROM proposed_records ORDER BY kind,key'):
-            self.add(strict_json(payload))
-        self.db.commit()
-
     def get_envelope(self, kind, key):
         args=kind,canonical(key)
         size=self.db.execute('SELECT length(payload) FROM records WHERE kind=? AND key=?',args).fetchone()
@@ -686,26 +732,31 @@ class RecordIndex:
 
     def find(self, kind, relation=None, target=None):
         if relation is None:
-            sql,args='SELECT key FROM records WHERE kind=? ORDER BY number,text_key',(kind,)
+            sql,args="SELECT key FROM records r WHERE kind=? AND (?='' OR EXISTS (SELECT 1 FROM active_authoritative a WHERE a.kind=r.kind AND a.key=r.key) OR EXISTS (SELECT 1 FROM proposed_records p WHERE p.kind=r.kind AND p.key=r.key)) ORDER BY number,text_key",(kind,self.scope)
         else:
             sql=('SELECT r.key FROM records r JOIN semantic_links s ON r.kind=s.kind AND r.key=s.key '
-                 'WHERE r.kind=? AND s.relation=? AND s.target=? ORDER BY r.number,r.text_key')
+                 'WHERE r.kind=? AND s.relation=? AND s.target=? AND (EXISTS (SELECT 1 FROM active_authoritative a WHERE a.kind=r.kind AND a.key=r.key) OR EXISTS (SELECT 1 FROM proposed_records p WHERE p.kind=r.kind AND p.key=r.key)) ORDER BY r.number,r.text_key')
             args=kind,relation,target
         for key, in self.db.execute(sql,args):yield self.get(kind,strict_json(key))
 
     def find_after(self,kind,after):
         require(kind in NUMERIC and type(after) is int and after>=0,'typed numeric operation cursor required')
-        for key, in self.db.execute('SELECT key FROM records WHERE kind=? AND number>? ORDER BY number',(kind,after)):
+        for key, in self.db.execute("SELECT key FROM records r WHERE kind=? AND number>? AND (?='' OR EXISTS (SELECT 1 FROM active_authoritative a WHERE a.kind=r.kind AND a.key=r.key)) ORDER BY number",(kind,after,self.scope)):
             yield self.get(kind,strict_json(key))
 
     def find_unchecked(self,kind,table,offset=0):
         require(table in ('v_stores','v_oracle','v_products','verified_sccs'),'unregistered private coverage table')
         require(type(offset) is int and offset in (0,1),'invalid fixed source/global ID bijection')
-        sql='SELECT r.key FROM records r LEFT JOIN '+table+' c ON c.id=r.number-? WHERE r.kind=? AND c.id IS NULL ORDER BY r.number'
-        for key, in self.db.execute(sql,(offset,kind)):yield self.get(kind,strict_json(key))
+        sql="SELECT r.key FROM records r LEFT JOIN "+table+" c ON c.id=r.number-? WHERE r.kind=? AND c.id IS NULL AND (?='' OR EXISTS (SELECT 1 FROM active_authoritative a WHERE a.kind=r.kind AND a.key=r.key)) ORDER BY r.number"
+        for key, in self.db.execute(sql,(offset,kind,self.scope)):yield self.get(kind,strict_json(key))
+
+    def raw_count(self, kind):
+        return self.db.execute('SELECT count(*) FROM records WHERE kind=?',(kind,)).fetchone()[0]
 
     def count(self, kind):
-        return self.db.execute('SELECT count(*) FROM records WHERE kind=?', (kind,)).fetchone()[0]
+        if not self.scope:return self.raw_count(kind)
+        return self.db.execute('SELECT count(*) FROM records r WHERE kind=? AND (EXISTS (SELECT 1 FROM active_authoritative a WHERE a.kind=r.kind AND a.key=r.key) OR EXISTS (SELECT 1 FROM proposed_records p WHERE p.kind=r.kind AND p.key=r.key))',(kind,)).fetchone()[0]
+
 
     def load_member(self,path):
         require(Path(path).is_file() and not Path(path).is_symlink(),'unsafe proof member before decoding')
@@ -722,18 +773,19 @@ class RecordIndex:
         data = path.read_bytes()
         file_digest = sha_bytes(data)
         old = self.db.execute('SELECT digest,reference FROM loaded_members WHERE path=?', (str(path.resolve()),)).fetchone()
-        if old:
+        if old and not getattr(self,'execution',None):
             require(old[0] == file_digest, 'mutated loaded member')
             return strict_json(old[1])
         value = strict_json(data)
         require(encoded(value) == data, 'outer member is not canonical JSON')
         self.add(value)
         prior=self.db.execute('SELECT reference FROM loaded_members WHERE reference=? LIMIT 1',(encoded(ref(value)),)).fetchone()
-        if prior is not None:
-            self.db.execute('INSERT INTO loaded_members VALUES(?,?,?)',(str(path.resolve()),file_digest,encoded(ref(value))))
+        if prior is not None and not getattr(self,'execution',None):
+            self.db.execute('INSERT OR REPLACE INTO loaded_members VALUES(?,?,?)',(str(path.resolve()),file_digest,encoded(ref(value))))
             self.db.commit()
             return ref(value)
-        self.db.execute('INSERT OR IGNORE INTO authoritative VALUES(?,?)', (value['kind'], canonical(record_key(value))))
+        if not getattr(self,'execution',None):
+            self.db.execute('INSERT OR IGNORE INTO active_authoritative VALUES(?,?)', (value['kind'], canonical(record_key(value))))
         if value['kind'] == 'Page':
             r = value['record']
             require(len(data) <= PAGE_BYTES, 'full page byte ceiling')
@@ -742,7 +794,8 @@ class RecordIndex:
             for item in r['records']:
                 require(item['kind'] == r['kind'], 'heterogeneous data page')
                 key = self.add(item)
-                self.db.execute('INSERT OR IGNORE INTO authoritative VALUES(?,?)', (item['kind'], canonical(key)))
+                if not getattr(self,'execution',None):
+                    self.db.execute('INSERT OR IGNORE INTO active_authoritative VALUES(?,?)', (item['kind'], canonical(key)))
                 keys.append(key)
                 try:
                     self.db.execute('INSERT INTO page_members VALUES(?,?,?)', (r['page_id'], item['kind'], canonical(key)))
@@ -764,79 +817,223 @@ class RecordIndex:
                     self.db.execute('INSERT INTO manifest_children VALUES(?,?,?)', (r['sha256'], child['kind'], canonical(child['id'])))
                 except sqlite3.IntegrityError as error:
                     raise Invalid('duplicate manifest child') from error
-        self.db.execute('INSERT INTO loaded_members VALUES(?,?,?)', (str(path.resolve()), file_digest, encoded(ref(value))))
+        self.db.execute('INSERT OR REPLACE INTO loaded_members VALUES(?,?,?)', (str(path.resolve()), file_digest, encoded(ref(value))))
         self.db.commit()
         self.budget.check()
         return ref(value)
 
-    def verify_dependencies(self, manifest_root, *, high_water):
-        """Resolve all refs and exact external inventories, with no global set."""
-        for owner_kind, owner_key, target, key, expected in self.db.execute('SELECT l.* FROM links l JOIN authoritative a ON a.kind=l.owner_kind AND a.key=l.owner_key'):
-            table = 'blobs' if target in BLOBS else 'records'
-            row = self.db.execute('SELECT digest FROM ' + table + ' WHERE kind=? AND key=?', (target, key)).fetchone()
-            require(row is not None and (expected is None or expected == row[0]), 'missing/mismatched transitive dependency')
-        # Dependencies must exactly cover links leaving each page, neither hide
-        # payloads nor supply a convenient subset of the needed Store outcomes.
-        for page in self.find('Page'):
-            require(page['transaction_high_water'] <= high_water, 'post-snapshot page')
-            page_id = page['page_id']
-            needed = '''SELECT DISTINCT l.target_kind,l.target_key FROM page_members m JOIN links l
-                ON l.owner_kind=m.kind AND l.owner_key=m.key WHERE m.page=? AND NOT EXISTS
-                (SELECT 1 FROM page_members n WHERE n.page=m.page AND n.kind=l.target_kind AND n.key=l.target_key)'''
-            missing = self.db.execute('SELECT * FROM (' + needed + ') EXCEPT SELECT kind,key FROM page_deps WHERE page=?', (page_id, page_id)).fetchone()
-            extra = self.db.execute('SELECT kind,key FROM page_deps WHERE page=? EXCEPT ' + needed, (page_id, page_id)).fetchone()
-            require(missing is None and extra is None, 'page external dependency inventory differs')
-            for kind, key, expected in self.db.execute('SELECT kind,key,digest FROM page_deps WHERE page=?', (page_id,)):
-                table = 'blobs' if kind in BLOBS else 'records'
-                actual = self.db.execute('SELECT digest FROM ' + table + ' WHERE kind=? AND key=?', (kind, key)).fetchone()
-                require(actual is not None and actual[0] == expected, 'page dependency authentication')
-        for kind, key, expected in self.db.execute('SELECT kind,key,digest FROM external_roots'):
-            table = 'blobs' if kind in BLOBS else 'records'
-            actual = self.db.execute('SELECT digest FROM ' + table + ' WHERE kind=? AND key=?', (kind, key)).fetchone()
-            require(actual is not None and actual[0] == expected, 'external root authentication')
-        self.db.execute('DELETE FROM selected')
-        self.db.execute('INSERT INTO selected VALUES(?,?)', ('ManifestNode', canonical(manifest_root)))
-        self.db.execute('INSERT OR IGNORE INTO selected SELECT kind,key FROM external_roots')
-        changed = True
-        while changed:
-            before = self.db.total_changes
-            self.db.execute('''INSERT OR IGNORE INTO selected SELECT m.child_kind,m.child_key FROM manifest_children m
-                JOIN selected s ON s.kind='ManifestNode' AND s.key=json_quote(m.parent)''')
-            self.db.execute('''INSERT OR IGNORE INTO selected SELECT m.kind,m.key FROM page_members m
-                JOIN selected s ON s.kind='Page' AND s.key=json_quote(m.page)''')
-            self.db.execute('''INSERT OR IGNORE INTO selected SELECT l.target_kind,l.target_key FROM links l
-                JOIN selected s ON s.kind=l.owner_kind AND s.key=l.owner_key''')
-            changed = self.db.total_changes != before
-            self.budget.check()
-        require(self.db.execute('SELECT 1 FROM authoritative r LEFT JOIN selected s ON s.kind=r.kind AND s.key=r.key WHERE s.key IS NULL LIMIT 1').fetchone() is None,
-                'orphan/unreferenced hidden record')
-        require(self.db.execute('SELECT 1 FROM blobs b LEFT JOIN selected s ON s.kind=b.kind AND s.key=b.key WHERE s.key IS NULL LIMIT 1').fetchone() is None,
-                'unreferenced hidden external payload')
-        # A manifest child can be shared only with identical bytes; cycles and
-        # incorrect levels are independently rejected, not assumed from hashes.
-        for node in self.find('ManifestNode'):
-            for child in node['children']:
-                if child['kind'] == 'ManifestNode':
-                    require(self.get('ManifestNode', child['id'])['level'] + 1 == node['level'], 'manifest cycle/level')
-        for node in self.find('ManifestNode'):
-            require(node['counts']==self.manifest_counts(node['sha256']),'manifest exact transitive unique-record counts differ')
-        self.db.commit()
-        return self.counts()
+    def input_quantum(self, operation, **kw):
+        scope = empty_scope(); scope['input_root'] = self.scope
+        return self.execution.quantum(operation, scope=scope, **kw)
 
-    def manifest_counts(self,root):
-        self.db.execute('DELETE FROM manifest_tally')
-        self.db.execute('INSERT INTO manifest_tally VALUES(?,?)',('ManifestNode',canonical(root)))
-        changed=True
-        while changed:
-            before=self.db.total_changes
-            self.db.execute("INSERT OR IGNORE INTO manifest_tally SELECT m.child_kind,m.child_key FROM manifest_children m JOIN manifest_tally s ON s.kind='ManifestNode' AND s.key=json_quote(m.parent)")
-            self.db.execute("INSERT OR IGNORE INTO manifest_tally SELECT p.kind,p.key FROM page_members p JOIN manifest_tally s ON s.kind='Page' AND s.key=json_quote(p.page)")
-            self.db.execute('INSERT OR IGNORE INTO manifest_tally SELECT l.target_kind,l.target_key FROM links l JOIN manifest_tally s ON s.kind=l.owner_kind AND s.key=l.owner_key')
-            changed=self.db.total_changes!=before
-            self.budget.check()
-        values={field:self.db.execute('SELECT count(*) FROM manifest_tally WHERE kind=?',(kind,)).fetchone()[0] for field,kind in COUNT_KINDS.items()}
-        values['frontier']=values['products']-values['expansions']
-        require(values['frontier']>=0,'manifest closure has expansions without unique predecessor ownership')
+    def save_input_cursor(self, phase, after=None, owner=None, status='checking'):
+        self.db.execute('UPDATE input_scopes SET cursor=?,status=? WHERE scope=?',
+            (encoded({'pass':phase,'after':after,'owner':owner}),status,self.scope))
+
+    def input_work(self, phase, owner, kind, key):
+        self.db.execute('INSERT OR IGNORE INTO input_work VALUES(?,?,?,?,?,?,?,?,?)',
+            (self.scope,phase,'ManifestNode' if owner else '',owner,kind,key,'pending',encoded(None),self.execution.sequence()[1]+1))
+
+    def dependency_row(self, kind, key, expected=None):
+        table='blob_descriptors' if kind in BLOBS else 'records'
+        row=self.db.execute('SELECT digest FROM '+table+' WHERE kind=? AND key=?',(kind,key)).fetchone()
+        require(row is not None and (expected is None or row[0]==expected),'missing/mismatched scoped input dependency')
+
+    def prepare_input(self, request):
+        # Candidate objects are not authority. Only the exact frozen root walk
+        # selects records, and every resumable mutation has an actual result.
+        self.resolver_path = Path(request['dependency_index'])
+        auth=sqlite3.connect(self.resolver_path.as_uri()+'?mode=ro&immutable=1',uri=True)
+        checkpoint=request['checkpoint'];cp=checkpoint['record']
+        try:
+            existing=self.db.execute("SELECT scope,checkpoint,status FROM input_scopes WHERE status!='ready' ORDER BY owner_result LIMIT 1").fetchone()
+            if existing:
+                require(strict_json(existing[1])==checkpoint,'pending preparation changed frozen checkpoint')
+                self.bind_scope(existing[0])
+            else:
+                ready=self.db.execute("SELECT scope FROM input_scopes WHERE checkpoint_sha256=? AND status='ready'",(digest(checkpoint),)).fetchone()
+                if ready:self.bind_scope(ready[0]);return
+                roots=[];size=0
+                for kind,key,d in auth.execute('SELECT kind,key,digest FROM roots ORDER BY kind,key'):
+                    # Log-carrier controls are M4 authority, never fictitious
+                    # uploaded members. Semantic records do not depend on them.
+                    if kind in ('WorkUnit','ArtifactReceipt','Completion'):continue
+                    item=[kind,strict_json(key),d];size+=len(encoded(item))+1
+                    if size>8*1024*1024:raise Incomplete('external inventory exceeds indivisible metadata allowance')
+                    roots.append(item)
+                self.scope=sha_bytes(encoded([self.source,self.session_id,self.budget.plan['plan_sha256'],
+                    request['initial_image']['record']['image_sha256'],digest(checkpoint),roots]))
+                parent=None
+                for candidate,raw in self.db.execute("SELECT scope,checkpoint FROM input_scopes WHERE status='ready' AND manifest_root=? AND high_water<=? ORDER BY owner_result DESC",(cp['page_root'],cp['committed_transaction'])):
+                    old=strict_json(raw)['record']
+                    if old['counts']==cp['counts'] and old['contexts']==cp['contexts']:
+                        parent=candidate
+                        while True:
+                            ancestor=self.db.execute('SELECT manifest_scope FROM input_scopes WHERE scope=?',(parent,)).fetchone()[0]
+                            if ancestor is None:break
+                            parent=ancestor
+                        break
+                before=self.execution.cursor()
+                if before['operation'] in ('load_input','check_input'):
+                    suspended=self.db.execute("SELECT resume_cursor FROM input_scopes WHERE scope=? AND status='ready'",(before['scope']['input_root'],)).fetchone()
+                    resume=strict_json(suspended[0]) if suspended else {
+                        'stage':'semantic_verify','operation':'materialize_store','scope':empty_scope(),'position':empty_position(),'quantum':before['quantum']}
+                else:resume=before
+                with self.input_quantum('load_input') as q:
+                    self.budget.check(records=len(roots)+1,bytes_=len(encoded(roots))+len(encoded(checkpoint)))
+                    self.db.execute('INSERT INTO input_scopes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                        (self.scope,encoded(checkpoint),digest(checkpoint),cp['committed_transaction'],cp['page_root'],encoded(roots),parent,
+                         'loading',encoded(resume),encoded({'pass':'inventory','after':None,'owner':None}),q.sequence))
+                    for kind,key,d in roots:self.db.execute('INSERT INTO active_external_roots VALUES(?,?,?)',(kind,canonical(key),d))
+                    q.credit('input_scope',self.scope)
+                    if parent:q.credit('input_manifest_reuse',[self.scope,parent])
+            status,cursor=self.db.execute('SELECT status,cursor FROM input_scopes WHERE scope=?',(self.scope,)).fetchone()
+            if status=='loading':
+                after=strict_json(cursor)['after'] or ['', '']
+                for kind,key,d,path in auth.execute('SELECT kind,key,digest,path FROM objects WHERE (kind,CAST(key AS TEXT))>(?,?) ORDER BY kind,CAST(key AS TEXT)',tuple(after)):
+                    if kind in ('WorkUnit','ArtifactReceipt','Completion'):continue
+                    key=canonical(strict_json(key))
+                    row=auth.execute('SELECT unit_ordinal,part_ordinal,member_path,bytes,sha256 FROM authenticated_members WHERE local_path=? ORDER BY unit_ordinal,part_ordinal,member_path LIMIT 1',(path,)).fetchone()
+                    require(row is not None,'candidate missing authenticated member provenance')
+                    member=dict(zip(('unit_ordinal','part_ordinal','member_path','bytes','sha256'),row))
+                    reference={'kind':kind,'id':strict_json(key),'sha256':d}
+                    prior=self.db.execute("SELECT member_ref,owner_result FROM input_members WHERE kind=? AND key=? AND reference=? AND status='done' ORDER BY owner_result LIMIT 1",(kind,key,encoded(reference))).fetchone()
+                    with self.input_quantum('load_input',inputs=({'entry_kind':'member','member':member},)) as q:
+                        if prior is None:
+                            actual=self.member_path(member)
+                            if kind in BLOBS:
+                                self.add_blob(kind,strict_json(key),actual,d)
+                                self.db.execute('INSERT INTO blob_descriptors VALUES(?,?,?,?,?)',(kind,key,d,member['bytes'],encoded(member)))
+                            else:
+                                require(self.load_member(actual)==reference,'candidate exact transport identity differs')
+                                self.db.execute('INSERT OR IGNORE INTO record_members VALUES(?,?,?,?)',(kind,key,kind,key))
+                                if kind=='Page':
+                                    for nk,ni in self.db.execute('SELECT kind,key FROM page_members WHERE page=?',(strict_json(key),)):
+                                        self.db.execute('INSERT OR IGNORE INTO record_members VALUES(?,?,?,?)',(nk,ni,kind,key))
+                        else:
+                            require(self.db.execute('SELECT 1 FROM check_results WHERE sequence=?',(prior[1],)).fetchone() is not None,'missing prior loading result')
+                            if strict_json(prior[0])!=member:
+                                left=self.member_path(strict_json(prior[0]));right=self.member_path(member)
+                                with left.open('rb') as x,right.open('rb') as y:
+                                    while True:
+                                        v,w=x.read(65536),y.read(65536)
+                                        require(v==w,'same-key authenticated member full-byte conflict')
+                                        if not v:break
+                                        self.budget.check(bytes_=len(v)+len(w))
+                        self.db.execute('INSERT INTO input_members VALUES(?,?,?,?,?,?,?)',(self.scope,kind,key,encoded(reference),encoded(member),'done',q.sequence))
+                        q.credit('input_member',[self.scope,kind,strict_json(key)])
+                        for ordinal,(nk,ni,nd) in enumerate(self.db.execute('SELECT r.kind,r.key,r.digest FROM records r JOIN record_members m USING(kind,key) WHERE m.member_kind=? AND m.member_key=? ORDER BY r.kind,r.key',(kind,key))):
+                            self.db.execute('INSERT INTO inventory_entries VALUES(?,?,?,?)',(q.sequence,'outputs',ordinal,encoded({'entry_kind':'record','record_kind':nk,'key':strict_json(ni),'sha256':nd})))
+                        self.save_input_cursor('inventory',[kind,key],status='loading')
+                        self.budget.check(records=1)
+                with self.input_quantum('check_input') as q:
+                    self.save_input_cursor('links')
+                    if self.db.execute('SELECT manifest_scope FROM input_scopes WHERE scope=?',(self.scope,)).fetchone()[0] is None:
+                        self.input_work('links','','ManifestNode',canonical(cp['page_root']))
+                    for kind,key in self.db.execute('SELECT kind,key FROM active_external_roots'):self.input_work('links','',kind,key)
+                    q.credit('input_pass',[self.scope,'inventory'])
+            self.check_input_scope()
+        finally:auth.close()
+
+    def check_input_scope(self):
+        phases=('links','page_dependencies','external_roots','selected_closure','orphan_check','manifest_levels','manifest_counts','finish')
+        while True:
+            raw,status=self.db.execute('SELECT cursor,status FROM input_scopes WHERE scope=?',(self.scope,)).fetchone()
+            if status in ('dependencies_ready','ready'):return
+            cursor=strict_json(raw);phase=cursor['pass']
+            if phase=='page_dependencies':
+                row=self.db.execute("SELECT key FROM input_work WHERE scope=? AND pass='links' AND kind='Page' AND status='done' AND key>? ORDER BY key LIMIT 1",(self.scope,cursor['after'] or '')).fetchone()
+                if row:
+                    with self.input_quantum('check_input') as q:
+                        page=self.get('Page',strict_json(row[0]));page_id=page['page_id']
+                        needed='SELECT DISTINCT l.target_kind,l.target_key FROM page_members m JOIN links l ON l.owner_kind=m.kind AND l.owner_key=m.key WHERE m.page=? AND NOT EXISTS (SELECT 1 FROM page_members n WHERE n.page=m.page AND n.kind=l.target_kind AND n.key=l.target_key)'
+                        require(self.db.execute('SELECT * FROM ('+needed+') EXCEPT SELECT kind,key FROM page_deps WHERE page=?',(page_id,page_id)).fetchone() is None and
+                            self.db.execute('SELECT kind,key FROM page_deps WHERE page=? EXCEPT '+needed,(page_id,page_id)).fetchone() is None,'page dependency inventory differs')
+                        for nk,ni,nd in self.db.execute('SELECT kind,key,digest FROM page_deps WHERE page=?',(page_id,)):self.dependency_row(nk,ni,nd)
+                        self.save_input_cursor(phase,row[0]);q.credit('input_page_dependencies',[self.scope,row[0]]);self.budget.check(records=1)
+                    continue
+            if phase=='external_roots':
+                row=self.db.execute('SELECT kind,key,digest FROM active_external_roots WHERE (kind,key)>(?,?) ORDER BY kind,key LIMIT 1',tuple(cursor['after'] or ['',''])).fetchone()
+                if row:
+                    with self.input_quantum('check_input') as q:
+                        self.dependency_row(*row);self.save_input_cursor(phase,list(row[:2]));q.credit('input_root',[self.scope,*row[:2]])
+                        self.budget.check(records=1)
+                    continue
+            elif phase in ('links','selected_closure','manifest_counts'):
+                owner=cursor['owner'] or ''
+                if phase=='manifest_counts' and not owner:
+                    row=self.db.execute("SELECT key FROM selected WHERE scope=input_scope() AND kind='ManifestNode' AND key>? AND NOT EXISTS (SELECT 1 FROM manifest_tally t JOIN input_scopes s ON s.manifest_scope=t.scope AND s.manifest_root=t.tally_manifest WHERE s.scope=input_scope() AND t.kind=selected.kind AND t.key=selected.key) ORDER BY key LIMIT 1",(cursor['after'] or '',)).fetchone()
+                    if row:
+                        with self.input_quantum('check_input'):
+                            self.input_work(phase,row[0],'ManifestNode',row[0]);self.save_input_cursor(phase,cursor['after'],row[0])
+                        continue
+                row=self.db.execute("SELECT owner_kind,owner_key,kind,key FROM input_work WHERE scope=? AND pass=? AND owner_key=? AND status='pending' ORDER BY kind,key LIMIT 1",(self.scope,phase,owner)).fetchone() if phase in ('links','selected_closure') or owner else None
+                if row:
+                    ok,oi,kind,key=row
+                    with self.input_quantum('check_input') as q:
+                        self.dependency_row(kind,key)
+                        if phase=='selected_closure':
+                            self.db.execute('INSERT OR IGNORE INTO active_selected VALUES(?,?)',(kind,key))
+                            self.db.execute('INSERT OR IGNORE INTO active_authoritative VALUES(?,?)',(kind,key))
+                        elif phase=='manifest_counts':self.db.execute('INSERT OR IGNORE INTO manifest_tally VALUES(?,?,?,?)',(self.scope,strict_json(owner),kind,key))
+                        inherited=self.db.execute("SELECT 1 FROM manifest_tally t JOIN input_scopes s ON s.manifest_scope=t.scope AND s.manifest_root=t.tally_manifest WHERE s.scope=? AND t.kind=? AND t.key=?",(self.scope,kind,key)).fetchone()
+                        if kind not in BLOBS and inherited is None:
+                            value=self.get_envelope(kind,strict_json(key));r=value['record']
+                            if kind=='Page':
+                                high=self.db.execute('SELECT high_water FROM input_scopes WHERE scope=?',(self.scope,)).fetchone()[0]
+                                require(r['transaction_high_water']<=high,'post-snapshot selected page')
+                                for nk,ni in self.db.execute('SELECT kind,key FROM page_members WHERE page=?',(r['page_id'],)):self.input_work(phase,owner,nk,ni)
+                            if kind=='ManifestNode':
+                                for nk,ni in self.db.execute('SELECT child_kind,child_key FROM manifest_children WHERE parent=?',(r['sha256'],)):self.input_work(phase,owner,nk,ni)
+                            for nk,ni,nd in self.db.execute('SELECT target_kind,target_key,digest FROM links WHERE owner_kind=? AND owner_key=?',(kind,key)):
+                                self.dependency_row(nk,ni,nd);self.input_work(phase,owner,nk,ni)
+                        self.db.execute("UPDATE input_work SET status='done',owner_result=? WHERE scope=? AND pass=? AND owner_kind=? AND owner_key=? AND kind=? AND key=?",(q.sequence,self.scope,phase,*row))
+                        q.credit('input_work',[self.scope,phase,*row]);self.budget.check(records=1)
+                    continue
+                if phase=='manifest_counts' and owner:
+                    with self.input_quantum('check_input') as q:
+                        root=strict_json(owner)
+                        require(self.get('ManifestNode',root)['counts']==self.manifest_counts(root),'manifest exact unique closure counts differ')
+                        self.save_input_cursor(phase,owner);q.credit('input_tally',[self.scope,root])
+                    continue
+            elif phase=='orphan_check':
+                row=self.db.execute('SELECT kind,key FROM active_selected WHERE (kind,key)>(?,?) ORDER BY kind,key LIMIT 1',tuple(cursor['after'] or ['',''])).fetchone()
+                if row:
+                    with self.input_quantum('check_input') as q:
+                        kind,key=row
+                        if kind not in BLOBS and kind not in ('Page','ManifestNode'):
+                            member=self.db.execute("SELECT 1 FROM page_members p JOIN active_selected a ON a.kind='Page' AND a.key=json_quote(p.page) WHERE p.kind=? AND p.key=? LIMIT 1",(kind,key)).fetchone()
+                            external=self.db.execute('SELECT 1 FROM active_external_roots WHERE kind=? AND key=?',(kind,key)).fetchone()
+                            require(member is not None or external is not None,'unpublished raw/proposed record entered semantic authority')
+                        self.save_input_cursor(phase,list(row));q.credit('input_orphan',[self.scope,*row]);self.budget.check(records=1)
+                    continue
+            elif phase=='manifest_levels':
+                row=self.db.execute("SELECT key FROM selected WHERE scope=input_scope() AND kind='ManifestNode' AND key>? AND NOT EXISTS (SELECT 1 FROM manifest_tally t JOIN input_scopes s ON s.manifest_scope=t.scope AND s.manifest_root=t.tally_manifest WHERE s.scope=input_scope() AND t.kind=selected.kind AND t.key=selected.key) ORDER BY key LIMIT 1",(cursor['after'] or '',)).fetchone()
+                if row:
+                    with self.input_quantum('check_input') as q:
+                        node=self.get('ManifestNode',strict_json(row[0]))
+                        for child in node['children']:
+                            if child['kind']=='ManifestNode':require(self.get('ManifestNode',child['id'])['level']+1==node['level'],'manifest cycle/level')
+                        self.save_input_cursor(phase,row[0]);q.credit('input_level',[self.scope,row[0]]);self.budget.check(records=1)
+                    continue
+            elif phase=='finish':
+                with self.input_quantum('check_input') as q:
+                    self.save_input_cursor('finish',status='dependencies_ready');q.credit('input_dependencies_ready',self.scope)
+                return
+            with self.input_quantum('check_input') as q:
+                next_phase=phases[phases.index(phase)+1]
+                if next_phase=='selected_closure':
+                    root=self.db.execute('SELECT manifest_root FROM input_scopes WHERE scope=?',(self.scope,)).fetchone()[0]
+                    if self.db.execute('SELECT manifest_scope FROM input_scopes WHERE scope=?',(self.scope,)).fetchone()[0] is None:
+                        self.input_work(next_phase,'','ManifestNode',canonical(root))
+                    for kind,key in self.db.execute('SELECT kind,key FROM active_external_roots'):self.input_work(next_phase,'',kind,key)
+                self.save_input_cursor(next_phase);q.credit('input_pass',[self.scope,phase])
+
+    def manifest_counts(self, root):
+        values = {field: self.db.execute('SELECT count(*) FROM manifest_tally WHERE scope=? AND tally_manifest=? AND kind=?',
+                  (self.scope,root,kind)).fetchone()[0] for field,kind in COUNT_KINDS.items()}
+        values['frontier'] = values['products'] - values['expansions']
+        require(values['frontier'] >= 0, 'manifest closure expansion ownership')
         return values
 
     def counts(self):
@@ -844,6 +1041,8 @@ class RecordIndex:
 
 
 OPERATIONS = {
+    'load_input': {'load_input','check_input'},
+    'check_input': {'check_input'},
     'materialize_store': {'materialize_store', 'materialize_oracle'},
     'materialize_oracle': {'materialize_oracle', 'materialize_product'},
     'materialize_product': {'materialize_product', 'seed_fifo'},
@@ -876,6 +1075,14 @@ for _publishing_operation in ('produce_monitor','select_view','dfs_forward','dfs
     OPERATIONS[_publishing_operation].add('publish_temporal')
 del _publishing_operation
 
+# Preparation can suspend a proof only at a committed boundary. The destination
+# of check_input is additionally checked against the persisted saved cursor.
+for _operation in tuple(OPERATIONS):
+    if _operation not in ('load_input','check_input'):
+        OPERATIONS[_operation].add('load_input')
+        OPERATIONS['check_input'].add(_operation)
+del _operation
+
 
 def empty_position():
     return {'context': None, 'record_kind': None, 'after_key': None, 'fifo_ticket': None,
@@ -898,7 +1105,7 @@ class ExecutionState:
         self.sql_path = PACKAGE / 'paged-verifier-state.sql'
         self.schema_sha256 = sha_bytes(self.sql_path.read_bytes())
         self._validate_schema()
-        initial = {'stage': 'semantic_verify', 'operation': 'materialize_store',
+        initial = {'stage': 'semantic_verify', 'operation': 'load_input',
                    'scope': empty_scope(), 'position': empty_position(), 'quantum': 0}
         row = self.db.execute('SELECT source_json,session,plan,initial_image FROM verifier_meta WHERE singleton=1').fetchone()
         identity = encoded(index.source), index.session_id, index.budget.plan['plan_sha256'], initial_image
@@ -934,6 +1141,7 @@ class ExecutionState:
             raise Incomplete('prospective private DB/journal commit reservation exhausted')
 
     def _validate_schema(self):
+        require(self.db.execute('PRAGMA encoding').fetchone()==('UTF-8',),'private SQLite text encoding differs from source constructor')
         expected = sqlite3.connect(':memory:')
         try:
             expected.executescript(self.sql_path.read_text())
@@ -950,27 +1158,54 @@ class ExecutionState:
         return self.db.execute('SELECT private_commit,last_result FROM verifier_meta WHERE singleton=1').fetchone()
 
     def logical_digest(self):
-        """Stream every full durable row in explicit source-reviewed PK order."""
-        sql = self.sql_path.read_text()
-        line = next(x for x in sql.splitlines() if x.startswith('-- logical-order: '))
-        order = strict_json(line.split(': ', 1)[1])
-        h = hashlib.sha256(b'plurx-independent-verifier-state-v1\0')
+        """Stream the unchanged full typed-row preimage in exact pinned PK order.
+
+        rowid below is only a transient SQLite incremental-BLOB I/O address.
+        It is neither hashed identity nor a saved/progress cursor; ordering and
+        hashed identity are the full explicit primary keys, including raw BLOBs.
+        """
+        order=strict_json(next(x for x in self.sql_path.read_text().splitlines() if x.startswith('-- logical-order: ')).split(': ',1)[1])
+        h=hashlib.sha256(b'plurx-independent-verifier-state-v1\0')
         h.update(bytes.fromhex(self.schema_sha256))
-        for table, keys in order.items():
-            require(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', table), 'bad pinned table name')
-            cols = [r[1] for r in self.db.execute('PRAGMA table_info("' + table + '")')]
-            require(cols, 'missing private durable table')
-            select = 'SELECT ' + ','.join('"' + c + '"' for c in cols) + ' FROM "' + table + '" ORDER BY ' + ','.join('"' + c + '"' for c in keys)
-            for row in self.db.execute(select):
-                # BLOBs retain their exact bytes; hex is a lossless typed
-                # canonical representation, never parsed/re-normalized JSON.
-                def cell(v):
-                    return {'blob_hex': v.hex()} if type(v) is bytes else v
-                values = [cell(v) for v in row]
-                pk = [cell(row[cols.index(k)]) for k in keys]
-                data = encoded([table, pk, values])
-                h.update(len(data).to_bytes(8, 'big'))
-                h.update(data)
+        def cell(table,column,address):
+            typ=self.db.execute('SELECT typeof("'+column+'") FROM "'+table+'" WHERE rowid=?',(address,)).fetchone()[0]
+            if typ in ('blob','text'):
+                budget=getattr(self,'budget',None)
+                if budget:budget.reserve_working(262144)
+                try:
+                    yield b'{"blob_hex":"' if typ=='blob' else b'"'
+                    decoder=codecs.getincrementaldecoder('utf-8')('strict')
+                    with self.db.blobopen(table,column,address,readonly=True) as stream:
+                        while chunk:=stream.read(8192):
+                            data=chunk.hex().encode('ascii') if typ=='blob' else canonical(decoder.decode(chunk))[1:-1].encode('utf-8')
+                            if budget:budget.check(bytes_=len(chunk))
+                            yield data
+                    if typ=='text':yield canonical(decoder.decode(b'',final=True))[1:-1].encode('utf-8')
+                    yield b'"}' if typ=='blob' else b'"'
+                finally:
+                    if budget:budget.release_working(262144)
+            else:
+                value=self.db.execute('SELECT "'+column+'" FROM "'+table+'" WHERE rowid=?',(address,)).fetchone()[0]
+                yield encoded(value)
+        def row_chunks(table,keys,columns,address):
+            yield b'[';yield encoded(table);yield b',['
+            for i,column in enumerate(keys):
+                if i:yield b','
+                yield from cell(table,column,address)
+            yield b'],['
+            for i,column in enumerate(columns):
+                if i:yield b','
+                yield from cell(table,column,address)
+            yield b']]'
+        for table,keys in order.items():
+            require(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',table),'bad pinned private table name')
+            columns=[row[1] for row in self.db.execute('PRAGMA table_info("'+table+'")')]
+            require(columns and set(keys)<=set(columns),'missing private durable table/key')
+            for address, in self.db.execute('SELECT rowid FROM "'+table+'" ORDER BY '+','.join('"'+k+'"' for k in keys)):
+                size=sum(len(chunk) for chunk in row_chunks(table,keys,columns,address))
+                h.update(size.to_bytes(8,'big'))
+                for chunk in row_chunks(table,keys,columns,address):h.update(chunk)
+                if hasattr(self,'budget'):self.budget.check()
         return h.hexdigest()
 
     def deterministic_initial(self):
@@ -979,11 +1214,12 @@ class ExecutionState:
             temporary.executescript(self.sql_path.read_text())
             row=self.db.execute('SELECT source_json,session,plan,initial_image FROM verifier_meta WHERE singleton=1').fetchone()
             require(row is not None,'missing verifier identity')
-            initial={'stage':'semantic_verify','operation':'materialize_store','scope':empty_scope(),'position':empty_position(),'quantum':0}
+            initial={'stage':'semantic_verify','operation':'load_input','scope':empty_scope(),'position':empty_position(),'quantum':0}
             temporary.execute("INSERT INTO meta VALUES('identity',?)",(encoded([strict_json(row[0]),row[1],row[2]]),))
             temporary.execute('INSERT INTO verifier_meta VALUES(1,1,?,?,?,?,0,0,?,NULL)',(*row,encoded(initial)))
             empty=ExecutionState.__new__(ExecutionState)
             empty.db,empty.sql_path,empty.schema_sha256=temporary,self.sql_path,self.schema_sha256
+            empty.budget=self.budget
             return initial,empty.logical_digest()
         finally:temporary.close()
 
@@ -994,8 +1230,8 @@ class ExecutionState:
     def record_input(self, value):
         require(self.active, 'input capture outside quantum')
         sequence = self.db.execute('SELECT max(sequence) FROM check_results').fetchone()[0]
-        authority=self.db.execute('SELECT 1 FROM authoritative WHERE kind=? AND key=?',(value['kind'],canonical(record_key(value)))).fetchone()
-        if authority is None:
+        authority=self.db.execute('SELECT 1 FROM active_authoritative WHERE kind=? AND key=?',(value['kind'],canonical(record_key(value)))).fetchone()
+        if authority is None and self.cursor()['operation'] not in ('load_input','check_input'):
             claim=self.db.execute('SELECT claim FROM check_results WHERE sequence=?',(sequence,)).fetchone()[0]
             require(claim=='algorithm_checkpoint','semantic/SCC/TLC credit requires actual authenticated input-manifest record')
             require(self.db.execute('SELECT 1 FROM proposed_records WHERE kind=? AND key=?',(value['kind'],canonical(record_key(value)))).fetchone() is not None,'unattributed private derived input')
@@ -1046,6 +1282,13 @@ class ExecutionQuantum:
         require(self.operation in OPERATIONS and (self.operation in OPERATIONS[self.before['operation']] or
                 self.framing and self.operation==self.before['operation'] or
                 self.before['quantum'] == 0 and self.operation == self.before['operation']), 'illegal explicit verifier operation transition')
+        if self.before['operation']=='check_input' and self.operation not in ('check_input','load_input'):
+            prepared=s.db.execute('SELECT status,resume_cursor FROM input_scopes WHERE scope=?',(s.index.scope,)).fetchone()
+            require(prepared is not None and prepared[0]=='ready','semantic execution before input scope ready')
+            saved=strict_json(prepared[1])
+            require(self.operation==saved['operation'] and (self.stage or self.before['stage'])==saved['stage'] and
+                    (self.scope or self.before['scope'])==saved['scope'] and
+                    (self.position or self.before['position'])==saved['position'],'input preparation changed its suspended proof cursor')
         self.after = {'stage': self.stage or self.before['stage'], 'operation': self.operation,
                       'scope': self.scope or self.before['scope'], 'position': self.position or self.before['position'],
                       'quantum': self.before['quantum'] + 1}
@@ -1219,6 +1462,78 @@ class ContinuationResolver:
                 yield strict_json(payload)
         return entries()
 
+    def reconcile_input_state(self, state):
+        db=state.db
+        initial=db.execute('SELECT initial_image FROM verifier_meta WHERE singleton=1').fetchone()[0]
+        for scope,checkpoint,cp_sha,high,root,inventory,parent,status,resume,cursor,owner in db.execute('SELECT * FROM input_scopes ORDER BY owner_result'):
+            cp=strict_json(checkpoint);roots=strict_json(inventory)
+            require(encoded(cp)==checkpoint and digest(cp)==cp_sha and cp['record']['committed_transaction']==high and cp['record']['page_root']==root,
+                    'durable input scope checkpoint changed')
+            require(sha_bytes(encoded([self.source,self.session,state.budget.plan['plan_sha256'],initial,cp_sha,roots]))==scope,'durable input scope identity changed')
+            if parent is not None:
+                prior=db.execute('SELECT checkpoint,status,owner_result FROM input_scopes WHERE scope=?',(parent,)).fetchone()
+                require(prior is not None and prior[1]=='ready' and prior[2]<owner,'manifest reuse lacks earlier ready authenticated prior scope')
+                old=strict_json(prior[0])['record'];new=cp['record']
+                require(old['page_root']==root and old['committed_transaction']<=high and old['counts']==new['counts'] and old['contexts']==new['contexts'] and
+                    db.execute("SELECT 1 FROM credit_links WHERE table_name='input_manifest_reuse' AND row_key=? AND result_sequence=?",(encoded([scope,parent]),owner)).fetchone() is not None,
+                    'manifest reuse changed source graph/checkpoint relation')
+            result=db.execute('SELECT claim,before_cursor FROM check_results WHERE sequence=?',(owner,)).fetchone()
+            require(result is not None and result[0]=='algorithm_checkpoint' and
+                db.execute("SELECT 1 FROM execution_commits WHERE first_result=? AND operation='load_input'",(owner,)).fetchone() is not None,'input scope lacks actual creation result')
+            before=strict_json(result[1])
+            expected_resume=before
+            if before['operation'] in ('load_input','check_input'):
+                suspended=db.execute("SELECT resume_cursor,owner_result FROM input_scopes WHERE scope=? AND status='ready'",(before['scope']['input_root'],)).fetchone()
+                if suspended:
+                    require(suspended[1]<owner,'cyclic/unordered suspended input scope')
+                    expected_resume=strict_json(suspended[0])
+                else:expected_resume={'stage':'semantic_verify','operation':'materialize_store','scope':empty_scope(),'position':empty_position(),'quantum':before['quantum']}
+            require(strict_json(resume)==expected_resume,'saved input preparation resume cursor was altered')
+            bound=db.execute('SELECT input_snapshot FROM unit_work WHERE first_result<=? ORDER BY first_result DESC LIMIT 1',(owner,)).fetchone()
+            require(bound is not None and bound[0]==checkpoint,'input scope not bound to actual source-checked unit input')
+            require(status in ('loading','checking','dependencies_ready','ready'),'unknown durable input preparation status')
+            local=list(db.execute('SELECT kind,key,digest FROM external_roots WHERE scope=? ORDER BY kind,key',(scope,)))
+            require([[k,strict_json(key),d] for k,key,d in local]==roots,'durable input external root inventory differs')
+            if status=='ready':
+                require(db.execute("SELECT 1 FROM credit_links WHERE table_name='input_ready' AND row_key=?",(encoded(scope),)).fetchone() is not None and db.execute("SELECT 1 FROM input_work WHERE scope=? AND pass='catalog' AND status='done'",(scope,)).fetchone() is not None,'ready input scope lacks checked catalog/finish result')
+            self.budget.check()
+        for scope,kind,key,reference,member,status,owner in db.execute('SELECT * FROM input_members ORDER BY scope,kind,key'):
+            r,m=strict_json(reference),strict_json(member)
+            require(status=='done' and r['kind']==kind and canonical(r['id'])==key,'incomplete/mismatched durable input member')
+            require(db.execute("SELECT 1 FROM execution_commits WHERE first_result=? AND operation='load_input'",(owner,)).fetchone() is not None and
+                db.execute("SELECT 1 FROM inventory_entries WHERE result_sequence=? AND purpose='inputs' AND entry=?",(owner,encoded({'entry_kind':'member','member':m}))).fetchone() is not None and
+                db.execute("SELECT 1 FROM credit_links WHERE table_name='input_member' AND row_key=? AND result_sequence=?",(encoded([scope,kind,strict_json(key)]),owner)).fetchone() is not None,
+                'missing/forged immutable member loading result')
+            for rk,ri,rd in db.execute('SELECT r.kind,r.key,r.digest FROM records r JOIN record_members m USING(kind,key) WHERE m.member_kind=? AND m.member_key=? ORDER BY r.kind,r.key',(kind,key)):
+                require(db.execute("SELECT 1 FROM inventory_entries WHERE result_sequence=? AND purpose='outputs' AND entry=?",(owner,encoded({'entry_kind':'record','record_kind':rk,'key':strict_json(ri),'sha256':rd}))).fetchone() is not None,
+                        'loading result omitted exact raw record coverage')
+                self.budget.check()
+        for scope,phase,ok,oi,kind,key,status,cursor,owner in db.execute('SELECT * FROM input_work ORDER BY scope,pass,owner_kind,owner_key,kind,key'):
+            require(status in ('pending','done') and db.execute("SELECT 1 FROM execution_commits WHERE first_result=? AND operation='check_input'",(owner,)).fetchone() is not None,'unbound scoped input queue/tally row')
+            if status=='done' and phase!='catalog':
+                require(db.execute("SELECT 1 FROM credit_links WHERE table_name='input_work' AND row_key=? AND result_sequence=?",(encoded([scope,phase,ok,oi,kind,key]),owner)).fetchone() is not None,'missing actual dependency/tally owner result')
+            self.budget.check()
+        for scope,manifest,kind,key in db.execute('SELECT * FROM manifest_tally ORDER BY scope,tally_manifest,kind,key'):
+            require(db.execute("SELECT 1 FROM input_work WHERE scope=? AND pass='manifest_counts' AND owner_key=? AND kind=? AND key=? AND status='done'",(scope,canonical(manifest),kind,key)).fetchone() is not None,'tally membership lacks exact root-bound traversal credit')
+        for scope,cursor,status,owner in db.execute("SELECT scope,cursor,status,owner_result FROM input_work WHERE pass='catalog'"):
+            value=strict_json(cursor)
+            require(set(value)=={'checkpoint','catalog_sha256','bytes','kind','after','phase'} and
+                type(value['kind']) is int and value['kind']>=0 and type(value['after']) is list and len(value['after'])==3 and
+                value['phase'] in ('records','missing','done'),'invalid exact catalog checked-prefix cursor')
+            bound=db.execute('SELECT checkpoint_sha256 FROM input_scopes WHERE scope=?',(scope,)).fetchone()
+            require(bound==(value['checkpoint'],),'catalog prefix checkpoint/scope mismatch')
+            if status=='done':
+                require(value['phase']=='done' and db.execute("SELECT 1 FROM credit_links WHERE table_name='input_catalog' AND row_key=? AND result_sequence=?",(encoded(scope),owner)).fetchone() is not None,
+                    'catalog correspondence lacks actual final checked result')
+        for kind,key in db.execute('SELECT kind,key FROM records ORDER BY kind,key'):
+            require(db.execute('SELECT 1 FROM record_members WHERE kind=? AND key=?',(kind,key)).fetchone() is not None or
+                db.execute('SELECT 1 FROM proposed_records WHERE kind=? AND key=?',(kind,key)).fetchone() is not None,
+                'unattributed durable raw input row')
+            self.budget.check()
+        for kind,key,d,bytes_,member in db.execute('SELECT * FROM blob_descriptors ORDER BY kind,key'):
+            require(db.execute("SELECT 1 FROM input_members WHERE kind=? AND key=? AND member_ref=? AND status='done'",(kind,key,member)).fetchone() is not None,'unbound immutable blob descriptor')
+            require(strict_json(member)['bytes']==bytes_ and strict_json(member)['sha256']==d,'blob descriptor/member bytes differ')
+
     def reconcile_chain(self, state, *, latest_progress_sha256, latest_backup_sha256, tlc_reparser):
         """Reconcile source-pinned results/credits, not self-asserted checked bits."""
         self.db.execute('DELETE FROM chain_results')
@@ -1266,8 +1581,10 @@ class ContinuationResolver:
                         expected=next(local,None)
                         require(expected is not None and strict_json(expected[0])==item,'changed/skipped inventory credit')
                         if item['entry_kind']=='record':
-                            value=state.index.get_envelope(item['record_kind'],item['key'])
-                            require(digest(value)==item['sha256'],'checked input raw preimage changed')
+                            raw=state.db.execute('SELECT digest,length(payload) FROM records WHERE kind=? AND key=?',(item['record_kind'],canonical(item['key']))).fetchone()
+                            require(raw is not None and raw[0]==item['sha256'] and raw[1]>0,'checked input raw preimage changed')
+                            require(state.db.execute('SELECT 1 FROM record_members WHERE kind=? AND key=?',(item['record_kind'],canonical(item['key']))).fetchone() is not None or
+                                state.db.execute('SELECT 1 FROM proposed_records WHERE kind=? AND key=?',(item['record_kind'],canonical(item['key']))).fetchone() is not None,'raw input has no authenticated load/proposal provenance')
                         else:
                             self.member_path(item['member'])
                     require(next(local,None) is None,'omitted private inventory credit')
@@ -1306,6 +1623,11 @@ class ContinuationResolver:
             saved=state.db.execute('SELECT before_cursor,after_cursor,input_root,claim FROM check_results WHERE sequence=?',(first_result,)).fetchone()
             require(saved is not None and (saved[0],saved[1],saved[2])==(before_raw,after_raw,input_root),'private journal/result binding differs')
             if useful:
+                if before['operation']=='check_input' and operation not in ('load_input','check_input'):
+                    bound=state.db.execute('SELECT status,resume_cursor FROM input_scopes WHERE scope=?',(before['scope']['input_root'],)).fetchone()
+                    require(bound is not None and bound[0]=='ready','resumed proof lacks ready input scope')
+                    resume=strict_json(bound[1])
+                    require(all(after[k]==resume[k] for k in ('stage','operation','scope','position')),'input preparation jumped to another proof cursor')
                 require(operation in OPERATIONS[before['operation']] or before['quantum']==0 and operation==before['operation'],
                         'private useful operation transition is illegal')
             else:
@@ -1325,5 +1647,6 @@ class ContinuationResolver:
                     'verified_views':'verified_view','rooted_products_checked':'rooted_product'}.get(table,table)
                 require(state.db.execute('SELECT 1 FROM credit_links c JOIN check_results r ON r.sequence=c.result_sequence WHERE c.table_name=? AND c.row_key=?',(credit_table,encoded(identity))).fetchone() is not None,'altered checked bit without execution credit')
         require(state.db.execute('SELECT 1 FROM credit_links c LEFT JOIN check_results r ON r.sequence=c.result_sequence WHERE r.sequence IS NULL LIMIT 1').fetchone() is None,'orphan private credit')
+        self.reconcile_input_state(state)
         self.db.commit()
         return latest

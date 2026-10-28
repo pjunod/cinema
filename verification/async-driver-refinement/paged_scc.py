@@ -623,7 +623,7 @@ class Temporal:
         from pathlib import Path
         from paged_codec import sha_bytes
         reference=witness['full_graph_fairness']
-        row=self.index.db.execute('SELECT digest,path FROM blobs WHERE kind=? AND key=?',(reference['kind'],canonical(reference['id']))).fetchone()
+        row=(self.index.blob(reference['kind'],reference['id'])[1],self.index.blob(reference['kind'],reference['id'])[0])
         require(row is not None and row[0]==reference['sha256'],'fairness receipt is not authenticated')
         path=Path(row[1])
         require(path.is_file() and not path.is_symlink() and path.stat().st_size<=self.budget.member_limit(),'unsafe/oversized fairness receipt')
