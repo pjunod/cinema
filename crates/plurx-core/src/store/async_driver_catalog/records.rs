@@ -33,7 +33,14 @@ impl fmt::Display for CatalogError {
 impl std::error::Error for CatalogError {}
 impl From<rusqlite::Error> for CatalogError {
     fn from(error: rusqlite::Error) -> Self {
-        Self::Io(error.to_string())
+        match &error {
+            rusqlite::Error::SqliteFailure(code, _)
+                if code.code == rusqlite::ErrorCode::DiskFull =>
+            {
+                Self::ResourceIncomplete("catalog SQLite reserved pages/disk exhausted".into())
+            }
+            _ => Self::Io(error.to_string()),
+        }
     }
 }
 impl From<std::io::Error> for CatalogError {
@@ -525,6 +532,108 @@ impl Record {
         value.record[field] = json!(value.sha256());
         value.validate()?;
         Ok(value)
+    }
+}
+
+/// Bounded lexical reservation before allocating decoded JSON containers.
+/// This operational overcharge is separate from M4's actual process RSS guard;
+/// it is not a source valuation-width theorem or an encoded-bytes/RSS equality.
+pub fn decoded_json_reservation(bytes: &[u8], limit: u64) -> CatalogResult<u64> {
+    let mut tokens = 0u64;
+    let mut containers = 0u64;
+    let mut depth = 0u64;
+    let mut quoted = false;
+    let mut escaped = false;
+    let base = (bytes.len() as u64)
+        .checked_mul(32)
+        .and_then(|value| value.checked_add(65536))
+        .ok_or_else(|| {
+            CatalogError::ResourceIncomplete("decoded JSON reservation overflow".into())
+        })?;
+    for byte in bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => {
+                quoted = true;
+                tokens += 1;
+            }
+            b'[' | b'{' => {
+                containers += 1;
+                depth += 1;
+                if depth > 128 {
+                    return Err(CatalogError::ResourceIncomplete(
+                        "bounded JSON decoder stack".into(),
+                    ));
+                }
+            }
+            b']' | b'}' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| CatalogError::CorruptRecord("JSON nesting underflow".into()))?;
+            }
+            b',' | b':' => tokens += 1,
+            _ => {}
+        }
+        if tokens
+            .checked_add(containers)
+            .and_then(|value| value.checked_mul(512))
+            .and_then(|value| value.checked_add(base))
+            .is_none_or(|value| value > limit)
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "decoded JSON working-set reservation".into(),
+            ));
+        }
+    }
+    if quoted || depth != 0 {
+        return Err(CatalogError::CorruptRecord(
+            "unterminated JSON frame".into(),
+        ));
+    }
+    let total = base
+        .checked_add((tokens + containers) * 512)
+        .ok_or_else(|| {
+            CatalogError::ResourceIncomplete("decoded JSON reservation overflow".into())
+        })?;
+    if total > limit {
+        return Err(CatalogError::ResourceIncomplete(
+            "decoded JSON working-set reservation".into(),
+        ));
+    }
+    Ok(total)
+}
+impl Record {
+    pub fn parse_bounded(bytes: &[u8], resident: u64) -> CatalogResult<Self> {
+        let outer = decoded_json_reservation(bytes, resident)?;
+        let record: Self = serde_json::from_value(strict_json(bytes)?)?;
+        for field in [
+            "canonical_utf8",
+            "action_utf8",
+            "descriptor_utf8",
+            "choice_utf8",
+            "input_utf8",
+            "omitted_utf8",
+            "raw_fixture_utf8",
+            "production_witness_utf8",
+            "independent_checks_utf8",
+            "source_bounds_utf8",
+            "runner_identity_utf8",
+        ] {
+            if let Some(text) = record.record.get(field).and_then(Value::as_str) {
+                decoded_json_reservation(text.as_bytes(), resident.saturating_sub(outer))?;
+            }
+        }
+        record.validate()?;
+        Ok(record)
     }
 }
 

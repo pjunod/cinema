@@ -114,7 +114,12 @@ pub trait Storage {
     fn initial(&self, context: &str) -> CatalogResult<Option<u64>>;
     fn begin_read(&mut self, expected: u64) -> CatalogResult<()>;
     fn end_read(&mut self) -> CatalogResult<()>;
-    fn save_checkpoint(&mut self, checkpoint: &Record, work_unit: &Record) -> CatalogResult<()>;
+    fn save_checkpoint(
+        &mut self,
+        checkpoint: &Record,
+        work_unit: &Record,
+        session: &Record,
+    ) -> CatalogResult<()>;
     fn save_export(&mut self, record: &Record) -> CatalogResult<()>;
     fn check_private(&self, checkpoint: &Record) -> CatalogResult<()>;
     fn backup(&self, path: &Path, limits: &BackupLimits) -> CatalogResult<()>;
@@ -338,10 +343,11 @@ pub struct Catalog {
 impl Catalog {
     pub fn disk(config: CatalogConfig) -> CatalogResult<Self> {
         config.validate()?;
-        let backend = sqlite::SqliteStorage::open(
+        let mut backend = sqlite::SqliteStorage::open(
             &config.path,
             number(&config.resource_plan.record, "resident_bytes")?,
         )?;
+        backend.reserve_operational_storage(&ResourceLimits::from_plan(&config.resource_plan)?)?;
         Self::with_storage(config, Box::new(backend))
     }
     pub fn memory(
@@ -664,7 +670,12 @@ impl Catalog {
     }
     fn charge_record(&self, record: &Record, is_new: bool) -> CatalogResult<()> {
         let allowance = self.inner.limits.allowance(&record.kind)?;
-        let bytes = record.encoded_len(allowance.max_encoded_bytes)?;
+        let bytes = record.encoded_len(
+            allowance
+                .max_encoded_bytes
+                .min(self.inner.limits.resident_bytes / 4),
+        )?;
+        decoded_json_reservation(&record.bytes(), self.inner.limits.resident_bytes)?;
         if is_new && self.count(&record.kind)? >= allowance.records {
             return Err(CatalogError::ResourceIncomplete(format!(
                 "{} lifetime count exhausted",
@@ -984,6 +995,19 @@ impl Catalog {
     }
     /// Mutable pre-upload controller bookkeeping is private, never a data page.
     pub fn record_checkpoint(&self, checkpoint: &Record, work_unit: &Record) -> CatalogResult<()> {
+        let phase = if work_unit.record["status"] == "closed_unqualified" {
+            SessionCheckpointPhase::ClosedUnqualified
+        } else {
+            SessionCheckpointPhase::CheckpointedIncomplete
+        };
+        self.record_checkpoint_phase(checkpoint, work_unit, phase)
+    }
+    pub fn record_checkpoint_phase(
+        &self,
+        checkpoint: &Record,
+        work_unit: &Record,
+        phase: SessionCheckpointPhase,
+    ) -> CatalogResult<()> {
         if self.inner.reading.get() || self.inner.pending.borrow().is_some() {
             return Err(CatalogError::SnapshotMismatch(
                 "checkpoint bookkeeping while writer/snapshot active".into(),
@@ -1035,10 +1059,11 @@ impl Catalog {
         let snapshot = self.pin_read_snapshot(self.current_transaction()?)?;
         snapshot.check_checkpoint(checkpoint)?;
         snapshot.close()?;
-        self.inner
-            .storage
-            .borrow_mut()
-            .save_checkpoint(checkpoint, work_unit)
+        self.inner.storage.borrow_mut().save_checkpoint(
+            checkpoint,
+            work_unit,
+            &checkpoint_session(checkpoint, work_unit, phase)?,
+        )
     }
     pub fn exported_record(&self, kind: &str, key: &RecordKey) -> CatalogResult<Record> {
         if kind == "Checkpoint" {
@@ -2397,7 +2422,9 @@ impl QuantumRequest {
                 "private control decoded allowance".into(),
             ));
         }
-        let value = strict_json(&std::fs::read(path)?)?;
+        let bytes = std::fs::read(path)?;
+        decoded_json_reservation(&bytes, 128 * 1024 * 1024)?;
+        let value = strict_json(&bytes)?;
         let base = [
             "schema_version",
             "operation",
@@ -2466,6 +2493,13 @@ impl QuantumRequest {
             }
         }
         let unit = request.unit()?;
+        if number(&unit.record, "unit_ordinal")?
+            >= number(&request.resource_plan.record, "maximum_units")?
+        {
+            return Err(CatalogError::ResourceIncomplete(
+                "total attempted-unit allowance exhausted".into(),
+            ));
+        }
         let config = request.config()?;
         config.validate()?;
         if unit.record["session_id"] != json!(config.session_id)
@@ -2794,7 +2828,7 @@ impl QuantumRequest {
             || checkpoint.record["resource_plan_sha256"] != self.work_unit["resource_plan_sha256"]
             || self.work_unit["expected_prior_checkpoint"] != checkpoint.sha256()
             || number(&self.work_unit, "unit_ordinal")?
-                != number(&checkpoint.record, "unit_ordinal")?
+                < number(&checkpoint.record, "unit_ordinal")?
                     .checked_add(1)
                     .ok_or_else(|| CatalogError::NumericDomain("unit ordinal exhausted".into()))?
             || catalog.latest_checkpoint()?.as_ref() != Some(checkpoint)
@@ -2849,7 +2883,26 @@ pub fn compiled_catalog_sources() -> BTreeMap<String, String> {
     .map(|(path, text)| (path.into(), digest(text.as_bytes())))
     .collect()
 }
-pub fn checkpoint_session(checkpoint: &Record, unit: &Record) -> CatalogResult<Record> {
+#[derive(Clone, Copy, Debug)]
+pub enum SessionCheckpointPhase {
+    CheckpointedIncomplete,
+    ClosedUnqualified,
+    ResourceBlocked,
+}
+impl SessionCheckpointPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CheckpointedIncomplete => "checkpointed_incomplete",
+            Self::ClosedUnqualified => "closed_unqualified",
+            Self::ResourceBlocked => "resource_blocked",
+        }
+    }
+}
+pub fn checkpoint_session(
+    checkpoint: &Record,
+    unit: &Record,
+    phase: SessionCheckpointPhase,
+) -> CatalogResult<Record> {
     let c = &checkpoint.record;
     let u = &unit.record;
     let next = number(c, "unit_ordinal")?
@@ -2858,7 +2911,7 @@ pub fn checkpoint_session(checkpoint: &Record, unit: &Record) -> CatalogResult<R
         .ok_or_else(|| CatalogError::NumericDomain("session next unit exhausted".into()))?;
     Record::new(
         "Session",
-        json!({"session_id":c["session_id"],"source":c["source"],"pr":u["pr"],"repository":u["repository"],"event_base":u["event_base"],"initial_image_id":c["initial_image_id"],"resource_plan_sha256":c["resource_plan_sha256"],"phase":if u["status"]=="closed_unqualified" {"closed_unqualified"}else{"checkpointed_incomplete"},"checkpoint":checkpoint.sha256(),"next_unit":next,"counts":c["counts"]}),
+        json!({"session_id":c["session_id"],"source":c["source"],"pr":u["pr"],"repository":u["repository"],"event_base":u["event_base"],"initial_image_id":c["initial_image_id"],"resource_plan_sha256":c["resource_plan_sha256"],"phase":phase.as_str(),"checkpoint":checkpoint.sha256(),"next_unit":next,"counts":c["counts"]}),
     )
 }
 pub fn same_file_bytes(
@@ -3291,6 +3344,26 @@ mod tests {
         )
         .expect("right");
         assert_ne!(left.bytes(), right.bytes());
+        assert!(matches!(
+            Record::parse_bounded(&left.bytes(), 1),
+            Err(CatalogError::ResourceIncomplete(_))
+        ));
+        assert_eq!(
+            Record::parse_bounded(&left.bytes(), 64 * 1024 * 1024).expect("bounded actual decoder"),
+            left
+        );
+        let nested = format!("{}0{}", "[".repeat(129), "]".repeat(129));
+        assert!(decoded_json_reservation(nested.as_bytes(), 64 * 1024 * 1024).is_err());
+        let lexical = decoded_json_reservation(
+            br#"{"quoted":"[\\\"}]","list":[false,0,null]}"#,
+            64 * 1024 * 1024,
+        )
+        .expect("escaped lexical reservation");
+        assert!(decoded_json_reservation(
+            br#"{"quoted":"[\\\"}]","list":[false,0,null]}"#,
+            lexical - 1
+        )
+        .is_err());
         // Full outer envelope accounting includes every JSON escape and header.
         let inner = canonical(&json!(["\"", "\\", "\n", "λ"]));
         let escaped=Record::new("PhysicalRows",json!({"id":3,"canonical_utf8":inner,"utf8_bytes":inner.len(),"sha256":digest(inner.as_bytes())})).expect("escaped exact inner bytes");

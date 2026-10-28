@@ -1926,55 +1926,6 @@ fn state_cap_diagnostic(input: &CapDiagnostic<'_>) -> String {
     encoded
 }
 
-pub(super) fn domain_metadata() -> Value {
-    let mut domain = json!({"jobs": 2, "nodes": NODES, "physical_capacity_per_node": 1,
-            "attempts_per_job": ATTEMPTS_PER_JOB, "renewals_per_attempt": 1, "rearrival": false,
-            "ordinary_token_inputs": "latest captured revision per claim for intrinsic renew/bind/complete; ordinary saved settlement captures are contextual and may be historical",
-            "binding_completion_inputs": "captured domain lease owner equals captured queue-token node; wrong-owner inputs are separate conformance",
-            "settlement_dispositions": ["cancel", "retirement_yield"],
-            "node_domain_acquisition_inputs": "node has selected running durable queue ownership, including expired retained ownership for dispatch/application races; foreign holder is independent",
-            "domain_acquisitions_per_owner": 1, "domain_owners": DOMAIN_OWNERS,
-            "selected_attempt_ids": 4, "reserved_boundary_ids": 2,
-            "allocator_exhaustion": "outside D: the attempt budget is exhausted before the six-ID namespace",
-            "numeric_quotient": "none: every i64/u64 and raw production job ID remains exact",
-            "clock": "wall and mono independently advance to the smallest strict greater nonnegative representable neighbour of retained exact authority/payload/queued-eligibility or source local-deadline anchors; no horizon clipping",
-            "publication": "opaque conformance boundary; no item-insertion SQL or retry proof in this relation",
-            "reply_faults": "split application/reply/reconciliation in temporal composition; separate bridge-boundary conformance histories",
-            "cap": STATE_CAP,
-            "premises": ["completion opportunity before attempt/domain/fault budget exhaustion", "two fixed selected requests; no infinite fresh-progress conclusion"],
-            "savepoints": "same production writer connection, sequential harness; transaction/commit visibility and SQLite internals remain assumptions; any SQL/ABORT/ROLLBACK error aborts closure"});
-    let boundary_metadata = json!({
-        "renewal_resolution_boundary": "selected zero-delay renewal plus actual logical resolve has no inner interleaving; both actual outcomes and capture references are certified; resolution errors consume the remaining per-attempt fault allowance",
-        "ordinary_settlement_payload_transfer": "selected actual ordinary settlement payload/capture/request/local-service correspondence; evidence pending qualification; normal wall/mono input domain only",
-        "retirement_inputs": "disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; cancellation uses disposition 2; ordinary service uses contextual ordinary_settle payloads",
-        "initial_claim_recovery_boundary": "lost initial claims use actual fence-None resolution with original dispatch identity, conditional actual row reread or Cancel, and no inner query interleaving; at most eight persistent job/node/claim loss keys; inconclusive outcomes service exact 250ms source wakes until the fixed 30000ms local deadline; the separate Store request window is 120000ms",
-        "resolution_read_boundary": "resolve_claim is one logical actual-API pure-read action; its two authoritative QueueSql awaits and internal interleavings are a named conformance boundary, not closed read-interleaving coverage",
-        "primitive_clock_boundary": "intrinsic primitives use current episode.now; ordinary_settle preserves its separately captured request_now_ms; retirement wall samples/internal dispatch races and zero-delay claim/renew-resolution envelopes remain named source/conformance boundaries",
-        "reservation_conservation_boundary": "conservation is checked for unexpired queue authority only; expired Running rows and residue remain represented, with no independent complete-residue conservation guarantee until reclaim/prune",
-        "domain_reacquisition_boundary": "each owner can acquire at most once; release or expiry does not reset its budget, so same-owner release-to-reacquire cycles are excluded",
-        "foreign_holder_boundary": "foreign-holder is a third adversarial domain-lease owner, not either worker node, with one independent acquisition budget",
-        "retirement_sequence_boundary": "the graph supplies separate actual settle and logical resolve primitives; daemon drain/local-token/first-settle/resolve/optional-second-settle sequencing is a reviewed source and daemon-conformance boundary composed by the temporal model",
-        "cleanup_boundary": "local cleanup needs bounded retirement calls to return, not eventual successful acknowledgement; errors are logged and finish returns while durable authority may remain",
-        "omitted_dv_state_boundary": "selected library_scan/metadata_refresh inputs preserve empty files, DV demand, handoffs/tokens, text cues, shared caption read leases and range continuities; DV, handoff, text and shared-caption markers remain [(1,1)] with exact initialized dv_title_jobs_demand sqlite_sequence rows; omitted-state drift aborts the whole run without changing nine-table canonical identity",
-        "snapshot_tables": SNAPSHOT_TABLES,
-        "dispatch_time_noninterference": "for retirement fence Some(F), resolve_claim reads dispatched_at_ms only in its skipped fence-is-none window branch; neither SQL query nor later classification reads it, so a representative dispatch sample preserves results at fixed now/read outcomes; this is a reviewed source lemma, not a machine proof",
-        "queue_sql_boundary": "all generated queue primitives use QueueSql::queue_sql, not queue_transaction; ReplyBoundary passes queue_transaction through without fault injection, so multi-statement transaction faults are outside this slice",
-        "schema_snapshot_boundary": "canonical durable rows cover exactly the nine snapshot_tables; all installed schema objects are hash-bound for identity, not complete row snapshots or proofs of unrelated tables",
-        "savepoint_boundary": "no closure transition invokes queue_transaction or nested explicit transactions; test savepoints bracket sequential primitives on the production writer and any savepoint/SQL failure aborts closure",
-        "refusal_observation": "the extracted oracle retains the original full-canonical refused-edge equality guard before memoization; logical resolve retains durable read-only observation; no pre-existing closure gap is claimed",
-    });
-    domain
-        .as_object_mut()
-        .expect("domain metadata object")
-        .extend(
-            boundary_metadata
-                .as_object()
-                .expect("boundary metadata object")
-                .clone(),
-        );
-    domain
-}
-
 pub(super) type StoreHandle = usize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -2463,19 +2414,7 @@ impl Oracle {
             },
         )
     }
-    pub(super) fn edge_count(&self) -> usize {
-        self.persistent.as_ref().map_or_else(
-            || self.edges.len(),
-            |catalog| {
-                usize::try_from(
-                    catalog
-                        .count("OracleEvidence")
-                        .expect("persistent Oracle count"),
-                )
-                .expect("edge count fits host")
-            },
-        )
-    }
+
     pub(super) fn state(&self, handle: StoreHandle) -> OracleState {
         self.try_state(handle)
             .expect("checked persistent Store and witness")
@@ -2637,21 +2576,6 @@ impl Oracle {
         view["raw"] = serde_json::from_str(&state.canonical).expect("full canonical raw view");
         view["canonical_json"] = json!(state.canonical);
         self.normalize(&view)
-    }
-
-    pub(super) fn export_product_state(&self, handle: StoreHandle) -> Value {
-        // Logical export preserves original bytes; schema5 packs exact fragments.
-        // The standalone Store export keeps its existing redundant raw view.
-        let state = &self.state(handle);
-        let mut view = state.view.clone();
-        view["canonical_json"] = json!(state.canonical);
-        self.normalize(&view)
-    }
-
-    pub(super) fn export_states(&self) -> Vec<Value> {
-        (0..self.state_count())
-            .map(|id| self.export_state(id))
-            .collect()
     }
 
     pub(super) fn source_bindings(&self) -> BTreeMap<&'static str, String> {

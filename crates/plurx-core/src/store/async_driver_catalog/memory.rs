@@ -66,7 +66,38 @@ impl MemoryStorage {
                         CatalogError::ResourceIncomplete("reference byte overflow".into())
                     })
             })?;
-        if self.state.records.len() > self.max_records || bytes > self.max_bytes {
+        let mut bytes = bytes;
+        for (kind, key) in self.state.records.keys() {
+            bytes = bytes
+                .checked_add((kind.len() + key.canonical().len() + 128) as u64)
+                .ok_or_else(|| {
+                    CatalogError::ResourceIncomplete("reference key reservation overflow".into())
+                })?;
+        }
+        for (key, value) in &self.state.controls {
+            bytes = bytes
+                .checked_add((key.len() + canonical(value).len() + 128) as u64)
+                .ok_or_else(|| {
+                    CatalogError::ResourceIncomplete(
+                        "reference controller reservation overflow".into(),
+                    )
+                })?;
+        }
+        bytes = bytes
+            .checked_add(
+                (self.state.frontier.len()
+                    + self.state.created.len()
+                    + self.state.counters.len()
+                    + self.state.initial.len()) as u64
+                    * 128,
+            )
+            .ok_or_else(|| {
+                CatalogError::ResourceIncomplete("reference index reservation overflow".into())
+            })?;
+        if self.state.records.len() + self.state.controls.len() + self.state.frontier.len()
+            > self.max_records
+            || bytes > self.max_bytes
+        {
             return Err(CatalogError::ResourceIncomplete(
                 "small reference catalog exhausted".into(),
             ));
@@ -245,7 +276,7 @@ impl Storage for MemoryStorage {
     fn set_control(&mut self, key: &str, value: &Value) -> CatalogResult<()> {
         self.writable()?;
         self.state.controls.insert(key.into(), value.clone());
-        Ok(())
+        self.within_bounds()
     }
     fn enqueue(&mut self, product: u64) -> CatalogResult<u64> {
         self.writable()?;
@@ -345,12 +376,18 @@ impl Storage for MemoryStorage {
         self.reading = false;
         Ok(())
     }
-    fn save_checkpoint(&mut self, checkpoint: &Record, work_unit: &Record) -> CatalogResult<()> {
+    fn save_checkpoint(
+        &mut self,
+        checkpoint: &Record,
+        work_unit: &Record,
+        session: &Record,
+    ) -> CatalogResult<()> {
         if self.prior.is_some() || self.reading {
             return Err(CatalogError::SnapshotMismatch(
                 "reference checkpoint writer active".into(),
             ));
         }
+        let previous = self.state.controls.clone();
         self.state.controls.insert(
             format!("checkpoint:{}", checkpoint.sha256()),
             serde_json::to_value(checkpoint)?,
@@ -363,10 +400,13 @@ impl Storage for MemoryStorage {
             format!("work_unit:{}", number(&work_unit.record, "unit_ordinal")?),
             serde_json::to_value(work_unit)?,
         );
-        self.state.controls.insert(
-            "session".into(),
-            serde_json::to_value(super::checkpoint_session(checkpoint, work_unit)?)?,
-        );
+        self.state
+            .controls
+            .insert("session".into(), serde_json::to_value(session)?);
+        if let Err(error) = self.within_bounds() {
+            self.state.controls = previous;
+            return Err(error);
+        }
         Ok(())
     }
     fn save_export(&mut self, record: &Record) -> CatalogResult<()> {
@@ -384,6 +424,7 @@ impl Storage for MemoryStorage {
             }
             return Ok(());
         }
+        let previous = self.state.controls.clone();
         self.state
             .controls
             .insert(key, serde_json::to_value(record)?);
@@ -406,7 +447,11 @@ impl Storage for MemoryStorage {
                 record.record["page_id"].clone(),
             );
         }
-        self.within_bounds()
+        if let Err(error) = self.within_bounds() {
+            self.state.controls = previous;
+            return Err(error);
+        }
+        Ok(())
     }
     fn check_private(&self, checkpoint: &Record) -> CatalogResult<()> {
         if number(&checkpoint.record, "committed_transaction")? != self.state.sequence {

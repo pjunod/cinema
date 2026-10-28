@@ -117,6 +117,7 @@ pub struct SqliteStorage {
     pending_sequence: Option<u64>,
     reading: bool,
     read_limit: u64,
+    reservation: Option<super::ResourceLimits>,
 }
 impl SqliteStorage {
     pub fn open(path: &Path, resident_bytes: u64) -> CatalogResult<Self> {
@@ -179,6 +180,7 @@ impl SqliteStorage {
             pending_sequence: None,
             reading: false,
             read_limit: resident_bytes / 4,
+            reservation: None,
         })
     }
     pub fn open_readonly(path: &Path, resident_bytes: u64) -> CatalogResult<Self> {
@@ -202,6 +204,7 @@ impl SqliteStorage {
             pending_sequence: None,
             reading: false,
             read_limit: resident_bytes / 4,
+            reservation: None,
         })
     }
     /// Manual operational measurement, never a behavioral/proof result.
@@ -247,6 +250,93 @@ impl SqliteStorage {
             "compiled_sources":super::compiled_catalog_sources(),"page_size":scalar("PRAGMA page_size")?,"page_count":scalar("PRAGMA page_count")?,"freelist_count":scalar("PRAGMA freelist_count")?,
             "tables":scalar("SELECT count(*) FROM sqlite_schema WHERE type='table'")?,"indexes":scalar("SELECT count(*) FROM sqlite_schema WHERE type='index'")?,"empty_table_rows":rows}),
         )
+    }
+    pub fn reserve_operational_storage(
+        &mut self,
+        limits: &super::ResourceLimits,
+    ) -> CatalogResult<()> {
+        let maximum = limits.record_allowances.values().try_fold(
+            limits.index_bytes,
+            |total, allowance| {
+                allowance
+                    .records
+                    .checked_mul(allowance.max_encoded_bytes)
+                    .and_then(|bytes| total.checked_add(bytes))
+                    .ok_or_else(|| {
+                        CatalogError::ResourceIncomplete(
+                            "catalog encoded/index reservation overflow".into(),
+                        )
+                    })
+            },
+        )?;
+        let page_size = self
+            .connection
+            .query_row("PRAGMA page_size", [], |row| row_uint(row, 0))?;
+        if maximum / page_size == 0 {
+            return Err(CatalogError::ResourceIncomplete(
+                "catalog page reservation".into(),
+            ));
+        }
+        self.connection.pragma_update(
+            None,
+            "max_page_count",
+            (maximum / page_size).min(i64::MAX as u64) as i64,
+        )?;
+        self.reservation = Some(limits.clone());
+        self.check_storage()
+    }
+    fn check_storage(&self) -> CatalogResult<()> {
+        let Some(limits) = &self.reservation else {
+            return Ok(());
+        };
+        let maximum = limits.record_allowances.values().try_fold(
+            limits.index_bytes,
+            |total, allowance| {
+                allowance
+                    .records
+                    .checked_mul(allowance.max_encoded_bytes)
+                    .and_then(|bytes| total.checked_add(bytes))
+                    .ok_or_else(|| {
+                        CatalogError::ResourceIncomplete(
+                            "catalog storage reservation overflow".into(),
+                        )
+                    })
+            },
+        )?;
+        let pages = self
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row_uint(row, 0))?;
+        let size = self
+            .connection
+            .query_row("PRAGMA page_size", [], |row| row_uint(row, 0))?;
+        if pages.checked_mul(size).is_none_or(|bytes| bytes > maximum) {
+            return Err(CatalogError::ResourceIncomplete(
+                "catalog data/index pages exceed immutable reservation".into(),
+            ));
+        }
+        let mut wal = 0u64;
+        for suffix in ["-wal", "-shm"] {
+            let mut name = self.path.as_os_str().to_os_string();
+            name.push(suffix);
+            match Path::new(&name).symlink_metadata() {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() {
+                        return Err(CatalogError::Io("catalog journal symlink".into()));
+                    }
+                    wal = wal.checked_add(metadata.len()).ok_or_else(|| {
+                        CatalogError::ResourceIncomplete("catalog WAL reservation overflow".into())
+                    })?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if wal > limits.wal_bytes {
+            return Err(CatalogError::ResourceIncomplete(
+                "catalog WAL/shared-memory exceeds immutable reservation".into(),
+            ));
+        }
+        Ok(())
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -760,6 +850,10 @@ impl Storage for SqliteStorage {
             .get_control("binding")?
             .ok_or_else(|| CatalogError::SourceMismatch("catalog lacks binding".into()))?;
         self.connection.execute("INSERT INTO catalog_meta(singleton,current_commit,schema_version,source_json,session_id,resource_plan_sha256) VALUES(1,?1,6,?2,?3,?4) ON CONFLICT(singleton) DO UPDATE SET current_commit=excluded.current_commit",params![sequence,canonical(&binding["source"]).as_bytes(),string(&binding,"session_id")?,binding["resource_plan"]["record"]["plan_sha256"].as_str().ok_or_else(||CatalogError::SourceMismatch("plan digest".into()))?])?;
+        // Flush uncommitted dirty pages before the quota observation. The
+        // transaction is still rollbackable; no predecessor is visible yet.
+        self.connection.cache_flush()?;
+        self.check_storage()?;
         self.connection.execute_batch("COMMIT")?;
         self.context.take();
         self.pending_sequence.take();
@@ -819,7 +913,7 @@ impl Storage for SqliteStorage {
             )
             .optional()?;
         raw.map(|raw| {
-            let record = Record::parse(&raw)?;
+            let record = Record::parse_bounded(&raw, self.read_limit.saturating_mul(4))?;
             if record.kind != kind || record.key()? != *key {
                 return Err(CatalogError::CorruptRecord("envelope index key".into()));
             }
@@ -829,6 +923,7 @@ impl Storage for SqliteStorage {
     }
     fn put(&mut self, record: &Record, replace_private: bool) -> CatalogResult<()> {
         self.writable()?;
+        self.check_storage()?;
         record.validate()?;
         let key = record.key()?;
         let old = self.get(&record.kind, &key)?;
@@ -947,7 +1042,7 @@ impl Storage for SqliteStorage {
                 break;
             }
             let raw: Vec<u8> = row.get(1)?;
-            let record = Record::parse(&raw)?;
+            let record = Record::parse_bounded(&raw, self.read_limit.saturating_mul(4))?;
             if record.kind != kind {
                 return Err(CatalogError::CorruptRecord("scan kind".into()));
             }
@@ -1003,7 +1098,10 @@ impl Storage for SqliteStorage {
             )
             .optional()?;
         bytes
-            .map(|b| serde_json::from_slice(&b).map_err(Into::into))
+            .map(|b| {
+                super::decoded_json_reservation(&b, self.read_limit.saturating_mul(4))?;
+                super::strict_json(&b)
+            })
             .transpose()
     }
     fn set_control(&mut self, key: &str, value: &Value) -> CatalogResult<()> {
@@ -1113,7 +1211,12 @@ impl Storage for SqliteStorage {
         self.reading = false;
         Ok(())
     }
-    fn save_checkpoint(&mut self, checkpoint: &Record, work_unit: &Record) -> CatalogResult<()> {
+    fn save_checkpoint(
+        &mut self,
+        checkpoint: &Record,
+        work_unit: &Record,
+        session: &Record,
+    ) -> CatalogResult<()> {
         if self.context.is_some() || self.reading {
             return Err(CatalogError::SnapshotMismatch(
                 "checkpoint bookkeeping requires paused writers/readers".into(),
@@ -1151,7 +1254,6 @@ impl Storage for SqliteStorage {
                 .ok_or_else(|| CatalogError::SourceMismatch("checkpoint binding".into()))?;
             let plan = &binding["resource_plan"];
             self.connection.execute("INSERT INTO resource_plans(digest,descriptor,admission) VALUES(?1,?2,'admitted') ON CONFLICT(digest) DO NOTHING",params![string(c,"resource_plan_sha256")?,canonical(plan).as_bytes()])?;
-            let session = super::checkpoint_session(checkpoint, work_unit)?;
             let v = &session.record;
             self.connection.execute("INSERT INTO sessions(id,source_json,initial_image_sha256,resource_plan_sha256,phase,checkpoint_digest,next_unit,descriptor) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET phase=excluded.phase,checkpoint_digest=excluded.checkpoint_digest,next_unit=excluded.next_unit,descriptor=excluded.descriptor",params![string(v,"session_id")?,canonical(&v["source"]).as_bytes(),string(v,"initial_image_id")?,string(v,"resource_plan_sha256")?,string(v,"phase")?,checkpoint.sha256(),number(v,"next_unit")?,session.bytes()])?;
             self.connection.execute("INSERT INTO catalog_control(key,payload) VALUES('session',?1) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",params![session.bytes()])?;
@@ -1159,6 +1261,15 @@ impl Storage for SqliteStorage {
         })();
         match result {
             Ok(()) => {
+                if let Err(error) = self
+                    .connection
+                    .cache_flush()
+                    .map_err(CatalogError::from)
+                    .and_then(|()| self.check_storage())
+                {
+                    let _ = self.connection.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
                 self.connection.execute_batch("COMMIT")?;
                 Ok(())
             }
@@ -1210,6 +1321,15 @@ impl Storage for SqliteStorage {
         })();
         match result {
             Ok(()) => {
+                if let Err(error) = self
+                    .connection
+                    .cache_flush()
+                    .map_err(CatalogError::from)
+                    .and_then(|()| self.check_storage())
+                {
+                    let _ = self.connection.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
                 self.connection.execute_batch("COMMIT")?;
                 Ok(())
             }
@@ -1337,7 +1457,7 @@ impl Storage for SqliteStorage {
                 ));
             }
             let bytes: Vec<u8> = row.get(6)?;
-            let record = Record::parse(&bytes)?;
+            let record = Record::parse_bounded(&bytes, limits.resident_bytes)?;
             let key = record.key()?;
             let expected_key = match row.get::<_, i64>(1)? {
                 0 => RecordKey::Numeric(row_uint(row, 2)?),
@@ -1417,7 +1537,18 @@ impl Storage for SqliteStorage {
             .ok_or_else(|| CatalogError::CorruptRecord("checkpoint private unit missing".into()))?;
         let current_unit: Record = serde_json::from_value(current_unit)?;
         current_unit.validate()?;
-        let session = super::checkpoint_session(checkpoint, &current_unit)?;
+        let actual_session = self
+            .get_control("session")?
+            .ok_or_else(|| CatalogError::CorruptRecord("current Session missing".into()))?;
+        let phase = match actual_session["record"]["phase"].as_str() {
+            Some("resource_blocked") => super::SessionCheckpointPhase::ResourceBlocked,
+            Some("closed_unqualified") => super::SessionCheckpointPhase::ClosedUnqualified,
+            Some("checkpointed_incomplete") => {
+                super::SessionCheckpointPhase::CheckpointedIncomplete
+            }
+            _ => return Err(CatalogError::CorruptRecord("producer Session phase".into())),
+        };
+        let session = super::checkpoint_session(checkpoint, &current_unit, phase)?;
         if self.get_control("session")? != Some(serde_json::to_value(&session)?)
             || self.get_control("latest_checkpoint")? != Some(serde_json::to_value(checkpoint)?)
         {
@@ -1458,7 +1589,7 @@ impl Storage for SqliteStorage {
                 ));
             }
             let bytes: Vec<u8> = row.get(2)?;
-            let record = Record::parse(&bytes)?;
+            let record = Record::parse_bounded(&bytes, limits.resident_bytes)?;
             if !matches!(record.kind.as_str(), "Page" | "ManifestNode")
                 || record.record["source"] != binding["source"]
                 || record.record["session_id"] != binding["session_id"]
