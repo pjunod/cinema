@@ -399,7 +399,7 @@ async fn expired_invalid_and_overflow_direct_requests_are_before_reservation() {
         .expect("invalid path")
         .definitely_before_reservation());
     let mut overflow = local_request(path, 1, 1);
-    overflow.application_owner_bytes = usize::MAX;
+    overflow.application_owner_bytes = u64::MAX;
     assert!(runtime
         .prepare_direct_source(overflow, deadline())
         .err()
