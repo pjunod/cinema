@@ -121,6 +121,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Sharing-host setup reaps its helper before timeout or cancellation returns,
+  while retaining the helper's native user/IPC environment. The lifecycle
+  inventory now records the sharing-host and invitation owners and their tests.
+
 - Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.
 - Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
   headers, allowing floating-point parsing with the macOS 12 deployment target.

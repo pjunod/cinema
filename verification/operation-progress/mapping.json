@@ -237,7 +237,7 @@
         "table": "39 bounded process cancellation",
         "source": "crates/plurx-core/src/process/bounded.rs",
         "anchor": "pub async fn cancellable<T>(",
-        "sha256": "46e763cb19786296d4b411399d93db541f35710a05fa6d130df595bc2c8b4a6e"
+        "sha256": "0ecf4d5fab84346af8ce8a9184bb6cdf350b6390c05a620a276d7772259b782e"
       },
       {
         "table": "40 provider item deadline",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "40b4eeef5e9bddf172420c38e6bde66bc79f347b495672fd22a4a27b73567aab"
+        "sha256": "f79f4b2e15adc1a0f243a13eb02f48645d7d9a14fa8d19839f42a27f7234e88d"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
