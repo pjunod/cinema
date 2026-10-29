@@ -323,14 +323,14 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND active_job IS NULL
       AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'media_probe' AND state IN ('queued','running','cancelling')
         AND json_extract(payload_json,'$.coordinator') = json_extract(body,'$.payload.coordinator')) >= 128 THEN 'queue_full'
-    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_text_translate','subtitle_text_model_operation') AND NOT ("#,
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') AND NOT ("#,
     text_admission!(
         "json_extract(body,'$.payload')",
         "json_extract(body,'$.now_ms')"
     ),
     r#") THEN 'producer_fenced'
-    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_text_translate','subtitle_text_model_operation') AND active_job IS NULL
-      AND (SELECT COUNT(*) FROM background_jobs WHERE kind IN ('subtitle_text_translate','subtitle_text_model_operation') AND state IN ('queued','running','cancelling'))>=32 THEN 'queue_full'
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') AND state IN ('queued','running','cancelling'))>=32 THEN 'queue_full'
     WHEN json_extract(body,'$.payload.kind')='subtitle_transcribe_managed' AND NOT ("#,
     subtitle_managed_admission!(),
     r#") THEN 'producer_fenced'
@@ -524,7 +524,7 @@ WHERE id = json_extract($1, '$.job_id')
     AND d.file_id=json_extract(background_jobs.payload_json,'$.file_id') AND d.terminal=0
     AND d.scanner_digest=json_extract(background_jobs.payload_json,'$.scanner_digest')
     AND f.size=json_extract(background_jobs.payload_json,'$.source_size') AND f.mtime=json_extract(background_jobs.payload_json,'$.source_mtime')))
-  AND (kind NOT IN ('subtitle_text_translate','subtitle_text_model_operation') OR ("#,
+  AND (kind NOT IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') OR ("#,
     text_admission!("payload_json", "json_extract($1,'$.now_ms')"),
     r#"))
   AND (kind NOT IN ('subtitle_translation_prepare','subtitle_translation_range') OR ("#,
@@ -762,6 +762,8 @@ pub enum JobKind {
     SubtitleTranslationPrepare,
     SubtitleTranslationRange,
     SubtitleTextTranslate,
+    /// Separate from legacy extraction-capable workers during rolling upgrades.
+    SubtitleTextTranslateArtifact,
     SubtitleTextModelOperation,
     LibraryScan,
     MetadataRefresh,
@@ -788,6 +790,7 @@ impl JobKind {
             | Self::SubtitleTranslationPrepare
             | Self::SubtitleTranslationRange
             | Self::SubtitleTextTranslate
+            | Self::SubtitleTextTranslateArtifact
             | Self::SubtitleTextModelOperation
             | Self::SubtitleExtract
             | Self::ArtifactVerify
@@ -1037,6 +1040,22 @@ pub enum JobPayload {
         target_node_id: String,
         admin_user_id: i64,
     },
+    /// Input must already be materialized. Claimed workers never extract media.
+    SubtitleTextTranslateArtifact {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        subtitle_index: i64,
+        input_sha256: String,
+        source_language: String,
+        target_language: String,
+        engine_sha256: String,
+        model_id: String,
+        model_sha256: String,
+        adapter_contract: String,
+        target_node_id: String,
+        admin_user_id: i64,
+    },
     SubtitleTextModelOperation {
         action: super::background_jobs_transcription::ModelAction,
         model_id: String,
@@ -1096,6 +1115,43 @@ pub enum JobPayload {
 }
 
 impl JobPayload {
+    /// Explicit retry may promote a legacy operation after its input was
+    /// materialized again. Existing queued/running job identities never change.
+    pub fn into_artifact_text(self) -> Self {
+        match self {
+            Self::SubtitleTextTranslate {
+                file_id,
+                source_size,
+                source_mtime,
+                subtitle_index,
+                input_sha256,
+                source_language,
+                target_language,
+                engine_sha256,
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                admin_user_id,
+            } => Self::SubtitleTextTranslateArtifact {
+                file_id,
+                source_size,
+                source_mtime,
+                subtitle_index,
+                input_sha256,
+                source_language,
+                target_language,
+                engine_sha256,
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                admin_user_id,
+            },
+            other => other,
+        }
+    }
+
     pub const fn kind(&self) -> JobKind {
         match self {
             Self::EncodedOutputPrepare { .. } => JobKind::EncodedOutputPrepare,
@@ -1110,6 +1166,7 @@ impl JobPayload {
             Self::SubtitleTranslationPrepare { .. } => JobKind::SubtitleTranslationPrepare,
             Self::SubtitleTranslationRange { .. } => JobKind::SubtitleTranslationRange,
             Self::SubtitleTextTranslate { .. } => JobKind::SubtitleTextTranslate,
+            Self::SubtitleTextTranslateArtifact { .. } => JobKind::SubtitleTextTranslateArtifact,
             Self::SubtitleTextModelOperation { .. } => JobKind::SubtitleTextModelOperation,
             Self::LibraryScan { .. } => JobKind::LibraryScan,
             Self::MetadataRefresh { .. } => JobKind::MetadataRefresh,
@@ -1131,6 +1188,7 @@ impl JobPayload {
             | Self::SubtitleTranslationPrepare { target_node_id, .. }
             | Self::SubtitleTranslationRange { target_node_id, .. }
             | Self::SubtitleTextTranslate { target_node_id, .. }
+            | Self::SubtitleTextTranslateArtifact { target_node_id, .. }
             | Self::SubtitleTextModelOperation { target_node_id, .. } => Some(target_node_id),
             _ => None,
         }
@@ -1322,6 +1380,21 @@ impl JobPayload {
                         || uuid::Uuid::parse_str(producer_preparation_job_id).is_ok())
             }
             Self::SubtitleTextTranslate {
+                file_id,
+                source_size,
+                subtitle_index,
+                input_sha256,
+                source_language,
+                target_language,
+                engine_sha256,
+                model_id,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                admin_user_id,
+                ..
+            }
+            | Self::SubtitleTextTranslateArtifact {
                 file_id,
                 source_size,
                 subtitle_index,

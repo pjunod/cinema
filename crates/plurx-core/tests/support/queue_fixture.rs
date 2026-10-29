@@ -989,11 +989,11 @@ fn validated_translation_rewind(connection: &rusqlite::Connection, version: i64)
 /// Rewind only an exact empty managed extension in an owned historical fixture.
 #[allow(dead_code)]
 pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
-pub(crate) const MANAGED_FIXTURE_DATA_SQL: &str = "SELECT (SELECT count(*) FROM subtitle_model_receipts) + (SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_model_operation','subtitle_transcribe_managed','subtitle_text_model_operation','subtitle_text_translate'))";
+pub(crate) const MANAGED_FIXTURE_DATA_SQL: &str = "SELECT (SELECT count(*) FROM subtitle_model_receipts) + (SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_model_operation','subtitle_transcribe_managed','subtitle_text_model_operation','subtitle_text_translate','subtitle_text_translate_artifact'))";
 
 fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
     assert!(
-        matches!(version, 1 | 2),
+        matches!(version, 1..=3),
         "only published managed fixture versions are recognized"
     );
     let expected = rusqlite::Connection::open_in_memory().expect("closed managed metadata witness");
@@ -1001,12 +1001,19 @@ fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
     expected
         .execute_batch(include_str!("../../src/store/subtitle_managed_schema.sql"))
         .expect("published managed v1 objects");
-    if version == 2 {
+    if version >= 2 {
         expected
             .execute_batch(include_str!(
                 "../../src/store/subtitle_managed_resources_v2.sql"
             ))
             .expect("published managed v2 objects");
+    }
+    if version == 3 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_managed_resources_v3.sql"
+            ))
+            .expect("published managed v3 objects");
     }
     expected
 }
@@ -1019,7 +1026,7 @@ fn managed_fixture_rows(connection: &rusqlite::Connection) -> Vec<(String, Strin
         .collect::<Result<Vec<_>, _>>()
         .expect("complete managed shape")
 }
-/// Historical v1 and current v2 each require their own exact DDL and marker.
+/// Historical v1/v2 and current v3 each require their own exact DDL and marker.
 /// This pure plan cannot discard accepted work or silently repair schema drift.
 pub(crate) fn validated_empty_managed_rewind(
     shape: &[(String, String)],
@@ -1059,7 +1066,7 @@ pub(crate) fn validated_empty_managed_rewind(
 
 #[test]
 fn managed_fixture_rewind_accepts_exact_empty_v1_and_v2() {
-    for version in [1, 2] {
+    for version in [1, 2, 3] {
         let connection = managed_fixture_connection(version);
         let statements =
             validated_empty_managed_rewind(&managed_fixture_rows(&connection), version, 0);
@@ -1084,45 +1091,55 @@ fn managed_fixture_rewind_accepts_exact_empty_v1_and_v2() {
 
 #[test]
 fn managed_fixture_rewind_refuses_v2_drift_marker_and_populated_work_without_mutation() {
-    for damage in ["drift", "receipt", "text-job", "marker", "wrong-marker"] {
-        let connection = managed_fixture_connection(2);
-        match damage {
+    for version in [2, 3] {
+        for damage in [
+            "drift",
+            "receipt",
+            "text-job",
+            "artifact-job",
+            "marker",
+            "wrong-marker",
+        ] {
+            let connection = managed_fixture_connection(version);
+            match damage {
             "drift"=>connection.execute_batch("DROP VIEW background_job_required_resources; CREATE VIEW background_job_required_resources AS SELECT 1 AS job_id,'source_io' AS resource_key").expect("drift"),
             "receipt"=>{connection.execute("INSERT INTO subtitle_model_receipts VALUES('node','model','{}')",[]).expect("receipt");},
             "text-job"=>{connection.execute("INSERT INTO background_jobs(id,kind) VALUES('accepted','subtitle_text_model_operation')",[]).expect("accepted model work");},
+            "artifact-job"=>{connection.execute("INSERT INTO background_jobs(id,kind) VALUES('accepted','subtitle_text_translate_artifact')",[]).expect("accepted artifact work");},
             "marker"=>{connection.execute("DELETE FROM subtitle_managed_schema",[]).expect("missing marker");},
             "wrong-marker"=>{},
             _=>unreachable!(),
         }
-        let snapshot = || {
-            let shape = managed_fixture_rows(&connection);
-            let data: i64 = connection
-                .query_row(MANAGED_FIXTURE_DATA_SQL, [], |row| row.get(0))
-                .expect("data inventory");
-            let marker:i64=connection.query_row("SELECT COALESCE(max(version),0) FROM subtitle_managed_schema WHERE singleton=1",[],|row|row.get(0)).expect("marker inventory");
-            (shape, data, marker)
-        };
-        let before = snapshot();
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                validated_empty_managed_rewind(
-                    &before.0,
-                    if damage == "wrong-marker" {
-                        1
-                    } else {
-                        before.2
-                    },
-                    before.1,
-                )
-            }))
-            .is_err(),
-            "{damage} must refuse"
-        );
-        assert_eq!(
-            snapshot(),
-            before,
-            "refusal preserves DDL, marker and accepted work"
-        );
+            let snapshot = || {
+                let shape = managed_fixture_rows(&connection);
+                let data: i64 = connection
+                    .query_row(MANAGED_FIXTURE_DATA_SQL, [], |row| row.get(0))
+                    .expect("data inventory");
+                let marker:i64=connection.query_row("SELECT COALESCE(max(version),0) FROM subtitle_managed_schema WHERE singleton=1",[],|row|row.get(0)).expect("marker inventory");
+                (shape, data, marker)
+            };
+            let before = snapshot();
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    validated_empty_managed_rewind(
+                        &before.0,
+                        if damage == "wrong-marker" {
+                            1
+                        } else {
+                            before.2
+                        },
+                        before.1,
+                    )
+                }))
+                .is_err(),
+                "{damage} must refuse"
+            );
+            assert_eq!(
+                snapshot(),
+                before,
+                "refusal preserves DDL, marker and accepted work"
+            );
+        }
     }
 }
 

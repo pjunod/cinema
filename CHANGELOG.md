@@ -121,6 +121,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Progressive captions recover an existing stopped operation through a validated
+  read before explicit Resume, including operations without a published asset.
+  Current nonretryable range failures are visible without hiding available
+  coverage or offering unsupported retries.
+
 - Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.
 - Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
   headers, allowing floating-point parsing with the macOS 12 deployment target.

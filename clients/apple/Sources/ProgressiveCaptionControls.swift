@@ -50,8 +50,12 @@ struct ProgressiveCaptionControls: View {
                 Section {
                     if session.canStop || session.stopRequested { Button(session.stopRequested ? "Retry Stop" : "Stop caption work") { session.stop() }.disabled(session.busy) }
                     if session.canRetry { Button("Retry caption work") { session.retry() }.disabled(session.busy) }
-                    ForEach(session.failedRanges.filter(\.retryable)) { range in
-                        Button("Retry range \(range.coreIndex + 1)") { session.retry(range) }.disabled(session.busy)
+                    ForEach(session.failedRanges) { range in
+                        if range.retryable {
+                            Button("Retry range \(range.coreIndex + 1)") { session.retry(range) }.disabled(session.busy)
+                        } else {
+                            Text("Range \(range.coreIndex + 1): \(CaptionServiceError.message(range.reason))")
+                        }
                     }
                     if session.nextFailureCursor != nil { Button("More failed ranges") { session.moreFailures() } }
                     HStack {

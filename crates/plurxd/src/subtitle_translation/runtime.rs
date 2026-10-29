@@ -149,6 +149,25 @@ fn log_integer(line: &str, key: &str) -> Option<i64> {
     tail.split_whitespace().next()?.parse().ok()
 }
 
+/// FFmpeg logs frame records and side-data continuations under the same
+/// ashowinfo instance. Only records beginning with `n:` carry clock evidence.
+/// Select them before the byte cap so metadata cannot displace the window's
+/// final timestamps. Malformed frame records remain selected and fail parsing.
+#[cfg(unix)]
+fn clock_frame_record(line: &[u8]) -> bool {
+    let instance = [
+        b"[Parsed_ashowinfo_1 ".as_slice(),
+        b"[Parsed_ashowinfo_4 ".as_slice(),
+    ]
+    .iter()
+    .any(|marker| line.windows(marker.len()).any(|part| part == *marker));
+    instance
+        && line
+            .windows(2)
+            .rposition(|part| part == b"] ")
+            .is_some_and(|end| line[end + 2..].starts_with(b"n:"))
+}
+
 #[cfg(unix)]
 #[cfg(test)]
 fn observe_clock(log: &[u8], begin: i64, end: i64) -> Result<ClockObservation, StoreError> {
@@ -167,7 +186,10 @@ fn observe_source_clock(
     let mut anchor = None;
     let mut next = None;
     let mut samples = 0_i64;
-    for line in log.lines() {
+    for line in log
+        .lines()
+        .filter(|line| clock_frame_record(line.as_bytes()))
+    {
         // asettb is explicitly1/16000 before either observed filter. Raw
         // source rate may differ; its pts already uses this declared timebase.
         if line.contains("Parsed_ashowinfo_1 ") {
@@ -978,7 +1000,18 @@ async fn decode_window(
         Purpose::Range => Duration::from_secs(120),
         Purpose::TranslationSelfTest => Duration::from_secs(30),
     };
-    let decoded = child_output(&mut decode, wall, MAX_CHILD_LOG, false).await?;
+    let decoded = plurx_core::process::bounded::output_command_clean_env_selected_stderr(
+        &mut decode,
+        wall,
+        MAX_CHILD_LOG,
+        plurx_core::process::ChildWork::background("progressive subtitle translation"),
+        clock_frame_record,
+    )
+    .await
+    .map_err(|_| failure("decode_failed"))?;
+    if !decoded.status.success() {
+        return Err(failure("decode_failed"));
+    }
     let clock = observe_source_clock(
         &decoded.stderr,
         begin_sample,
@@ -1462,6 +1495,34 @@ mod tests {
     }
 
     #[test]
+    fn observed_clock_ignores_side_data_but_rejects_malformed_frame_records() {
+        // E-AC-3 surround emits these continuation records for each frame.
+        // Values come from a real deep-seek decoder observation, without media
+        // paths or content. They retain the exact 48k-to-16k source clock.
+        let log = "[Parsed_ashowinfo_1 @0] n:0 pts:5648000 pts_time:353 fmt:fltp channels:6 rate:48000 nb_samples:1152\n\
+                   [Parsed_ashowinfo_1 @0] side data - matrix encoding: none\n\
+                   [Parsed_ashowinfo_1 @0] side data - downmix: preferred type: Lt/Rt\n\
+                   [Parsed_ashowinfo_1 @0] n:1 pts:5648384 pts_time:353.024 fmt:fltp channels:6 rate:48000 nb_samples:1536\n\
+                   [Parsed_ashowinfo_4 @0] n:0 pts:5680000 pts_time:355 fmt:s16 channels:1 rate:16000 nb_samples:111\n\
+                   [Parsed_ashowinfo_4 @0] side data - matrix encoding: none\n\
+                   [Parsed_ashowinfo_4 @0] n:1 pts:5680111 pts_time:355.007 fmt:s16 channels:1 rate:16000 nb_samples:529\n";
+        let clock = observe_clock(log.as_bytes(), 5_680_000, 5_680_640)
+            .expect("side data is not malformed clock evidence");
+        assert_eq!(
+            (clock.raw_first_sample, clock.anchor_sample, clock.samples),
+            (5_648_000, 5_680_000, 640)
+        );
+        let malformed = log.replace("pts:5680111 ", "missing_pts ");
+        assert!(observe_clock(malformed.as_bytes(), 5_680_000, 5_680_640).is_err());
+        assert!(clock_frame_record(
+            b"[Parsed_ashowinfo_4 @0] n:1 missing_pts nb_samples:529"
+        ));
+        assert!(!clock_frame_record(
+            b"[Parsed_ashowinfo_4 @0] side data - matrix encoding: none"
+        ));
+    }
+
+    #[test]
     fn observed_clock_allows_only_verified_leading_audio_delay_and_negative_preroll() {
         let delayed = frame(1, 8_000, 8_000) + &frame(4, 0, 16_000);
         assert!(observe_source_clock(delayed.as_bytes(), 0, 16_000, 8_000).is_ok());
@@ -1665,6 +1726,69 @@ mod tests {
             .expect("actual FFmpeg is required for the decoder regression")
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[tokio::test]
+    async fn actual_multichannel_decoder_keeps_clock_frames_past_side_data_log_budget() {
+        let root = tempfile::tempdir().expect("owned surround fixture");
+        let root = root.path().canonicalize().expect("canonical fixture root");
+        let source_path = root.join("surround.mkv");
+        let decoder = test_decoder();
+        let mut generate = tokio::process::Command::new(&decoder);
+        generate
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=44",
+                "-ac",
+                "6",
+                "-channel_layout",
+                "5.1",
+                "-c:a",
+                "eac3",
+                "-b:a",
+                "640k",
+                "-threads",
+                "1",
+                "-f",
+                "matroska",
+            ])
+            .arg(&source_path);
+        child_output(&mut generate, Duration::from_secs(20), 8192, false)
+            .await
+            .expect("actual E-AC-3 fixture encoder");
+        let source = plurx_core::fs_secure::open_read_nofollow(&source_path)
+            .await
+            .expect("held surround fixture")
+            .into_std()
+            .await;
+        let scratch = root.join("decode");
+        std::fs::create_dir(&scratch).expect("owned decode directory");
+        let decoded = decode_window(
+            &source,
+            Window {
+                purpose: Purpose::Range,
+                begin_ms: 2_000,
+                end_ms: 42_000,
+                core_begin_ms: 7_000,
+                core_end_ms: 37_000,
+                audio_index: 0,
+                audio_start_samples: 0,
+            },
+            &scratch,
+            &decoder,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("full surround window retains observed timestamps despite side data");
+        assert_eq!(decoded.clock.anchor_sample, 32_000);
+        assert_eq!(decoded.clock.samples, 640_000);
+        assert!(decoded.has_signal);
     }
 
     #[tokio::test]
