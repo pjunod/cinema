@@ -6082,7 +6082,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in-process responses, while the finite FFmpeg fixture is explicitly awaited.
 # Main's HTTPS admin/transport/startup owners and source/status reads remain in
 # the source scan; none changes launch authorization.
-expected_occurrences = 808
+# +2 for shared cached-presentation compatibility: Response::status() assertions
+# in sharing_catalogue_detail_presentation_is_opt_in_and_uses_cached_public_fields
+# inspect the in-process Axum oneshot response for invalid opt-in and success.
+# These reads launch no task or child and introduce no producer ownership.
+expected_occurrences = 810
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
