@@ -16,19 +16,23 @@ use std::{
 /// that worker's first poll. No native result or close proof is injected.
 #[tokio::test]
 async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_own_r() {
+    eprintln!("Direct unpublished fixture: before original fixture future construction");
     let fixture =
         super::super::real_source_start_fixture_with(super::super::SourceFixtureMode::Direct, None)
             .await;
+    eprintln!("Direct unpublished fixture: original fixture returned");
     let state = Arc::clone(&fixture.state);
     let manager = Arc::clone(&state.transcode);
     let value: serde_json::Value =
         serde_json::from_slice(&fixture.request).expect("original complete direct request");
     let session: crate::http::hls::CreateSession =
         serde_json::from_value(value["session"].clone()).expect("actual direct session recipe");
+    eprintln!("Direct unpublished fixture: before actual Direct preparation");
     let prepared =
         prepare_source_direct(&state, &fixture.headers, fixture.reference.clone(), session)
             .await
             .expect("actual current direct decision/preparation");
+    eprintln!("Direct unpublished fixture: actual Direct preparation returned");
     let request_id = prepared.request_id.clone();
     let mut prepared = PreparedSourceStart::Direct(Box::new(prepared));
     let (credential_hash, grant) =
@@ -120,6 +124,7 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
             .used,
         plurx_core::adaptive_resources::ResourceVector::default()
     );
+    eprintln!("Direct unpublished fixture: before original Direct factory");
     let actor = manager
         .start_source_direct_worker(
             Arc::clone(&state),
@@ -133,6 +138,7 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
         .expect("actual admitted direct factory");
     // NO await between the factory return and this real filesystem failure.
     std::fs::rename(&original_path, &missing_path).expect("remove original path before owner poll");
+    eprintln!("Direct unpublished fixture: original factory returned and source renamed before first poll");
     let charged = runtime.accounting().expect("original pre-open R").used;
     assert!(charged.handles > 0 && charged.peak_memory_bytes > 0);
     assert_eq!(manager.fixture_source_direct_restart_custody(), (1, 0, 0));

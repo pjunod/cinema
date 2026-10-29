@@ -2460,6 +2460,7 @@ async fn build_real_source_start_fixture(
         store::{keys, sharing_catalogue_details::SourceDetailsRead},
     };
     use std::sync::Arc;
+    eprintln!("real Source HTTP fixture: entered original fixture body");
     let directory = crate::test_tempdir().expect("real Source fixture");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
@@ -2477,12 +2478,14 @@ async fn build_real_source_start_fixture(
         .expect("production non-destructive storage preflight before Store ownership");
     let startup_clock =
         advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
+    eprintln!("real Source HTTP fixture: before original Store selector");
     let mut selected = if let Some(clock) = &startup_clock {
         Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
     } else {
         crate::sharing_fixture_clock::select_applied_singleton(&config).await
     }
     .expect("actual one voter");
+    eprintln!("real Source HTTP fixture: original Store selector returned");
     selected
         .store
         .put_setting(keys::SHARING_ENABLED, "true")
@@ -2490,11 +2493,14 @@ async fn build_real_source_start_fixture(
         .expect("saved choice");
     // Run the real pre-serving factory before constructing State/listeners.
     // No manual candidate DDL or synthetic capability rows admit this fixture.
+    eprintln!("real Source HTTP fixture: before original Source schema factory");
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual startup factory"));
+    eprintln!("real Source HTTP fixture: original Source schema factory returned");
     #[cfg(target_os = "linux")]
     let direct_runtime = if matches!(mode, SourceFixtureMode::Direct) {
+        eprintln!("real Source HTTP fixture: before original custody startup");
         Some(
             crate::resource_runtime::open_before_cleanup(&mut selected, &config)
                 .await
@@ -2504,8 +2510,11 @@ async fn build_real_source_start_fixture(
     } else {
         None
     };
+    eprintln!("real Source HTTP fixture: original custody startup returned or not selected");
     let client = selected.local_client().expect("local voter client");
+    eprintln!("real Source HTTP fixture: before original State construction");
     let mut state = Arc::new(crate::http::source_actor_test_state());
+    eprintln!("real Source HTTP fixture: original State constructed");
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
     #[cfg(target_os = "linux")]
     if let Some(runtime) = direct_runtime {
@@ -2643,7 +2652,9 @@ async fn build_real_source_start_fixture(
             .arg("color=s=320x180:r=24")
             .args(["-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y"]);
     }
+    eprintln!("real Source HTTP fixture: before actual fixture FFmpeg");
     let generated = generate.arg(&file).output().await.expect("actual FFmpeg");
+    eprintln!("real Source HTTP fixture: actual fixture FFmpeg returned");
     assert!(
         generated.status.success(),
         "{}",

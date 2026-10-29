@@ -185,12 +185,16 @@ async fn actual_open_timeout_retains_original_work_and_unknown_after_worker_exit
     assert_eq!(pool.software_used, 0);
     assert!(!heavy);
     assert_eq!(assert_same_unknown(&serving).await.admissions_in_flight, 0);
+    let unrelated = manager.admit_fragment().await;
     assert!(
-        manager.admit_fragment().await.is_none(),
-        "counter0 cannot clear original Unknown"
+        unrelated.is_some(),
+        "disposed original work leaves unrelated admission capacity available"
     );
-    // Job/File disposal grants NO native absence/refund proof. Persistence is
-    // deliberate: a slow open can fence this process even after its job exits.
+    drop(unrelated);
+    // Job/File disposal grants no native absence/refund proof. The same
+    // uncertainty still blocks restart after its original work count reaches
+    // zero; it does not block unrelated admissions on the node.
+    assert_eq!(assert_same_unknown(&serving).await.admissions_in_flight, 0);
 }
 
 #[tokio::test]
