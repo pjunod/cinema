@@ -619,6 +619,9 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
             .collect_planning_tasks(&preparation, deadline())
             .await
     };
+    // Both branches consumed the selected waiter. End the empty holder's
+    // borrow before the original preparation and runtime are drained below.
+    drop(collect);
     assert!(
         result.is_err(),
         "failed native work cannot produce a planning report"
