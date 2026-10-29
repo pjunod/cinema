@@ -11,8 +11,10 @@ test interaction failures: Meridian setup steered vertically at a vertical
 rail, and successful diagnostic captures consumed the live controls' idle
 interval before Select. The fixture corrections preserve their assertions and
 failure captures. Authenticated per-case native reuse is being completed so
-only failed or missing journeys repeat. Review and a green final gate remain
-required; the PR records the live counts and owner. The maintainer deploys,
+only failed or missing journeys repeat. The web lane also retains its three
+Node unit commands from authenticated original execution with unchanged inputs;
+JavaScript parsing and TypeScript qualification remain active. Final independent
+review approves both receipt changes. A green final gate remains required; the PR records the live counts and owner. The maintainer deploys,
 then translation publication and visible generated/translated captions on the
 physical TV still require deployed acceptance.
 

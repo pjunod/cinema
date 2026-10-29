@@ -437,10 +437,11 @@ jobs:
       - name: Type-check the web shell against its baseline
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          node tests/web/jsconfig-generated.test.js
+          python3 -m validation.web_unit_receipts --command jsconfig-generated
           scripts/web-types --base "$PR_BASE_SHA"
-          node tests/web/player-typedef.test.js
+          python3 -m validation.web_unit_receipts --command player-typedef
       # Every Node web and playback test, the same list `make web-check` runs
       # minus its two real-browser scripts. Until 2026-10-04 a pull request ran
       # two of them here and the rest ran only when someone typed make; a stale
@@ -448,7 +449,16 @@ jobs:
       - name: Run every Node web and playback test
         env:
           TMPDIR: /tmp
-        run: make web-unit-check
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.web_unit_receipts --command suite
+      - name: Preserve original web unit adoption provenance
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: web-unit-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .main-preflight-receipts/web-unit
+          if-no-files-found: error
+          retention-days: 90
 
   apple_compile:
     name: Apple compile and native TV navigation
