@@ -4,6 +4,30 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Sharing startup integration — scoped source review on 2026-10-29
+
+Codex agent `coverage_review` compared main `66a33d723` with incoming main
+`10f45ae5f2619ab3e807b5576bf6ffb39ade6e86` and the repair worktree.
+[Startup](../../crates/plurxd/src/main.rs) adds a read-only Sharing host
+capability command and separate host-reconciliation and invitation-network
+loops using the existing background shutdown token. The mapped
+`background_work_loop` call, selected library scheduler/worker bodies and
+token/publication wait and lock order are unchanged. Sharing host setup and
+invitation-network lifecycle, including their child work and shutdown, remain
+outside this selected-worker model. This review does not prove their resource
+contention or liveness.
+
+[The translation schema test](../../crates/plurx-core/src/store/subtitle_translation_schema.rs)
+changes only its upgraded-version expectation from 119 to 120. Its production
+recognizer and upgrade guards are unchanged. Two whole-file row pins follow
+the reviewed bytes; retained exact anchors remain unique.
+
+This agent authored the mapping refresh; parent and independent Codex diagnose_core_failures metadata review found no issues.
+Model/configuration/toolchain bytes, bounds, fairness premises, properties,
+scope, validators and historical source receipts remain unchanged. This
+review ran no builds, tests or TLC and supplies no new runtime, refinement,
+liveness or qualification evidence.
+
 ## Combined-source integration — scoped author audit on 2026-10-29
 
 The repair is combined with main `66a33d723096ee931ce2e05e860f51f8f3671513`.

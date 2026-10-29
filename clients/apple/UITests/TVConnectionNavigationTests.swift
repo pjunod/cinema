@@ -9,6 +9,7 @@ final class TVConnectionNavigationTests: TVNavigationTestCase {
         defer { server.stop() }
         let app = openSignIn(origin: origin)
         defer { app.terminate() }
+        XCTAssertFalse(app.buttons["diagnostics-open"].exists, "Credential sign-in does not offer Report a problem")
         let change = app.buttons["Use a different server"]
         reachForSetup(change, in: app, limit: 8)
         assertFocus(change, in: app, context: "Sign in can choose another server")

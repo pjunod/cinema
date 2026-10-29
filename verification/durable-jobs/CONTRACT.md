@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`66a33d723` plus the repair worktree (scoped integration audit below) · **Scope:** bound `library_scan` and
+`10f45ae5f` plus the repair worktree (scoped source audits below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,21 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Test-only schema expectation — scoped source review on 2026-10-29
+
+Against incoming main `10f45ae5f2619ab3e807b5576bf6ffb39ade6e86`, the
+repair changes only the upgraded-version expectation in
+[the translation schema tests](../../crates/plurx-core/src/store/subtitle_translation_schema.rs)
+from 119 to 120. The v115 starting fixture, retained handoff assertions and
+production shape recognizer and upgrade guards are unchanged. One whole-file
+row pin follows those inspected bytes; its exact anchor remains unique.
+
+Codex agent `coverage_review` inspected the source and authored this mapping
+refresh; parent and independent Codex diagnose_core_failures metadata review found no issues. Selected library-worker
+transitions, model/configuration/toolchain bytes, bounds, properties, scope
+and historical source receipts remain unchanged. This review ran no builds,
+tests or TLC and supplies no new execution or qualification evidence.
 
 ## Combined-source integration — scoped author audit on 2026-10-29
 

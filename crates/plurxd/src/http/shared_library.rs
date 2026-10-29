@@ -356,15 +356,23 @@ async fn item(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
     let (hash, grant) = authority(&state, &headers).await?;
+    // Older receivers reject unknown response fields. They must keep receiving
+    // the original closed shape; an upgraded receiver explicitly opts in.
+    let presentation = match query.as_deref() {
+        None => false,
+        Some("presentation=1") => true,
+        Some(_) => return Err(invalid()),
+    };
     use plurx_core::{
         sharing_catalogue_details::{CatalogueRevisionKey, SourceItemDetails},
         store::sharing_catalogue_details::SourceDetailsRead,
     };
     let snapshot = match state
         .store
-        .source_item_details_snapshot(&hash, grant, source_id(&id)?)
+        .source_item_details_snapshot_with_presentation(&hash, grant, source_id(&id)?, presentation)
         .await
         .map_err(unavailable)?
     {
@@ -422,7 +430,11 @@ async fn item(
         .await?
         .pop()
         .ok_or_else(missing)?;
-    let details = SourceItemDetails { item, files };
+    let details = SourceItemDetails {
+        item,
+        files,
+        presentation: snapshot.presentation.map(Box::new),
+    };
     details.validate().map_err(unavailable)?;
     let mut response = source_json(
         &state,
@@ -1727,6 +1739,7 @@ async fn viewer_item(
             .collect(),
     )?;
     let metadata = details.item;
+    let presentation = details.presentation;
     let files = details
         .files
         .into_iter()
@@ -1754,8 +1767,12 @@ async fn viewer_item(
     } else {
         "unavailable"
     };
+    let mut item = shared_item(&summary, metadata, user.id, art_key.as_ref());
+    if let Some(presentation) = presentation {
+        item["presentation"] = json!(presentation);
+    }
     receiver_json(&state,&token,user.id,vec![scope],
-        json!({"item":shared_item(&summary,metadata,user.id,art_key.as_ref()),"files":files,"lifecycle_generation":summary.lifecycle_generation,"watch":progress,"delivery_status":delivery_status})).await
+        json!({"item":item,"files":files,"lifecycle_generation":summary.lifecycle_generation,"watch":progress,"delivery_status":delivery_status})).await
 }
 async fn viewer_progress(
     State(state): State<AppState>,

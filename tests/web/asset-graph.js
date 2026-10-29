@@ -2,7 +2,7 @@
 
 // What the web assets may name at load, and when.
 //
-// The split shell (docs/clients/WEB-SHELL-LAYOUT.md) has ninety-four WEB_ASSETS
+// The split shell (docs/clients/WEB-SHELL-LAYOUT.md) has ninety-seven WEB_ASSETS
 // rows. This graph analyzes the plain scripts that share one global
 // scope and skips the vendored hls.js row. Hoisting is per script, so a file may only
 // name a binding declared in an *earlier* file at the moment it loads — and the

@@ -1,3 +1,31 @@
+# Integration with main 10f45ae5f: retain its two awaited Live TV fixture timers
+# and three HTTP response observations alongside the reviewed repair fixtures.
+# Final exact counts are verified by the unchanged structural inventory.
+# Additional upstream ownership audit (66a33d723 -> 10f45ae5f, 2026-10-29):
+# +3 namespaced tasks belong to private sharing, not rolling media producers.
+# main.rs starts sharing_host::run and sharing_network::run with the existing
+# BackgroundLoopGuard cancellation token. Their JoinHandles are not retained;
+# guard Drop requests cancellation, without proving either loop has joined.
+# sharing_network::issue detaches one invitation owner from its request waiter.
+# It bounds issue_inner at 22s, serializes persisted provider intent/cleanup
+# through network_invite_lock, and abandons/cancels the invitation on error or
+# lost response delivery before attempting cleanup. The cleanup continuation
+# has no overall 22s deadline and is not a confirmed daemon-shutdown receipt.
+# +4 timers: that 22s issue bound, the network loop's cancellation-aware 30s
+# cadence, sharing_host's cancellation-aware 5s cadence, and its 8s child bound.
+# +1 Command/+1 kill-on-drop/+2 lifecycle methods are sharing_host::command:
+# the existing background ChildWork launcher registers its child; stdout is
+# limited to 256 KiB plus one refusal byte, stderr discarded, and normal success
+# drains stdout then awaits child.wait. Returned inner errors await child.kill;
+# timeout returns before that branch and relies on kill-on-drop. Neither drop
+# nor the deadline proves confirmed reap or descendant settlement on every exit.
+# +9 launch-shaped methods start no child: sharing_host has three production
+# status reads and four test-only SetupState::status reads, while sharing_network
+# reads the same HTTP response status twice. The child above is launched through
+# the existing shared launcher, adding no .spawn/.output/.status call site here.
+# Additional reviewed totals: 1027 tasks, 1909 timers, 308 Commands, 833 launch
+# shapes, 357 lifecycle methods and 118 kill-on-drop sites. Source roots,
+# structural patterns, exact equality and every forbidden zero remain unchanged.
 # Integration with main 66a33d723 (2026-10-29): retain its four progressive
 # subtitle admission timers plus the four test-only repair timers. Exact
 # namespaced timer census is 1903; all other merged counts match source.
@@ -44,6 +72,16 @@
 # Updated repair-only structural totals before main integration: 80 method spawns, 1899 namespaced timers,
 # 307 Commands, 821 launch shapes, 355 lifecycle methods, 73 UFCS lifecycle
 # sites. Module roots, patterns, exact equality and forbidden zeroes unchanged.
+# Live TV upload regression ownership review (PR #1312, 2026-10-28;
+# Rust source 9c5aa95df): +2 namespaced timers are the awaited five-second
+# fixture observation deadline and its five-millisecond poll. Neither starts
+# a task, child, detached timer, repair owner or producer authority. The test
+# owns its loopback PutSink and HTTP streams; the segment body is completed
+# and its response drained before the fixture ends. The existing PutSink
+# Drop closes the receiver and aborts its acceptor.
+# +1 launch-shaped match is reqwest::Response::status(), an HTTP assertion
+# that starts no process. Structural patterns, roots, exact equality and
+# forbidden-shape zeroes remain unchanged.
 
 # DV title analysis ownership review (PR #1301, 2026-10-28; source 7d2d4a9c7):
 # +1 namespaced task and +1 Command are DvTitleRide's companion scanner.
@@ -3295,7 +3333,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
-expected_occurrences = 1024
+expected_occurrences = 1027
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5000,7 +5038,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1903
+expected_occurrences = 1909
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5482,7 +5520,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 307
+expected_occurrences = 308
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6129,7 +6167,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in-process responses, while the finite FFmpeg fixture is explicitly awaited.
 # Main's HTTPS admin/transport/startup owners and source/status reads remain in
 # the source scan; none changes launch authorization.
-expected_occurrences = 821
+# +2 for shared cached-presentation compatibility: Response::status() assertions
+# in sharing_catalogue_detail_presentation_is_opt_in_and_uses_cached_public_fields
+# inspect the in-process Axum oneshot response for invalid opt-in and success.
+# These reads launch no task or child and introduce no producer ownership.
+# Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
+expected_occurrences = 833
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6425,7 +6468,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 355
+expected_occurrences = 357
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6649,7 +6692,7 @@ pattern = "kill_on_drop\\s*\\("
 # `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
 # counts once). Each is also explicitly waited, or killed and waited, by its
 # owner; kill-on-drop is the backstop, not the settlement.
-expected_occurrences = 117
+expected_occurrences = 118
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

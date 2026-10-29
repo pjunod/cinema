@@ -5741,6 +5741,188 @@ fn progress_is_the_newest_listed_segment_not_the_window_sliding() {
 }
 
 #[tokio::test]
+async fn live_scratch_keeps_playing_during_http_uploads_and_pending_playlist() {
+    for extension in ["ts", "m4s"] {
+        let temp = crate::test_tempdir().expect("scratch root");
+        let sink = crate::scratch_put::PutSink::bind_live_tv(temp.path().to_owned())
+            .expect("live upload sink");
+        let base = sink.base_url(0);
+        let client = reqwest::Client::new();
+        for sequence in 10..=12 {
+            client
+                .put(format!("{base}/segment-{sequence:06}.{extension}"))
+                .body("transport")
+                .send()
+                .await
+                .expect("segment upload")
+                .error_for_status()
+                .expect("segment committed");
+        }
+        let playlist = |first| {
+            let text = String::from_utf8(live_playlist(first, 3)).expect("playlist");
+            if extension == "m4s" {
+                text.replace(".ts", ".m4s").replace(
+                    "#EXT-X-VERSION:3",
+                    "#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"",
+                )
+            } else {
+                text
+            }
+        };
+        if extension == "m4s" {
+            client
+                .put(format!("{base}/init.mp4"))
+                .body("init")
+                .send()
+                .await
+                .expect("init upload")
+                .error_for_status()
+                .expect("init committed");
+        }
+        client
+            .put(format!("{base}/index.m3u8"))
+            .body(playlist(10))
+            .send()
+            .await
+            .expect("playlist upload")
+            .error_for_status()
+            .expect("published");
+
+        // Hold a real segment upload open while the next playlist arrives.
+        // The playlist remains pending until this segment commits, so the
+        // scanner must tolerate both receiver temporaries without publishing
+        // either unfinished resource.
+        let url = reqwest::Url::parse(&base).expect("upload URL");
+        let mut segment = tokio::net::TcpStream::connect((
+            url.host_str().expect("host"),
+            url.port().expect("port"),
+        ))
+        .await
+        .expect("connect");
+        segment.write_all(format!(
+            "PUT {}/segment-000013.{extension} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8\r\n\r\npart",
+            url.path()).as_bytes()).await.expect("partial segment");
+        let pending = client
+            .put(format!("{base}/index.m3u8"))
+            .body(playlist(11))
+            .send()
+            .await
+            .expect("next playlist");
+        assert_eq!(pending.status(), reqwest::StatusCode::ACCEPTED);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut entries = tokio::fs::read_dir(temp.path()).await.expect("directory");
+                let mut uploads = 0;
+                while let Some(entry) = entries.next_entry().await.expect("entry") {
+                    if entry.file_name().to_string_lossy().ends_with(".tmp") {
+                        uploads += 1;
+                    }
+                }
+                if uploads == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("two overlapping uploads");
+        for _ in 0..3 {
+            let inventory = inspect_scratch(temp.path())
+                .await
+                .expect("live scan")
+                .expect("published window");
+            assert_eq!(inventory.media_sequence, 10);
+            assert_eq!(inventory.newest_listed(), Some(12));
+            assert_eq!(inventory.segments.len(), 3);
+        }
+        segment.write_all(b"done").await.expect("finish segment");
+        let mut response = Vec::new();
+        segment
+            .read_to_end(&mut response)
+            .await
+            .expect("upload response");
+        assert!(response.starts_with(b"HTTP/1.1 201"));
+        let inventory = inspect_scratch(temp.path())
+            .await
+            .expect("completed scan")
+            .expect("new published window");
+        assert_eq!(inventory.media_sequence, 11);
+        assert_eq!(inventory.newest_listed(), Some(13));
+        assert_eq!(inventory.segments.len(), 4);
+        assert!(sink.failure().is_none());
+    }
+}
+
+#[tokio::test]
+async fn live_scratch_upload_temporaries_keep_name_count_and_byte_limits() {
+    let temp = crate::test_tempdir().expect("scratch root");
+    for name in [
+        "index.m3u8.0.tmp",
+        "init.mp4.1.tmp",
+        "segment-000013.ts.2.tmp",
+        "segment-000014.m4s.18446744073709551615.tmp",
+    ] {
+        std::fs::write(temp.path().join(name), b"upload").expect("temporary");
+    }
+    assert!(scan_scratch_directory(temp.path())
+        .expect("valid uploads")
+        .is_some());
+    for name in [
+        "notes.txt.0.tmp",
+        "index.m3u8..tmp",
+        "init.mp4.-1.tmp",
+        "segment-000013.ts.no.tmp",
+        "segment-000013.ts.18446744073709551616.tmp",
+        "segment-000013.ts.1.2.tmp",
+        "segment-x.ts.1.tmp",
+    ] {
+        let path = temp.path().join(name);
+        std::fs::write(&path, b"stray").expect("invalid temporary");
+        assert!(
+            scan_scratch_directory(temp.path())
+                .err()
+                .expect("refused")
+                .to_string()
+                .contains("unexpected filename"),
+            "{name}"
+        );
+        std::fs::remove_file(path).expect("remove invalid temporary");
+    }
+    let large = temp.path().join("segment-000015.ts.3.tmp");
+    let file = std::fs::File::create(&large).expect("temporary");
+    file.set_len(MAX_SESSION_BYTES + 1).expect("sparse upload");
+    assert!(scan_scratch_directory(temp.path())
+        .err()
+        .expect("oversized upload")
+        .to_string()
+        .contains("128 MiB"));
+    drop(file);
+    std::fs::remove_file(&large).expect("remove oversized upload");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("index.m3u8.0.tmp", &large).expect("temporary symlink");
+        assert!(scan_scratch_directory(temp.path())
+            .err()
+            .expect("symlink refused")
+            .to_string()
+            .contains("non-regular"));
+        std::fs::remove_file(&large).expect("remove symlink");
+    }
+    for request in 4..=MAX_UPLOAD_TEMPORARIES {
+        std::fs::write(
+            temp.path().join(format!("segment-000015.ts.{request}.tmp")),
+            b"x",
+        )
+        .expect("upload temporary");
+    }
+    assert!(scan_scratch_directory(temp.path())
+        .err()
+        .expect("excess uploads")
+        .to_string()
+        .contains("too many temporary"));
+}
+
+#[tokio::test]
 async fn live_scratch_inventory_enforces_list_deletion_and_temp_budgets() {
     let temp = crate::test_tempdir().expect("scratch root");
     let directory = temp.path();
@@ -5795,10 +5977,12 @@ fn scratch_scan_accepts_bounded_put_staging_without_publishing_it() {
         assert!(scan.init.is_none(), "a staging init is not published");
         let second = directory.join("segment-000003.ts.1.tmp");
         std::fs::write(&second, b"second staging").expect("second staging");
-        assert!(
-            scan_scratch_directory(directory).is_err(),
-            "the temporary-file budget still applies"
-        );
+        let overlapping = scan_scratch_directory(directory)
+            .expect("concurrent PUT temporaries fit the bounded upload budget")
+            .expect("directory");
+        assert_eq!(overlapping.final_segments.len(), 1);
+        assert!(overlapping.final_segments.contains_key(&1));
+        assert!(overlapping.init.is_none(), "staging is not published");
         std::fs::remove_file(second).expect("remove second staging");
         std::fs::File::create(&path)
             .expect("staging file")

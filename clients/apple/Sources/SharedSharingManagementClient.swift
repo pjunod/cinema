@@ -78,10 +78,26 @@ struct SharedSharingManagementClient {
         try SharedSharingValidation.ids(libraries)
         guard !libraries.isEmpty, (1...604800).contains(ttlSeconds) else { throw APIError.badURL }
         let row = try decode(SharedSharingInvitation.self, await request("sharing/invitations", method: "POST", body: ["library_ids": .array(libraries.map(SharedPlaybackJSON.string)), "ttl_seconds": .integer(ttlSeconds)]))
-        guard PlaybackFileContext.canonicalUUID(row.id), row.invitation.hasPrefix("cinema-share-v1:"), row.invitation.utf8.count <= 10939 else { throw APIError.badURL }; return row
+        guard PlaybackFileContext.canonicalUUID(row.id), Self.validInvitation(row.invitation) else { throw APIError.badURL }; return row
+    }
+    private static func validInvitation(_ value: String) -> Bool {
+        PlaybackFileContext.matches(value, "^(cinema-share-v1:[A-Za-z0-9_-]{1,10923}|cinema-connect-v1:[A-Za-z0-9_-]{1,15000})$")
     }
     private func invitation(_ value: String) throws -> SharedPlaybackJSON {
-        guard value.hasPrefix("cinema-share-v1:"), value.utf8.count <= 10939, PlaybackFileContext.matches(String(value.dropFirst(16)), "^[A-Za-z0-9_-]{1,10923}$") else { throw SharedSharingManagementError.invalid("Paste a valid cinema-share-v1 invitation.") }; return .string(value)
+        guard Self.validInvitation(value) else { throw SharedSharingManagementError.invalid("Paste a valid Cinema invitation.") }; return .string(value)
+    }
+    struct NetworkShare: Decodable { let tsFqdn: String; let inviteUrl: String }
+    struct Connection: Decodable { let network: [NetworkShare]; let connected: Bool }
+    func connection(_ value: String, probe: Bool = false) async throws -> Connection {
+        let row = try decode(Connection.self, await request("sharing/connection", method: "POST", body: ["invitation": try invitation(value), "probe": .bool(probe)]))
+        guard row.network.count <= 4, Set(row.network.map(\.tsFqdn)).count == row.network.count,
+              row.network.allSatisfy({ PlaybackFileContext.matches($0.inviteUrl, "^https://login\\.tailscale\\.com/admin/invite/[A-Za-z0-9_-]{1,256}$") }) else { throw APIError.badURL }
+        return row
+    }
+    func authorizeNetwork(_ token: String) async throws {
+        let data = try await request("sharing/network-authorization", method: "PUT", body: ["token": .string(token)])
+        struct Reply: Decodable { let configured: Bool }
+        guard try decode(Reply.self, data).configured else { throw APIError.badURL }
     }
     func importSource(invitation value: String) async throws -> SharedSharingImport {
         let row = try decode(SharedSharingImport.self, await request("sharing/imports", method: "POST", body: ["invitation": try invitation(value)])); try row.validate(); return row

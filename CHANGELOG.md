@@ -59,6 +59,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- Credential sign-in screens omit Report a problem. Connection setup, saved-
+  session recovery, and signed-in reporting keep their entry points.
+
+- Cinema sharing invitations open as QR codes with expandable text. Save or
+  share the PNG, then upload or scan it on the receiving Cinema; import and
+  pairing approval remain explicit. Web, Apple, and Android clients retain
+  text fallback for oversized invitations.
+
 - Linux player 0.4.0 uses Cinema-style playback controls with scoped library
   metadata and next episode, saved autoplay, and Auto/Original/advertised
   quality choices that retain playback position and paused state.
@@ -122,9 +130,11 @@ bump may break compatibility and a **patch** bump never does.
 
 - Recording lists bind paging, state filters, and capture boundaries independently
   instead of returning a database error.
-- Live TV accepts bounded atomic upload staging files during startup.
 - Model and media-tool verification detects immediate same-size byte changes
   even when filesystem timestamps coincide.
+- Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.
+- Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
+  headers, allowing floating-point parsing with the macOS 12 deployment target.
 
 - Fresh macOS media builds retain caller macro paths and expose Homebrew
   aclocal macros to the source-built Automake tools used by libass.
@@ -135,6 +145,25 @@ bump may break compatibility and a **patch** bump never does.
 
 - Fresh macOS source installs build Automake without creating a circular
   GNUmakefile symlink when the temporary directory uses a symlinked path.
+
+- Live TV keeps playing while the HTTP output writer uploads a segment or
+  waits to publish its next playlist; valid temporary upload files no longer
+  terminate the stream a few seconds after startup.
+
+- Shared library browsing uses responsive poster grids instead of overlapping
+  inline panels. Shared details show artwork, year, genres, runtime, cached
+  review-site ratings, and video, audio and subtitle facts. Playback failures
+  retain their typed preparation error instead of reporting every refusal as
+  an unavailable decision.
+- Shared Auto playback selects a supported encoded plan when an HEVC remux
+  lacks a usable HLS index, avoiding a Source startup refusal for titles that
+  local playback can serve through its progressive fallback.
+- Sharing can configure a managed native host's private Tailscale connection,
+  discover its addresses and certificate, and report sign-in or setup problems.
+  A separately installed Linux Compose host component manages private forwarding
+  and a scoped egress guard without giving the server host-control sockets.
+  Native Mac sharing binds the actual private interface instead of requiring a
+  Linux interface name. The address form explains that no router changes are needed.
 
 - Restrict the Linux external player preference to Dolby Vision files on Linux;
   other formats and operating systems retain web playback, including mixed-version titles.

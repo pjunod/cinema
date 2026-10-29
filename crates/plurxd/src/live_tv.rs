@@ -175,6 +175,10 @@ pub(crate) const MAX_PLAYLIST_BYTES: u64 = 64 * 1024;
 pub(crate) const MAX_SEGMENT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_SESSION_BYTES: u64 = MAX_SEGMENT_BYTES;
 const MAX_LISTED_SEGMENTS: usize = 24;
+/// The HTTP sink receives objects on separate connections: a segment and
+/// playlist can overlap, unlike the legacy single-file writer. Bound its
+/// unique upload temporaries to one window plus the init and playlist.
+const MAX_UPLOAD_TEMPORARIES: usize = MAX_LISTED_SEGMENTS + 2;
 /// hlsenc renames a finished segment before it rewrites the playlist, so for
 /// an instant the scratch holds `threshold + 1` final files that the playlist
 /// does not list. Deletion precedes the rewrite, so it is never `+ 2`.
@@ -9141,23 +9145,6 @@ struct ScratchScan {
     init: Option<(String, u64)>,
 }
 
-/// The owned PUT receiver stages `<object>.<request sequence>.tmp` before
-/// atomically renaming it. Those bytes count against scratch, but a staging
-/// file is never a published segment or init.
-fn is_put_scratch_temporary(name: &str) -> bool {
-    let Some((object, sequence)) = name.strip_suffix(".tmp").and_then(|s| s.rsplit_once('.'))
-    else {
-        return false;
-    };
-    if sequence.is_empty()
-        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
-        || sequence.parse::<u64>().is_err()
-    {
-        return false;
-    }
-    matches!(object, "index.m3u8" | "init.mp4") || parse_segment_name(object, false).is_some()
-}
-
 /// The directory walk of `inspect_scratch`, synchronous, so that one
 /// `spawn_blocking` runs all of it: one `read_dir` and one `symlink_metadata`
 /// per entry on the thread that already holds the directory, rather than a
@@ -9180,6 +9167,7 @@ fn scan_scratch_directory(directory: &Path) -> Result<Option<ScratchScan>, LiveT
     let mut final_segments = HashMap::new();
     let mut init = None;
     let mut temporary_count = 0usize;
+    let mut upload_temporary_count = 0usize;
     for entry in entries {
         let entry = entry.map_err(|error| {
             LiveTvError::StreamFailed(format!("reading live-TV scratch: {error}"))
@@ -9222,10 +9210,10 @@ fn scan_scratch_directory(directory: &Path) -> Result<Option<ScratchScan>, LiveT
             _ => {
                 if let Some(sequence) = parse_segment_name(&name, false) {
                     final_segments.insert(sequence, (name, metadata.len()));
-                } else if parse_segment_name(&name, true).is_some()
-                    || is_put_scratch_temporary(&name)
-                {
+                } else if parse_segment_name(&name, true).is_some() {
                     temporary_count += 1;
+                } else if is_upload_temporary(&name) {
+                    upload_temporary_count += 1;
                 } else {
                     return Err(LiveTvError::StreamFailed(
                         "live-TV scratch contains an unexpected filename".into(),
@@ -9234,7 +9222,7 @@ fn scan_scratch_directory(directory: &Path) -> Result<Option<ScratchScan>, LiveT
             }
         }
     }
-    if temporary_count > 1 {
+    if temporary_count > 1 || upload_temporary_count > MAX_UPLOAD_TEMPORARIES {
         return Err(LiveTvError::StreamFailed(
             "live-TV scratch contains too many temporary files".into(),
         ));
@@ -9466,6 +9454,20 @@ fn startup_publishable(inventory: &ScratchInventory) -> bool {
     inventory.listed >= STARTUP_LISTED_SEGMENTS
         && inventory.listed_seconds
             >= STARTUP_LISTED_TARGET_DURATIONS * inventory.target_duration as f64
+}
+
+/// Match only the HTTP receiver's `<published-name>.<request-u64>.tmp`
+/// namespace. Uploads count toward the scratch byte budget, but never enter
+/// the inventory of complete resources or the startup publication barrier.
+fn is_upload_temporary(name: &str) -> bool {
+    let Some((object, request)) = name.strip_suffix(".tmp").and_then(|s| s.rsplit_once('.')) else {
+        return false;
+    };
+    !request.is_empty()
+        && request.bytes().all(|byte| byte.is_ascii_digit())
+        && request.parse::<u64>().is_ok()
+        && (matches!(object, "index.m3u8" | "init.mp4")
+            || parse_segment_name(object, false).is_some())
 }
 
 fn parse_segment_name(name: &str, temporary: bool) -> Option<u64> {
