@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1332: native journey harness anchors; execution remains in separate receipts.
+[[fixes]]
+id = "apple.tv-navigation-success-capture-idle-budget"
+commits = ["dd8b896e8e5f293b0e3117c92bde5f1574540cd2"]
+source = "clients/apple/UITests/TVNavigationTestCase.swift"
+source_anchor = "if result != .completed || captureOnSuccess {"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "testLiveFullscreenRevealMoreReportAndBackRetainSession"
+
+[[fixes]]
+id = "apple.meridian-tv-rail-setup-steering"
+commits = []
+supplements = "apple.tv-navigation-success-capture-idle-budget"
+source = "clients/apple/UITests/TVNavigationTestCase.swift"
+source_anchor = 'let targetIsRail = target.identifier.hasPrefix("viewer-tab-")'
+test = "clients/apple/UITests/TVMeridianNavigationTests.swift"
+test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
+
 # Issue #1329: client recovery/status anchors; execution remains in separate receipts.
 [[fixes]]
 id = "subtitles.apple-stopped-operation-recovery"

@@ -41,6 +41,8 @@ EXEMPT = {
     'tests/operations/test_apple_tv_navigation_gate.py',
     'tests/operations/test_apple_tv_navigation_runner.py',
     'tests/operations/test_web_test_inventory.py',
+    # Corrective-history metadata is not read by the audited Node inventory.
+    'tests/client-fixes.toml',
     'docs/features/PROJECT-BACKLOG.md', 'docs/features/SUBTITLE-COMPLETION-STATUS.md',
 }
 # No Node filesystem reader traverses Apple UI test sources or the Rust clock
