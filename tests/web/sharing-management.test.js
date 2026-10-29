@@ -365,7 +365,7 @@ test("sharing QR result defaults to the image with collapsed text and PNG export
 });
 test("QR scan only fills a current draft and rejects stale editor account and explicit edits",async()=>{
  const h=harness();await h.m.open("import");const job=h.m.qrBegin();h.m.qrFinish(job,"cinema-share-v1:scanned");
- assert.equal(h.m.state().editor.text,"cinema-share-v1:scanned");assert.match(h.element.innerHTML,/Choose Save to import/);assert.equal(h.requests.length,0);
+ assert.equal(h.m.state().editor.text,"cinema-share-v1:scanned");assert.match(h.element.innerHTML,/Choose Import invitation/);assert.equal(h.requests.length,0);
  const invalid=h.m.qrBegin();h.m.qrFinish(invalid,"https://other.example");assert.match(h.m.state().editor.error,/not a Cinema/);assert.equal(h.m.state().editor.text,"cinema-share-v1:scanned");
  const edited=h.m.qrBegin();h.m.edit("text","cinema-share-v1:manual");h.m.qrFinish(edited,"cinema-share-v1:old");assert.equal(h.m.state().editor.text,"cinema-share-v1:manual");
  const closed=h.m.qrBegin();h.m.back();await h.m.open("import");h.m.qrFinish(closed,"cinema-share-v1:old");assert.equal(h.m.state().editor.text,"");
@@ -395,10 +395,10 @@ test("automatic host setup reports required action without claiming peer reachab
 test("setup polling stops on readiness and retires without replaying writes",async()=>{
  const h=harness(async(path)=>reply(path.endsWith("endpoints")?{manifest:{revision:1n,endpoints:[endpoint]}}:{listener:"listening",host_setup:{state:"ready",message:"Private host setup is configured."}}));
  const timers=[],cleared=[];h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=id=>cleared.push(id);
- h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"pending",message:"Setting up…"}}});assert.equal(timers.length,1);
- await timers[0]();assert.equal(h.m.state().status.host_setup.state,"ready");assert.equal(timers.length,1);assert.ok(h.requests.every(r=>r.options.method==="GET"));
- h.m.panel({...h.data,sharingStatus:{host_setup:{state:"permission_required",message:"Host permission is required."}}});assert.equal(timers.length,2);
- h.m.retire();assert.deepEqual(cleared,[2]);const count=h.requests.length;await timers[1]();assert.equal(h.requests.length,count);assert.equal(h.m.state(),null);
+ h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"pending",message:"Setting up…"}}});assert.equal(timers.length,2);
+ await timers[0]();assert.equal(h.m.state().status.host_setup.state,"ready");assert.equal(timers.length,2);assert.ok(h.requests.every(r=>r.options.method==="GET"));
+ h.m.panel({...h.data,sharingStatus:{host_setup:{state:"permission_required",message:"Host permission is required."}}});assert.equal(timers.length,3);
+ h.m.retire();assert.deepEqual(cleared,[3,2]);const count=h.requests.length;await timers[1]();await timers[2]();assert.equal(h.requests.length,count);assert.equal(h.m.state(),null);
 });
 
 test("unavailable peer explains setup and stale invitations without replaying the import",async()=>{
@@ -408,8 +408,8 @@ test("unavailable peer explains setup and stale invitations without replaying th
 });
 
 test("combined invitation waits for private consent then imports once automatically",async()=>{
- const timers=[];
- const {c,m,requests}=harness(async(path,options)=>path.endsWith("/sharing/connection")?reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:JSON.parse(options.body).probe===true}):reply(imported()));
+ const timers=[];let probes=0;
+ const {c,m,requests}=harness(async(path)=>path.endsWith("/sharing/connection")?reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:++probes>1}):reply(imported()));
  c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
  await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
  assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,0);
@@ -437,6 +437,57 @@ test("connected combined invitation imports directly without a second consent ac
  const {m,requests}=harness(async(path)=>path.endsWith("/sharing/connection")?reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:true}):reply(imported()));
  await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
  assert.deepEqual(requests.map(r=>r.path),["/api/v1/sharing/connection","/api/v1/sharing/imports"]);
+ assert.equal(JSON.parse(requests[0].options.body).probe,true);
+});
+test("revoked recipients are hidden by default while current actions keep their original row identity",async()=>{
+ const h=harness(),old=exported(),current=exported();old.recipient_name="Old recipient";old.grant.state="revoked";current.recipient_name="Current recipient";current.grant.id="66666666-6666-4666-8666-666666666666";
+ h.m.state().exports=[old,current];h.m.paint();
+ assert.doesNotMatch(h.element.innerHTML,/Old recipient/);assert.match(h.element.innerHTML,/Current recipient/);assert.match(h.element.innerHTML,/sharingOpen\('approve',1\)/);assert.match(h.element.innerHTML,/Show revoked connections \(1\)/);
+ vm.runInContext("sharingShowRevoked(true)",h.c);assert.match(h.element.innerHTML,/Old recipient/);assert.doesNotMatch(h.element.innerHTML,/sharingOpen\('revoke',0\)/);
+ vm.runInContext("sharingShowRevoked(false)",h.c);assert.doesNotMatch(h.element.innerHTML,/Old recipient/);
+ await h.m.open("approve",1);assert.equal(h.m.state().editor.row.grant.id,current.grant.id);
+});
+test("failed combined connection is actionable, bounded, retryable, and never saves an unverified import",async()=>{
+ const timers=[],h=harness(async()=>reply({name:"Owner Cinema",network:[],connected:false,connection_error:"sharing_identity_mismatch"}));
+ h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=()=>{};
+ await h.m.open("import");h.m.edit("text","cinema-connect-v1:AAAA");await h.m.save();
+ assert.match(h.element.innerHTML,/different Cinema identity/);assert.match(h.element.innerHTML,/has not been imported yet/);assert.match(h.element.innerHTML,/Leaving this form cancels/);
+ for(let i=0;i<10;i++)await timers.shift()();
+ assert.equal(h.m.state().editor.waitingConnection,false);assert.match(h.element.innerHTML,/Automatic checks paused/);assert.match(h.element.innerHTML,/Try connection again/);assert.equal(timers.length,0);
+ assert.ok(h.requests.every(r=>r.path.endsWith("/sharing/connection")));assert.ok(h.requests.every(r=>JSON.parse(r.options.body).probe===true));
+ await h.m.save();assert.equal(h.m.state().editor.waitingConnection,true);assert.equal(timers.length,1);
+});
+test("editing a waiting invitation cancels its old timer and schedules checks for the new draft",async()=>{
+ const timers=[],cleared=[],h=harness(async()=>reply({network:[],connected:false,connection_error:"sharing_peer_unavailable"}));
+ h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=id=>cleared.push(id);
+ await h.m.open("import");h.m.edit("text","cinema-connect-v1:AAAA");await h.m.save();
+ h.m.edit("text","cinema-connect-v1:BBBB");assert.deepEqual(cleared,[1]);await h.m.save();assert.equal(timers.length,2);
+ const before=h.requests.length;await timers[0]();assert.equal(h.requests.length,before);
+ await timers[1]();assert.equal(h.requests.length,before+1);assert.equal(JSON.parse(h.requests.at(-1).options.body).invitation,"cinema-connect-v1:BBBB");
+});
+test("QR replacement of a waiting invitation clears consent and timer state before the new import",async()=>{
+ const timers=[],cleared=[],h=harness(async()=>reply({network:[],connected:false,connection_error:"sharing_peer_unavailable"}));
+ h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=id=>cleared.push(id);
+ await h.m.open("import");h.m.edit("text","cinema-connect-v1:AAAA");await h.m.save();
+ h.m.qrFinish(h.m.qrBegin(),"cinema-connect-v1:BBBB");
+ assert.deepEqual(cleared,[1]);assert.equal(h.m.state().editor.waitingConnection,false);assert.equal(h.m.state().editor.connection,null);assert.equal(h.m.state().editor.connectionVerified,false);
+ await h.m.save();assert.equal(timers.length,2);assert.equal(JSON.parse(h.requests.at(-1).options.body).invitation,"cinema-connect-v1:BBBB");
+});
+test("connection list observes a new pairing request automatically and stops after account retirement",async()=>{
+ const fresh=exported();fresh.recipient_name="New pairing request";
+ const h=harness(async path=>reply(path.endsWith("/imports")?{imports:[imported()]}:{exports:[fresh],next:null})),timers=[];
+ h.m.state().exports=[];h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=()=>{};h.m.paint();
+ await timers.shift()();assert.match(h.element.innerHTML,/New pairing request/);assert.match(h.element.innerHTML,/Approval needed/);assert.ok(h.requests.every(r=>r.options.method==="GET"));
+ const before=h.requests.length;h.m.retire();for(const fn of timers)await fn();assert.equal(h.requests.length,before);
+});
+test("revoked history pages cannot hide a new pending recipient from initial reads or automatic refresh",async()=>{
+ const revoked=Array.from({length:32},(_,i)=>{const row=exported();row.grant.id=(i+1).toString(16).padStart(8,"0")+"-1111-4111-8111-111111111111";row.grant.state="revoked";row.recipient_name="Old recipient "+i;return row;}),cursor=revoked.at(-1).grant.id;
+ const pending=exported();pending.recipient_name="Newest request";
+ const h=harness(async path=>reply(path.endsWith("/imports")?{imports:[]}:path.includes("?after=")?{exports:[pending],next:null}:{exports:revoked,next:cursor}));
+ const list=await h.m.read("/sharing/exports");assert.equal(list.exports.length,33);assert.equal(list.next,null);
+ h.m.state().exports=list.exports;h.m.paint();assert.match(h.element.innerHTML,/Newest request/);assert.doesNotMatch(h.element.innerHTML,/Old recipient/);
+ h.m.state().exports=[];const timers=[];h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=()=>{};h.m.paint();await timers.shift()();
+ assert.match(h.element.innerHTML,/Newest request/);assert.match(h.element.innerHTML,/Show revoked connections \(32\)/);
 });
 test("network authorization clears the transient API key and never returns it to invitations",async()=>{
  const {m,requests}=harness(async()=>reply({configured:true}));

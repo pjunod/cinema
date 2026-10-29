@@ -3728,6 +3728,11 @@
 .cinema-owned-choice>button{display:block;width:100%;min-height:44px;margin:8px 0;text-align:left}
 #cinema-pair-dialog button{min-height:44px;margin:4px}
 #cinema-pair-dialog canvas{max-width:100%;height:auto}
+.sharing-actions{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 24px}.sharing-actions button{min-height:44px}
+.sharing-peer,.sharing-progress{padding:18px;margin:14px 0;border:1px solid var(--line);border-radius:var(--radius);overflow-wrap:anywhere}.sharing-peer h4{margin:0 0 8px}.sharing-peer p{margin:8px 0 14px}
+.sharing-peer summary,.sharing-advanced summary{cursor:pointer;min-height:44px;padding:12px 0}.sharing-peer details{margin-top:10px}.sharing-peer details button{margin:4px 4px 4px 0}
+.sharing-advanced{border-top:1px solid var(--line);margin-top:24px;padding-top:8px}.sharing-notice{padding:14px;border-left:3px solid var(--accent);background:var(--panel2)}
+.sharing-pairing-code{display:block;font-size:20px;letter-spacing:2px;margin:14px 0;overflow-wrap:anywhere}.sharing-history{display:block;margin:16px 0}
   .sharing-invitation{margin-top:20px;padding:20px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel2)}
 .sharing-qr-image{display:block;width:min(100%,360px);height:auto;background:white;image-rendering:pixelated;margin:16px 0}
 .sharing-invitation summary,.sharing-qr-upload{cursor:pointer;padding:12px 0;min-height:44px}

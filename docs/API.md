@@ -4137,6 +4137,17 @@ including errors, carries `Cache-Control: no-store`.
 | ANY | `/sharing` | Refuse peer traffic on the ordinary listener with `404 sharing_not_found`. |
 | ANY | `/sharing/{*path}` | Refuse every peer path on the ordinary listener with the same typed 404. |
 
+`POST /api/v1/sharing/connection` returns `name`, bounded `network` consent
+links, `connected`, and `connection_error`. With `probe: true`, a failed
+pinned connection returns one fixed code: `sharing_peer_unavailable`,
+`sharing_identity_mismatch`, `sharing_protocol_unsupported`,
+`sharing_peer_auth_failed`, or `sharing_invalid_peer_response`. Consent
+links remain available when verification fails. An unchecked or successful
+probe returns a null error; unchecked `connected: false` is not evidence
+of a failed connection. This route never persists an import. Probe and
+import failures log their phase, fixed code and local correlation UUIDs,
+without invitation secrets, consent URLs or peer credentials.
+
 `GET /api/v1/sharing/endpoints` returns `{ "manifest": null }` before
 initial address setup; a configured manifest contains `revision` and
 `endpoints`. Invitation creation refuses an absent manifest with

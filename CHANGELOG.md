@@ -121,6 +121,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Sharing hides revoked recipients by default, explains pairing and viewer
+  assignment steps, and refreshes incoming requests automatically. Invitation
+  imports verify an existing private connection immediately, show actionable
+  failures with bounded retries, and log connection/import failure codes
+  without exposing invitation secrets or credentials.
+
 - Progressive subtitle translation keeps FFmpeg progress updates out of source
   clock evidence, preventing valid decoded ranges from failing before inference.
 

@@ -98,7 +98,7 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
         if(!groups.has(key)) groups.set(key,{...row,assigned:new Set()});groups.get(key).assigned.add(row.library_id);if(groups.get(key).assigned.size>64) throw new Error("Shared assignments unavailable");}
       if(groups.size>32) throw new Error("Shared assignments unavailable");
       const entries=Array.from(groups.values());
-      paint(entries.length?entries.map((group,index)=>`<section class="card shared-source"><h2>${esc(group.source_name||"Shared source")}</h2><div id="shared-source-${index}">Loading source…</div><div id="shared-continue-${index}"></div></section>`).join(""):"<div class=\"empty\">No shared libraries assigned.</div>");
+      paint(entries.length?entries.map((group,index)=>`<section class="card shared-source"><h2>${esc(group.source_name||"Shared source")}</h2><div id="shared-source-${index}">Loading source…</div><div id="shared-continue-${index}"></div></section>`).join(""):"<div class=\"empty\"><p>No shared libraries assigned to your user yet.</p><p>A Cinema administrator must finish importing the invitation, obtain the other owner’s pairing approval, then assign the shared libraries to your user.</p></div>");
       // Each Source paints independently; one unreachable home cannot delay another.
       let nextGroup=0;
       const loadGroup=async(group,index)=>{

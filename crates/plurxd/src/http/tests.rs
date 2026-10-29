@@ -11461,6 +11461,93 @@ async fn home_previews_are_authenticated_fixed_and_match_library_pages() {
     );
 }
 
+#[tokio::test]
+async fn sharing_connection_probe_reports_failure_preserves_consent_and_does_not_import() {
+    use plurx_core::{
+        config::SharingNetworkConfig,
+        sharing::{ConnectionInvitation, Endpoint, Invitation, NetworkShare, SharingIdentity},
+    };
+    let (_, mut state) = test_app_with_state();
+    state.sharing = Arc::new(crate::sharing::SharingManager::new(
+        state.sharing.key.clone(),
+        crate::test_temp_path(format!("sharing-probe-{}", uuid::Uuid::new_v4())),
+        SharingNetworkConfig {
+            // Missing host custody must fail closed rather than using an
+            // ordinary network route, on every test host.
+            require_host_egress_guard: true,
+            ..Default::default()
+        },
+    ));
+    let app = router(state.clone());
+    let admin = setup_admin(&app).await;
+    let invitation = Invitation {
+        identity: SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: crate::state::clock_ms(),
+        },
+        name: "Synthetic source".into(),
+        endpoints: vec![Endpoint {
+            ipv4: "100.101.102.103"
+                .parse()
+                .expect("synthetic tailnet address"),
+            ipv6: None,
+            ts_fqdn: "source.fixture.ts.net".into(),
+            port: 32443,
+            spki_sha256: "a".repeat(64),
+        }],
+        id: uuid::Uuid::new_v4(),
+        secret: plurx_core::sharing::new_secret().expect("synthetic invitation secret"),
+        expires_at_ms: crate::state::clock_ms() + 60_000,
+    };
+    let consent = "https://login.tailscale.com/admin/invite/synthetic_consent";
+    let combined = ConnectionInvitation {
+        invitation: invitation.encode().expect("synthetic invitation"),
+        network: vec![NetworkShare {
+            ts_fqdn: "source.fixture.ts.net".into(),
+            invite_url: consent.into(),
+        }],
+    }
+    .encode()
+    .expect("synthetic combined invitation");
+    for probe in [false, true] {
+        let (status, response) = call(
+            &app,
+            post(
+                "/api/v1/sharing/connection",
+                Some(&admin),
+                json!({"invitation":combined.expose(),"probe":probe}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["name"], "Synthetic source");
+        assert_eq!(response["connected"], false);
+        assert_eq!(response["network"][0]["invite_url"], consent);
+        assert_eq!(
+            response["connection_error"],
+            if probe {
+                json!("sharing_peer_unavailable")
+            } else {
+                Value::Null
+            },
+            "an attempted connection must distinguish failure from an unchecked invitation"
+        );
+        assert!(state
+            .store
+            .sharing_imports()
+            .await
+            .expect("imports")
+            .is_empty());
+        assert!(state
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("exports")
+            .is_empty());
+    }
+}
+
 /// Runs only in a disposable namespace with an assigned CGNAT fixture IP.
 /// The production endpoint validator, DNS, pinned dialer and both routers
 /// remain in the path. This proves protocol recovery, not Tailscale topology.
