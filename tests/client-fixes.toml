@@ -1,6 +1,86 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Issue #1329: client recovery/status anchors; execution remains in separate receipts.
+[[fixes]]
+id = "subtitles.apple-stopped-operation-recovery"
+commits = ["9996d26f4b57643f097c4b10864ca929353d81a1"]
+source = "clients/apple/Sources/ProgressiveCaptionSession.swift"
+source_anchor = "private func recoverStopped("
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "testStoppedCreateDiscoversUnpreparedOperationAndRequiresExplicitResume"
+
+[[fixes]]
+id = "subtitles.apple-current-core-failure"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "clients/apple/Sources/ProgressiveCaptionModels.swift"
+source_anchor = "func currentFailure(position:"
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "testRecoveredOperationIdentityAndNonretryableCoreStatusStayFenced"
+
+[[fixes]]
+id = "subtitles.android-stopped-operation-recovery"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ProgressiveCaptions.kt"
+source_anchor = "internal fun captionValidateRecovery("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ProgressiveCaptionsTest.kt"
+test_anchor = "stoppedCreateRecoveryRequiresItsExactSourceProfileAndLanguage"
+
+[[fixes]]
+id = "subtitles.android-current-core-failure"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ProgressiveCaptions.kt"
+source_anchor = "internal fun captionCurrentFailure("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ProgressiveCaptionsTest.kt"
+test_anchor = "currentNonretryableFailureDoesNotHideCoverageOrRelevantActiveProgress"
+
+[[fixes]]
+id = "subtitles.web-stopped-operation-recovery"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "async function translationRecoverStopped("
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "stopped Create discovers its exact operation without demand until explicit Resume"
+
+[[fixes]]
+id = "subtitles.web-stopped-operation-identity"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "function translationValidateOperation("
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "stopped Create discovery refuses mismatched observations and stale selection"
+
+[[fixes]]
+id = "subtitles.web-current-core-failure"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "function translationCurrentFailure("
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "current nonretryable range failure preserves coverage and relevant active progress"
+
+# Inherited main fixes for issue #1323; source correspondence, no new execution claim.
+[[fixes]]
+id = "sharing.network-invitation-abandonment"
+commits = ["e94b4f7af012d2e94dd95b5f68484fb14fa3e2f4"]
+source = "crates/plurxd/src/sharing_network.rs"
+source_anchor = "fn abandon_file(path: &Path) -> Result<()> {"
+test = "crates/plurxd/src/sharing_network.rs"
+test_anchor = "abandoned_completed_network_job_keeps_durable_cleanup_intent"
+
+[[fixes]]
+id = "sharing.combined-invitation-automatic-import"
+commits = ["ecba33b56a852a57d00ceb12339ec16e56530f67"]
+source = "crates/plurxd/src/web/pages/sharing-management.js"
+source_anchor = "function sharingScheduleConnection(){"
+test = "tests/web/sharing-management.test.js"
+test_anchor = "combined invitation waits for private consent then imports once automatically"
+
 # Issue #1321: credential sign-in omits reporting while connection recovery retains it.
 [[fixes]]
 id = "apple.sign-in-report-action-removed"
