@@ -1123,7 +1123,6 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
         and receipt.get('source_manifest_kind') == 'reconstructed_from_authenticated_checkout'
         and receipt.get('recipe_compatibility') == RECIPE_COMPATIBILITY
         and receipt.get('build_product_digests') is None
-        and receipt.get('current_build_products_exist') is False
         and isinstance(receipt.get('toolchain_contract'),dict)
         and receipt['toolchain_contract'].get('xcode_output') == TOOLCHAIN
         and receipt['toolchain_contract'].get('swift_path') == SWIFT,
@@ -1138,6 +1137,8 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
     result.update(native_log=native,manifest=entries,expected=expected,observed=observed,
         checkout_path=attestation['workspace'],key=key,tree=tree,receipt_member_sha256=digest(payload['receipt.json']))
     if receipt.get('decision') == 'fresh_execution':
+        require(receipt.get('current_build_products_exist') is None,
+            'Native fresh build-product availability must remain unrecorded')
         observed = parse_native(native,expected,attestation['workspace'])
         result['observed'] = observed
         require(set(payload) == {'receipt.json','fresh-start.json','fresh-finish.json',MEMBER}, 'Native fresh member schema differs')
@@ -1158,6 +1159,7 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
         return (result,result,receipt,attestation) if include_current else result
     require(not require_fresh and receipt.get('decision') == 'retained_prior_execution'
         and receipt.get('current_native_commands_executed') is False
+        and receipt.get('current_build_products_exist') is False
         and set(payload) == {'receipt.json','origin-artifact.zip','origin-job.log','origin-metadata.json',MEMBER},
         'Native origin is not a fresh root (retained-to-retained/cycle refused)')
     require(not any(line.startswith(('DESKTOP-NATIVE-START ','DESKTOP-NATIVE-FINISH ')) for line in result['lines']), 'Retained native job reports a fresh execution')

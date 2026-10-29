@@ -485,7 +485,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             consumer_workflow_sha256=native.digest(native.transformed_workflow(legacy)),
             recipe_compatibility=native.RECIPE_COMPATIBILITY,
             adapter_sha256=native.digest(b'adapter'),policy_sha256=native.policy_fingerprint(),checkout_attestation=attest,
-            decision='fresh_execution',current_native_commands_executed=True,current_build_products_exist=False,history={'pagination_complete':True},
+            decision='fresh_execution',current_native_commands_executed=True,current_build_products_exist=None,history={'pagination_complete':True},
             observed=native.parse_native(self.native,self.expected,WORK),native_log_sha256=native.digest(self.native),
             execution_origin={'commit':commit,'tree':tree,'run':rid,'job':jid,'attempt':1,
                 'native_execution_key':key,'native_log_sha256':native.digest(self.native)})
@@ -534,7 +534,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         retained = copy.deepcopy(fresh)
         for name in ('history','observed','native_log_sha256'):retained.pop(name)
         retained.update(decision='retained_prior_execution',current_native_commands_executed=False,
-            current_run=6200,current_job=62001,execution_origin=native.origin_identity(original))
+            current_run=6200,current_job=62001,current_build_products_exist=False,execution_origin=native.origin_identity(original))
         retained['checkout_attestation'].update(run=6200,job=62001,workspace='/another/checkout')
         metadata = {'run':original['run'],'job':original['job'],'artifact':original['artifact']}
         meta_raw = native.canonical(metadata);retained['attached_metadata_sha256'] = native.digest(meta_raw)
@@ -946,3 +946,52 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             api.runs[RUN]['event_payload']=json.dumps(moved)
             with self.assertRaises(native.receipts.ReceiptError):
                 native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'])
+
+    def test_public_fresh_root_then_retained_preserves_decision_specific_product_contract(self):
+        api,fresh_envelope,payload,fresh,key,legacy,packed=self.v1_fixture()
+        commit=fresh_envelope['run']['commit_sha']
+        self.assertIsNone(fresh['current_build_products_exist'])  # actual run_gate fresh contract
+        retained=copy.deepcopy(fresh)
+        for name in ('history','observed','native_log_sha256'):retained.pop(name)
+        original={**fresh_envelope,'tree':'d'*40,'key':key,'native_log':self.native,
+            'manifest':self.entries,'expected':self.expected,'observed':fresh['observed'],
+            'receipt_member_sha256':native.digest(payload['receipt.json'])}
+        retained.update(decision='retained_prior_execution',current_native_commands_executed=False,
+            current_run=6200,current_job=62001,current_build_products_exist=False,
+            execution_origin=native.origin_identity(original))
+        retained['checkout_attestation'].update(run=6200,job=62001,workspace='/another/checkout')
+        metadata=native.canonical({name:original[name] for name in ('run','job','artifact')})
+        retained['attached_metadata_sha256']=native.digest(metadata)
+        values={'receipt.json':native.canonical(retained),'origin-artifact.zip':fresh_envelope['archive'],
+            'origin-job.log':fresh_envelope['job_log'],'origin-metadata.json':metadata,native.MEMBER:self.native}
+        wrapper={**fresh_envelope,'run':{**fresh_envelope['run'],'id':6200},
+            'job':{**fresh_envelope['job'],'id':62001,'run_id':6200},'archive':packed(values),
+            'lines':['[command]/usr/bin/git log -1 --format=%H',commit,*native.TOOLCHAIN,native.SWIFT,
+                'DESKTOP-NATIVE-CHECKOUT '+native.canonical(retained['checkout_attestation']).decode()]}
+        api.runs[6200]=wrapper['run'];api.runs[RUN]=copy.deepcopy(fresh_envelope['run'])
+        def objects(workspace,*args,**kwargs):
+            if args[-1]==native.PRODUCER+':'+native.WORKFLOW:return legacy
+            return b'd'*40 if args[0]=='rev-parse' else b'adapter'
+        def envelope(api,scope,workspace,rid,*args,**kwargs):
+            return fresh_envelope if rid==6100 else wrapper
+        with mock.patch.object(native,'v1_envelope',side_effect=envelope), \
+             mock.patch.object(native,'manifest',return_value=(self.entries,self.contents)), \
+             mock.patch.object(native,'git',side_effect=objects):
+            actual=native.authenticate_current_result(api,ROOT,commit,6100,61001,1,SCOPE['pr'])
+            self.assertEqual(actual['execution_origin']['run'],6100)
+            result=native.authenticate_current_result(api,ROOT,commit,6200,62001,1,SCOPE['pr'])
+            self.assertEqual(result['current']['run'],6200)
+            self.assertEqual(result['execution_origin']['run'],6100)
+            self.assertEqual(result['observed'],actual['observed'])
+            for decision,wrong_values in (('fresh',(False,True,0,'unknown')),('retained',(None,True,0,'unknown'))):
+                for wrong in wrong_values:
+                    with self.subTest(decision=decision,value=wrong):
+                        if decision=='fresh':
+                            fresh_envelope['archive']=packed({**payload,'receipt.json':native.canonical({**fresh,'current_build_products_exist':wrong})})
+                            rid,jid=6100,61001
+                        else:
+                            wrapper['archive']=packed({**values,'receipt.json':native.canonical({**retained,'current_build_products_exist':wrong})})
+                            rid,jid=6200,62001
+                        with self.assertRaises(native.receipts.ReceiptError):
+                            native.authenticate_current_result(api,ROOT,commit,rid,jid,1,SCOPE['pr'])
+                        fresh_envelope['archive']=packed(payload);wrapper['archive']=packed(values)
