@@ -81,7 +81,7 @@ const SHARED_ARTWORK=(()=>{
       if(contexts.size>=8192)throw new Error("Shared artwork presentation capacity reached");
       ctx=Object.freeze({id:"sa-"+(++serial),key,reference:ref,row,capture:Object.freeze({...proof}),maximum:backdrop?780:300});contexts.set(ctx.id,ctx);latest.set(key,ctx);
     }
-    return `<canvas data-shared-art="${ctx.id}" width="0" height="0" aria-hidden="true" style="${backdrop?"width:100%;max-width:780px;max-height:300px;object-fit:contain":"width:72px;height:108px;object-fit:cover"}"></canvas>`;
+    return `<canvas class="shared-art-${backdrop?"backdrop":"poster"}" data-shared-art="${ctx.id}" width="0" height="0" aria-hidden="true"></canvas>`;
   }
   function dimensions(bytes,mime){
     const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);let width=0,height=0;

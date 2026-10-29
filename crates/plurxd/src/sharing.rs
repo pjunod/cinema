@@ -30,6 +30,7 @@ pub(crate) struct ImportTransportStatus {
 }
 #[derive(Clone, Serialize)]
 pub(crate) struct SharingStatus {
+    pub host_setup: crate::sharing_host::SetupStatus,
     pub source_activation_at_boot: Option<bool>,
     pub source_activation_current: Option<bool>,
     pub listener: &'static str,
@@ -64,6 +65,8 @@ pub(crate) struct SharingManager {
     pub(crate) receiver_starts: crate::http::shared_receiver_playback::ReceiverStartRegistry,
     pub key: Arc<CredentialKey>,
     pub network: SharingNetworkConfig,
+    automatic_egress: RwLock<Option<std::net::IpAddr>>,
+    host_egress_guard: std::sync::atomic::AtomicBool,
     key_directory: PathBuf,
     status: RwLock<SharingStatus>,
     lifetime: Mutex<Option<CancellationToken>>,
@@ -280,7 +283,10 @@ impl SharingManager {
             accepted_drivers: Default::default(),
             key,
             key_directory,
+            automatic_egress: RwLock::new(None),
+            host_egress_guard: std::sync::atomic::AtomicBool::new(false),
             status: RwLock::new(SharingStatus {
+                host_setup: Default::default(),
                 source_activation_at_boot: None,
                 source_activation_current: None,
                 listener: "not_started",
@@ -367,10 +373,66 @@ impl SharingManager {
         lifetime.as_ref().expect("new sharing lifetime").clone()
     }
     pub fn egress(&self) -> PinnedEgress {
+        #[cfg(unix)]
+        // SAFETY: geteuid has no pointer arguments or side effects.
+        let privileged_source = unsafe { libc::geteuid() } == 0;
+        #[cfg(not(unix))]
+        let privileged_source = true;
+        if self.network.require_host_egress_guard
+            && (privileged_source
+                || !self
+                    .host_egress_guard
+                    .load(std::sync::atomic::Ordering::Acquire))
+        {
+            // This hosting profile has not yet established its concrete
+            // private route. Never send a socket through an unguarded bridge.
+            return PinnedEgress::LocalAddress(std::net::IpAddr::V4(
+                std::net::Ipv4Addr::UNSPECIFIED,
+            ));
+        }
+        // The historical default names a Linux interface. Native non-Linux
+        // hosts discover their own Tailnet source address instead; explicit
+        // local-address and alternative interface choices remain authoritative.
+        if !cfg!(target_os = "linux")
+            && matches!(&self.network.egress, SharingEgressConfig::Interface { name } if name == "tailscale0")
+        {
+            return PinnedEgress::LocalAddress(
+                self.automatic_egress
+                    .read()
+                    .expect("automatic sharing egress")
+                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+            );
+        }
         match &self.network.egress {
             SharingEgressConfig::Interface { name } => PinnedEgress::Interface(name.clone()),
             SharingEgressConfig::LocalAddress { address } => PinnedEgress::LocalAddress(*address),
         }
+    }
+    pub(crate) fn host_directory(&self) -> PathBuf {
+        self.key_directory
+            .parent()
+            .expect("node TLS directory parent")
+            .join("sharing-host")
+    }
+    pub(crate) fn observe_host_setup(
+        &self,
+        setup: crate::sharing_host::SetupStatus,
+        ip: Option<std::net::IpAddr>,
+        guard: bool,
+    ) {
+        self.host_egress_guard
+            .store(guard, std::sync::atomic::Ordering::Release);
+        *self
+            .automatic_egress
+            .write()
+            .expect("automatic sharing egress") = ip;
+        let mut status = self.status.write().expect("sharing status lock");
+        status.serve = if setup.state == crate::sharing_host::SetupState::Ready {
+            "configured"
+        } else {
+            "unknown"
+        };
+        status.host_setup = setup;
     }
     fn listener_status(&self, status: &'static str) {
         self.status.write().expect("sharing status lock").listener = status;

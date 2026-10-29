@@ -380,3 +380,27 @@ test("QR camera permission arriving after page retirement stops every camera tra
  const pending=h.m.qrScan();h.m.retire();release({getTracks:()=>[{stop(){stopped++;}},{stop(){stopped++;}}]});await pending;
  assert.equal(stopped,2);assert.equal(h.m.state(),null);assert.equal(h.requests.length,0);
 });
+
+test("automatic host setup reports required action without claiming peer reachability",()=>{
+ const h=harness();
+ const status={listener:"listening",certificate:{spki_sha256:endpoint.spki_sha256},address_manifest:null,host_setup:{state:"sign_in_required",message:"Open Tailscale on this host and sign in."}};
+ const html=h.m.panel({...h.data,sharingStatus:status});
+ assert.match(html,/Open Tailscale on this host and sign in/);assert.match(html,/No router configuration is needed/);assert.match(html,/Advanced addresses/);assert.match(html,/Cinema is preparing this host/);assert.doesNotMatch(html,/Host setup is configured/);
+ const ready=h.m.panel({...h.data,sharingStatus:{...status,address_manifest:{revision:1n,endpoints:[endpoint]},host_setup:{state:"ready",message:"Private host setup is configured."}}});
+ assert.match(ready,/Pair another Cinema to verify its access and certificate/);assert.doesNotMatch(ready,/set up Tailscale and TCP Serve on each serving host first/);
+});
+
+test("setup polling stops on readiness and retires without replaying writes",async()=>{
+ const h=harness(async(path)=>reply(path.endsWith("endpoints")?{manifest:{revision:1n,endpoints:[endpoint]}}:{listener:"listening",host_setup:{state:"ready",message:"Private host setup is configured."}}));
+ const timers=[],cleared=[];h.c.setTimeout=fn=>{timers.push(fn);return timers.length;};h.c.clearTimeout=id=>cleared.push(id);
+ h.m.panel({...h.data,sharingStatus:{listener:"listening",host_setup:{state:"pending",message:"Setting up…"}}});assert.equal(timers.length,1);
+ await timers[0]();assert.equal(h.m.state().status.host_setup.state,"ready");assert.equal(timers.length,1);assert.ok(h.requests.every(r=>r.options.method==="GET"));
+ h.m.panel({...h.data,sharingStatus:{host_setup:{state:"permission_required",message:"Host permission is required."}}});assert.equal(timers.length,2);
+ h.m.retire();assert.deepEqual(cleared,[2]);const count=h.requests.length;await timers[1]();assert.equal(h.requests.length,count);assert.equal(h.m.state(),null);
+});
+
+test("unavailable peer explains setup and stale invitations without replaying the import",async()=>{
+ const h=harness(async()=>reply({code:"sharing_peer_unavailable",error:"sharing peer unavailable"},502));
+ await assert.rejects(h.m.request("/sharing/imports",{method:"POST",body:{invitation:"test"}}),error=>error.code==="sharing_peer_unavailable"&&/Check both Cinemas/.test(error.message)&&/fresh invitation/.test(error.message));
+ assert.equal(h.requests.length,1);assert.equal(h.requests[0].options.method,"POST");
+});

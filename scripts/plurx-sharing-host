@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""Fixed-purpose Tailscale reconciler, installed on the host outside Docker.
+
+Registration is a local installer operation. Daemon requests contain no
+commands, paths, ports or targets that this worker is allowed to execute.
+"""
+from __future__ import annotations
+import argparse
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import shlex
+import signal
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+LIMIT = 1024 * 1024
+TARGET = "127.0.0.1:32444"
+PINNED_PORT = "32443"
+STATES = {"disabled", "ready", "tailscale_missing", "sign_in_required",
+          "permission_required", "port_conflict", "deployment_required", "unavailable"}
+
+
+class SetupError(Exception):
+    def __init__(self, state):
+        self.state = state
+        super().__init__(state)
+
+
+def run(argv, timeout=15):
+    """No shell, inherited stdin, unbounded output, or unrelated child signals."""
+    process = subprocess.Popen(list(map(str, argv)), stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               start_new_session=True)
+    data = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as poll:
+            poll.register(process.stdout, selectors.EVENT_READ)
+            while poll.get_map():
+                if time.monotonic() >= deadline:
+                    raise SetupError("unavailable")
+                for key, _ in poll.select(min(.2, max(0, deadline - time.monotonic()))):
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        poll.unregister(key.fileobj)
+                    data.extend(chunk)
+                    if len(data) > LIMIT:
+                        raise SetupError("unavailable")
+            code = process.wait(timeout=max(.01, deadline - time.monotonic()))
+            if code:
+                raise SetupError("permission_required")
+            return bytes(data)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        process.stdout.close()
+
+
+def trusted_program(candidates):
+    for name in candidates:
+        path = Path(name).resolve()
+        try:
+            metadata = path.stat()
+        except FileNotFoundError:
+            continue
+        if (stat.S_ISREG(metadata.st_mode) and metadata.st_uid in (0, os.geteuid())
+                and not metadata.st_mode & 0o022):
+            return str(path)
+    raise SetupError("tailscale_missing")
+
+
+def read_json_at(directory, name, owners):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    try:
+        metadata = os.fstat(fd)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size > LIMIT
+                or metadata.st_uid not in owners or metadata.st_mode & 0o022):
+            raise SetupError("unavailable")
+        with os.fdopen(fd, "rb", closefd=False) as source:
+            data = source.read(LIMIT + 1)
+        if len(data) > LIMIT:
+            raise SetupError("unavailable")
+        return json.loads(data)
+    finally:
+        os.close(fd)
+
+
+def write_json_at(directory, name, value, mode=0o644):
+    temporary = name + "." + uuid.uuid4().hex
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 mode, dir_fd=directory)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as target:
+            target.write(json.dumps(value, separators=(",", ":")).encode())
+            target.flush()
+            os.fsync(fd)
+        os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
+def address_from_status(status):
+    if status.get("BackendState") != "Running":
+        raise SetupError("sign_in_required")
+    node = status.get("Self") or {}
+    ips = [ipaddress.ip_address(value) for value in node.get("TailscaleIPs", [])]
+    ipv4 = next((str(ip) for ip in ips if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10")), None)
+    ipv6 = next((str(ip) for ip in ips if ip.version == 6 and ip in ipaddress.ip_network("fd7a:115c:a1e0::/48")), None)
+    name = node.get("DNSName", "").rstrip(".")
+    if not ipv4 or len(name) > 253 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.ts\.net", name):
+        raise SetupError("unavailable")
+    if any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part) for part in name.split(".")):
+        raise SetupError("unavailable")
+    return {"ipv4": ipv4, "ipv6": ipv6, "ts_fqdn": name}
+
+
+def serve_rule(config):
+    if any(key.endswith(":" + PINNED_PORT) and value is True
+           for key, value in (config.get("AllowFunnel") or {}).items()):
+        return "conflict"
+    for foreground in (config.get("Foreground") or {}).values():
+        if PINNED_PORT in (foreground.get("TCP") or {}):
+            return "conflict"
+    rule = (config.get("TCP") or {}).get(PINNED_PORT)
+    if rule is None:
+        return "missing"
+    return "ours" if rule == {"TCPForward": TARGET} else "conflict"
+
+
+def validate_request(request, now):
+    fields = {"schema_version", "generation", "node_id", "enabled", "checked_at_ms",
+              "listener_profile", "listener_address", "container_egress"}
+    if not isinstance(request, dict) or set(request) != fields or request["schema_version"] != 1:
+        raise SetupError("unavailable")
+    if type(request["enabled"]) is not bool or type(request["checked_at_ms"]) is not int:
+        raise SetupError("unavailable")
+    if not -5000 <= now - request["checked_at_ms"] <= 15000:
+        raise SetupError("unavailable")
+    if str(uuid.UUID(request["generation"])) != request["generation"]:
+        raise SetupError("unavailable")
+    if not isinstance(request["node_id"], str) or not 1 <= len(request["node_id"]) <= 128:
+        raise SetupError("unavailable")
+
+
+def container_uid(container):
+    uid = int(container["Config"].get("User", "0").split(":")[0] or "0")
+    security = container.get("HostConfig") or {}
+    if uid <= 0 or security.get("Privileged") or security.get("CapAdd"):
+        raise SetupError("deployment_required")
+    return uid
+
+
+def validate_container(container, registration, request):
+    if container_uid(container) != registration["source_uid"]:
+        raise SetupError("deployment_required")
+    labels = container["Config"].get("Labels") or {}
+    if (labels.get("com.docker.compose.project") != registration["project"]
+            or labels.get("com.docker.compose.service") != "plurxd"
+            or not container["State"]["Running"]):
+        raise SetupError("deployment_required")
+    if not any(m["Source"] == registration["data_dir"] and m["Destination"] == registration["container_data_dir"]
+               for m in container["Mounts"]):
+        raise SetupError("deployment_required")
+    if request["listener_profile"] != "docker_bridge":
+        raise SetupError("deployment_required")
+    address = ipaddress.ip_address(request["container_egress"])
+    private = any(address in ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")) if address.version == 4 else False
+    networks = list(container["NetworkSettings"]["Networks"].values())
+    selected = next((n for n in networks if n.get("IPAddress") == str(address)), None)
+    if (not private or not selected or not (selected.get("IPAMConfig") or {}).get("IPv4Address") == str(address)
+            or any(n is not selected and n.get("GwPriority", 0) >= selected.get("GwPriority", 0) for n in networks)):
+        raise SetupError("deployment_required")
+    if request["listener_address"] not in ("0.0.0.0:32444", str(address) + ":32444"):
+        raise SetupError("deployment_required")
+    ports = container["NetworkSettings"]["Ports"].get("32444/tcp")
+    if ports != [{"HostIp": "127.0.0.1", "HostPort": "32444"}]:
+        raise SetupError("deployment_required")
+
+
+def host_tunnel_ready():
+    return Path("/sys/class/net/tailscale0").is_dir()
+
+
+def guard_is_first(output, rule):
+    lines = [shlex.split(line) for line in output.decode("ascii").splitlines() if line.startswith("-A ")]
+    expected = ["-A", *rule]
+    return bool(lines) and lines[0] in (expected, [*expected, "--reject-with", "icmp-port-unreachable"])
+
+
+def docker_user_is_first(output):
+    lines = [shlex.split(line) for line in output.decode("ascii").splitlines() if line.startswith("-A ")]
+    return bool(lines) and lines[0] == ["-A", "FORWARD", "-j", "DOCKER-USER"]
+
+
+class Worker:
+    def __init__(self, registration, state_directory, execute=run, now=lambda: int(time.time() * 1000)):
+        self.registration, self.execute, self.now = registration, execute, now
+        self.state_directory = Path(state_directory)
+
+    def cli_json(self, program, args):
+        return json.loads(self.execute([program, *args]))
+
+    def ensure_private_egress(self, request, revalidate):
+        if self.registration["kind"] != "docker":
+            return
+        if not self.registration.get("private_egress_guard"):
+            raise SetupError("deployment_required")
+        # Only this verified container's Tailnet destinations are affected.
+        # A route disappearing cannot move its private requests onto the WAN.
+        rule = ["DOCKER-USER", "-s", str(ipaddress.ip_address(request["container_egress"])) + "/32",
+                "-d", "100.64.0.0/10", "!", "-o", "tailscale0", "-j", "REJECT"]
+        program = self.registration["iptables"]
+        if not docker_user_is_first(self.execute([program, "-w", "5", "-S", "FORWARD"])):
+            raise SetupError("deployment_required")
+        if not guard_is_first(self.execute([program, "-w", "5", "-S", "DOCKER-USER"]), rule):
+            revalidate()
+            self.execute([program, "-w", "5", "-I", rule[0], "1", *rule[1:]])
+            if not guard_is_first(self.execute([program, "-w", "5", "-S", "DOCKER-USER"]), rule):
+                raise SetupError("unavailable")
+
+    def reconcile(self, request, revalidate=lambda: None):
+        self.egress_guard = False
+        validate_request(request, self.now())
+        marker = self.state_directory / "serve-owned.json"
+        owned = False
+        try:
+            with marker.open() as source:
+                owned = json.load(source) == {"port": 32443, "target": TARGET, "node_id": request["node_id"]}
+        except FileNotFoundError:
+            pass
+        if not request["enabled"] and not owned:
+            return "disabled", None
+        if request["enabled"]:
+            if self.registration["kind"] == "docker":
+                container = self.cli_json(self.registration["docker"], ["--host", "unix:///var/run/docker.sock", "inspect", self.registration["container"]])[0]
+                validate_container(container, self.registration, request)
+            elif request["listener_profile"] != "host_loopback" or request["listener_address"] != TARGET:
+                raise SetupError("deployment_required")
+            self.ensure_private_egress(request, revalidate)
+            self.egress_guard = self.registration["kind"] == "docker"
+        program = trusted_program(["/usr/bin/tailscale", "/usr/local/bin/tailscale"])
+        address = address_from_status(self.cli_json(program, ["status", "--json", "--peers=false"])) if request["enabled"] else None
+        if request["enabled"] and self.registration["kind"] == "docker" and not host_tunnel_ready():
+            raise SetupError("deployment_required")
+        rule = serve_rule(self.cli_json(program, ["serve", "status", "--json"]))
+        if request["enabled"]:
+            if rule == "conflict":
+                raise SetupError("port_conflict")
+            if rule == "missing":
+                revalidate()
+                directory = os.open(self.state_directory, os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    write_json_at(directory, marker.name, {"port": 32443, "target": TARGET, "node_id": request["node_id"]}, 0o600)
+                finally:
+                    os.close(directory)
+                self.execute([program, "serve", "--bg", "--tcp=32443", "tcp://" + TARGET])
+                if serve_rule(self.cli_json(program, ["serve", "status", "--json"])) != "ours":
+                    raise SetupError("unavailable")
+            return "ready", address
+        if rule == "conflict":
+            raise SetupError("port_conflict")
+        if rule == "ours":
+            revalidate()
+            self.execute([program, "serve", "--tcp=32443", "off"])
+        marker.unlink(missing_ok=True)
+        return "disabled", None
+
+    def tick(self):
+        root = os.open(self.registration["data_dir"], os.O_DIRECTORY | os.O_NOFOLLOW)
+        directory = None
+        try:
+            metadata = os.fstat(root)
+            if [metadata.st_dev, metadata.st_ino] != self.registration["data_identity"]:
+                raise SetupError("deployment_required")
+            directory = os.open("sharing-host", os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+            metadata = os.fstat(directory)
+            if metadata.st_uid != self.registration["source_uid"] or metadata.st_mode & 0o077:
+                raise SetupError("unavailable")
+            request = read_json_at(directory, "request.json", [self.registration["source_uid"]])
+            validate_request(request, self.now())
+            def revalidate():
+                current = read_json_at(directory, "request.json", [self.registration["source_uid"]])
+                validate_request(current, self.now())
+                if {k: v for k, v in current.items() if k != "checked_at_ms"} != {k: v for k, v in request.items() if k != "checked_at_ms"}:
+                    raise SetupError("unavailable")
+            try:
+                state, address = self.reconcile(request, revalidate)
+            except SetupError as error:
+                state, address = error.state, None
+            report = {key: request[key] for key in ("schema_version", "generation", "node_id", "enabled")}
+            report.update(checked_at_ms=self.now(), state=state, address=address, egress_guard=self.egress_guard)
+            write_json_at(directory, "report.json", report)
+        finally:
+            if directory is not None:
+                os.close(directory)
+            os.close(root)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--registration", type=Path, required=True)
+    parser.add_argument("--state-directory", type=Path, required=True)
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args(argv)
+    parent = os.open(args.registration.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        registration = read_json_at(parent, args.registration.name, [os.geteuid()])
+    finally:
+        os.close(parent)
+    metadata = args.state_directory.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+        parser.error("The worker state directory must be private and owned by its host account")
+    worker = Worker(registration, args.state_directory)
+    while True:
+        try:
+            worker.tick()
+        except (SetupError, OSError, ValueError, KeyError, TypeError):
+            # Never disclose raw daemon input, host paths, environment or CLI output.
+            if args.once:
+                return 1
+        if args.once:
+            return 0
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
