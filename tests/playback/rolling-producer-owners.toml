@@ -1,3 +1,14 @@
+# Live TV upload regression ownership review (PR #1312, 2026-10-28;
+# Rust source 9c5aa95df): +2 namespaced timers are the awaited five-second
+# fixture observation deadline and its five-millisecond poll. Neither starts
+# a task, child, detached timer, repair owner or producer authority. The test
+# owns its loopback PutSink and HTTP streams; the segment body is completed
+# and its response drained before the fixture ends. The existing PutSink
+# Drop closes the receiver and aborts its acceptor.
+# +1 launch-shaped match is reqwest::Response::status(), an HTTP assertion
+# that starts no process. Structural patterns, roots, exact equality and
+# forbidden-shape zeroes remain unchanged.
+
 # DV title analysis ownership review (PR #1301, 2026-10-28; source 7d2d4a9c7):
 # +1 namespaced task and +1 Command are DvTitleRide's companion scanner.
 # build_attested_pass retains DvTitleScan through the index pass and finish;
@@ -4953,7 +4964,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1899
+expected_occurrences = 1901
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6082,7 +6093,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in-process responses, while the finite FFmpeg fixture is explicitly awaited.
 # Main's HTTPS admin/transport/startup owners and source/status reads remain in
 # the source scan; none changes launch authorization.
-expected_occurrences = 808
+expected_occurrences = 809
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
