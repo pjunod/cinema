@@ -4,11 +4,15 @@
 async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retained_output() {
     use plurx_core::playback::candidate::CandidateRoute;
     use plurx_core::store::background_jobs::*;
+    eprintln!("automatic static fixture: entered original fixture body");
     testfixtures::require_ffmpeg();
     let base = crate::test_tempdir().expect("automatic encoded preparation");
     let path = base.path().join("source.mkv");
+    eprintln!("automatic static fixture: before actual media fixture construction");
     std::fs::copy(testfixtures::source_with_eac3_audio(), &path).expect("owned source");
+    eprintln!("automatic static fixture: actual media fixture returned");
     let preliminary = media_file_at(path.clone(), 12_000);
+    eprintln!("automatic static fixture: before original held-source open and probe");
     let source = crate::fragment_index_cluster::open_source_fence(&preliminary, None)
         .await
         .expect("held source");
@@ -20,6 +24,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     .expect("real probe");
     let probe =
         plurx_core::scan::probe::parse_probe_json(&serde_json::from_str(&raw).expect("probe JSON"));
+    eprintln!("automatic static fixture: actual held-source probe returned");
     let mut config = plurx_core::config::Config::default();
     config.storage.data_dir = base.path().join("database");
     let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("fixture Raft port");
@@ -28,9 +33,11 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     config.cluster.api_bind = api.local_addr().expect("fixture API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
+    eprintln!("automatic static fixture: before original Store selector");
     let mut selected_store = crate::sharing_fixture_clock::select_applied_singleton(&config)
         .await
         .expect("actual selected singleton");
+    eprintln!("automatic static fixture: original Store selector returned");
     assert!(
         Box::pin(selected_store.prepare_source_schema_before_serving())
             .await
@@ -292,18 +299,16 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     );
     drop(legacy);
     assert_eq!(compatibility_pool.snapshot(), compatibility_baseline);
-    assert!(
-        manager
-            .produce_encoded_output_job(
-                &file,
-                controller.job(),
-                fence.clone(),
-                deadline,
-                observation
-            )
-            .await
-            .expect("same original automatic owner resumes under zero policy")
-    );
+    assert!(manager
+        .produce_encoded_output_job(
+            &file,
+            controller.job(),
+            fence.clone(),
+            deadline,
+            observation
+        )
+        .await
+        .expect("same original automatic owner resumes under zero policy"));
     assert_eq!(
         compatibility_pool.snapshot(),
         compatibility_baseline,

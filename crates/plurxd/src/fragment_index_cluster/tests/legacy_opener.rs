@@ -187,21 +187,41 @@ async fn lost_legacy_waiter(after_metadata: bool) {
         .expect("actual native phase returns");
     // The genuine File/Metadata result now has no consumer. The existing
     // Retained carrier disposes its value before its same original keeper.
+    // Arc reaches strong=0 before FragmentAdmission finishes dropping its
+    // permit, heavy gate and restart admission fields. Weak exhaustion alone
+    // is therefore not a barrier for observing those real accounting books.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while original.upgrade().is_some() {
+        loop {
+            let original_gone = original.upgrade().is_none();
+            let (pool, heavy) = manager.original_legacy_drain_counts();
+            let admissions = serving.restart_drain_status(0).await.admissions_in_flight;
+            if original_gone && pool.software_used == 0 && !heavy && admissions == 0 {
+                break;
+            }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("same job and unclaimed result dispose original keeper");
+    .expect("same job/result dispose original keeper and all its accounting fields");
     let (pool, heavy) = manager.original_legacy_drain_counts();
     assert_eq!(pool.software_used, 0);
     assert!(!heavy);
     assert_unknown(&serving, 0).await;
-    assert!(
-        manager.admit_fragment().await.is_none(),
-        "worker/result disposal cannot clear Unknown"
-    );
+    // The original uncertainty stays sticky for restart, while ordinary
+    // intake can use capacity once that operation's actual permits are gone.
+    let replacement = manager
+        .admit_fragment()
+        .await
+        .expect("normal intake resumes after the original permits actually dispose");
+    assert!(original.upgrade().is_none());
+    let (pool, heavy) = manager.original_legacy_drain_counts();
+    assert!(pool.software_used > 0 && heavy);
+    assert_unknown(&serving, 1).await;
+    drop(replacement);
+    let (pool, heavy) = manager.original_legacy_drain_counts();
+    assert_eq!(pool.software_used, 0);
+    assert!(!heavy);
+    assert_unknown(&serving, 0).await;
 }
 
 #[tokio::test]

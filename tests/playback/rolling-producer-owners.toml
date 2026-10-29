@@ -3341,7 +3341,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
-expected_occurrences = 1085
+# Source HTTP fixture Store setup adds one blocking join bridge and one
+# owned 8 MiB std thread, positively joined before returning the real Store.
+# Both use the original runtime; Source worker stacks remain unchanged.
+# This is test-only pre-R bootstrap, not a new media producer or close proof.
+expected_occurrences = 1086
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3587,7 +3591,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # threads relocate existing decode_facts workers. Title ride.spawn is an owned Rust helper
 # invocation. Remaining delta is bounded test launch sites, not independent production
 # authority.
-expected_occurrences = 84
+# Source HTTP fixture Store setup adds one blocking join bridge and one
+# owned 8 MiB std thread, positively joined before returning the real Store.
+# Both use the original runtime; Source worker stacks remain unchanged.
+# This is test-only pre-R bootstrap, not a new media producer or close proof.
+expected_occurrences = 85
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6202,7 +6210,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # threads, custodied process launch, and test child/status calls. Each actual changed
 # production launch remains in its original registered/admitted owner; these totals do not
 # equate every output/status match with an OS launch.
-expected_occurrences = 832
+# Source HTTP fixture Store setup adds one blocking join bridge and one
+# owned 8 MiB std thread, positively joined before returning the real Store.
+# Both use the original runtime; Source worker stacks remain unchanged.
+# This is test-only pre-R bootstrap, not a new media producer or close proof.
+expected_occurrences = 833
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

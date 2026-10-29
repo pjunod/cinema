@@ -2445,6 +2445,59 @@ fn real_source_start_fixture_at(
     ))
 }
 #[cfg(test)]
+fn source_http_fixture_store(
+    config: plurx_core::config::Config,
+    startup_clock: Option<std::sync::Arc<crate::StartupObservationHttp>>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    plurx_core::cluster::migration::SelectedStore,
+                    plurx_core::error::StoreError,
+                >,
+            > + Send,
+    >,
+> {
+    Box::pin(async move {
+        // Only pre-R Store setup gets the existing fixture debug-frame
+        // allowance. Construct AND poll the selector on this owned thread,
+        // using the ORIGINAL runtime for its tasks, timers and I/O.
+        let runtime = tokio::runtime::Handle::current();
+        let bootstrap = std::thread::Builder::new()
+            .name("source-http-fixture-store-bootstrap".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                runtime.block_on(Box::pin(async move {
+                    if let Some(clock) = startup_clock {
+                        Box::pin(
+                            plurx_core::cluster::migration::select_daemon_store_observing(
+                                &config,
+                                Some(clock.as_ref()),
+                            ),
+                        )
+                        .await
+                    } else {
+                        crate::sharing_fixture_clock::select_applied_singleton(&config).await
+                    }
+                }))
+            })
+            .expect("owned Source HTTP fixture Store bootstrap thread");
+        // The current-thread runtime must keep driving I/O while setup runs.
+        // This bridge owns and positively joins the SAME setup thread, with
+        // no cancellable await inside the bridge and no replacement runtime.
+        let mut joined = tokio::task::spawn_blocking(move || match bootstrap.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        });
+        match (&mut joined).await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => panic!("owned Source HTTP Store join bridge cancelled: {error}"),
+        }
+    })
+}
+
+#[cfg(test)]
 async fn build_real_source_start_fixture(
     mode: SourceFixtureMode,
     recipient_server_id: Option<Uuid>,
@@ -2452,7 +2505,6 @@ async fn build_real_source_start_fixture(
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealSourceStartFixture {
     use plurx_core::{
-        cluster::migration::select_daemon_store_observing,
         config::Config,
         domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
         sharing::{new_secret, secret_hash, InvitationRecord, SecretDomain, ShareClaim, SourceId},
@@ -2479,12 +2531,9 @@ async fn build_real_source_start_fixture(
     let startup_clock =
         advertised_http.map(|address| Arc::new(crate::StartupObservationHttp::new(address)));
     eprintln!("real Source HTTP fixture: before original Store selector");
-    let mut selected = if let Some(clock) = &startup_clock {
-        Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
-    } else {
-        crate::sharing_fixture_clock::select_applied_singleton(&config).await
-    }
-    .expect("actual one voter");
+    let mut selected = source_http_fixture_store(config.clone(), startup_clock.clone())
+        .await
+        .expect("actual one voter");
     eprintln!("real Source HTTP fixture: original Store selector returned");
     selected
         .store
