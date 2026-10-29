@@ -2446,7 +2446,7 @@ assert.equal(context.ACT_TIMER, null);
                     reauthentication_name = "Reauthenticate original native cases before executing the pending selection"
                     reauthentication = steps[reauthentication_name]
                     self.assertEqual(workflow_step_scalar(reauthentication, "run"),
-                                     "python3 -m validation.native_receipts --verify-tv-plan")
+                                     "python3 -m validation.native_receipts --verify-tv-plan --family tv_navigation")
                     self.assertIn("GITHUB_TOKEN: ${{ github.token }}", reauthentication)
                     step_order = list(steps)
                     self.assertLess(step_order.index("Compile iOS and tvOS without running simulator tests"),
