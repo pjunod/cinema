@@ -341,16 +341,18 @@ test("invitation copy confirms the exact secret or offers manual selection witho
 
 test("sharing QR codes round trip the exact invitation including maximum capacity and retain a quiet zone",()=>{
  const h=harness();
- for(const length of [120,1300,2331]){
-  const text="cinema-share-v1:"+"a".repeat(length-16),qr=h.m.qrMatrix(text),scale=4,width=(qr.size+8)*scale,pixels=new Uint8ClampedArray(width*width*4).fill(255);
-  for(let y=0;y<qr.size;y++)for(let x=0;x<qr.size;x++)if(qr.getModule(x,y))for(let dy=0;dy<scale;dy++)for(let dx=0;dx<scale;dx++){
-   const offset=(((y+4)*scale+dy)*width+(x+4)*scale+dx)*4;pixels[offset]=pixels[offset+1]=pixels[offset+2]=0;
+ for(const prefix of ["cinema-share-v1:","cinema-connect-v1:"]){
+  for(const length of [120,1300,2331]){
+   const text=prefix+"a".repeat(length-prefix.length),qr=h.m.qrMatrix(text),scale=4,width=(qr.size+8)*scale,pixels=new Uint8ClampedArray(width*width*4).fill(255);
+   for(let y=0;y<qr.size;y++)for(let x=0;x<qr.size;x++)if(qr.getModule(x,y))for(let dy=0;dy<scale;dy++)for(let dx=0;dx<scale;dx++){
+    const offset=(((y+4)*scale+dy)*width+(x+4)*scale+dx)*4;pixels[offset]=pixels[offset+1]=pixels[offset+2]=0;
+   }
+   assert.equal(h.c.jsQR(pixels,width,width).data,text);
   }
-  assert.equal(h.c.jsQR(pixels,width,width).data,text);
+  assert.throws(()=>h.m.qrMatrix(prefix+"x".repeat(2331)),/too large/);
+  assert.throws(()=>h.m.qrMatrix(prefix+"abc\n"),/valid Cinema invitation/);
  }
- assert.throws(()=>h.m.qrMatrix("cinema-share-v1:"+"x".repeat(2331)),/too large/);
  assert.throws(()=>h.m.qrMatrix("https://other.example/"),/valid Cinema invitation/);
- assert.throws(()=>h.m.qrMatrix("cinema-share-v1:abc\n"),/valid Cinema invitation/);
 });
 test("sharing QR result defaults to the image with collapsed text and PNG export",async()=>{
  const h=harness();const invitation={id,invitation:"cinema-share-v1:secret",qrImage:"data:image/png;base64,cG5n"};h.m.state().invitation=invitation;

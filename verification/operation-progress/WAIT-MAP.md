@@ -4,6 +4,19 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Sharing host startup — scoped refresh on 2026-10-28
+
+Compared the pinned `main.rs` from `2975dec487d2` with `10f45ae5f`.
+The additions declare sharing host/network modules, expose a host-capability
+probe and start independent sharing loops using the existing cancellation
+token. Table 44's selected `background_work_loop` spawn and its argument are
+unchanged. These sharing loops are outside this selected library-worker model;
+this review adds no fairness, shutdown or liveness claim for them.
+
+Refresh only Table 44's whole-file hash. The exact anchor, model, configurations,
+bounds and historical source anchors stay unchanged. This records source
+correspondence; it does not claim a new formal execution or qualification.
+
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 
 Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.
