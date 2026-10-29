@@ -558,7 +558,8 @@ fn hierarchy_mount_is_unshadowed(
     leaf.strip_prefix(root).ok()?;
     for line in mounts.lines() {
         let (before, _) = line.split_once(" - ")?;
-        let mount = Path::new(before.split_whitespace().nth(4)?);
+        let mount_text = before.split_whitespace().nth(4)?;
+        let mount = Path::new(mount_text);
         if !mount.is_absolute()
             || mount
                 .components()
@@ -568,6 +569,12 @@ fn hierarchy_mount_is_unshadowed(
         }
         if mount == root || !mount.starts_with(root) {
             continue;
+        }
+        // proc mountinfo octal-escapes spaces, tabs, newlines and backslashes.
+        // An undecoded path could hide a relevant bind from comparisons with
+        // the actual member path. Keep this unusual hierarchy Unknown.
+        if mount_text.contains('\\') {
+            return None;
         }
         if leaf.starts_with(mount) {
             return Some(false);
@@ -624,6 +631,20 @@ mod tests {
         assert_eq!(root, std::path::Path::new("/sys/fs/cgroup"));
         assert_eq!(leaf, root.join("system.slice/job"));
         // Parsing paths supplies no native root or membership authority.
+    }
+
+    #[test]
+    fn escaped_mountpoints_cannot_hide_member_ancestry_or_controller_binds() {
+        let root = "41 25 0:32 / /sys/fs/cgroup ro - cgroup2 cgroup2 rw";
+        for mount in [
+            r"/sys/fs/cgroup/team name",
+            r"/sys/fs/cgroup/team name/cpu.max",
+            r"/sys/fs/cgroup/team name/job/cgroup.procs",
+            r"/sys/fs/cgroup/team\name/cpu.max",
+        ] {
+            let mounts = format!("{root}\n42 41 0:32 /other {mount} ro - cgroup2 cgroup2 ro");
+            assert!(unified_path("0::/team name/job\n", &mounts).is_none());
+        }
     }
 
     #[test]
