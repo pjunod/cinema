@@ -637,10 +637,10 @@ mod tests {
     fn escaped_mountpoints_cannot_hide_member_ancestry_or_controller_binds() {
         let root = "41 25 0:32 / /sys/fs/cgroup ro - cgroup2 cgroup2 rw";
         for mount in [
-            r"/sys/fs/cgroup/team name",
-            r"/sys/fs/cgroup/team name/cpu.max",
-            r"/sys/fs/cgroup/team name/job/cgroup.procs",
-            r"/sys/fs/cgroup/team\name/cpu.max",
+            r"/sys/fs/cgroup/team\040name",
+            r"/sys/fs/cgroup/team\040name/cpu.max",
+            r"/sys/fs/cgroup/team\040name/job/cgroup.procs",
+            r"/sys/fs/cgroup/team\134name/cpu.max",
         ] {
             let mounts = format!("{root}\n42 41 0:32 /other {mount} ro - cgroup2 cgroup2 ro");
             assert!(unified_path("0::/team name/job\n", &mounts).is_none());
