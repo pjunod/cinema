@@ -1,8 +1,8 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** ACTIVE · deployed acceptance incomplete · model download/setup passed · artifact-only translation and stopped-session recovery in progress
+**Status:** ACTIVE · repair reviewed · all 18 focused regressions pass · deployed acceptance incomplete
 
-**Date:** 2026-10-25 · **Updated:** 2026-10-28 · **Owner:** Codex /root · **Branch:** `codex/subtitle-artifact-admission`
+**Date:** 2026-10-25 · **Updated:** 2026-10-29 · **Owner:** Codex /root · **Branch:** `codex/subtitle-artifact-admission`
 
 [PR #1309](http://forge.lan:3000/noirr/plurx/pulls/1309) merged as
 `f9074711`, and the maintainer has now deployed `10f45ae5`, which contains it.
@@ -22,18 +22,24 @@ The follow-up separates acquisition from artifact-only inference, uses a
 distinct job kind that older workers cannot claim, and adds append-only
 managed v3 / SQLite v121 resource upgrades. Legacy jobs keep their original
 reader fence and explicit Retry reacquires the original verified input.
-Implementation is written and the pinned workspace/all-target compiler check
-passed. Final adversarial review and focused new regressions remain. The
-maintainer resumed the work from its saved handoff. Previously passing unit
-cases are retained across main updates. The saved patch is preserved on the
-current main base. [Tracking issue #1329](http://forge.lan:3000/noirr/plurx/issues/1329)
-records ownership and merge readiness; no new repair PR has been opened.
+Implementation, the pinned workspace/all-target compiler check, normal
+format/Clippy/syntax hooks and final adversarial review pass. The review found
+one native pagination-status issue, which is fixed and covered by the new
+methods. All 18 focused cases pass: seven new/expanded core, four daemon,
+three Web, two tvOS and two Android cases. This includes a real 40-second
+surround decode. Previously passing cases remain retained across main updates.
+The only integration conflict was adjacent changelog entries; both are kept.
+The unrelated sharing update does not change subtitle source or invalidate
+these passes. The repair PR records its current fast-lane result and merge state; a green
+gate remains required before merge.
+[Tracking issue #1329](http://forge.lan:3000/noirr/plurx/issues/1329) records
+ownership and the current repair branch; the PR carries gate/merge readiness.
 
-A second confirmed client failure is being repaired: Create returns
+A second confirmed deployed client failure occurs when Create returns
 `operation_stopped` for the exact stopped recipe without an operation handle,
-leaving clients unable to offer the existing explicit Resume. The correction
-will return that validated handle, adopt only matching read-only observation,
-and retain explicit fenced Resume.
+leaving clients unable to offer the existing explicit Resume. The candidate
+returns that validated handle, adopts only matching read-only observation,
+and retains explicit fenced Resume.
 
 Fresh-file deployed acceptance now identified a separate concrete decoder
 failure. Source verification of the 5.72 GB test file succeeds, the current
@@ -47,15 +53,15 @@ messages also exhaust its byte cap before the window ends. The correction
 selects frame records before bounded retention, ignores metadata in clock
 parsing, and keeps malformed frame/overflow refusals and process ownership.
 Actual timestamp continuity and the requested anchor pass without loosening
-source-clock validation. The owned
-acceptance operation is stopped and its playback paused after recording the
-failure. Current-core failure reporting is also being corrected so a terminal
-range error does not leave the UI saying it is still processing.
+source-clock validation. The owned acceptance operation was stopped and its
+test tab closed after recording the failure; the user tab is preserved. The
+candidate reports current terminal range errors, including later failure
+pages, instead of leaving the UI saying it is still processing.
 
 On-the-fly generation and physical caption rendering remain unverified.
 The selected Apple TV responds through its existing Companion pairing and
-Cinema launches. The browser test's 2160p HEVC remux route stalled near
-90 seconds; a manual route is being used to isolate caption generation.
+Cinema launches. An earlier 2160p HEVC remux route stalled near 90 seconds; manual playback
+advanced, and the fresh-file Auto route advanced beyond eight minutes.
 This is not a successful moving-playback or native-rendering acceptance result.
 The maintainer owns deployments; no agent deployment or production database
 mutation has occurred.
@@ -63,7 +69,9 @@ mutation has occurred.
 Companion to the [subtitle generation plan](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md)
 and [progressive translation plan](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).
 
-The implementation is built in one owned clone and batched in
+## Earlier completion and qualification evidence
+
+The earlier implementation was built in one owned clone and batched in
 [PR #1292](http://forge.lan:3000/noirr/plurx/pulls/1292), owned by Codex /root.
 The PR records current qualification results, merge blockers and the landing
 receipt. Independent review findings, including final worker and native lifecycle deltas, are resolved. The user owns deployment;
