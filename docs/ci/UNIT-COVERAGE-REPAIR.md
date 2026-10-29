@@ -118,7 +118,11 @@ Only a passing required corpus creates `cov.json` and the success receipt used
 for publication. Source/object mismatches, unexpected feature changes and failed
 commands preserve diagnostic logs but cannot update the badge. Collector guard
 and host-orchestration tests are separate from native execution evidence; the
-final measurement receipt records which corpus actually ran.
+final measurement receipt records which corpus actually ran. Successful badge
+publication places a sanitized `coverage-receipt.json` beside the SVG and
+endpoint JSON, recording the measured source/archive/report identities and
+exact line counters in the same commit. Its visible date comes from the UTC
+measurement timestamp.
 
 ## Additional behavior found by the new tests
 

@@ -50,7 +50,18 @@ jobs:
         run: |
           set -euo pipefail
           pct=$(jq -er '.data[0].totals.lines.percent | select(type == "number" and . >= 0 and . <= 100)' cov.json)
-          measured_on=$(date -u +%F)
+          receipt="$GITHUB_WORKSPACE/target/unit-coverage-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/receipt.json"
+          measured_on=$(python3 - "$receipt" <<'PYTHON'
+          import json
+          import sys
+          from datetime import datetime, timezone
+          with open(sys.argv[1]) as source:
+              timestamp = datetime.fromisoformat(json.load(source)["measured_at_utc"].replace("Z", "+00:00"))
+          if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+              raise ValueError("measurement timestamp must include its timezone")
+          print(timestamp.astimezone(timezone.utc).date().isoformat())
+          PYTHON
+          )
           msg=$(printf '%.1f' "$pct"); int=${msg%.*}
           if   [ "$int" -ge 90 ]; then color=brightgreen; fill='#4c1'
           elif [ "$int" -ge 75 ]; then color=green;       fill='#97ca00'
@@ -62,6 +73,7 @@ jobs:
             --branch badges \
             --alias codex/badges \
             --filename coverage \
+            --receipt "$receipt" \
             --label "unit coverage" \
             --message "${msg}% · ${measured_on} UTC" \
             --fill "$fill" \

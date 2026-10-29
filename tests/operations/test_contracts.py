@@ -2250,7 +2250,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("scripts/publish-badge", publish)
         self.assertIn("--branch badges", publish)
         self.assertIn("--alias codex/badges", publish)
-        self.assertIn("date -u +%F", publish)
+        self.assertIn("measured_at_utc", publish)
+        self.assertIn("astimezone(timezone.utc)", publish)
+        self.assertIn('--receipt "$receipt"', publish)
         self.assertIn('--message "${msg}% · ${measured_on} UTC"', publish)
         self.assertLess(
             coverage.index("Measure line coverage"),
