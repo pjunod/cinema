@@ -2747,34 +2747,153 @@ async fn a_hung_inventory_does_not_stack_and_the_progress_timer_still_ends_the_s
     );
 }
 
-/// A scripted FFmpeg that keeps producing until its scratch is removed: a
-/// new one-second segment every 300 ms, a three-segment window, and the
-/// one deletion-lag segment kept behind it.
+/// The direct fixture child only drains tuner input. Publication is owned by
+/// `AdvancingPublisher`, rather than a detached shell grandchild that survives
+/// the production owner's SIGKILL and reap of this child.
 fn advancing_ffmpeg() -> String {
     r#"for output do playlist="$output"; done
-directory=${playlist%/*}
-(
-n=1
-while :; do
-  printf 'segment-%d' "$n" | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/$(printf 'segment-%06d.ts' "$n")" > /dev/null
-  first=1
-  [ "$n" -gt 2 ] && first=$((n - 2))
-  {
-    printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n' "$first"
-    listed=$first
-    while [ "$listed" -le "$n" ]; do
-      printf '#EXTINF:1.000000,\nsegment-%06d.ts\n' "$listed"
-      listed=$((listed + 1))
-    done
-  } | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$playlist" > /dev/null
-  stale=$((first - 2))
-  [ "$stale" -ge 1 ] && /usr/bin/curl --noproxy '*' -fsS -X DELETE "$directory/$(printf 'segment-%06d.ts' "$stale")" > /dev/null
-  n=$((n + 1))
-  /bin/sleep 0.3
-done
-) &
+printf '%s\n%s\n' "$$" "$playlist" > "${0%/*}/publisher-target"
 exec /bin/cat > /dev/null"#
         .to_owned()
+}
+
+#[cfg(unix)]
+struct AdvancingPublisher {
+    task: Option<tokio::task::JoinHandle<()>>,
+    child_pid: Option<u32>,
+}
+
+#[cfg(unix)]
+impl Drop for AdvancingPublisher {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            // Also covers setup/assertion panics. This task owns no subprocesses.
+            task.abort();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl AdvancingPublisher {
+    fn start(root: PathBuf) -> Self {
+        let task = tokio::spawn(async move {
+            let target = root.join("publisher-target");
+            let deadline = tokio::time::Instant::now() + LIVE_TV_TEST_HANG_GUARD;
+            let (pid, playlist) = loop {
+                if let Ok(text) = std::fs::read_to_string(&target) {
+                    if text.ends_with('\n') {
+                        if let Some((pid, playlist)) = text.trim_end().split_once('\n') {
+                            break (
+                                pid.parse::<u32>().expect("actual fixture child PID"),
+                                playlist.to_owned(),
+                            );
+                        }
+                    }
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "fixture child never declared its upload target"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            assert!(
+                process_exists(pid),
+                "publisher starts for a live owned child"
+            );
+            let directory = playlist
+                .rsplit_once('/')
+                .expect("upload target directory")
+                .0;
+            let client = test_client();
+            let mut n = 1_u64;
+            while process_exists(pid) {
+                let first = n.saturating_sub(2).max(1);
+                let mut body = format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+                for listed in first..=n {
+                    body.push_str(&format!("#EXTINF:1.000000,\nsegment-{listed:06}.ts\n"));
+                }
+                let publish = async {
+                    client
+                        .put(format!("{directory}/segment-{n:06}.ts"))
+                        .timeout(Duration::from_secs(2))
+                        .body(format!("segment-{n}"))
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    client
+                        .put(&playlist)
+                        .timeout(Duration::from_secs(2))
+                        .body(body)
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    if first > 2 {
+                        client
+                            .delete(format!("{directory}/segment-{:06}.ts", first - 2))
+                            .timeout(Duration::from_secs(2))
+                            .send()
+                            .await?
+                            .error_for_status()?;
+                    }
+                    Ok::<(), reqwest::Error>(())
+                }
+                .await;
+                if let Err(error) = publish {
+                    assert!(
+                        !process_exists(pid),
+                        "publication failed while the owned child was still alive: {error}"
+                    );
+                    return;
+                }
+                n += 1;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        });
+        Self {
+            task: Some(task),
+            child_pid: None,
+        }
+    }
+
+    async fn assert_settled(mut self, session: &LiveTvSession) {
+        // Registry retirement alone precedes physical cleanup. Observe the real
+        // worker's cleanup result before asserting reap and publisher completion.
+        tokio::time::timeout(LIVE_TV_TEST_HANG_GUARD, async {
+            loop {
+                let cleanup = session.state.lock().expect("state").cleanup.clone();
+                match cleanup {
+                    Some(Ok(())) => break,
+                    Some(Err(error)) => panic!("fixture session cleanup failed: {error:?}"),
+                    None => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("session physical cleanup settled");
+        let pid = self
+            .child_pid
+            .expect("actual child identity observed before retirement");
+        assert!(
+            !process_exists(pid),
+            "the actual fixture child must be reaped"
+        );
+        assert!(
+            session.process.lock().await.is_none(),
+            "the worker released its reaped process"
+        );
+        tokio::time::timeout(
+            LIVE_TV_TEST_HANG_GUARD,
+            self.task.as_mut().expect("owned publisher"),
+        )
+        .await
+        .expect("publisher stopped after actual child reap")
+        .expect("publisher task succeeded");
+        self.task = None;
+        assert!(
+            !session.directory.exists(),
+            "scratch cleanup preceded fixture retirement"
+        );
+    }
 }
 
 /// One playlist GET, bounded: before plan L-03 every GET took the
@@ -2807,7 +2926,9 @@ async fn session_with_a_hung_ledger_read(
     String,
     Arc<LiveTvSession>,
     u64,
+    AdvancingPublisher,
 ) {
+    let mut publisher = AdvancingPublisher::start(root.to_path_buf());
     let (manager, tuner) = start_path_fixture(root, &advancing_ffmpeg(), 1).await;
     std::fs::write(root.join("probe.json"), PROBED_480).expect("probe answer");
     let request = fixture_request(1);
@@ -2834,6 +2955,29 @@ async fn session_with_a_hung_ledger_read(
     let session = manager
         .session(&provisional.capability)
         .expect("registered session");
+    // During observation the production worker owns Child in a local variable;
+    // session.process is only its later terminal-cleanup transfer slot. The
+    // script's $$ is the same actual PID retained by exec /bin/cat.
+    let declared = std::fs::read_to_string(root.join("publisher-target")).expect("fixture target");
+    let child_pid = declared
+        .lines()
+        .next()
+        .expect("declared child PID")
+        .parse::<u32>()
+        .expect("child PID");
+    assert!(
+        child_pid > 0 && process_exists(child_pid),
+        "actual fixture child is running"
+    );
+    assert!(
+        !publisher
+            .task
+            .as_ref()
+            .expect("owned publisher")
+            .is_finished(),
+        "publisher is live before the ledger read is held"
+    );
+    publisher.child_pid = Some(child_pid);
     let before = manager.session_fence_reads_started.load(Ordering::Acquire);
     manager.hold_session_fence_reads.send_replace(true);
     let deadline = tokio::time::Instant::now() + LIVE_TV_TEST_HANG_GUARD;
@@ -2845,7 +2989,14 @@ async fn session_with_a_hung_ledger_read(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let held = manager.session_fence_reads_started.load(Ordering::Acquire);
-    (manager, tuner, provisional.capability, session, held)
+    (
+        manager,
+        tuner,
+        provisional.capability,
+        session,
+        held,
+        publisher,
+    )
 }
 
 /// Wait for the tuner's lease to renew (the ingest's revision moves on
@@ -2911,7 +3062,7 @@ async fn session_ended_within(
 #[tokio::test]
 async fn a_hung_ledger_read_keeps_the_playlist_advancing_and_its_refusal_still_ends_the_session() {
     let root = crate::test_tempdir().expect("root");
-    let (manager, _tuner, capability, session, held) =
+    let (manager, _tuner, capability, session, held, publisher) =
         session_with_a_hung_ledger_read(root.path()).await;
     let sequence_held = session.state.lock().expect("state").media_sequence;
     let playlist_held = served_playlist(&manager, &capability).await;
@@ -2957,6 +3108,7 @@ async fn a_hung_ledger_read_keeps_the_playlist_advancing_and_its_refusal_still_e
         matches!(&terminal, Some(LiveTvError::CapabilityExpired(message)) if message.contains("no longer authorizes")),
         "{terminal:?}"
     );
+    publisher.assert_settled(&session).await;
 }
 
 /// While the ledger read hangs, the rest of the running fence must not
@@ -2968,7 +3120,7 @@ async fn a_hung_ledger_read_keeps_the_playlist_advancing_and_its_refusal_still_e
 #[tokio::test]
 async fn a_settings_change_ends_a_session_whose_ledger_read_is_hung() {
     let root = crate::test_tempdir().expect("root");
-    let (manager, _tuner, capability, session, held) =
+    let (manager, _tuner, capability, session, held, publisher) =
         session_with_a_hung_ledger_read(root.path()).await;
     await_ingest_renewal(&manager).await;
     manager
@@ -2997,6 +3149,7 @@ async fn a_settings_change_ends_a_session_whose_ledger_read_is_hung() {
         "the session ended on the observation, not on a second ledger read"
     );
     assert!(*manager.hold_session_fence_reads.borrow());
+    publisher.assert_settled(&session).await;
 }
 
 #[test]

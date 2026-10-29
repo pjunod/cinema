@@ -2453,6 +2453,8 @@ expected_occurrences = 14
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# Live TV ledger fixtures replace detached shell publishers with one owned
+# Rust publisher task, joined after child reap or aborted on setup/panic.
 # PR1045 review fix: +1 joined test-only releaser task in
 # `processed_preparation_waits_only_for_background_work_that_can_yield`; it
 # frees the held capacity after a short sleep and is awaited by the test.
@@ -3440,7 +3442,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
-expected_occurrences = 1029
+expected_occurrences = 1030
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3707,6 +3709,8 @@ expected_occurrences = 17
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Live TV ledger fixtures add five test-only declaration/publication/cleanup
+# waits; actual child reap and publisher join remain required for success.
 # PR1045 review fix: +1 test-only sleep in the same releaser task
 # (`processed_preparation_waits_only_for_background_work_that_can_yield`).
 # PR947 unit follow-up: the inventory-cancellation regression replaces
@@ -5145,7 +5149,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1917
+expected_occurrences = 1922
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
