@@ -1066,7 +1066,8 @@ OPERATIONS = {
     'fair_search': {'fair_search', 'component_tlc', 'family_finish'},
     'boundary_tlc': {'boundary_tlc', 'family_finish'},
     'family_finish': {'one_step_tlc', 'component_tlc', 'boundary_tlc', 'family_finish', 'publish_temporal', 'stage_finish'},
-    'publish_temporal': {'publish_temporal', 'stage_finish','family_finish','check_monitor_node','select_view'},
+    'publish_temporal': {'publish_temporal', 'stage_finish','family_finish','check_monitor_node','select_view',
+                         'one_step_tlc','component_tlc','boundary_tlc','fair_search'},
     'stage_finish': {'produce_monitor', 'one_step_tlc', 'publish_temporal', 'stage_finish'},
 }
 for _publishing_operation in ('produce_monitor','select_view','dfs_forward','dfs_reverse','condensation_rank','build_tree',

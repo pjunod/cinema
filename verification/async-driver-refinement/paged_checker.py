@@ -1042,71 +1042,131 @@ def component_tables(index, temporal, component):
     return chunks(), mapping
 
 
+class TemporalQualification:
+    """Journalled next-work cursor and bounded Outcome aggregation.
+
+    These rows resume only after the exact authenticated private backup/result
+    chain has been reconciled. They never replace retained TLC byte parsing.
+    """
+    operation = 'temporal_qualification'
+
+    def __init__(self, index, mapping):
+        self.index = index
+        closure = index.db.execute("SELECT state FROM operation_state WHERE operation='source_closure_binding'").fetchone()
+        require(closure is not None, 'temporal cursor before exact source closure')
+        self.binding = encoded({'closure': strict_json(closure[0]), 'families': mapping,
+                                'configs': list(legacy.CONFIGS.items()), 'contexts': legacy.CONFIG_CONTEXT})
+        old = index.db.execute('SELECT scope,state FROM operation_state WHERE operation=?', (self.operation,)).fetchone()
+        if old is None:
+            self.state = {'phase': 'one_step', 'family': 0, 'after_product': -1,
+                          'property': 0, 'after_component': 0, 'pending': None,
+                          'receipt_after': '', 'receipts': [], 'witness': None, 'violated': False}
+            with index.execution.quantum('one_step_tlc', stage='temporal_components'):
+                index.db.execute('INSERT INTO operation_state VALUES(?,?,?)',
+                                 (self.operation, self.binding, encoded(self.state)))
+        else:
+            require(old[0] == self.binding, 'temporal cursor exact source/config/family binding changed')
+            self.state = bounded_json(old[1], index.budget)
+
+    def save(self):
+        require(self.index.execution.active, 'temporal cursor outside atomic quantum')
+        raw = encoded(self.state)
+        if len(raw) > self.index.budget.member_limit():
+            raise Incomplete('indivisible temporal aggregation state exceeds resident admission')
+        self.index.budget.check(records=1, bytes_=len(raw))
+        self.index.db.execute('UPDATE operation_state SET state=? WHERE operation=?', (raw, self.operation))
+
+    def advance(self, **changes):
+        with self.index.execution.quantum('family_finish'):
+            self.state.update(changes)
+            self.save()
+
+    def append(self, reference):
+        # Outcome remains an admitted indivisible record. The traversal building
+        # it is a persisted prefix, rather than a fresh full-prefix scan.
+        self.state['receipts'].append(reference)
+        if len(encoded(self.state['receipts'])) > min(self.index.budget.member_limit(),
+                self.index.budget.allowances['Outcome']['max_encoded_bytes']):
+            raise Incomplete('whole Outcome component receipt array exceeds allocation')
+
+
+def temporal_receipt_ref(index, tag):
+    row = index.db.execute('SELECT invocation_key,receipt,relative_path FROM tlc_done WHERE tag=?', (tag,)).fetchone()
+    require(row is not None and index.db.execute(
+        "SELECT 1 FROM credit_links WHERE table_name='tlc_invocation' AND row_key=?", (encoded(row[0]),)).fetchone() is not None,
+        'temporal aggregation lacks actual invocation credit')
+    return {'kind': 'tlc_receipt', 'id': row[2], 'sha256': sha_bytes(row[1])}
+
+
+def run_temporal_tlc(index, output, tlc, tag, module, directory, config, *, completed):
+    identity, key = tlc_identity(index, directory, module, config, tlc, tag)
+    old = index.db.execute('SELECT invocation_key,input_tuple,receipt,relative_path FROM tlc_done WHERE tag=?', (tag,)).fetchone()
+    if old:
+        require(old[0] == key and old[1] == encoded(identity), 'same TLC tag has different exact invocation key')
+        retained = strict_json(old[2])
+        row=index.db.execute("SELECT r.record FROM credit_links c JOIN check_results r ON r.sequence=c.result_sequence WHERE c.table_name='tlc_invocation' AND c.row_key=?",(encoded(key),)).fetchone()
+        require(row is not None and row[0] is not None,'TLC reuse lacks an authenticated finalized result')
+        result=strict_json(row[0])
+        resolver=ContinuationResolver(index.request['dependency_index'],output,source=index.source,session_id=index.session_id,budget=index.budget)
+        try:
+            reparse_retained_tlc(result,None,resolver,index.execution)
+        finally:
+            resolver.close()
+        with index.execution.quantum('family_finish'):
+            completed(retained)
+        return retained
+    operation = {'PagedOneStep': 'one_step_tlc', 'PagedComponent': 'component_tlc', 'BoundaryControls': 'boundary_tlc'}[module]
+    position={**index.execution.cursor()['position'],'family':identity['family'],
+        'after_key':identity['scope'].get('owned_predecessor'),'component_id':identity['scope'].get('component')}
+    with index.execution.quantum(operation, stage='temporal_components', claim='tlc_completed',position=position,
+            coverage={'record_kind':'Product' if module=='PagedOneStep' else 'Scc' if module=='PagedComponent' else None,
+                'lower_exclusive':None,'upper_inclusive':position['after_key'] if module=='PagedOneStep' else position['component_id'],
+                'count':1,'scope':{**index.execution.cursor()['scope'],'family':identity['family'],'input_root':key}},
+            scope={**index.execution.cursor()['scope'], 'family': identity['family'], 'input_root': key}) as quantum:
+        receipt = invoke_tlc(index, directory, module, config, tlc, tag=tag)
+        relative = str((directory / (tag + '.tlc-receipt.json')).relative_to(output))
+        index.db.execute('INSERT INTO tlc_done VALUES(?,?,?,?,?)', (tag, key, encoded(identity), encoded(receipt), relative))
+        quantum.credit('tlc_invocation', key)
+        path = directory / (tag + '.tlc-receipt.json')
+        index.add_blob('tlc_receipt', relative, path, sha_bytes(encoded(receipt)))
+        completed(receipt)
+    return receipt
+
+
 def qualify_temporal(index, semantic, temporal, output, tlc):
-    """Every original predecessor and every required component, all 11 families."""
+    """Every original predecessor and required component, across bounded units."""
     import shutil
     package = Path(__file__).resolve().parent
     output = Path(output)
-    artifacts = []
-    index.db.executescript('''CREATE TABLE IF NOT EXISTS tlc_done(tag TEXT PRIMARY KEY,invocation_key TEXT NOT NULL,input_tuple BLOB NOT NULL,receipt BLOB,relative_path TEXT);
-        CREATE TABLE IF NOT EXISTS finite_failures(family TEXT PRIMARY KEY,product INTEGER,receipt BLOB);''')
-    def run_once(tag, module, directory, config):
-        identity, key = tlc_identity(index, directory, module, config, tlc, tag)
-        old = index.db.execute('SELECT invocation_key,input_tuple,receipt,relative_path FROM tlc_done WHERE tag=?', (tag,)).fetchone()
-        if old:
-            require(old[0] == key and old[1] == encoded(identity), 'same TLC tag has different exact invocation key')
-            retained = strict_json(old[2])
-            row=index.db.execute("SELECT r.record FROM credit_links c JOIN check_results r ON r.sequence=c.result_sequence WHERE c.table_name='tlc_invocation' AND c.row_key=?",(encoded(key),)).fetchone()
-            require(row is not None and row[0] is not None,'TLC reuse lacks an authenticated finalized result')
-            result=strict_json(row[0])
-            resolver=ContinuationResolver(index.request['dependency_index'],output,source=index.source,session_id=index.session_id,budget=index.budget)
-            try:
-                reparse_retained_tlc(result,None,resolver,index.execution)
-                for member in (result['tlc']['receipt_member'],result['tlc']['log_member']):
-                    original=resolver.member_path(member)
-                    destination=output/member['member_path']
-                    require(destination.resolve().is_relative_to(output.resolve()) and not destination.is_symlink(),'unsafe relocated TLC cache path')
-                    destination.parent.mkdir(parents=True,exist_ok=True)
-                    if original.resolve()!=destination.resolve():
-                        with original.open('rb') as src,destination.open('wb') as dst:
-                            while block:=src.read(65536):
-                                dst.write(block)
-                                index.budget.check()
-                    require(file_sha(destination)==member['sha256'],'relocated TLC cache bytes differ')
-                    index.db.execute('INSERT OR REPLACE INTO cache_bindings VALUES(?,?)',(str(destination),encoded(member)))
-                index.db.commit()  # Excluded relocatable paths confer no proof credit.
-            finally:resolver.close()
-            receipt_path = output / old[3]
-            require(receipt_path.is_file() and strict_json(receipt_path.read_bytes()) == retained, 'retained TLC receipt bytes changed')
-            parsed = parse_tlc_log(directory / (tag + '.tlc.log'), retained['exit_code'])
-            require(all(retained[k] == v for k, v in parsed.items()) and retained['invocation_key'] == key, 'retained actual TLC log/receipt disagrees')
-            return retained
-        operation = {'PagedOneStep': 'one_step_tlc', 'PagedComponent': 'component_tlc', 'BoundaryControls': 'boundary_tlc'}[module]
-        position={**index.execution.cursor()['position'],'family':identity['family'],
-            'after_key':identity['scope'].get('owned_predecessor'),'component_id':identity['scope'].get('component')}
-        with index.execution.quantum(operation, stage='temporal_components', claim='tlc_completed',position=position,
-                coverage={'record_kind':'Product' if module=='PagedOneStep' else 'Scc' if module=='PagedComponent' else None,
-                    'lower_exclusive':None,'upper_inclusive':position['after_key'] if module=='PagedOneStep' else position['component_id'],
-                    'count':1,'scope':{**index.execution.cursor()['scope'],'family':identity['family'],'input_root':key}},
-                scope={**index.execution.cursor()['scope'], 'family': identity['family'], 'input_root': key}) as quantum:
-            receipt = invoke_tlc(index, directory, module, config, tlc, tag=tag)
-            relative = str((directory / (tag + '.tlc-receipt.json')).relative_to(output))
-            index.db.execute('INSERT INTO tlc_done VALUES(?,?,?,?,?)', (tag, key, encoded(identity), encoded(receipt), relative))
-            quantum.credit('tlc_invocation', key)
-        return receipt
-    # One-step safety/coverage checks run at every exact owned predecessor;
-    # mutation invariant failures remain named expected outcome evidence.
-    for family, descriptor in legacy.CONFIGS.items():
-        if descriptor.get('model') == 'BoundaryControls':
-            continue
-        context = legacy.CONFIG_CONTEXT[family]
-        for identity, in index.db.execute('SELECT id FROM v_products WHERE context=? ORDER BY id', (context,)):
+    mapping = strict_json((package / 'paged-outcomes.json').read_bytes())
+    cursor = TemporalQualification(index, mapping)
+    state = cursor.state
+    originals = [(name, desc) for name, desc in legacy.CONFIGS.items()
+                 if desc.get('model') != 'BoundaryControls']
+    families = mapping['families']
+    while state['phase'] != 'complete':
+        index.budget.check()
+        if state['phase'] == 'one_step':
+            if state['family'] == len(originals):
+                cursor.advance(phase='components', family=0)
+                continue
+            family, descriptor = originals[state['family']]
+            context = legacy.CONFIG_CONTEXT[family]
+            row = index.db.execute('SELECT id FROM v_products WHERE context=? AND id>? ORDER BY id LIMIT 1',
+                                   (context, state['after_product'])).fetchone()
+            if row is None:
+                cursor.advance(family=state['family'] + 1, after_product=-1)
+                continue
+            identity = row[0]
+            # Debit before generation/execution; a rejected unit cannot execute
+            # K+1 calls or spend its next allowance on completed predecessors.
+            index.budget.check(predecessors=1)
             tag = family + '-one-step-' + str(identity)
             directory = output / 'temporal' / tag
             directory.mkdir(parents=True, exist_ok=True)
-            chunks, mapping, owned = local_tables(semantic, identity)
+            chunks, local_map, owned = local_tables(semantic, identity)
             bounded_source(directory / 'SourceTables.tla', chunks, index.budget)
-            write_json(directory / 'id-map.json', mapping)
+            write_json(directory / 'id-map.json', local_map)
             for module in ('AsyncDriverRefinement', 'PagedOneStep'):
                 shutil.copyfile(package / (module + '.tla'), directory / (module + '.tla'))
             names = descriptor['invariants']
@@ -1118,52 +1178,82 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
                    '\n Mutation = ' + legacy.tla(descriptor['mutation']) + '\n Witness = FALSE\nINVARIANTS PageAgreement PageSafety\nCHECK_DEADLOCK FALSE\n')
             config = directory / 'paged-one-step.cfg'
             config.write_text(cfg)
-            receipt = run_once(tag, 'PagedOneStep', directory, config)
-            if receipt['first_failure'] is not None:
-                require(receipt['first_failure'] == 'PageSafety' and descriptor['expected'] in descriptor['invariants'], 'unexpected original-action one-step failure')
-                first=index.db.execute('SELECT product,receipt FROM finite_failures WHERE family=?',(family,)).fetchone()
-                if first is None:
-                    with index.execution.quantum('family_finish'):
-                        index.db.execute('INSERT INTO finite_failures VALUES(?,?,?)',(family,identity,encoded(receipt)))
-                elif first[0]==identity:
-                    require(first[1]==encoded(receipt),'retained first invariant failure changed')
-            index.budget.check(predecessors=1)
-    mapping = strict_json((package / 'paged-outcomes.json').read_bytes())
-    for family in mapping['families']:
+            def completed(receipt):
+                if receipt['first_failure'] is not None:
+                    require(receipt['first_failure'] == 'PageSafety' and descriptor['expected'] in names,
+                            'unexpected original-action one-step failure')
+                    index.db.execute('INSERT OR IGNORE INTO finite_failures VALUES(?,?,?)',
+                                     (family, identity, encoded(receipt)))
+                state['after_product'] = identity
+                cursor.save()
+            run_temporal_tlc(index, output, tlc, tag, 'PagedOneStep', directory, config, completed=completed)
+            continue
+        if state['family'] == len(families):
+            # Only the fixed seven contexts and one final Counts record remain.
+            with index.execution.quantum('family_finish'):
+                require(index.count('Outcome') == 11, 'eleven semantic outcome families incomplete')
+                for context in semantic.checkpoint['contexts']:
+                    require(context['frontier'] == 0 and context['reachable_products'] == context['expanded_products'],
+                            'final context publication before source closure')
+                    index.propose(envelope('ContextRoot', context), 'family_finish')
+                index.propose(envelope('Counts', index.counts()), 'family_finish')
+                state['phase'] = 'complete'
+                cursor.save()
+            continue
+        family = families[state['family']]
         name, context = family['family'], family['context']
         properties = family['source_descriptor'].get('properties', [])
-        component_receipts = BoundedList(index.budget,'Outcome')
-        witness_ref = None
-        violated = False
-        for prop in properties:
+        if state['phase'] == 'components':
+            if state['property'] == len(properties):
+                cursor.advance(phase='boundary' if family['scope'] == 'sparse_boundary_control' else 'collect')
+                continue
+            prop = properties[state['property']]
             view = 'seen_goal_false' if prop == 'BothSelectedCompletion' else 'capacity_ok_pending_true'
-            for component in index.find('Scc'):
-                if component['context'] != context or component['property'] != view:
-                    continue
-                tag = name + '-component-' + str(component['id'])
-                directory = output / 'temporal' / tag
-                directory.mkdir(parents=True, exist_ok=True)
-                chunks, local_map = component_tables(index, temporal, component)
-                bounded_source(directory / 'ComponentTables.tla', chunks, index.budget)
-                write_json(directory / 'id-map.json', local_map)
-                shutil.copyfile(package / 'PagedComponent.tla', directory / 'PagedComponent.tla')
-                shutil.copyfile(package / 'PropertyMonitors.tla', directory / 'PropertyMonitors.tla')
-                config = directory / 'paged-component.cfg'
-                shutil.copyfile(package / 'paged-component.cfg', config)
-                receipt = run_once(tag, 'PagedComponent', directory, config)
-                walk = temporal.fair_walk(component)
-                require((receipt['first_failure'] == 'EventuallyDischarged') == (walk is not None), 'TLC/composed fair-language disagreement')
-                receipt_path = directory / (tag + '.tlc-receipt.json')
-                receipt_ref = {'kind': 'tlc_receipt', 'id': str(receipt_path.relative_to(output)), 'sha256': file_sha(receipt_path)}
-                index.add_blob('tlc_receipt', receipt_ref['id'], receipt_path, receipt_ref['sha256'])
-                component_receipts.append(receipt_ref)
-                if len(encoded(component_receipts))>min(index.budget.member_limit(),index.budget.allowances['Outcome']['max_encoded_bytes']):
-                    raise Incomplete('whole Outcome component receipt array exceeds allocation')
+            component = next(index.find_after('Scc', state['after_component']), None)
+            if component is None:
+                cursor.advance(property=state['property'] + 1, after_component=0)
+                continue
+            index.budget.check(records=1)
+            if component['context'] != context or component['property'] != view:
+                cursor.advance(after_component=component['id'])
+                continue
+            index.budget.check(predecessors=1)
+            tag = name + '-component-' + str(component['id'])
+            directory = output / 'temporal' / tag
+            directory.mkdir(parents=True, exist_ok=True)
+            chunks, local_map = component_tables(index, temporal, component)
+            bounded_source(directory / 'ComponentTables.tla', chunks, index.budget)
+            write_json(directory / 'id-map.json', local_map)
+            for module in ('PagedComponent', 'PropertyMonitors'):
+                shutil.copyfile(package / (module + '.tla'), directory / (module + '.tla'))
+            config = directory / 'paged-component.cfg'
+            shutil.copyfile(package / 'paged-component.cfg', config)
+            def completed(receipt):
+                state.update(phase='component_walk', pending=component['id'])
+                cursor.save()
+            run_temporal_tlc(index, output, tlc, tag, 'PagedComponent', directory, config, completed=completed)
+        elif state['phase'] == 'component_walk':
+            component = index.get('Scc', state['pending'])
+            prop = properties[state['property']]
+            view = 'seen_goal_false' if prop == 'BothSelectedCompletion' else 'capacity_ok_pending_true'
+            tag = name + '-component-' + str(component['id'])
+            receipt = strict_json(index.db.execute('SELECT receipt FROM tlc_done WHERE tag=?', (tag,)).fetchone()[0])
+            # The invocation/cursor commit is atomic. On restore, actual prior
+            # outputs/module/map/runtime bytes were reparsed during reconciliation.
+            # fair_walk has its own durable search cursor, including a shared
+            # component reused by multiple named families.
+            walk = temporal.fair_walk(component)
+            require((receipt['first_failure'] == 'EventuallyDischarged') == (walk is not None),
+                    'TLC/composed fair-language disagreement')
+            with index.execution.quantum('family_finish'):
+                cursor.append(temporal_receipt_ref(index, tag))
                 if walk is not None:
-                    violated = True
+                    state['violated'] = True
                     require(family['expected_first_failure'] == prop, 'unexpected positive-family property violation')
-                    if witness_ref is None:
+                    if state['witness'] is None:
                         prefix, cycle, stutter = walk
+                        directory = output / 'temporal' / tag
+                        directory.mkdir(parents=True, exist_ok=True)
                         fairness_value = {'schema_version': 6, 'source': index.source, 'session_id': index.session_id,
                             'component': component['id'], 'property': view, 'obligation': component['obligation'],
                             'full_original_enabledness': True, 'nonstuttering_pair_occurrence': True,
@@ -1179,55 +1269,71 @@ def qualify_temporal(index, semantic, temporal, output, tlc):
                             'source': index.source, 'stutter_at': stutter}
                         temporal.replay_witness(witness)
                         value = envelope('Counterexample', witness)
-                        index.propose(value,'family_finish')
+                        index.propose(value, 'family_finish')
                         write_json(directory / 'counterexample.json', value)
-                        witness_ref = ref(value)
-                index.budget.check()
-        finite = index.db.execute('SELECT product,receipt FROM finite_failures WHERE family=?', (name,)).fetchone()
-        if family['scope'] == 'sparse_boundary_control':
-            receipt_ref = qualify_boundary(index, semantic, output, tlc, family, run_once)
-            component_receipts.append(receipt_ref)
-            witness_ref, violated = receipt_ref, True
-        elif not properties and family['expected_first_failure'] is not None:
-            require(finite is not None, 'expected original invariant witness absent')
-            witness_path = output / (name + '-finite-witness.json')
-            write_json(witness_path, finite_witness(index, semantic, name, finite[0]))
-            witness_ref = {'kind': 'causal_receipt', 'id': witness_path.name, 'sha256': file_sha(witness_path)}
-            index.add_blob('causal_receipt', witness_ref['id'], witness_path, witness_ref['sha256'])
-            violated = True
-        if family['expected_first_failure'] is None:
-            require(not violated and finite is None, 'positive family violated')
-            expected = actual = 'pass'
-        elif name == 'nonvacuity':
-            require(violated, 'nonvacuity original-Init witness missing')
-            expected = actual = 'finite_witness'
+                        state['witness'] = ref(value)
+                state.update(phase='components', after_component=component['id'], pending=None)
+                cursor.save()
+        elif state['phase'] == 'boundary':
+            index.budget.check(predecessors=1)
+            def run_once(tag, module, directory, config):
+                def completed(receipt):
+                    require(receipt['first_failure'] == family['expected_first_failure'], 'sparse boundary first failure differs')
+                    cursor.append(temporal_receipt_ref(index, tag))
+                    state.update(witness=temporal_receipt_ref(index, tag), violated=True, phase='collect')
+                    cursor.save()
+                return run_temporal_tlc(index, output, tlc, tag, module, directory, config, completed=completed)
+            qualify_boundary(index, semantic, output, tlc, family, run_once)
+        elif state['phase'] == 'collect':
+            # One retained reference per committed step. No receipt/log copies or
+            # regeneration, and no charging the completed prefix on the next unit.
+            prefix = name + '-one-step-'
+            row = index.db.execute('SELECT tag FROM tlc_done WHERE tag>? AND tag<? ORDER BY tag LIMIT 1',
+                                   (max(prefix, state['receipt_after']), name + '-one-step.')).fetchone()
+            if row is None:
+                cursor.advance(phase='finish')
+                continue
+            index.budget.check(records=1)
+            with index.execution.quantum('family_finish'):
+                cursor.append(temporal_receipt_ref(index, row[0]))
+                state['receipt_after'] = row[0]
+                cursor.save()
+        elif state['phase'] == 'finish':
+            finite = index.db.execute('SELECT product,receipt FROM finite_failures WHERE family=?', (name,)).fetchone()
+            if not properties and family['scope'] != 'sparse_boundary_control' and family['expected_first_failure'] is not None and state['witness'] is None:
+                require(finite is not None, 'expected original invariant witness absent')
+                witness = finite_witness(index, semantic, name, finite[0])
+                with index.execution.quantum('family_finish'):
+                    path = output / (name + '-finite-witness.json')
+                    write_json(path, witness)
+                    reference = {'kind': 'causal_receipt', 'id': path.name, 'sha256': file_sha(path)}
+                    index.add_blob('causal_receipt', reference['id'], path, reference['sha256'])
+                    state.update(witness=reference, violated=True)
+                    cursor.save()
+            if family['expected_first_failure'] is None:
+                require(not state['violated'] and finite is None, 'positive family violated')
+                expected = 'pass'
+            elif name == 'nonvacuity':
+                require(state['violated'], 'nonvacuity original-Init witness missing')
+                expected = 'finite_witness'
+            else:
+                require(state['violated'], 'required mutation counterexample missing')
+                expected = 'named_semantic_counterexample'
+            with index.execution.quantum('family_finish'):
+                outcome = envelope('Outcome', {'family': name, 'expected': expected, 'actual': expected,
+                    'component_receipts': state['receipts'], 'invocation_count': len(state['receipts']), 'witness': state['witness']})
+                index.propose(outcome, 'family_finish')
+                write_json(output / (name + '-outcome.json'), outcome)
+                state.update(phase='components', family=state['family'] + 1, property=0, after_component=0,
+                             pending=None, receipt_after='', receipts=[], witness=None, violated=False)
+                cursor.save()
         else:
-            require(violated, 'required mutation counterexample missing')
-            expected = actual = 'named_semantic_counterexample'
-        # Include every original-action receipt for this family, not just SCCs.
-        for tag, relative in index.db.execute('SELECT tag,relative_path FROM tlc_done ORDER BY tag'):
-            if tag.startswith(name + '-one-step-'):
-                path = output / relative
-                r = {'kind': 'tlc_receipt', 'id': relative, 'sha256': file_sha(path)}
-                index.add_blob('tlc_receipt', relative, path, r['sha256'])
-                component_receipts.append(r)
-        outcome = envelope('Outcome', {'family': name, 'expected': expected, 'actual': actual,
-            'component_receipts': component_receipts, 'invocation_count': len(component_receipts), 'witness': witness_ref})
-        index.propose(outcome,'family_finish')
-        path = output / (name + '-outcome.json')
-        write_json(path, outcome)
-        artifacts.append(path.name)
+            raise Invalid('unknown durable temporal qualification phase')
     require(index.count('Outcome') == 11, 'eleven semantic outcome families incomplete')
-    for context in semantic.checkpoint['contexts']:
-        require(context['frontier']==0 and context['reachable_products']==context['expanded_products'],
-                'final context publication before source closure')
-        index.propose(envelope('ContextRoot',context),'family_finish')
-    index.propose(envelope('Counts',index.counts()),'family_finish')
     write_json(output / 'temporal-receipt.json', {'schema_version': 6, 'source': index.source,
         'session_id': index.session_id, 'all_original_predecessors': True, 'all_required_components': True,
         'all_eleven_families': True, 'acceptance': False})
-    artifacts.append('temporal-receipt.json')
-    return artifacts
+    return ['temporal-receipt.json']
 
 
 def finite_witness(index, semantic, family, target):
@@ -1344,10 +1450,7 @@ def qualify_boundary(index, semantic, output, tlc, family, run_once):
     config.write_text(legacy.config(name))
     receipt = run_once(name, 'BoundaryControls', directory, config)
     require(receipt['first_failure'] == family['expected_first_failure'], 'sparse boundary first failure differs')
-    receipt_path = directory / (name + '.tlc-receipt.json')
-    reference={'kind':'tlc_receipt','id':str(receipt_path.relative_to(output)),'sha256':file_sha(receipt_path)}
-    index.add_blob(reference['kind'],reference['id'],receipt_path,reference['sha256'])
-    return reference
+    return temporal_receipt_ref(index, name)
 
 
 
