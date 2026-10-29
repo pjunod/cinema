@@ -606,6 +606,15 @@ async fn prepare_owned(
             "preparation expired before media admissions drained",
         ));
     }
+    if cluster_operations::require_adaptive_outage_zero(&state, lease.claim(), token)
+        .await
+        .is_err()
+    {
+        lease.release().await;
+        return Err(unsafe_shutdown(
+            "adaptive cleanup is active or its exact replicated inventory is unavailable",
+        ));
+    }
     let (active, owned, drain) = cluster_operations::local_media_drain_snapshot(&state).await;
     if active != 0
         || !owned.is_empty()
@@ -702,6 +711,15 @@ async fn commit_owned(
             "topology or protocol generation changed; prepare again",
         ));
     }
+    // Preparation's earlier zero is not final-commit evidence. Read again
+    // from the first page under the same original lease and live local token.
+    cluster_operations::require_adaptive_outage_zero(&state, lease.claim(), prepared.token)
+        .await
+        .map_err(|_| {
+            unsafe_shutdown(
+                "adaptive cleanup is active or its exact replicated inventory is unavailable",
+            )
+        })?;
     let (active, owned, drain) = cluster_operations::local_media_drain_snapshot(&state).await;
     if !owned.is_empty() || !drain.drained {
         return Err(unsafe_shutdown(
@@ -1419,7 +1437,7 @@ mod tests {
                 confirm_interruption: true,
                 target_version: None,
             };
-            let prepared = match prepare_owned(
+            let mut prepared = match prepare_owned(
                 state.clone(),
                 Arc::clone(&context),
                 native_peer.clone(),
@@ -1430,13 +1448,104 @@ mod tests {
                 Ok(Json(prepared)) => prepared,
                 Err(error) => panic!("real sole-voter preparation: {}", error.2),
             };
-            let commit = ShutdownCommitRequestV1 {
+            let commit_request = |prepared: &ShutdownPreparedV1| ShutdownCommitRequestV1 {
                 schema_version: 1,
-                operation_id: prepared.operation_id,
-                process_nonce: prepared.process_nonce,
-                generation: prepared.generation,
-                owner_capability: prepared.owner_capability,
+                operation_id: prepared.operation_id.clone(),
+                process_nonce: prepared.process_nonce.clone(),
+                generation: prepared.generation.clone(),
+                owner_capability: prepared.owner_capability.clone(),
             };
+            if configured {
+                let stale_token = context
+                    .control
+                    .operation
+                    .lock()
+                    .await
+                    .as_ref()
+                    .expect("real retained preparation")
+                    .token;
+                assert!(matches!(
+                    state
+                        .membership
+                        .release_restart_preparation(&state.node_id)
+                        .await,
+                    Ok(plurx_core::cluster::membership::ClusterOperationCleanupOutcome::Confirmed)
+                ));
+                {
+                    let operation = context.control.operation.lock().await;
+                    let original = operation.as_ref().expect("real retained preparation");
+                    let lease = original.lease.as_ref().expect("real retained lease");
+                    assert!(cluster_operations::require_adaptive_outage_zero(
+                        &state,
+                        lease.claim(),
+                        original.token,
+                    )
+                    .await
+                    .is_err());
+                }
+                // The original prepared response and live local token cannot
+                // authorize final commitment after its exact durable release.
+                assert!(commit_owned(
+                    state.clone(),
+                    Arc::clone(&context),
+                    native_peer.clone(),
+                    commit_request(&prepared),
+                )
+                .await
+                .is_err());
+                assert!(!state.shutdown.is_cancelled());
+                assert!(state.serving.planned_outage_is_current(stale_token).await);
+                if let Err(error) = cancel(
+                    State(state.clone()),
+                    Extension(Arc::clone(&context)),
+                    Extension(native_peer.clone()),
+                    Ok(Json(commit_request(&prepared))),
+                )
+                .await
+                {
+                    panic!("cancelling released real preparation: {}", error.2);
+                }
+                prepared = match prepare_owned(
+                    state.clone(),
+                    Arc::clone(&context),
+                    native_peer.clone(),
+                    ShutdownPrepareRequestV1 {
+                        schema_version: 1,
+                        operation_id: uuid::Uuid::new_v4().to_string(),
+                        operation: Operation::Restart,
+                        process_nonce: control.process.nonce.clone(),
+                        confirm_interruption: true,
+                        target_version: None,
+                    },
+                )
+                .await
+                {
+                    Ok(Json(prepared)) => prepared,
+                    Err(error) => {
+                        panic!("real preparation after exact cancellation: {}", error.2)
+                    }
+                };
+                let operation = context.control.operation.lock().await;
+                let replacement = operation.as_ref().expect("real replacement preparation");
+                let lease = replacement.lease.as_ref().expect("real replacement lease");
+                // This token came from the actual earlier owner, not a
+                // fabricated generation. The replacement must reject it.
+                assert!(cluster_operations::require_adaptive_outage_zero(
+                    &state,
+                    lease.claim(),
+                    stale_token,
+                )
+                .await
+                .is_err());
+                assert!(
+                    state
+                        .serving
+                        .planned_outage_is_current(replacement.token)
+                        .await
+                );
+                assert!(!state.shutdown.is_cancelled());
+            }
+            let commit = commit_request(&prepared);
             let operation_id = commit.operation_id.clone();
             let committed = match commit_owned(state.clone(), context, native_peer, commit).await {
                 Ok(Json(committed)) => committed,

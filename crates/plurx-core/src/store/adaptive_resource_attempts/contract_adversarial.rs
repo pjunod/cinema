@@ -26,7 +26,7 @@ fn ordinary(fixture: &AttemptFixture) -> MediaSessionActivation {
 
 #[tokio::test]
 async fn simultaneous_winners_preserve_one_winner_and_all_cleanup_debt() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let first = AttemptFixture::new(store.as_ref()).await;
         let claimed = applied(
             store
@@ -144,7 +144,7 @@ async fn simultaneous_winners_preserve_one_winner_and_all_cleanup_debt() {
 
 #[tokio::test]
 async fn initial_claim_rechecks_predecessor_epoch_and_desired_before_acquisition() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let mut fixture = AttemptFixture::new(store.as_ref()).await;
         let incumbent = store
             .activate_media_session(&ordinary(&fixture))
@@ -210,7 +210,7 @@ async fn initial_claim_rechecks_predecessor_epoch_and_desired_before_acquisition
 
 #[tokio::test]
 async fn failed_desired_adoption_retains_provisional_lease_and_incumbent() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let mut fixture = AttemptFixture::new(store.as_ref()).await;
         let incumbent = store
             .activate_media_session(&ordinary(&fixture))
@@ -284,7 +284,7 @@ async fn failed_desired_adoption_retains_provisional_lease_and_incumbent() {
 
 #[tokio::test]
 async fn replace_upsert_proposed_identity_and_requestless_activation_are_fenced() {
-    for_each_strandable_backend(|store,_,raw|async move {
+    for_each_adaptive_strandable_backend(|store,_,raw|async move {
         let fixture=AttemptFixture::new(store.as_ref()).await;
         let before=applied(store.claim_adaptive_attempt(&fixture.claim).await.expect("claim"));
         let route=fixture.claim.key.route_incarnation_id;
@@ -316,7 +316,7 @@ async fn replace_upsert_proposed_identity_and_requestless_activation_are_fenced(
 
 #[tokio::test]
 async fn both_backend_maintenance_preserves_expired_unknown_debt_and_ordinary_work() {
-    for_each_backend(|store, _| async move {
+    for_each_adaptive_backend(|store, _| async move {
         let fixture = AttemptFixture::new(store.as_ref()).await;
         let before = applied(
             store
@@ -361,168 +361,182 @@ async fn both_backend_maintenance_preserves_expired_unknown_debt_and_ordinary_wo
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test]
 async fn replicated_lost_prepare_and_adopt_acknowledgements_reconcile_exact_operations() {
-    use plurx_core::store::adaptive_resource_attempts::validation::{self, TransactionFault};
-    let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    store
-        .validation_reset_contract_state()
-        .await
-        .expect("exclusive fixture reset");
-    let fixture = AttemptFixture::new(&store).await;
-    assert!(validation::claim_hiqlite(
-        &store,
-        &fixture.claim,
-        TransactionFault::LostAcknowledgement
-    )
-    .await
-    .is_err());
-    let claimed = match store
-        .claim_adaptive_attempt(&fixture.claim)
-        .await
-        .expect("exact claim replay")
-    {
-        AttemptMutation::Replay(s) => s,
-        other => panic!("{other:?}"),
-    };
-    let mut prepared = fixture.prepared(&claimed);
-    prepared.worker.selected_recipe_digest = selected_recipe_digest("{}").expect("recipe");
-    assert!(
-        validation::prepared_hiqlite(&store, &prepared, TransactionFault::LostAcknowledgement)
+    with_adaptive_cluster(|cluster| {
+        Box::pin(async move {
+            use plurx_core::store::adaptive_resource_attempts::validation::{
+                self, TransactionFault,
+            };
+            let store = cluster.open_store().await;
+            let fixture = AttemptFixture::new(&store).await;
+            assert!(validation::claim_hiqlite(
+                &store,
+                &fixture.claim,
+                TransactionFault::LostAcknowledgement
+            )
             .await
-            .is_err()
-    );
-    let sealed = match store
-        .record_adaptive_prepared(&prepared)
-        .await
-        .expect("exact prepared replay")
-    {
-        AttemptMutation::Replay(s) => s,
-        other => panic!("{other:?}"),
-    };
-    let chosen = WinnerSelection {
-        context: MutationContext {
-            operation_id: Uuid::new_v4(),
-            expected_request_sequence: sealed.sequence,
-            expected_attempt_sequence: sealed.attempts[0].sequence,
-            now_ms: 10_003,
-        },
-        binding: prepared.binding,
-        key: prepared.key,
-        worker: prepared.worker,
-    };
-    let won = applied(store.select_adaptive_winner(&chosen).await.expect("winner"));
-    let mut activation = ordinary(&fixture);
-    activation.incarnation_id = chosen.key.route_incarnation_id.to_string();
-    activation.session_id = chosen.key.session_id.to_string();
-    activation.request_id = Some(chosen.binding.key.request_id.clone());
-    activation.owner_node_id = chosen.key.worker_node_id.clone();
-    activation.publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED;
-    activation.now_ms = 10_004;
-    let adoption = AdaptiveAdoption {
-        context: MutationContext {
-            operation_id: Uuid::new_v4(),
-            expected_request_sequence: won.sequence,
-            expected_attempt_sequence: won.attempts[0].sequence,
-            now_ms: 10_004,
-        },
-        binding: chosen.binding,
-        key: chosen.key,
-        worker: chosen.worker,
-        activation,
-    };
-    assert!(
-        validation::adopt_hiqlite(&store, &adoption, TransactionFault::FinalAssertion)
+            .is_err());
+            let claimed = match store
+                .claim_adaptive_attempt(&fixture.claim)
+                .await
+                .expect("exact claim replay")
+            {
+                AttemptMutation::Replay(s) => s,
+                other => panic!("{other:?}"),
+            };
+            let mut prepared = fixture.prepared(&claimed);
+            prepared.worker.selected_recipe_digest = selected_recipe_digest("{}").expect("recipe");
+            assert!(validation::prepared_hiqlite(
+                &store,
+                &prepared,
+                TransactionFault::LostAcknowledgement
+            )
             .await
-            .is_err()
-    );
-    assert_eq!(
-        store
-            .adaptive_request_status(&fixture.claim.binding.key, &fixture.claim.binding.principal)
+            .is_err());
+            let sealed = match store
+                .record_adaptive_prepared(&prepared)
+                .await
+                .expect("exact prepared replay")
+            {
+                AttemptMutation::Replay(s) => s,
+                other => panic!("{other:?}"),
+            };
+            let chosen = WinnerSelection {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: sealed.sequence,
+                    expected_attempt_sequence: sealed.attempts[0].sequence,
+                    now_ms: 10_003,
+                },
+                binding: prepared.binding,
+                key: prepared.key,
+                worker: prepared.worker,
+            };
+            let won = applied(store.select_adaptive_winner(&chosen).await.expect("winner"));
+            let mut activation = ordinary(&fixture);
+            activation.incarnation_id = chosen.key.route_incarnation_id.to_string();
+            activation.session_id = chosen.key.session_id.to_string();
+            activation.request_id = Some(chosen.binding.key.request_id.clone());
+            activation.owner_node_id = chosen.key.worker_node_id.clone();
+            activation.publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED;
+            activation.now_ms = 10_004;
+            let adoption = AdaptiveAdoption {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: won.sequence,
+                    expected_attempt_sequence: won.attempts[0].sequence,
+                    now_ms: 10_004,
+                },
+                binding: chosen.binding,
+                key: chosen.key,
+                worker: chosen.worker,
+                activation,
+            };
+            assert!(
+                validation::adopt_hiqlite(&store, &adoption, TransactionFault::FinalAssertion)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                store
+                    .adaptive_request_status(
+                        &fixture.claim.binding.key,
+                        &fixture.claim.binding.principal
+                    )
+                    .await
+                    .expect("whole adoption rolled back"),
+                Some(won)
+            );
+            assert!(validation::adopt_hiqlite(
+                &store,
+                &adoption,
+                TransactionFault::LostAcknowledgement
+            )
             .await
-            .expect("whole adoption rolled back"),
-        Some(won)
-    );
-    assert!(
-        validation::adopt_hiqlite(&store, &adoption, TransactionFault::LostAcknowledgement)
-            .await
-            .is_err()
-    );
-    assert!(matches!(
-        store
-            .adopt_adaptive_winner(&adoption)
-            .await
-            .expect("exact adoption replay"),
-        AttemptAdoption::Replay(_)
-    ));
+            .is_err());
+            assert!(matches!(
+                store
+                    .adopt_adaptive_winner(&adoption)
+                    .await
+                    .expect("exact adoption replay"),
+                AttemptAdoption::Replay(_)
+            ));
+        })
+    })
+    .await;
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test]
 async fn cancelled_waiter_and_late_commit_remain_blocked_until_exact_status() {
-    use plurx_core::store::adaptive_resource_attempts::validation::{self, TransactionFault};
-    let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = Arc::new(open_contract_hiqlite_store(&cluster).await);
-    store
-        .validation_reset_contract_state()
-        .await
-        .expect("exclusive fixture reset");
-    let fixture = AttemptFixture::new(store.as_ref()).await;
-    let submitted = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let operation = tokio::spawn({
-        let store = store.clone();
-        let claim = fixture.claim.clone();
-        let submitted = submitted.clone();
-        let release = release.clone();
-        async move {
-            let result = validation::claim_hiqlite(
-                &store,
-                &claim,
-                TransactionFault::BeforeCommit { submitted, release },
-            )
-            .await;
-            let _ = tx.send(result);
-        }
-    });
-    submitted.notified().await;
-    drop(rx); // cancel ONLY the waiter, not the owned in-flight mutation
-    release.notify_one();
-    operation
-        .await
-        .expect("owned mutation completed after waiter cancellation");
-    let status = store
-        .adaptive_request_status(&fixture.claim.binding.key, &fixture.claim.binding.principal)
-        .await
-        .expect("authoritative settlement")
-        .expect("late committed attempt");
-    assert_eq!(status.attempts.len(), 1);
-    let route = store
-        .media_session_route_by_incarnation(&fixture.claim.key.route_incarnation_id.to_string())
-        .await
-        .expect("route")
-        .expect("retained");
-    assert_eq!(
-        route.publication_ready_at_ms,
-        MEDIA_SESSION_PUBLICATION_BLOCKED
-    );
-    assert!(matches!(
-        store
-            .claim_adaptive_attempt(&fixture.claim)
-            .await
-            .expect("same-op reconciliation"),
-        AttemptMutation::Replay(_)
-    ));
-    let mut late = fixture.claim.clone();
-    late.context.operation_id = Uuid::new_v4();
-    late.context.now_ms = 30_000;
-    assert_eq!(
-        store
-            .claim_adaptive_attempt(&late)
-            .await
-            .expect("no reset budget"),
-        AttemptMutation::Refused(AttemptRefusal::Expired)
-    );
+    with_adaptive_cluster(|cluster| {
+        Box::pin(async move {
+            use plurx_core::store::adaptive_resource_attempts::validation::{
+                self, TransactionFault,
+            };
+            let store = Arc::new(cluster.open_store().await);
+            let fixture = AttemptFixture::new(store.as_ref()).await;
+            let submitted = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let operation = tokio::spawn({
+                let store = store.clone();
+                let claim = fixture.claim.clone();
+                let submitted = submitted.clone();
+                let release = release.clone();
+                async move {
+                    let result = validation::claim_hiqlite(
+                        &store,
+                        &claim,
+                        TransactionFault::BeforeCommit { submitted, release },
+                    )
+                    .await;
+                    let _ = tx.send(result);
+                }
+            });
+            submitted.notified().await;
+            drop(rx); // cancel ONLY the waiter, not the owned in-flight mutation
+            release.notify_one();
+            operation
+                .await
+                .expect("owned mutation completed after waiter cancellation");
+            let status = store
+                .adaptive_request_status(
+                    &fixture.claim.binding.key,
+                    &fixture.claim.binding.principal,
+                )
+                .await
+                .expect("authoritative settlement")
+                .expect("late committed attempt");
+            assert_eq!(status.attempts.len(), 1);
+            let route = store
+                .media_session_route_by_incarnation(
+                    &fixture.claim.key.route_incarnation_id.to_string(),
+                )
+                .await
+                .expect("route")
+                .expect("retained");
+            assert_eq!(
+                route.publication_ready_at_ms,
+                MEDIA_SESSION_PUBLICATION_BLOCKED
+            );
+            assert!(matches!(
+                store
+                    .claim_adaptive_attempt(&fixture.claim)
+                    .await
+                    .expect("same-op reconciliation"),
+                AttemptMutation::Replay(_)
+            ));
+            let mut late = fixture.claim.clone();
+            late.context.operation_id = Uuid::new_v4();
+            late.context.now_ms = 30_000;
+            assert_eq!(
+                store
+                    .claim_adaptive_attempt(&late)
+                    .await
+                    .expect("no reset budget"),
+                AttemptMutation::Refused(AttemptRefusal::Expired)
+            );
+        })
+    })
+    .await;
 }

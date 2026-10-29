@@ -32,6 +32,9 @@ impl From<&mut Row<'_>> for AttemptPayload {
 
 #[async_trait]
 impl attempts::Backend for HiqliteAuthStore {
+    fn attempt_outage_fence(&self) -> attempt_schema::OutageFence {
+        attempt_schema::OutageFence::Replicated
+    }
     async fn attempt_layout(&self) -> Result<attempt_schema::Layout, StoreError> {
         Ok(match session_layout(self, true).await? {
             SessionLayout::Legacy => attempt_schema::Layout::Legacy,
@@ -480,7 +483,9 @@ async fn session_layout(
     let (layout, guard) = match version {
         81 => (
             SessionLayout::Legacy,
-            super::sharing_source_schema::predecessor_layout_guard(),
+            super::sharing_source_schema::predecessor_layout_guard_for(
+                attempt_schema::OutageFence::Replicated,
+            ),
         ),
         82 => (
             SessionLayout::Principal,
@@ -5966,7 +5971,10 @@ impl MediaSessionStore for HiqliteAuthStore {
         let ordinary_route_alias = attempt_schema::ordinary_route_filter("session", adaptive);
         let ordinary_lease = attempt_schema::ordinary_lease_filter("lease", adaptive);
         let authority_guard = if adaptive {
-            attempt_schema::ready_guard(adaptive_layout)
+            attempt_schema::ready_guard_for(
+                adaptive_layout,
+                attempt_schema::OutageFence::Replicated,
+            )
         } else {
             attempt_schema::absent_guard().to_owned()
         };

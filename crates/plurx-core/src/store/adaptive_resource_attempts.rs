@@ -293,6 +293,16 @@ pub trait AdaptiveResourceAttemptStore: Send + Sync {
         key: &RequestKey,
         principal: &PlaybackPrincipal,
     ) -> Result<Option<RequestStatus>, StoreError>;
+    /// One consistent page while the original replicated outage row still
+    /// matches exactly. Missing/unsupported/released authority is an error,
+    /// never an empty page. The caller must retain/recheck its original local
+    /// drain token and expiry; this is no native-close or restart authority.
+    #[cfg(feature = "hiqlite-store")]
+    async fn unclosed_adaptive_attempts_under_outage(
+        &self,
+        outage: &crate::cluster::membership::ClusterOperationLease,
+        query: &AttemptInventoryQuery,
+    ) -> Result<AttemptInventoryPage, StoreError>;
     async fn unclosed_adaptive_attempts(
         &self,
         query: &AttemptInventoryQuery,

@@ -90,6 +90,20 @@ macro_rules! impl_attempt_store {
                 crate::store::adaptive_resource_attempts::transactions::status(self, key, principal)
                     .await
             }
+            #[cfg(feature = "hiqlite-store")]
+            async fn unclosed_adaptive_attempts_under_outage(
+                &self,
+                outage: &crate::cluster::membership::ClusterOperationLease,
+                query: &crate::store::adaptive_resource_attempts::AttemptInventoryQuery,
+            ) -> Result<
+                crate::store::adaptive_resource_attempts::AttemptInventoryPage,
+                crate::error::StoreError,
+            > {
+                crate::store::adaptive_resource_attempts::transactions::inventory_under_outage(
+                    self, outage, query,
+                )
+                .await
+            }
             async fn unclosed_adaptive_attempts(
                 &self,
                 query: &crate::store::adaptive_resource_attempts::AttemptInventoryQuery,
@@ -108,6 +122,9 @@ pub(crate) use impl_attempt_store;
 /// SessionClient's certified layout dispatch respectively. Never a second DB.
 #[async_trait]
 pub(crate) trait Backend: Send + Sync {
+    fn attempt_outage_fence(&self) -> schema::OutageFence {
+        schema::OutageFence::Standalone
+    }
     async fn attempt_layout(&self) -> Result<Layout, StoreError>;
     async fn attempt_read(&self, sql: String) -> Result<Vec<String>, StoreError>;
     async fn attempt_transaction(&self, statements: Vec<String>) -> Result<(), StoreError>;
@@ -203,13 +220,13 @@ pub(crate) async fn readiness<B: Backend>(store: &B) -> Result<AttemptSchemaRead
         .into_iter()
         .map(|row| serde_json::from_str::<(String, String)>(&row).map_err(|_| invalid()))
         .collect::<Result<Vec<_>, _>>()?;
-    if !schema::verify_shape(&rows, layout) {
+    if !schema::verify_shape_for(&rows, layout, store.attempt_outage_fence()) {
         return Ok(AttemptSchemaReadiness::Unavailable);
     }
     let rows = store
         .attempt_read(format!(
             "SELECT json_quote(CASE WHEN ({}) THEN 1 ELSE 0 END) AS payload",
-            schema::ready_guard(layout)
+            schema::ready_guard_for(layout, store.attempt_outage_fence())
         ))
         .await?;
     Ok(if rows.as_slice() == ["1"] {
@@ -237,7 +254,7 @@ pub(crate) async fn root_held<B: Backend>(
         return Ok(false);
     }
     let layout = store.attempt_layout().await?;
-    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN json_quote(EXISTS(SELECT 1 FROM media_resource_requests WHERE owner_key={} AND request_id={})) ELSE 'unavailable' END AS payload",schema::ready_guard(layout),quote(owner),quote(request))).await?;
+    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN json_quote(EXISTS(SELECT 1 FROM media_resource_requests WHERE owner_key={} AND request_id={})) ELSE 'unavailable' END AS payload",schema::ready_guard_for(layout, store.attempt_outage_fence()),quote(owner),quote(request))).await?;
     match rows.as_slice() {
         [value] if value == "1" => Ok(true),
         [value] if value == "0" => Ok(false),
@@ -264,7 +281,7 @@ pub(crate) async fn status<B: Backend>(
     let layout = store.attempt_layout().await?;
     // Schema and complete data are evaluated in this ONE authority snapshot.
     // A false guard returns null, never an apparently empty request inventory.
-    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN coalesce((SELECT {} FROM media_resource_requests r WHERE r.owner_key={} AND r.request_id={} AND r.request_incarnation_id={}), 'absent') ELSE 'unavailable' END AS payload",schema::ready_guard(layout),status_projection(),quote(&principal.owner_key()),quote(&key.request_id),quote(&key.request_incarnation_id.to_string()))).await?;
+    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN coalesce((SELECT {} FROM media_resource_requests r WHERE r.owner_key={} AND r.request_id={} AND r.request_incarnation_id={}), 'absent') ELSE 'unavailable' END AS payload",schema::ready_guard_for(layout, store.attempt_outage_fence()),status_projection(),quote(&principal.owner_key()),quote(&key.request_id),quote(&key.request_incarnation_id.to_string()))).await?;
     match rows.as_slice() {
         [row] if row == "absent" => Ok(None),
         [row] if row != "unavailable" => {
@@ -284,6 +301,53 @@ pub(crate) async fn inventory<B: Backend>(
     store: &B,
     query: &AttemptInventoryQuery,
 ) -> Result<AttemptInventoryPage, StoreError> {
+    inventory_snapshot(store, query, None).await
+}
+
+#[cfg(feature = "hiqlite-store")]
+pub(crate) async fn inventory_under_outage<B: Backend>(
+    store: &B,
+    outage: &crate::cluster::membership::ClusterOperationLease,
+    query: &AttemptInventoryQuery,
+) -> Result<AttemptInventoryPage, StoreError> {
+    if store.attempt_outage_fence() != schema::OutageFence::Replicated {
+        return Err(StoreError::Migration(
+            "replicated adaptive outage inventory unsupported".into(),
+        ));
+    }
+    let (node, operation, claim, expiry) = outage.adaptive_outage_identity();
+    if node != query.worker_node_id
+        || !matches!(operation, "restart" | "maintenance")
+        || Uuid::parse_str(claim).map_or(true, |id| id.is_nil())
+        || expiry <= 0
+    {
+        return Err(invalid());
+    }
+    let observed_at = outage.adaptive_inventory_unix_ms().map_err(|_| {
+        StoreError::Migration("adaptive outage inventory lease is expired or unavailable".into())
+    })?;
+    let page = inventory_snapshot(
+        store,
+        query,
+        Some((node, operation, claim, expiry, observed_at)),
+    )
+    .await?;
+    let completed_at = outage.adaptive_inventory_unix_ms().map_err(|_| {
+        StoreError::Migration("adaptive outage inventory lease expired during read".into())
+    })?;
+    if completed_at < observed_at {
+        return Err(StoreError::Migration(
+            "adaptive outage inventory clock moved backwards".into(),
+        ));
+    }
+    Ok(page)
+}
+
+async fn inventory_snapshot<B: Backend>(
+    store: &B,
+    query: &AttemptInventoryQuery,
+    outage: Option<(&str, &str, &str, i64, i64)>,
+) -> Result<AttemptInventoryPage, StoreError> {
     if !text(&query.worker_node_id, 256)
         || !(1..=128).contains(&query.limit)
         || query.after_attempt_id.is_some_and(|id| id.is_nil())
@@ -299,7 +363,16 @@ pub(crate) async fn inventory<B: Backend>(
     let cursor = query
         .after_attempt_id
         .map_or_else(String::new, |id| id.to_string());
-    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN json((SELECT json_group_array(json(entry)) FROM (SELECT json_object('binding',json(r.binding_json),'owner_key',a.owner_key,'attempt',json({})) AS entry FROM media_resource_attempts a LEFT JOIN media_resource_requests r USING(owner_key,request_id,request_incarnation_id) WHERE a.worker_node_id={} AND a.phase!='closed' AND a.attempt_id>{} ORDER BY a.attempt_id LIMIT {}))) ELSE 'unavailable' END AS payload",schema::ready_guard(layout),record_projection("a"),quote(&query.worker_node_id),quote(&cursor),u32::from(query.limit)+1)).await?;
+    let exact_outage = outage.map_or_else(|| "1".into(), |(node, operation, claim, expiry, observed_at)| {
+        format!("EXISTS(SELECT 1 FROM cluster_operation_leases lease JOIN cluster_nodes node ON node.node_id=lease.node_id WHERE lease.singleton=1 AND lease.node_id={} AND lease.operation={} AND lease.claim_id={} AND lease.expires_at={expiry} AND lease.expires_at>{observed_at} AND node.removed_at IS NULL) AND NOT EXISTS(SELECT 1 FROM cluster_operation_lease_releases WHERE claim_id={})",
+            quote(node), quote(operation), quote(claim), quote(claim))
+    });
+    // Exact schema, the original committed outage identity, its release
+    // receipt, current node and this page are read in ONE consistent Store
+    // statement. Freshness uses this process's actual clock before/after the
+    // read, never an origin-supplied timestamp. No prepared DTO or cached page
+    // proves zero; the caller still rechecks its SAME timed local drain token.
+    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) AND ({exact_outage}) THEN json((SELECT json_group_array(json(entry)) FROM (SELECT json_object('binding',json(r.binding_json),'owner_key',a.owner_key,'attempt',json({})) AS entry FROM media_resource_attempts a LEFT JOIN media_resource_requests r USING(owner_key,request_id,request_incarnation_id) WHERE a.worker_node_id={} AND a.phase!='closed' AND a.attempt_id>{} ORDER BY a.attempt_id LIMIT {}))) ELSE 'unavailable' END AS payload",schema::ready_guard_for(layout, store.attempt_outage_fence()),record_projection("a"),quote(&query.worker_node_id),quote(&cursor),u32::from(query.limit)+1)).await?;
     let [encoded] = rows.as_slice() else {
         return Err(invalid());
     };
@@ -378,9 +451,9 @@ impl Operation<'_> {
             &serde_json::json!({"operation_id":self.context.operation_id,"action":self.action,"owner_key":self.binding.principal.owner_key(),"request_id":self.binding.key.request_id,"request_incarnation_id":self.binding.key.request_incarnation_id,"attempt_id":self.key.attempt_id,"route_incarnation_id":self.key.route_incarnation_id,"session_id":self.key.session_id,"owner_epoch":self.key.owner_epoch,"expected_request_sequence":self.context.expected_request_sequence,"expected_attempt_sequence":self.context.expected_attempt_sequence,"payload_digest":self.payload}),
         )
     }
-    fn open(&self, layout: Layout) -> Result<Vec<String>, StoreError> {
+    fn open(&self, layout: Layout, outage: schema::OutageFence) -> Result<Vec<String>, StoreError> {
         let claim = quote(&self.claim()?);
-        Ok(vec![schema::assertion(&schema::ready_guard(layout)),schema::assertion(&format!("NOT EXISTS(SELECT 1 FROM media_resource_operations WHERE operation_id={}) AND NOT EXISTS(SELECT 1 FROM media_resource_close_operations WHERE operation_id={})",quote(&self.context.operation_id.to_string()),quote(&self.context.operation_id.to_string()))),format!("UPDATE media_resource_schema SET mutation_claim={claim} WHERE singleton=1 AND revision<9223372036854775807 AND mutation_claim IS NULL"),schema::assertion(&format!("EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND mutation_claim={claim})"))])
+        Ok(vec![schema::assertion(&schema::ready_guard_for(layout, outage)),schema::assertion(&format!("NOT EXISTS(SELECT 1 FROM media_resource_operations WHERE operation_id={}) AND NOT EXISTS(SELECT 1 FROM media_resource_close_operations WHERE operation_id={})",quote(&self.context.operation_id.to_string()),quote(&self.context.operation_id.to_string()))),format!("UPDATE media_resource_schema SET mutation_claim={claim} WHERE singleton=1 AND revision<9223372036854775807 AND mutation_claim IS NULL"),schema::assertion(&format!("EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND mutation_claim={claim})"))])
     }
     fn finish(&self, statements: &mut Vec<String>) -> Result<(), StoreError> {
         // SQL no-ops cannot mint history: both projections must advance.
@@ -560,7 +633,12 @@ pub(crate) async fn claim<B: Backend>(
         return Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding));
     }
     let layout = store.attempt_layout().await?;
-    let mut statements = operation.open(layout)?;
+    let mut statements = operation.open(layout, store.attempt_outage_fence())?;
+    if store.attempt_outage_fence() == schema::OutageFence::Replicated {
+        statements.push(schema::assertion(&schema::worker_unfenced_guard(
+            &input.key.worker_node_id,
+        )));
+    }
     let binding = &input.binding;
     let key = &input.key;
     let user = binding.principal.local_user_id().ok_or_else(invalid)?;
@@ -634,7 +712,7 @@ pub(crate) async fn prepared<B: Backend>(
         return Ok(AttemptMutation::Refused(AttemptRefusal::Expired));
     }
     let layout = store.attempt_layout().await?;
-    let mut statements = operation.open(layout)?;
+    let mut statements = operation.open(layout, store.attempt_outage_fence())?;
     statements.push(schema::assertion(&format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_requests r WHERE {} AND r.disposition='open' AND r.winner_attempt_id IS NULL) AND EXISTS(SELECT 1 FROM media_resource_attempts WHERE attempt_id={} AND phase='provisional' AND worker_json IS NULL AND worker_instance_id={} AND serving_generation=X'{}')",exact_request(&operation)?,exact_attempt(&operation)?,request_predicate(&input.binding,"r"),quote(&input.key.attempt_id.to_string()),quote(&input.worker.worker_instance_id.to_string()),hex::encode(input.worker.serving_generation.to_le_bytes()))));
     statements.push(advance_attempt(
         &operation,
@@ -692,7 +770,7 @@ pub(crate) async fn winner<B: Backend>(
         return Ok(AttemptMutation::Refused(AttemptRefusal::Expired));
     }
     let layout = store.attempt_layout().await?;
-    let mut statements = operation.open(layout)?;
+    let mut statements = operation.open(layout, store.attempt_outage_fence())?;
     statements.push(schema::assertion(&format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_requests r WHERE {} AND r.winner_attempt_id IS NULL AND r.disposition='open') AND EXISTS(SELECT 1 FROM media_resource_attempts WHERE attempt_id={} AND phase='prepared' AND worker_json={}) AND NOT EXISTS(SELECT 1 FROM media_resource_attempts a WHERE {} AND a.sequence=9223372036854775807)",exact_request(&operation)?,exact_attempt(&operation)?,request_predicate(&input.binding,"r"),quote(&input.key.attempt_id.to_string()),quote(&encode(&input.worker)?),request_predicate(&input.binding,"a"))));
     statements.push(advance_request(
         &operation,
@@ -741,7 +819,7 @@ pub(crate) async fn fence<B: Backend>(
         return Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding));
     }
     let layout = store.attempt_layout().await?;
-    let mut statements = operation.open(layout)?;
+    let mut statements = operation.open(layout, store.attempt_outage_fence())?;
     statements.push(schema::assertion(&format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_requests r WHERE {} AND r.disposition!='adopted')",exact_request(&operation)?,exact_attempt(&operation)?,request_predicate(&input.binding,"r"))));
     statements.push(advance_attempt(&operation, ",phase='cleanup'"));
     statements.push(advance_request(
@@ -799,7 +877,7 @@ pub(crate) async fn close<B: Backend>(
         return Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding));
     }
     let layout = store.attempt_layout().await?;
-    let mut statements = operation.open(layout)?;
+    let mut statements = operation.open(layout, store.attempt_outage_fence())?;
     let key = &input.key;
     let binding = &input.binding;
     let now = input.context.now_ms;

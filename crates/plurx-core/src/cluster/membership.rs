@@ -1048,6 +1048,49 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
 ];
 
 const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
+/// Exact existing membership objects needed by the adaptive outage boundary.
+/// Reuse their owning definitions; do not infer this capability from a table
+/// name, session principal layout, clock comparison or membership generation.
+pub(crate) fn adaptive_outage_schema_guard() -> String {
+    const NAMES: &[&str] = &[
+        "cluster_node_maintenance",
+        "cluster_operation_leases",
+        "cluster_operation_lease_releases",
+        "cluster_operation_lease_intents",
+        "cluster_operation_lease_insert_intent_guard",
+        "cluster_operation_lease_update_intent_guard",
+        "cluster_operation_lease_delete_intent_guard",
+        "cluster_operation_lease_heartbeat_expiry",
+    ];
+    let guards = MEMBERSHIP_SCHEMA
+        .iter()
+        .chain(
+            [
+                REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL,
+                REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL,
+                REQUIRE_OPERATION_LEASE_DELETE_INTENT_SQL,
+            ]
+            .iter(),
+        )
+        .filter_map(|sql| {
+            let canonical = sql.replace(" IF NOT EXISTS", "");
+            let words = canonical.split_whitespace().collect::<Vec<_>>();
+            let kind = *words.get(1)?;
+            let name = words.get(2)?.split('(').next()?;
+            NAMES.contains(&name).then(|| {
+                format!(
+            "EXISTS(SELECT 1 FROM sqlite_master WHERE type='{}' AND name='{}' AND sql='{}')",
+            kind.to_ascii_lowercase(), name, canonical.replace('\'', "''")
+        )
+            })
+        })
+        .collect::<Vec<_>>();
+    if guards.len() != NAMES.len() {
+        return "0".into();
+    }
+    guards.join(" AND ")
+}
+
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
 const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 /// A committed roster larger than this is not a bounded operations surface.
@@ -4688,6 +4731,29 @@ pub enum CacheAdminRevocationCleanupOutcome {
 }
 
 impl ClusterOperationLease {
+    /// Trusted Store projection only. The value can be merely prepared: a
+    /// Store snapshot must still prove the exact committed, unreleased row.
+    /// This identity never proves native closure or grants restart permission.
+    pub(crate) fn adaptive_outage_identity(&self) -> (&str, &str, &str, i64) {
+        (
+            &self.node_id,
+            self.operation,
+            &self.claim_id,
+            self.expires_at_unix_ms,
+        )
+    }
+
+    /// Necessary freshness check for a fenced inventory snapshot. This is not
+    /// commit proof: the Store must still compare the exact durable row and
+    /// the daemon must retain/recheck its original local drain token.
+    pub(crate) fn adaptive_inventory_unix_ms(&self) -> Result<i64, MembershipError> {
+        let now = unix_ms()?;
+        if now <= 0 || now >= self.expires_at_unix_ms {
+            return Err(MembershipError::ClusterOperationPending);
+        }
+        Ok(now)
+    }
+
     /// Bound a process-local admission fence by both the requested operator
     /// window and the already-committed replicated expiry. Time spent waiting
     /// for consensus consumes the lease instead of moving this deadline.

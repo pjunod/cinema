@@ -45,7 +45,15 @@ async fn verify_layout(client: &Client) -> Result<bool, MembershipError> {
             }
         }
         [row] if row.count == layout::SOURCE_SCHEMA_PREDECESSOR => {
-            if predicate(client, layout::predecessor_layout_guard(), params!()).await? {
+            if predicate(
+                client,
+                layout::predecessor_layout_guard_for(
+                    crate::store::adaptive_resource_attempts::schema::OutageFence::Replicated,
+                ),
+                params!(),
+            )
+            .await?
+            {
                 boot_table_present(client).await?;
                 Ok(false)
             } else {
@@ -166,11 +174,17 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
         _ => return Err(MembershipError::Incompatible),
     };
     let predecessor = if adaptive {
-        layout::adaptive_predecessor_guard(3, live)
+        layout::adaptive_predecessor_guard_for(
+            3,
+            live,
+            crate::store::adaptive_resource_attempts::schema::OutageFence::Replicated,
+        )
     } else if live {
         format!(
             "({}) AND ({})",
-            layout::predecessor_layout_guard(),
+            layout::predecessor_layout_guard_for(
+                crate::store::adaptive_resource_attempts::schema::OutageFence::Replicated
+            ),
             crate::store::adaptive_resource_attempts::schema::absent_guard()
         )
     } else {
@@ -207,7 +221,9 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
     ];
     statements.extend(
         (if adaptive {
-            layout::adaptive_layout_statements()
+            layout::adaptive_layout_statements_for(
+                crate::store::adaptive_resource_attempts::schema::OutageFence::Replicated,
+            )
         } else {
             layout::layout_statements()
         })

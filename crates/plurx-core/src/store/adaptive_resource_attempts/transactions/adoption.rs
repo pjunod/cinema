@@ -49,7 +49,7 @@ async fn outcome<B: Backend>(
         .binding
         .expected_predecessor_incarnation_id
         .map_or_else(|| "NULL".into(), |id| quote(&id.to_string()));
-    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN json_object('route',json({}),'predecessor',json((SELECT {} FROM media_sessions p WHERE p.incarnation_id={predecessor} AND p.user_id={} AND p.playback_id={}))) ELSE 'unavailable' END AS payload FROM media_sessions s WHERE s.incarnation_id={}",schema::ready_guard(layout),route_json("s"),route_json("p"),input.binding.principal.local_user_id().ok_or_else(invalid)?,quote(&input.binding.playback_id),quote(&input.key.route_incarnation_id.to_string()))).await?;
+    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN json_object('route',json({}),'predecessor',json((SELECT {} FROM media_sessions p WHERE p.incarnation_id={predecessor} AND p.user_id={} AND p.playback_id={}))) ELSE 'unavailable' END AS payload FROM media_sessions s WHERE s.incarnation_id={}",schema::ready_guard_for(layout, store.attempt_outage_fence()),route_json("s"),route_json("p"),input.binding.principal.local_user_id().ok_or_else(invalid)?,quote(&input.binding.playback_id),quote(&input.key.route_incarnation_id.to_string()))).await?;
     let [row] = rows.as_slice() else {
         return Err(invalid());
     };
@@ -160,7 +160,7 @@ pub(crate) async fn adopt<B: Backend>(
     }
     let layout = store.attempt_layout().await?;
     let user = binding.principal.local_user_id().ok_or_else(invalid)?;
-    let mut statements = operation.open(layout)?;
+    let mut statements = operation.open(layout, store.attempt_outage_fence())?;
     statements.push(schema::assertion(&format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_requests r WHERE {} AND r.disposition='open' AND r.winner_attempt_id={}) AND EXISTS(SELECT 1 FROM media_resource_attempts WHERE attempt_id={} AND phase='winner' AND worker_json={})",exact_request(&operation)?,exact_attempt(&operation)?,request_predicate(binding,"r"),quote(&key.attempt_id.to_string()),quote(&key.attempt_id.to_string()),quote(&encode(&input.worker)?))));
     let pointer_owner = layout.owner("pointer");
     let predecessor = binding

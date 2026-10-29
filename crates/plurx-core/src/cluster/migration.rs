@@ -903,7 +903,7 @@ async fn join_fresh_store(
         );
         let catalogue = CatalogueReader::replicated(
             Arc::clone(&store),
-            concrete_store,
+            concrete_store.clone(),
             replication.metrics_handle(),
             config.cluster.bounded_replica_reads,
             config.cluster.bounded_replica_max_lag_entries,
@@ -933,6 +933,16 @@ async fn join_fresh_store(
         let (membership_manager, activation_admission) =
             complete_startup_observation(&client, membership_manager, &identity, role, observer)
                 .await?;
+        if role == ClusterRole::Voter {
+            let admit_next = || {
+                activation_admission
+                    .revalidate()
+                    .map_err(|error| StoreError::Database(error.to_string()))
+            };
+            concrete_store
+                .install_adaptive_attempt_schema(Some(&admit_next))
+                .await?;
+        }
         activation_admission
             .revalidate()
             .map_err(|error| StoreError::Database(error.to_string()))?;
@@ -3103,6 +3113,16 @@ async fn open_active_store_with_key(
         let (membership, activation_admission) =
             complete_startup_observation(&client, membership, &identity, role, observer).await?;
         if role == ClusterRole::Voter {
+            // The owning membership initializer has now completed; install
+            // the replicated adjunct under this exact startup admission.
+            let admit_next = || {
+                activation_admission
+                    .revalidate()
+                    .map_err(|error| StoreError::Database(error.to_string()))
+            };
+            concrete_store
+                .install_adaptive_attempt_schema(Some(&admit_next))
+                .await?;
             // A desired voter that booted as a learner cannot migrate until
             // the actual local watch has proved its committed promotion.
             if !actual_voter {
