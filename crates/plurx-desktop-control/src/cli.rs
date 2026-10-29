@@ -208,7 +208,7 @@ pub fn control_entry() -> i32 {
                 "source installation uses canonical native paths",
             )));
         }
-        return emit(crate::source_install::run(candidate));
+        return emit_with_recovery(crate::source_install::run(candidate));
     }
     if let ControlCommand::Bootstrap { command } = &cli.command {
         let (package, no_start, source, preflight) = match command {
@@ -226,7 +226,7 @@ pub fn control_entry() -> i32 {
             )));
         }
         if preflight {
-            return emit(native::preflight_source_package(package).map(|()| {
+            return emit_with_recovery(native::preflight_source_package(package).map(|()| {
                 ControlResultV1::Update {
                     state: UpdateState::Idle,
                     version: None,
@@ -240,7 +240,7 @@ pub fn control_entry() -> i32 {
         } else {
             native::bootstrap_package(package, *no_start)
         };
-        return emit(installed.and_then(|i| controller::status(&i)));
+        return emit_with_recovery(installed.and_then(|i| controller::status(&i)));
     }
     if matches!(
         cli.command,
@@ -273,7 +273,11 @@ pub fn control_entry() -> i32 {
         }
         return invoke_helper();
     }
-    emit(execute(&i, cli.command))
+    if cli.installation.is_some() {
+        emit(execute(&i, cli.command))
+    } else {
+        emit_with_recovery(execute(&i, cli.command))
+    }
 }
 pub fn needs_authority(command: &ControlCommand) -> bool {
     !matches!(
@@ -508,8 +512,42 @@ pub fn execute(i: &InstallationV1, command: ControlCommand) -> Result<ControlRes
         )),
     }
 }
+fn recovery_command(path: &std::path::Path, transaction: &str) -> String {
+    format!(
+        "'{}' --transaction {}",
+        path.display().to_string().replace('\'', "'\\''"),
+        transaction
+    )
+}
+fn recovery_hint() -> Option<String> {
+    let installation = InstallationV1::load(&installation::default_record().ok()?).ok()?;
+    if installation.method != InstallMethod::MacosNative {
+        return None;
+    }
+    let root = installation.state_dir().ok()?;
+    let transactions = root.child("transactions", false).ok()?;
+    let journal = transaction::read_active(&root, &transactions).ok()??;
+    if journal.terminal() || journal.installation_id != installation.installation_id {
+        return None;
+    }
+    Some(recovery_command(
+        &installation.paths.state.join("plurx-recovery"),
+        &journal.transaction_id,
+    ))
+}
 pub fn emit(result: Result<ControlResultV1>) -> i32 {
+    emit_response(result, false)
+}
+fn emit_with_recovery(result: Result<ControlResultV1>) -> i32 {
+    emit_response(result, true)
+}
+fn emit_response(result: Result<ControlResultV1>, canonical_recovery: bool) -> i32 {
     let ok = result.is_ok();
+    let recovery = if !ok && canonical_recovery {
+        recovery_hint()
+    } else {
+        None
+    };
     let response = match result {
         Ok(value) => ControlResponseV1::success(value),
         Err(e) => ControlResponseV1::failure(e.wire()),
@@ -525,6 +563,9 @@ pub fn emit(result: Result<ControlResultV1>) -> i32 {
             eprintln!("failed to serialize bounded controller response");
             return 1;
         }
+    }
+    if let Some(command) = recovery {
+        eprintln!("Recovery command:\n{command}");
     }
     if ok {
         0
@@ -649,5 +690,32 @@ pub fn service_launch_entry() -> i32 {
             eprintln!("{}", e.message);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_command_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn recovery_command_is_directly_pasteable_with_spaces_quotes_and_shell_characters() {
+        let root =
+            std::env::temp_dir().join(format!("plurx-recovery-command-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).expect("private test directory");
+        let binary = root.join("recovery 'quoted' $HOME;echo");
+        std::fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").expect("argument recorder");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let transaction = "05734dec-45c5-4659-82cf-1f30f31c782d";
+        let (status, output) = supervisor::output(
+            "/bin/sh",
+            &["-c".into(), recovery_command(&binary, transaction)],
+            std::time::Duration::from_secs(5),
+        )
+        .expect("paste command into shell");
+        assert_eq!(status, 0);
+        assert_eq!(output, format!("--transaction\n{transaction}\n"));
+        std::fs::remove_dir_all(root).expect("remove test directory");
     }
 }

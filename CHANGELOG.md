@@ -113,9 +113,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- GitHub macOS releases sign and notarize the complete install archive in a
-  protected job before publication, retaining component hashes and the stapled
-  app ticket. Dry-run builds remain available without Apple credentials.
+- Fresh macOS media builds retain caller macro paths and expose Homebrew
+  aclocal macros to the source-built Automake tools used by libass.
+
+- macOS source upgrades wait through transient process-inspection failures,
+  recover interrupted clean shutdowns, and print a directly runnable recovery
+  command with the complete executable path.
 
 - Fresh macOS source installs build Automake without creating a circular
   GNUmakefile symlink when the temporary directory uses a symlinked path.
@@ -346,6 +349,10 @@ bump may break compatibility and a **patch** bump never does.
   settling repeated attachment to the same player layer.
 - Apple Playback info reports the installed Auto rung after a prepared quality
   switch, so an encoded 720p stream no longer retains the original Remux label.
+
+- GitHub macOS releases sign and notarize the complete install archive in a
+  protected job before publication, retaining component hashes and the stapled
+  app ticket. Dry-run builds remain available without Apple credentials.
 
 ## [0.7.0] — 2026-10-17
 
