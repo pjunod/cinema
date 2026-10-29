@@ -59,6 +59,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- Credential sign-in screens omit Report a problem. Connection setup, saved-
+  session recovery, and signed-in reporting keep their entry points.
+
 - Cinema sharing invitations open as QR codes with expandable text. Save or
   share the PNG, then upload or scan it on the receiving Cinema; import and
   pairing approval remain explicit. Web, Apple, and Android clients retain

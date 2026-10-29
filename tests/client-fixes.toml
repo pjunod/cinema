@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Issue #1321: credential sign-in omits reporting while connection recovery retains it.
+[[fixes]]
+id = "apple.sign-in-report-action-removed"
+commits = ["28c2d4ace2257bb51bb423bb046711cf72be4678"]
+source = "clients/apple/Sources/AuthViews.swift"
+source_anchor = 'AuthScaffold(subtitle: model.serverName ?? model.origin, error: model.authError, showReport: false)'
+test = "clients/apple/UITests/TVConnectionNavigationTests.swift"
+test_anchor = "testSignInCanChooseAnotherServerAndReconnectWithNativeRemote"
+
+[[fixes]]
+id = "web.sign-in-report-action-removed"
+commits = []
+supplements = "apple.sign-in-report-action-removed"
+source = "crates/plurxd/src/web/core/auth.js"
+source_anchor = "function authShell(title, sub, fields, btn, onsubmit, showReport=true)"
+test = "tests/web/session-expiry.test.js"
+test_anchor = "credential sign-in omits the reporting action"
+
 
 # PR #1316: QR-first invitation exchange preserves explicit import and approval.
 [[fixes]]
