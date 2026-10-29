@@ -121,6 +121,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+
+- Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
 - Progressive subtitle decoding resolves the normal PATH-based media tools to
   canonical executables before launching its clean, descriptor-bound children.
 
