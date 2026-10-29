@@ -130,6 +130,9 @@ bump may break compatibility and a **patch** bump never does.
   ordinary native daemons as Docker containers. Shared playback accepts the
   current audio downmix plans and excludes public-only output advisories from
   peer decisions instead of reporting an unexplained preparation failure.
+  HTTP browser sessions generate UUID request identities even without
+  `crypto.randomUUID`, allowing shared playback to start. Source connection
+  failures have a distinct message and catalogue-stage diagnostics.
 
 - Progressive subtitle translation keeps FFmpeg progress updates out of source
   clock evidence, preventing valid decoded ranges from failing before inference.

@@ -12,7 +12,9 @@ const SHARED_DECISION=(()=>{
   // Keep the closed server reason instead of presenting every failed Start as
   // a decision failure. Peer messages and arbitrary response text stay private.
   function refusal(status,value,mode){
-    const messages={sharing_start_unresolved:"The sharing host could not confirm playback preparation.",
+    const messages={sharing_source_unavailable:"Cinema could not reach the sharing host to load this file. Check that it is awake and connected, then try again.",
+      sharing_metadata_capacity:"The sharing host is busy loading library details. Try again shortly.",
+      sharing_start_unresolved:"The sharing host could not confirm playback preparation.",
       sharing_start_unavailable:"The sharing host is unavailable for playback.",
       sharing_start_deadline:"The sharing host took too long to prepare playback.",
       sharing_start_capacity:"The sharing host is busy. Try again shortly.",
@@ -101,7 +103,7 @@ const SHARED_DECISION=(()=>{
     const direct=body.presentation==="direct";
     if(body.presentation!=null&&body.presentation!=="vod"&&!direct||direct&&(body.native_subtitles===true||body.subtitle_burn!=null))unsupported();
     if(body.caps?.v!==2||typeof body.playback_id!=="string"||!body.playback_id||body.playback_id.length>128||/[\u0000-\u001f\u007f]/.test(body.playback_id)
-      ||typeof body.request_id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.request_id))fail();
+      ||typeof body.request_id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.request_id))fail("start_identity");
     const text=JSON.stringify(body);if(new TextEncoder().encode(text).length>24*1024)fail();
     const raw=await read(playbackFileUrl(base,"hls/sessions"),c,text,signal,restart?"restart":"start"),response=engine(raw);
     if(restart?!authorized(c):!current(c))fail();

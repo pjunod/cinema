@@ -117,6 +117,21 @@ actual import or pairing approval.
 
 ### When shared playback cannot prepare
 
+On a private HTTP origin, playback request identities use `getRandomValues`
+to form UUIDs because the browser's `randomUUID` API requires a secure
+context. Shared Start requires a UUID even when Local playback accepts a
+legacy request identifier. A `start_identity` client warning means Start was
+refused locally before an encoder was requested.
+
+Loading fresh file details precedes playback planning. A
+`sharing_source_unavailable` response means the receiver could not complete
+that Source read. Check the Source is awake, its Cinema listener is running
+and its private Serve forward still exists. The receiver logs
+`phase="catalogue_verify"` for failed peer connection/identity checks,
+`phase="catalogue_request"` for failed catalogue RPCs and
+`phase="catalogue_deadline"` for the overall read deadline. These include
+only correlation UUIDs, elapsed time and the closed peer error enum.
+
 The receiver distinguishes upstream, decision decoding and resource projection
 failures in daemon warnings with `phase="upstream"`, `phase="decode"` and
 `phase="project"`; Source planning failures use `phase="source_plan"`.
