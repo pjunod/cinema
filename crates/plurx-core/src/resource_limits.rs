@@ -389,8 +389,7 @@ fn verified_unified_root(root: &std::path::Path, leaf: &std::path::Path) -> Opti
         return None;
     }
     let stats = unsafe { stats.assume_init() };
-    #[allow(clippy::unnecessary_cast)] // libc filesystem word widths differ by Linux ABI.
-    if stats.f_type != libc::CGROUP2_SUPER_MAGIC as _ {
+    if stats.f_type != libc::CGROUP2_SUPER_MAGIC {
         return None;
     }
     // Kernel cgroup-v2 ABI: cpuset.cpus.isolated exists ONLY at the true root.

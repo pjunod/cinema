@@ -87,7 +87,7 @@ fn linux_handle_headroom(ceiling: Metric<u64>) -> Metric<u64> {
         Metric::Known(ceiling) => ceiling,
         Metric::Unknown(reason) => return Metric::Unknown(reason),
     };
-    let Ok(entries) = fs::read_dir("/proc/self/fd") else {
+    let Ok(entries) = fs::read_dir("/proc/thread-self/fd") else {
         return Metric::Unknown(UnknownReason::Inaccessible);
     };
     let mut open = 0_u64;
