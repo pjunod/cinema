@@ -285,6 +285,14 @@ pub trait SharingStore: Send + Sync {
         now_ms: i64,
     ) -> Result<bool, StoreError>;
     async fn create_share_import(&self, import: NewImport) -> Result<ImportOutcome, StoreError>;
+    /// Rename this recipient's display label without changing sharing authority.
+    async fn rename_share_import(
+        &self,
+        id: Uuid,
+        expected_name: &str,
+        name: &str,
+        now_ms: i64,
+    ) -> Result<MutationOutcome, StoreError>;
     async fn re_pair_share_import(
         &self,
         import: NewImport,
@@ -737,6 +745,35 @@ impl<T: Backend> SharingStore for T {
             None => Ok(ImportOutcome::Capacity),
         }
     }
+    async fn rename_share_import(
+        &self,
+        id: Uuid,
+        expected_name: &str,
+        name: &str,
+        now_ms: i64,
+    ) -> Result<MutationOutcome, StoreError> {
+        if name.is_empty()
+            || name.trim() != name
+            || name.len() > 128
+            || name.chars().any(char::is_control)
+            || expected_name.len() > 128
+            || expected_name.chars().any(char::is_control)
+            || now_ms < 0
+        {
+            return Err(invalid());
+        }
+        let counts = self.sharing_txn(vec![stmt(
+            "UPDATE sharing_imports SET source_name=$1,updated_at_ms=$2 WHERE id=$3 AND source_name=$4",
+            vec![name.to_owned().into(), now_ms.into(), id.into(), expected_name.to_owned().into()],
+        )]).await?;
+        if counts[0] == 1 {
+            Ok(MutationOutcome::Applied)
+        } else if self.sharing_import(id).await?.is_some() {
+            Ok(MutationOutcome::Conflict)
+        } else {
+            Ok(MutationOutcome::NotFound)
+        }
+    }
     async fn re_pair_share_import(
         &self,
         i: NewImport,
@@ -758,7 +795,7 @@ impl<T: Backend> SharingStore for T {
             .to_owned();
         let counts = self.sharing_txn(vec![
             stmt("DELETE FROM sharing_import_rotations WHERE import_id=$1 AND EXISTS(SELECT 1 FROM sharing_imports WHERE id=$1 AND lifecycle_generation=$2 AND lifecycle_generation<9223372036854775807 AND endpoint_generation<9223372036854775807 AND assignment_generation<9223372036854775807 AND source_server_id=$3 AND catalogue_epoch=$4)", vec![i.id.into(), generation.into(), i.source.server_id.into(), i.source.catalogue_epoch.into()]),
-            stmt("UPDATE sharing_imports SET source_name=$1,claim_id=$2,credential_envelope=$3,claim_envelope=$4,endpoints_json=$5,remote_grant_id=NULL,state='claiming',lifecycle_generation=lifecycle_generation+1,endpoint_generation=endpoint_generation+1,assignment_generation=assignment_generation+1,observed_scope_generation=NULL,observed_credential_generation=NULL,observed_catalogue_generation=NULL,observed_endpoint_revision=NULL,updated_at_ms=$6 WHERE id=$7 AND lifecycle_generation=$8 AND lifecycle_generation<9223372036854775807 AND endpoint_generation<9223372036854775807 AND assignment_generation<9223372036854775807 AND source_server_id=$9 AND catalogue_epoch=$10", vec![i.source_name.into(), i.claim_id.into(), credential.into(), claim.into(), json(&i.endpoints)?.into(), i.now_ms.into(), i.id.into(), generation.into(), i.source.server_id.into(), i.source.catalogue_epoch.into()]),
+            stmt("UPDATE sharing_imports SET claim_id=$1,credential_envelope=$2,claim_envelope=$3,endpoints_json=$4,remote_grant_id=NULL,state='claiming',lifecycle_generation=lifecycle_generation+1,endpoint_generation=endpoint_generation+1,assignment_generation=assignment_generation+1,observed_scope_generation=NULL,observed_credential_generation=NULL,observed_catalogue_generation=NULL,observed_endpoint_revision=NULL,updated_at_ms=$5 WHERE id=$6 AND lifecycle_generation=$7 AND lifecycle_generation<9223372036854775807 AND endpoint_generation<9223372036854775807 AND assignment_generation<9223372036854775807 AND source_server_id=$8 AND catalogue_epoch=$9", vec![i.claim_id.into(), credential.into(), claim.into(), json(&i.endpoints)?.into(), i.now_ms.into(), i.id.into(), generation.into(), i.source.server_id.into(), i.source.catalogue_epoch.into()]),
         ]).await?;
         Ok(if counts[1] == 1 {
             MutationOutcome::Applied

@@ -12,7 +12,7 @@ function harness(fetcher=async()=>reply({updated:true})){
  const c=vm.createContext({TextDecoder,TextEncoder,Uint8Array,URL,URLSearchParams,Response,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/settings/sharing",origin:"https://b.example"},PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   SETTINGS_DATA:{},SETTINGS_LOADED:new Set(),readAfterRequest:()=>({index:"",generation:1,epoch:0}),observeReadAfter(){},forgetReadAfter(){},clearLocalSession(){c.AUTH_GENERATION++;c.TOKEN=null;},
   esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),setHead:()=>"",setCard:v=>v,cardHead:()=>"",document:{getElementById(){return element;}},fetch:async(path,options)=>{requests.push({path,options});return fetcher(path,options,c);}});
- vm.runInContext(catalogue+"\n"+source+"\nthis.m={parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,recovery:sharingRecoveryHTML,mainReload:sharingReload,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,copyInvitation:sharingCopyInvitation,endpointEdit:sharingEndpointEdit,endpointCount:sharingEndpointCount,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,configure:sharingConfigureAddresses,back:sharingCloseEditor,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,state:()=>SHARING_MANAGEMENT};",c);
+ vm.runInContext(catalogue+"\n"+source+"\nthis.m={rename:sharingRenameImport,friendlyName:sharingFriendlyName,parse:sharingJSON,stringify:sharingJSONString,endpoint:sharingEndpoint,endpoints:sharingEndpoints,recovery:sharingRecoveryHTML,mainReload:sharingReload,matrix:sharingMatrix,assignments:sharingAssignments,cancel:sharingCancelInvitation,copyInvitation:sharingCopyInvitation,endpointEdit:sharingEndpointEdit,endpointCount:sharingEndpointCount,request:sharingRequest,read:sharingManagementRead,panel:sharingManagementPanel,capture:sharingCapture,retire:sharingRetire,route:sharingRouteChanged,open:sharingOpen,save:sharingSave,reload:sharingEditorReload,configure:sharingConfigureAddresses,back:sharingCloseEditor,select:sharingSelect,edit:sharingEdit,matrixEdit:sharingMatrixEdit,removeOutside:sharingRemoveOutside,work:sharingWork,state:()=>SHARING_MANAGEMENT};",c);
  const data={sharingImports:{imports:[imported()]},sharingExports:{exports:[exported()],next:null},sharingStatus:{listener:"ready"}};
  c.m.panel(data);return {c,m:c.m,requests,element,data};
 }
@@ -359,4 +359,35 @@ test("unavailable peer explains setup and stale invitations without replaying th
  const h=harness(async()=>reply({code:"sharing_peer_unavailable",error:"sharing peer unavailable"},502));
  await assert.rejects(h.m.request("/sharing/imports",{method:"POST",body:{invitation:"test"}}),error=>error.code==="sharing_peer_unavailable"&&/Check both Cinemas/.test(error.message)&&/fresh invitation/.test(error.message));
  assert.equal(h.requests.length,1);assert.equal(h.requests[0].options.method,"POST");
+});
+
+
+test("optional import name is trimmed locally, persisted in the request, and omitted for the Source default",async()=>{
+ const h=harness(async()=>reply(imported()));
+ await h.m.open("import");h.m.edit("text","cinema-share-v1:input");h.m.edit("name","  Alex’s Cinema  ");await h.m.save();
+ assert.equal(h.m.parse(h.requests[0].options.body).name,"Alex’s Cinema");
+ await h.m.open("import");h.m.edit("text","cinema-share-v1:input");h.m.edit("name","   ");await h.m.save();assert.equal(Object.hasOwn(h.m.parse(h.requests[1].options.body),"name"),false);
+ await h.m.open("import");h.m.edit("text","cinema-share-v1:input");h.m.edit("name","😀".repeat(33));await h.m.save();assert.equal(h.requests.length,2);assert.match(h.m.state().editor.error,/128 bytes/);
+ assert.throws(()=>h.m.friendlyName("Name\u0085control"));
+});
+function renameDialog(h){
+ const nodes=Object.fromEntries(["form","input",'button[type="button"]','button[type="submit"]','[role="alert"]'].map(key=>[key,{value:"",disabled:false,textContent:"",handlers:{},addEventListener(type,fn){this.handlers[type]=fn;},focus(){},select(){}}]));
+ const dialog={innerHTML:"",handlers:{},setAttribute(){},querySelector(key){return nodes[key];},addEventListener(type,fn){this.handlers[type]=fn;},showModal(){this.open=true;},close(){this.open=false;},remove(){this.removed=true;}};
+ h.c.document.createElement=tag=>{assert.equal(tag,"dialog");return dialog;};h.c.document.body={appendChild(){}};
+ return {dialog,nodes,submit:()=>nodes.form.handlers.submit({preventDefault(){}}),cancel:()=>nodes['button[type="button"]'].handlers.click()};
+}
+test("rename dialog saves the recipient label with CAS without altering import identity or generations",async()=>{
+ const h=harness(),ui=renameDialog(h),pending=h.m.rename(id,"Source");
+ assert.match(ui.dialog.innerHTML,/for="sharing-rename-name"/);assert.match(ui.dialog.innerHTML,/local to your Cinema/);
+ ui.nodes.input.value="  Family films  ";await ui.submit();assert.equal(await pending,"Family films");
+ assert.equal(h.requests[0].path,"/api/v1/sharing/imports/"+id+"/name");assert.equal(h.requests[0].options.method,"PUT");assert.equal(h.requests[0].options.body,'{"expected_name":"Source","name":"Family films"}');assert.equal(ui.dialog.removed,true);
+});
+test("rename conflicts remain visible with no retry and cancelling sends no write",async()=>{
+ const h=harness(async()=>reply({message:"Conflict"},409)),ui=renameDialog(h),pending=h.m.rename(id,"Source");ui.nodes.input.value="Family films";await ui.submit();
+ assert.match(ui.nodes['[role="alert"]'].textContent,/renamed elsewhere/);assert.equal(ui.nodes['button[type="submit"]'].disabled,true);assert.equal(h.requests.length,1);ui.cancel();assert.equal(await pending,null);
+ const cancelled=harness(),other=renameDialog(cancelled),waiting=cancelled.m.rename(id,"Source");other.cancel();assert.equal(await waiting,null);assert.equal(cancelled.requests.length,0);
+});
+test("leaving the page closes a pending rename and a late write cannot publish into the new page",async()=>{
+ let release;const gate=new Promise(resolve=>release=resolve),h=harness(async()=>{await gate;return reply({updated:true});}),ui=renameDialog(h),pending=h.m.rename(id,"Source");
+ ui.nodes.input.value="Family films";const writing=ui.submit();h.c.location.hash="#/";h.m.route();assert.equal(await pending,null);release();await writing;assert.equal(ui.dialog.removed,true);
 });

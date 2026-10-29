@@ -20820,3 +20820,161 @@ async fn display_target_setting_defaults_off_and_saves_despite_unmet_advice() {
         );
     }
 }
+
+#[tokio::test]
+async fn sharing_http_local_name_is_admin_only_and_validates_before_network() {
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    use plurx_core::{secrets::SharingSecretPurpose, sharing::*};
+    let id = uuid::Uuid::new_v4();
+    let path = format!("/api/v1/sharing/imports/{id}/name");
+    let body = json!({"expected_name":"Source", "name":"Family films"});
+    assert_eq!(
+        call(&app, put(&path, None, body.clone())).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let user = state
+        .store
+        .create_user("name-reader", "synthetic hash", false)
+        .await
+        .expect("user");
+    state
+        .store
+        .create_token(
+            &plurx_core::auth::hash_token("name-reader-token"),
+            user.id,
+            None,
+        )
+        .await
+        .expect("token");
+    assert_eq!(
+        call(&app, put(&path, Some("name-reader-token"), body.clone()))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&app, put(&path, Some(&admin), body)).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let identity = state.store.sharing_identity(1000).await.expect("identity");
+    state
+        .store
+        .create_share_import(NewImport {
+            id,
+            source: SharingIdentity {
+                server_id: uuid::Uuid::new_v4(),
+                catalogue_epoch: uuid::Uuid::new_v4(),
+                created_at_ms: 1000,
+            },
+            source_name: "Source".into(),
+            claim_id: uuid::Uuid::new_v4(),
+            credential: state
+                .sharing
+                .key
+                .seal_sharing(
+                    SharingSecretPurpose::Credential,
+                    identity.server_id,
+                    id,
+                    "name fixture credential",
+                )
+                .expect("credential"),
+            claim_secret: state
+                .sharing
+                .key
+                .seal_sharing(
+                    SharingSecretPurpose::Claim,
+                    identity.server_id,
+                    id,
+                    "name fixture invitation",
+                )
+                .expect("invitation"),
+            endpoints: vec![Endpoint {
+                ipv4: "100.101.102.103".parse().expect("address"),
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: 32443,
+                spki_sha256: "a".repeat(64),
+            }],
+            now_ms: 1000,
+        })
+        .await
+        .expect("import");
+    let saved = call(
+        &app,
+        put(
+            &path,
+            Some(&admin),
+            json!({"expected_name":"Source", "name":"  Family films  "}),
+        ),
+    )
+    .await;
+    assert_eq!(saved.0, StatusCode::OK);
+    assert_eq!(saved.1["updated"], true);
+    assert_eq!(
+        state
+            .store
+            .sharing_import(id)
+            .await
+            .expect("stored")
+            .expect("import")
+            .summary
+            .source_name,
+        "Family films"
+    );
+    assert_eq!(
+        call(
+            &app,
+            put(
+                &path,
+                Some(&admin),
+                json!({"expected_name":"Source", "name":"Stale rename"})
+            )
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    for name in [
+        "".to_owned(),
+        "  ".to_owned(),
+        "x\ncontrol".to_owned(),
+        "😀".repeat(33),
+    ] {
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    &path,
+                    Some(&admin),
+                    json!({"expected_name":"Source", "name":name})
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for body in [
+        json!({"expected_name":"Source"}),
+        json!({"expected_name":"Source", "name":"Name", "source_server_id":uuid::Uuid::new_v4()}),
+    ] {
+        assert_eq!(
+            call(&app, put(&path, Some(&admin), body)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            post(
+                "/api/v1/sharing/imports",
+                Some(&admin),
+                json!({"invitation":"invalid", "name":"😀".repeat(33)})
+            )
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}

@@ -11,7 +11,7 @@ function harness(read){
   PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,HTMLButtonElement:class{},
   esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),fmtDur:String,fmtSize:String,langName:String,
   api:async(path)=>{requests.push(path);const response=await read(path);Object.defineProperty(response,"url",{value:new URL("/api/v1"+path,"https://b.test").href});return response;},layoutChrome(){},setPagePhase(){},
-  document:{getElementById(id){if(!elements.has(id))elements.set(id,{innerHTML:"",more:null,querySelector(){return this.more;},querySelectorAll(){return [];},insertAdjacentHTML(where,html){this.innerHTML+=html;},appendChild(button){this.more=button;button.remove=()=>{this.more=null;};}});return elements.get(id);},createElement(){return {dataset:{}};}}
+  document:{getElementById(id){if(!elements.has(id))elements.set(id,{innerHTML:"",dataset:{},value:"",textContent:"",hidden:false,more:null,querySelector(){return this.more;},querySelectorAll(){return [];},insertAdjacentHTML(where,html){this.innerHTML+=html;},appendChild(button){this.more=button;button.remove=()=>{this.more=null;};}});return elements.get(id);},createElement(){return {dataset:{}};}}
  });
  vm.runInContext(artworkSource,context);
  for(const detailSource of detailSources)vm.runInContext(detailSource,context);
@@ -91,8 +91,22 @@ test("Continue Watching unavailable groups never publish stale items or erase an
   if(path.includes("continue-watching"))return reply({...group,availability:group===ref?"unavailable":"online",items:group===ref?[]:[{item:{source:"shared",reference:other,title:"Current title",kind:"movie"}}]});
   return reply({...group,libraries:[{library_id:group.library_id,name:"Library"}]});
  });
- await fixture.h.view(1);assert.match(fixture.elements.get("shared-continue-0").innerHTML,/unavailable/);
+ await fixture.h.view(1);assert.match(fixture.elements.get("shared-history-status-0").textContent,/unavailable/);
  assert.match(fixture.elements.get("shared-continue-1").innerHTML,/Current title/);
+});
+test("the bounded hub rejects foreign history even beyond its poster budget",async()=>{
+ const fixture=harness(async path=>{
+  if(path==="/shared/libraries")return reply({libraries:[ref]});
+  if(path==="/shared/continue-watching?limit=200")return reply({groups:[ref]});
+  if(path.endsWith("/libraries"))return reply({...ref,libraries:[{library_id:ref.library_id,name:"Movies"}]});
+  const items=Array.from({length:41},(_,index)=>({item:{source:"shared",reference:{...ref,item_id:String(index+1)},title:`Title ${index+1}`,kind:"movie"}}));
+  items[40].item.reference.server_id="44444444-4444-4444-8444-444444444444";
+  return reply({...ref,availability:"online",items});
+ });
+ await fixture.h.view(1);
+ assert.equal(fixture.elements.get("shared-continue-0").innerHTML,"");
+ assert.match(fixture.elements.get("shared-history-status-0").textContent,/unavailable/);
+ assert.match(fixture.elements.get("shared-source-0").innerHTML,/Movies/,"invalid history does not erase the assigned library");
 });
 test("Continue Watching preserves two assigned libraries from the same Source",async()=>{
  const second={...ref,library_id:"7",item_id:"9"};

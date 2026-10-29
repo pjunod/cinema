@@ -1280,3 +1280,117 @@ async fn sharing_capacity_refusals_preserve_existing_authority_and_reopen_expire
     })
     .await;
 }
+
+#[tokio::test]
+async fn sharing_local_name_cas_preserves_authority_and_survives_re_pair() {
+    for_each_backend(|s, backend| async move {
+        let local = s.sharing_identity(1000).await.expect("identity");
+        let id = Uuid::new_v4();
+        let key = plurx_core::secrets::CredentialKey::generate();
+        let mut import = NewImport {
+            id,
+            source: SharingIdentity {
+                server_id: Uuid::new_v4(),
+                catalogue_epoch: Uuid::new_v4(),
+                created_at_ms: 1000,
+            },
+            source_name: "Remote Cinema".into(),
+            claim_id: Uuid::new_v4(),
+            credential: key
+                .seal_sharing(
+                    SharingSecretPurpose::Credential,
+                    local.server_id,
+                    id,
+                    "credential",
+                )
+                .expect("credential"),
+            claim_secret: key
+                .seal_sharing(
+                    SharingSecretPurpose::Claim,
+                    local.server_id,
+                    id,
+                    "invitation",
+                )
+                .expect("claim"),
+            endpoints: vec![Endpoint {
+                ipv4: "100.101.102.103".parse().expect("address"),
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: 32443,
+                spki_sha256: hash(7),
+            }],
+            now_ms: 1000,
+        };
+        assert_eq!(
+            s.create_share_import(import.clone()).await.expect("create"),
+            ImportOutcome::Created
+        );
+        let before = s.sharing_import(id).await.expect("before").expect("import");
+        assert_eq!(
+            s.rename_share_import(id, "Remote Cinema", "Family films", 1001)
+                .await
+                .expect("rename"),
+            MutationOutcome::Applied,
+            "{backend}"
+        );
+        let after = s.sharing_import(id).await.expect("after").expect("import");
+        let mut expected = serde_json::to_value(&before.summary).expect("summary");
+        expected["source_name"] = "Family films".into();
+        assert_eq!(
+            serde_json::to_value(&after.summary).expect("summary"),
+            expected,
+            "display names cannot fence sessions or assignments"
+        );
+        assert_eq!(
+            before.credential.to_persist().expect("credential"),
+            after.credential.to_persist().expect("credential")
+        );
+        assert_eq!(
+            before.claim.expect("claim").to_persist().expect("claim"),
+            after.claim.expect("claim").to_persist().expect("claim")
+        );
+        assert_eq!(
+            s.rename_share_import(id, "Remote Cinema", "Stale rename", 1002)
+                .await
+                .expect("stale"),
+            MutationOutcome::Conflict
+        );
+        assert_eq!(
+            s.rename_share_import(Uuid::new_v4(), "Remote Cinema", "Missing", 1002)
+                .await
+                .expect("missing"),
+            MutationOutcome::NotFound
+        );
+        for name in [
+            "".to_owned(),
+            " ".to_owned(),
+            " spaced ".to_owned(),
+            "x\ncontrol".to_owned(),
+            "😀".repeat(33),
+        ] {
+            assert!(
+                s.rename_share_import(id, "Family films", &name, 1002)
+                    .await
+                    .is_err(),
+                "{backend}: {name:?}"
+            );
+        }
+        import.source_name = "Changed remote name".into();
+        import.claim_id = Uuid::new_v4();
+        import.now_ms = 1003;
+        assert_eq!(
+            s.re_pair_share_import(import, 1).await.expect("re-pair"),
+            MutationOutcome::Applied
+        );
+        assert_eq!(
+            s.sharing_import(id)
+                .await
+                .expect("retained")
+                .expect("import")
+                .summary
+                .source_name,
+            "Family films"
+        );
+    })
+    .await;
+}

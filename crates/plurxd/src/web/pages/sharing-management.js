@@ -37,6 +37,12 @@ function sharingUUID(v){if(!sharedCatalogueUuid(v))throw new Error("Invalid Shar
 function sharingIds(rows){if(!Array.isArray(rows)||rows.length>64||new Set(rows).size!==rows.length||rows.some(v=>!sharedCatalogueId(v)))throw new Error("Invalid Source library scope");return rows;}
 function sharingCode(v){if(typeof v!=="string"||!/^[0-9a-f]{16}$/.test(v))throw new Error("Enter the exact 16-character pairing code from the importing Cinema");return v;}
 function sharingInvitation(v){if(typeof v!=="string"||!/^cinema-share-v1:[A-Za-z0-9_-]{1,10923}$/.test(v))throw new Error("Paste a valid cinema-share-v1 invitation");return v;}
+function sharingFriendlyName(value,optional=false){
+  if(typeof value!=="string")throw new Error("Enter a share name");
+  const name=value.trim();
+  if((!optional&&!name)||new TextEncoder().encode(name).length>128||/[\u0000-\u001f\u007f-\u009f]/.test(name))throw new Error("Use a share name of up to 128 bytes without control characters");
+  return name;
+}
 function sharingIPv6(v){
   if(typeof v!=="string"||! /^[0-9a-fA-F:]+$/.test(v)||v.split("::").length>2)throw new Error("Invalid private Tailnet IPv6");
   const halves=v.split("::"),parts=halves.map(h=>h?h.split(":"):[]);
@@ -96,10 +102,11 @@ function sharingMatrix(snapshot,scope,viewers,row){
   return {snapshot,groups,libraries,viewers:users};
 }
 function sharingLocalRows(rows,label){if(!Array.isArray(rows)||rows.length>4096||new Set(rows.map(r=>r.id)).size!==rows.length)throw new Error("Invalid local management list");rows.forEach(r=>{sharingInteger(r.id,0n);if(typeof r[label]!=="string")throw new Error("Invalid local label");});return rows;}
-let SHARING_MANAGEMENT=null,SHARING_AUTH_EPOCH=0;
+let SHARING_MANAGEMENT=null,SHARING_AUTH_EPOCH=0,SHARING_RENAME=null;
 function sharingCapture(){if(API!=="/api/v1"||!/^https?:$/.test(new URL(location.origin).protocol))throw new Error("Invalid B management origin");return {epoch:SHARING_AUTH_EPOCH,auth:AUTH_GENERATION,token:TOKEN,origin:API,bOrigin:location.origin,route:location.hash,page:PAGE_RENDER_GENERATION};}
 function sharingCurrent(c){return !!TOKEN&&c.epoch===SHARING_AUTH_EPOCH&&(!c.work||(SHARING_MANAGEMENT===c.state&&c.state.revision===c.stateRevision&&c.state.editor===c.editor&&(!c.editor||c.editor.revision===c.editRevision)))&&c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API&&c.bOrigin===location.origin&&c.route===location.hash&&c.page===PAGE_RENDER_GENERATION;}
 function sharingRetire(reason=""){
+  SHARING_RENAME?.cancel();
   SHARING_AUTH_EPOCH++;
   if(SHARING_MANAGEMENT?.setupTimer!=null&&typeof clearTimeout==="function")clearTimeout(SHARING_MANAGEMENT.setupTimer);
   if(SHARING_MANAGEMENT){const e=SHARING_MANAGEMENT.editor;if(e){e.text="";e.row=null;e.endpoints=[];e.matrix=null;e.selected=[];e.libraries=[];e.ready=false;}for(const r of [...SHARING_MANAGEMENT.imports,...SHARING_MANAGEMENT.exports])r.pairing_code="";if(SHARING_MANAGEMENT.invitation)SHARING_MANAGEMENT.invitation.invitation="";SHARING_MANAGEMENT.alive=false;SHARING_MANAGEMENT.revision++;SHARING_MANAGEMENT.editor=null;SHARING_MANAGEMENT.invitation=null;SHARING_MANAGEMENT.imports=[];SHARING_MANAGEMENT.exports=[];SHARING_MANAGEMENT=null;}
@@ -122,7 +129,7 @@ async function sharingRequest(path,{method="GET",body=null,capture=sharingCaptur
   const segments=parts[0].split("/").slice(1);
   let allowed=["/libraries","/users","/sharing/status","/sharing/imports","/sharing/exports","/sharing/invitations","/sharing/endpoints"].includes(parts[0]);
   if(segments[0]==="sharing"&&["imports","exports","invitations"].includes(segments[1])&&segments.length>=3&&segments.length<=4){
-    sharingUUID(segments[2]);allowed=segments.length===3||(segments[1]==="imports"&&["re-pair","rotate","assignments","libraries","endpoints"].includes(segments[3]))||(segments[1]==="exports"&&["approve","libraries"].includes(segments[3]));
+    sharingUUID(segments[2]);allowed=segments.length===3||(segments[1]==="imports"&&["re-pair","rotate","assignments","libraries","endpoints","name"].includes(segments[3]))||(segments[1]==="exports"&&["approve","libraries"].includes(segments[3]));
   }
   if(!allowed)throw new Error("Invalid management route");
   if(parts.length===2){if(parts[0]!=="/sharing/exports"||!/^after=[0-9a-f-]+$/.test(parts[1]))throw new Error("Invalid management cursor");sharingUUID(parts[1].slice(6));}
@@ -177,11 +184,50 @@ function sharingButton(label,action,disabled=false){return `<button class="ghost
 function sharingInput(label,key,value,kind="text"){
   const e=SHARING_MANAGEMENT.editor;return `<label>${esc(label)}<input type="${kind}" value="${esc(value||"")}" autocomplete="off" autocapitalize="none" spellcheck="false" oninput="sharingEdit('${key}',this.value)"${e.busy?" disabled":""}></label>`;
 }
+// A recipient-owned label never changes the Source identity or viewer access.
+async function sharingRenameImport(importId,currentName){
+  sharingUUID(importId);
+  if(typeof currentName!=="string"||new TextEncoder().encode(currentName).length>128)throw new Error("Share name unavailable. Reload before renaming.");
+  SHARING_RENAME?.cancel();
+  const capture=sharingCapture(),previous=/** @type {HTMLElement|null} */(document.activeElement),dialog=document.createElement("dialog");
+  dialog.className="sharing-rename-dialog";dialog.setAttribute("aria-labelledby","sharing-rename-title");
+  dialog.innerHTML=`<form><h2 id="sharing-rename-title">Rename shared source</h2><label for="sharing-rename-name">Share name</label><input id="sharing-rename-name" name="name" autocomplete="off" value="${esc(currentName)}" required aria-describedby="sharing-rename-hint"><p id="sharing-rename-hint" class="hint">Use a name your household recognizes. This name is local to your Cinema.</p><p role="alert" class="sharing-rename-error"></p><div class="sharing-rename-actions"><button type="button" class="ghost">Cancel</button><button type="submit">Save name</button></div></form>`;
+  document.body.appendChild(dialog);
+  return new Promise(resolve=>{
+    const form=dialog.querySelector("form"),input=dialog.querySelector("input"),cancel=/** @type {HTMLButtonElement} */(dialog.querySelector('button[type="button"]')),save=/** @type {HTMLButtonElement} */(dialog.querySelector('button[type="submit"]')),error=dialog.querySelector('[role="alert"]');
+    let finished=false,busy=false;
+    const finish=value=>{if(finished)return;finished=true;if(SHARING_RENAME?.dialog===dialog)SHARING_RENAME=null;dialog.close();dialog.remove();if(sharingCurrent(capture))previous?.focus?.();resolve(value);};
+    SHARING_RENAME={dialog,cancel:()=>finish(null)};
+    cancel.addEventListener("click",()=>{if(!busy)finish(null);});
+    dialog.addEventListener("cancel",event=>{event.preventDefault();if(!busy)finish(null);});
+    form.addEventListener("submit",async event=>{
+      event.preventDefault();if(busy||finished)return;
+      try{
+        const name=sharingFriendlyName(input.value);if(name===currentName){finish(name);return;}
+        busy=true;input.disabled=true;cancel.disabled=true;save.disabled=true;save.textContent="Saving…";error.textContent="";
+        await sharingMutation("/sharing/imports/"+importId+"/name","PUT",{expected_name:currentName,name},capture);
+        if(!finished&&sharingCurrent(capture))finish(name);
+      }catch(problem){
+        if(finished)return;if(!sharingCurrent(capture)){finish(null);return;}
+        error.textContent=problem.status===409?"This share was renamed elsewhere. Close this dialog and reload before renaming it again.":problem.message;
+        // An uncertain save is never retried from this dialog.
+        if(busy){input.disabled=true;save.disabled=true;}else input.focus();
+        cancel.disabled=false;save.textContent="Save name";
+      }finally{busy=false;}
+    });
+    dialog.showModal();input.focus();input.select();
+  });
+}
+async function sharingRenameManaged(index){
+  const s=SHARING_MANAGEMENT,row=s?.imports[index];if(!row||s.busy||!sharingCurrent(s.capture))return;
+  try{const saved=await sharingRenameImport(row.import.id,row.import.source_name);if(saved!==null&&SHARING_MANAGEMENT===s&&sharingCurrent(s.capture)){row.import.source_name=saved;sharingPaint();}}
+  catch(error){if(SHARING_MANAGEMENT===s&&sharingCurrent(s.capture)){s.error=error.message;sharingPaint();}}
+}
 function sharingManagementHTML(){
   const s=SHARING_MANAGEMENT;if(!s)return "";
   if(s.editor)return sharingRequirementsHTML(s.status)+sharingEditorHTML(s.editor);
   const disabled=s.busy;
-  return sharingRequirementsHTML(s.status)+`<h3>Connect Cinemas</h3>${sharingButton("Create invitation","sharingOpen('invite')",disabled)} ${sharingButton("Import invitation","sharingOpen('import')",disabled)} ${sharingButton("This Cinema's endpoints","sharingOpen('manifest')",disabled)} ${sharingButton("Reload","sharingReload()",disabled)}${s.error?`<p role="alert">${esc(s.error)}</p>`:""}${s.invitation?`<section id="sharing-invitation-result" class="sharing-invitation" tabindex="-1"><h4>Invitation created</h4><p role="status">Your invitation is ready.</p><p>Copy the invitation below. On the other Cinema, open Settings → Sharing → Import invitation and paste it there. This secret is cleared when you leave Sharing.</p><textarea id="sharing-invitation-text" aria-label="Invitation to copy" readonly autocomplete="off" spellcheck="false" onfocus="this.select()">${esc(s.invitation.invitation)}</textarea><p role="status" aria-live="polite">${esc(s.invitationCopyNotice||"")}</p>${sharingButton("Copy invitation","sharingCopyInvitation()",disabled)} ${sharingButton("Cancel invitation","sharingCancelInvitation()",disabled)} ${sharingButton("Clear secret","sharingClearInvitation()",disabled)}</section>`:""}<h3>Imports</h3>${s.imports.map((row,i)=>`<section><h4>${esc(row.import.source_name||"Shared source")}</h4><p>${esc(row.import.state)} · Source ${esc(row.import.source_server_id)}</p>${sharingButton("Pairing code",`sharingOpen('code',${i})`,disabled)} ${sharingButton("Viewer assignments",`sharingOpen('matrix',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Source endpoints",`sharingOpen('endpoints',${i})`,disabled||!["claiming","pending","active"].includes(row.import.state))} ${sharingButton("Re-pair",`sharingOpen('repair',${i})`,disabled)} ${sharingButton("Rotate credential",`sharingOpen('rotate',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Disconnect",`sharingOpen('disconnect',${i})`,disabled)}</section>`).join("")||'<p class="muted">No imports.</p>'}<h3>Exports</h3>${s.exports.map((row,i)=>`<section><h4>${esc(row.recipient_name||"Recipient")}</h4><p>${esc(row.grant.state)} · Recipient ${esc(row.grant.recipient_server_id)}</p>${sharingButton("Approve pairing",`sharingOpen('approve',${i})`,disabled||row.grant.state!=="pending")} ${sharingButton("Library scope",`sharingOpen('scope',${i})`,disabled||row.grant.state!=="active")} ${sharingButton("Revoke",`sharingOpen('revoke',${i})`,disabled)}</section>`).join("")||'<p class="muted">No exports.</p>'}${s.next?sharingButton("More exports","sharingMoreExports()",disabled):""}`;
+  return sharingRequirementsHTML(s.status)+`<h3>Connect Cinemas</h3>${sharingButton("Create invitation","sharingOpen('invite')",disabled)} ${sharingButton("Import invitation","sharingOpen('import')",disabled)} ${sharingButton("This Cinema's endpoints","sharingOpen('manifest')",disabled)} ${sharingButton("Reload","sharingReload()",disabled)}${s.error?`<p role="alert">${esc(s.error)}</p>`:""}${s.invitation?`<section id="sharing-invitation-result" class="sharing-invitation" tabindex="-1"><h4>Invitation created</h4><p role="status">Your invitation is ready.</p><p>Copy the invitation below. On the other Cinema, open Settings → Sharing → Import invitation and paste it there. This secret is cleared when you leave Sharing.</p><textarea id="sharing-invitation-text" aria-label="Invitation to copy" readonly autocomplete="off" spellcheck="false" onfocus="this.select()">${esc(s.invitation.invitation)}</textarea><p role="status" aria-live="polite">${esc(s.invitationCopyNotice||"")}</p>${sharingButton("Copy invitation","sharingCopyInvitation()",disabled)} ${sharingButton("Cancel invitation","sharingCancelInvitation()",disabled)} ${sharingButton("Clear secret","sharingClearInvitation()",disabled)}</section>`:""}<h3>Imports</h3>${s.imports.map((row,i)=>`<section><h4>${esc(row.import.source_name||"Shared source")}</h4><p>${esc(row.import.state)} · Source ${esc(row.import.source_server_id)}</p>${sharingButton("Rename",`sharingRenameManaged(${i})`,disabled)} ${sharingButton("Pairing code",`sharingOpen('code',${i})`,disabled)} ${sharingButton("Viewer assignments",`sharingOpen('matrix',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Source endpoints",`sharingOpen('endpoints',${i})`,disabled||!["claiming","pending","active"].includes(row.import.state))} ${sharingButton("Re-pair",`sharingOpen('repair',${i})`,disabled)} ${sharingButton("Rotate credential",`sharingOpen('rotate',${i})`,disabled||row.import.state!=="active")} ${sharingButton("Disconnect",`sharingOpen('disconnect',${i})`,disabled)}</section>`).join("")||'<p class="muted">No imports.</p>'}<h3>Exports</h3>${s.exports.map((row,i)=>`<section><h4>${esc(row.recipient_name||"Recipient")}</h4><p>${esc(row.grant.state)} · Recipient ${esc(row.grant.recipient_server_id)}</p>${sharingButton("Approve pairing",`sharingOpen('approve',${i})`,disabled||row.grant.state!=="pending")} ${sharingButton("Library scope",`sharingOpen('scope',${i})`,disabled||row.grant.state!=="active")} ${sharingButton("Revoke",`sharingOpen('revoke',${i})`,disabled)}</section>`).join("")||'<p class="muted">No exports.</p>'}${s.next?sharingButton("More exports","sharingMoreExports()",disabled):""}`;
 }
 function sharingPaint(){if(!SHARING_MANAGEMENT||!sharingCurrent(SHARING_MANAGEMENT.capture))return;const node=document.getElementById("sharing-management");if(node)node.innerHTML=sharingManagementHTML();sharingScheduleSetup();}
 function sharingScheduleSetup(){
@@ -231,7 +277,7 @@ async function sharingOpen(mode,index=0,draft=null){
   const s=SHARING_MANAGEMENT;if(!s||s.busy||!sharingCurrent(s.capture))return;
   const row=["scope","approve","revoke"].includes(mode)?s.exports[index]:s.imports[index];
   if(!["invite","import","manifest"].includes(mode)&&!row)return;
-  s.revision++;s.editor={mode,row,revision:0,ready:false,busy:false,error:"",text:"",selected:[],libraries:[],matrix:null,endpoints:[],manifestRevision:0n,needsEndpoints:false,returnInvite:mode==="manifest"?draft:null};
+  s.revision++;s.editor={mode,row,revision:0,ready:false,busy:false,error:"",text:"",name:"",selected:[],libraries:[],matrix:null,endpoints:[],manifestRevision:0n,needsEndpoints:false,returnInvite:mode==="manifest"?draft:null};
   if(mode==="invite"&&draft)s.editor.selected=[...draft.selected];
   if(["import","repair","approve","rotate","disconnect","revoke","code"].includes(mode)){s.editor.ready=true;sharingPaint();return;}
   await sharingEditorReload();
@@ -327,7 +373,7 @@ function sharingEditorHTML(e){
   const titles={invite:"Create invitation",import:"Import invitation",repair:"Re-pair Source",approve:"Approve pairing",scope:"Export library scope",matrix:"Viewer assignments",manifest:"This Cinema's addresses",endpoints:"Source endpoints",rotate:"Rotate Source credential",disconnect:"Disconnect Source",revoke:"Revoke export",code:"Pairing code"};
   let content="";
   if(e.mode==="code")content=`<p>Enter this code on the Source Cinema to approve this recipient:</p><code>${esc(e.row.pairing_code)}</code>`;
-  else if(["import","repair"].includes(e.mode))content=sharingInput("Secret invitation","text",e.text);
+  else if(["import","repair"].includes(e.mode))content=sharingInput("Secret invitation","text",e.text)+(e.mode==="import"?sharingInput("Share name (optional)","name",e.name)+`<p class="hint">Use a name your household recognizes, such as Alex’s Cinema. Leave blank to use the Source Cinema’s name. You can rename it later; this name stays local to your Cinema.</p>`:"");
   else if(e.mode==="approve")content=`<p>Compare the importing Cinema's pairing code and type it here. Approval is never automatic.</p>`+sharingInput("Pairing code","text",e.text);
   else if(["invite","scope"].includes(e.mode))content=(e.mode==="invite"?`<p>${e.needsEndpoints?"Set up this Cinema’s private addresses before creating an invitation. Your library selection is kept while you configure them.":"Saved addresses are included in the invitation. Saving them does not verify that another Cinema can connect."}</p>${sharingButton("Configure this Cinema’s addresses","sharingConfigureAddresses()",e.busy)}`:"")+e.libraries.map((l,i)=>`<label><input type="checkbox" onchange="sharingSelect(${i},this.checked)"${e.selected.includes(l.library_id)?" checked":""}${e.busy?" disabled":""}> ${esc(l.name)} · ${esc(l.library_id)}</label>`).join("");
   else if(e.mode==="matrix"&&e.matrix){
@@ -358,7 +404,7 @@ async function sharingSave(){
       sharingUUID(r.id);sharingInvitation(r.invitation);s.invitation=r;s.invitationCopyNotice="";
     }else if(mode==="import"||mode==="repair"){
       const path=mode==="import"?"/sharing/imports":"/sharing/imports/"+sharingUUID(e.row.import.id)+"/re-pair";
-      const body={invitation:sharingInvitation(e.text)};if(mode==="repair")body.expected_lifecycle_generation=sharingInteger(e.row.import.lifecycle_generation);
+      const body={invitation:sharingInvitation(e.text)};if(mode==="import"){const name=sharingFriendlyName(e.name||"",true);if(name)body.name=name;}if(mode==="repair")body.expected_lifecycle_generation=sharingInteger(e.row.import.lifecycle_generation);
       const r=sharingImport(await sharingRequest(path,{method:"POST",body,capture:c}));
       if(mode==="repair"&&(r.import.id!==e.row.import.id||r.import.source_server_id!==e.row.import.source_server_id||r.import.catalogue_epoch!==e.row.import.catalogue_epoch))throw new Error("Source identity changed");
       s.imports=[...s.imports.filter(v=>v.import.id!==r.import.id),r];e.text="";

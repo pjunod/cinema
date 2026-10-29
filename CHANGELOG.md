@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Shared imports can have a household-friendly name when imported and can be
+  renamed from Shared libraries or Settings → Sharing. Names stay local and
+  survive re-pairing.
+
 - Progressive text subtitle translation can create and observe durable jobs,
   and shared playback can read committed caption assets from the Source under
   its existing import grant. Apple build 277, Android versionCode 182.
@@ -58,6 +62,10 @@ bump may break compatibility and a **patch** bump never does.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
 
 ### Changed
+
+- Shared libraries has a searchable share directory with compact library
+  cards, availability filters and one bounded Continue Watching row labelled
+  by share. The layout adapts to desktop and phone screens.
 
 - Linux player 0.4.0 uses Cinema-style playback controls with scoped library
   metadata and next episode, saved autoplay, and Auto/Original/advertised

@@ -108,6 +108,7 @@ pub(crate) fn admin_router(state: AppState) -> Router<AppState> {
             get(assignment_snapshot).put(assignments),
         )
         .route("/sharing/imports/{id}/endpoints", put(import_endpoints))
+        .route("/sharing/imports/{id}/name", put(import_name))
         .route("/sharing/imports/{id}", delete(disconnect))
         .merge(super::shared_library::admin_library_router(state))
         .layer(axum::middleware::from_fn(private_response))
@@ -829,6 +830,36 @@ async fn disconnect(
         .map_err(authority)?;
     Ok(Json(json!({"disabled":true})))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportNameRequest {
+    expected_name: String,
+    name: String,
+}
+async fn import_name(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(value): Path<String>,
+    raw: Body,
+) -> Result<Json<Value>, ApiError> {
+    let request: ImportNameRequest = body(raw).await?;
+    let name = request.name.trim();
+    if name.is_empty()
+        || name.len() > 128
+        || name.chars().any(char::is_control)
+        || request.expected_name.len() > 128
+        || request.expected_name.chars().any(char::is_control)
+    {
+        return Err(invalid());
+    }
+    mutation(
+        state
+            .store
+            .rename_share_import(id(&value)?, &request.expected_name, name, clock_ms())
+            .await
+            .map_err(authority)?,
+    )
+}
 
 fn peer_error(error: crate::sharing_client::PeerError) -> ApiError {
     use crate::sharing_client::PeerError;
@@ -854,6 +885,8 @@ struct ImportRequest {
     #[serde(deserialize_with = "invitation_secret")]
     invitation: Secret,
     endpoint_overrides: Option<Vec<Endpoint>>,
+    #[serde(default)]
+    name: Option<String>,
 }
 fn invitation_secret<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -866,6 +899,14 @@ async fn verified_import(
     import_id: Uuid,
 ) -> Result<NewImport, ApiError> {
     use plurx_core::secrets::SharingSecretPurpose;
+    let local_name = request
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if local_name.is_some_and(|name| name.len() > 128 || name.chars().any(char::is_control)) {
+        return Err(invalid());
+    }
     if !crate::sharing::enabled(state.store.as_ref())
         .await
         .map_err(authority)?
@@ -961,7 +1002,7 @@ async fn verified_import(
     Ok(NewImport {
         id: import_id,
         source: invitation.identity,
-        source_name: source.name,
+        source_name: local_name.map(str::to_owned).unwrap_or(source.name),
         claim_id: Uuid::new_v4(),
         credential,
         claim_secret,
@@ -1050,6 +1091,7 @@ async fn re_pair(
         ImportRequest {
             invitation: request.invitation,
             endpoint_overrides: request.endpoint_overrides,
+            name: None,
         },
         import_id,
     )
