@@ -1,6 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1326: external recipients explicitly authorize the private connection before import.
+[[fixes]]
+id = "sharing.external-recipient-consent"
+commits = ["ecba33b56a852a57d00ceb12339ec16e56530f67"]
+source = "crates/plurxd/src/web/pages/sharing-management.js"
+source_anchor = 'if(e.text.startsWith("cinema-connect-v1:")&&!e.connectionChecked)'
+test = "tests/web/sharing-management.test.js"
+test_anchor = "combined invitation waits for private consent then imports once automatically"
+
 # Issue #1321: credential sign-in omits reporting while connection recovery retains it.
 [[fixes]]
 id = "apple.sign-in-report-action-removed"
