@@ -1,6 +1,6 @@
 # Exchange Cinema sharing invitations with QR images
 
-Build: 279
+Build: 278
 Issue: #1313
 
 Sharing presents invitations as QR codes with expandable text. iPhone and
