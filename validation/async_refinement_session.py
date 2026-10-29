@@ -854,7 +854,8 @@ def authenticate_main(api, reg, run_id, root, *, verified):
         p.require(len(matches) == 1, 'Main job missing/ambiguous')
         job = matches[0]
         p.require(type(job.get('attempt')) is int and job['attempt'] == 1
-                  and job.get('run_id') == run_id and job.get('repo_id') == reg['repository'],
+                  and type(job.get('run_id')) is int and job['run_id'] == run_id
+              and type(job.get('repo_id')) is int and job['repo_id'] == reg['repository'],
                   'Main task/attempt binding differs')
         if not needed:
             p.require(job.get('status') == 'skipped', 'Main skip contradicts current affected source')
@@ -947,17 +948,21 @@ def authenticate_native(api, reg, run_id, artifacts, lines, selected, root, job)
     from validation import native_receipts as native
     from validation import desktop_macos_retention as desktop
     scope = {'repository': reg['repository'], 'pr': reg['pr']}
+    p.require(native.terminal_status(job) == 'success' and type(job.get('attempt')) is int
+              and job['attempt'] == 1 and type(job.get('task_id')) is int and job['task_id'] > 0
+              and job.get('run_id') == run_id and job.get('repo_id') == reg['repository'],
+              'current native job did not succeed with its initial task')
     adopted_name = 'native-adoption-' + str(run_id) + '-1'
     adoption_artifacts = [a for a in artifacts if a.get('name') == adopted_name]
     p.require(len(adoption_artifacts) == 1, 'native adoption provenance missing')
     directory = Path(api.scratch) / ('native-adoption-' + str(run_id))
     rows = authenticated_main_artifact(api, adoption_artifacts[0], lines, directory)
-    p.require(len(rows) == 1, 'native adoption member ambiguous')
+    p.require(len(rows) == 1 and rows[0]['path'] == 'receipt.json', 'native adoption member ambiguous')
     report = p.read(directory / rows[0]['path'])
-    p.closed(report,('version','scope','current_commit','current_run','adoptions','compatibility'))
+    p.closed(report,('version','scope','current_commit','current_run','adoptions','compatibility','tv_cases'))
     p.require(type(report['version']) is int and report['version']==1,'native report version differs')
     p.require(report.get('scope') == scope and report.get('current_commit') == reg['source']['commit']
-              and report.get('current_run') == run_id and type(report.get('adoptions')) is dict
+              and type(report.get('current_run')) is int and report.get('current_run') == run_id and type(report.get('adoptions')) is dict
               and set(report['adoptions'])<= {'tv_navigation'}, 'native current TV-only provenance differs')
     result={}
     if selected['apple']:
@@ -978,12 +983,12 @@ def authenticate_native(api, reg, run_id, artifacts, lines, selected, root, job)
             archive=p.artifact_bytes(api,artifact)
             try:
                 p.require(p.file_sha(archive)==archive_sha,'current TV archive differs from full native upload transaction')
-                with archive.open('rb') as stream:data=native.archive_member(stream,'receipt.json')
+                with archive.open('rb') as stream:
+                    verified = native.current_tv_result(api, scope, reg['source']['commit'], run_id, report, stream, job)
             finally:archive.unlink(missing_ok=True)
-            native.verify_tv(p.decode(data),reg['source']['commit'])
-            result['tv_navigation']={'disposition':'fresh_execution','commit':reg['source']['commit'],
+            result['tv_navigation']={**verified,'commit':reg['source']['commit'],
                 'run':run_id,'job':job['id'],'task':job['task_id'],'attempt':1,'artifact':aid,
-                'archive_sha256':archive_sha,'receipt_sha256':p.digest(data)}
+                'archive_sha256':archive_sha}
     if selected['desktop_macos']:
         result['desktop_macos']=desktop.authenticate_current_result(api,Path(root),reg['source']['commit'],
             run_id,job['id'],reg['repository'],reg['pr'],event_base=reg['event_base'])

@@ -161,6 +161,35 @@ pub(crate) async fn input_bytes(
     text::parse(&bytes)?;
     Ok(bytes)
 }
+/// Claimed inference reads only already-materialized subtitle artifacts. The
+/// pin protects the sidecar for the whole turn; the owned bytes remain exact
+/// even if a different producer replaces its pathname. No extraction fallback.
+pub(crate) async fn artifact_input_bytes(
+    dir: &std::path::Path,
+    file: &MediaFile,
+    index: i64,
+    stored: &crate::subtitle_source::StoreAccess,
+    expected_sha256: &str,
+) -> Result<(Vec<u8>, Option<crate::playback_cache::CachePin>), String> {
+    let pin = crate::playback_cache::pin(&crate::subtitles::vtt_path(dir, file, index))
+        .map_err(|_| "subtitle_unavailable".to_owned())?;
+    let bytes = crate::subtitles::read_cached_vtt_with_store(dir, file, index, stored)
+        .await?
+        .ok_or_else(|| "subtitle_unavailable".to_owned())?;
+    validate_artifact_input(bytes, expected_sha256).map(|bytes| (bytes, pin))
+}
+
+fn validate_artifact_input(bytes: Vec<u8>, expected_sha256: &str) -> Result<Vec<u8>, String> {
+    if bytes.len() > MAX_INPUT {
+        return Err("subtitle_too_large".into());
+    }
+    if hex::encode(Sha256::digest(&bytes)) != expected_sha256 {
+        return Err("subtitle_changed".into());
+    }
+    text::parse(&bytes).map_err(|_| "subtitle_invalid".to_owned())?;
+    Ok(bytes)
+}
+
 pub(crate) async fn workers(state: &AppState) -> Result<Vec<Value>, ApiError> {
     let cancel = CancellationToken::new();
     let bundle = artifacts::inspect(&state.subtitle_models.root, &cancel).await;
@@ -204,6 +233,91 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
         time::Duration,
     };
+
+    #[tokio::test]
+    async fn text_artifact_input_holds_verified_bounded_bytes_without_media() {
+        let directory = tempfile::tempdir().expect("artifact fixture");
+        let path = directory.path().join("absent-media.mkv");
+        let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
+            id: 1,
+            item_id: 1,
+            size: 100,
+            mtime: 20,
+            path,
+            duration_ms: Some(90_000),
+            container: Some("mkv".into()),
+            video_codec: Some("mpeg4".into()),
+            video_codec_tag: None,
+            field_order: None,
+            video_profile: None,
+            width: Some(320),
+            height: Some(180),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            bitrate: None,
+            audio_streams: vec![],
+            subtitle_streams: vec![plurx_core::domain::SubtitleStream {
+                index: 0,
+                codec: "subrip".into(),
+                ..Default::default()
+            }],
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        };
+        let cache = directory.path().join("captions");
+        std::fs::create_dir(&cache).expect("caption cache");
+        let sidecar = crate::subtitles::vtt_path(&cache, &file, 0);
+        let bytes = b"WEBVTT\n\n00:00.000 --> 00:01.000\nHallo\n";
+        std::fs::write(&sidecar, bytes).expect("materialized source subtitle");
+        let expected = hex::encode(Sha256::digest(bytes));
+        let stored =
+            crate::subtitle_source::StoreAccess::new(directory.path().join("store"), false);
+        let (held, _pin) = artifact_input_bytes(&cache, &file, 0, &stored, &expected)
+            .await
+            .expect("cached input requires no media source");
+        assert_eq!(held, bytes);
+        assert!(!file.path.exists());
+        std::fs::write(&sidecar, b"changed").expect("replace cached bytes");
+        assert_eq!(held, bytes, "inference owns immutable bounded bytes");
+        assert_eq!(
+            artifact_input_bytes(&cache, &file, 0, &stored, &expected)
+                .await
+                .err()
+                .as_deref(),
+            Some("subtitle_changed")
+        );
+        std::fs::remove_file(&sidecar).expect("evicted input");
+        assert_eq!(
+            artifact_input_bytes(&cache, &file, 0, &stored, &expected)
+                .await
+                .err()
+                .as_deref(),
+            Some("subtitle_unavailable"),
+            "miss asks for explicit acquisition rather than extracting media"
+        );
+        assert_eq!(
+            validate_artifact_input(vec![b'x'; MAX_INPUT + 1], &expected)
+                .err()
+                .as_deref(),
+            Some("subtitle_too_large")
+        );
+        let invalid = b"not a caption".to_vec();
+        let invalid_sha = hex::encode(Sha256::digest(&invalid));
+        assert_eq!(
+            validate_artifact_input(invalid, &invalid_sha)
+                .err()
+                .as_deref(),
+            Some("subtitle_invalid")
+        );
+    }
 
     #[tokio::test]
     async fn cancelled_engine_identity_request_retains_single_flight_and_publishes_cache() {

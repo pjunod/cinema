@@ -1,7 +1,7 @@
 {
   "algorithm_version": 1,
   "complete": true,
-  "finite_inventory_sha256": "5aceadb6ab6a98467dd1664d012c8ffae1ccbd30cd78efbb79bf4d21b4dee8fa",
+  "finite_inventory_sha256": "714a2a274067f26a1c630ae11e48f9f5e14d5072503396b182204c27dd191ce2",
   "formulas": [
     {
       "id": "json.0.ref",
@@ -15835,7 +15835,7 @@
       "two_jobs_requests_waiters"
     ],
     "specification_id": "fresh-selected-two-job-sqlite-v1",
-    "specification_sha256": "2fd0e8817ef2d5365b2184c72aeda7af56bb6e7c2ccab49cd45487f070683c05"
+    "specification_sha256": "388f91b53aefcd4393001e7678a19cea9cd60eca3a8d1bdad2d8b67b18c3d4dc"
   },
   "init_class_rules": [
     {
@@ -15856,7 +15856,7 @@
       ],
       "rule_id": "fixed_init_i64_json_representation_not_episode_horizon_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e"
+      "source_sha256": "57bc0a179c9a2ff98659c556255562c3973c4b29c63af840f092b910dee54cb9"
     },
     {
       "anchor": "Self::backfill_hdr_format(&conn)?;",
@@ -15866,7 +15866,7 @@
       ],
       "rule_id": "startup_instance_and_hdr_flag_only_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e"
+      "source_sha256": "57bc0a179c9a2ff98659c556255562c3973c4b29c63af840f092b910dee54cb9"
     },
     {
       "anchor": "Self::seed(SqliteStore::open_in_memory()",
@@ -20070,7 +20070,7 @@
       "id": "fixed_init.i64_encoded_width",
       "rule_id": "fixed_init_i64_json_representation_not_transition_finiteness_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e",
+      "source_sha256": "57bc0a179c9a2ff98659c556255562c3973c4b29c63af840f092b910dee54cb9",
       "value": "20"
     },
     {
@@ -20078,7 +20078,7 @@
       "id": "fresh.settings_rows",
       "rule_id": "fresh_sqlite_only_instance_uuid_and_hdr_backfill_settings_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e",
+      "source_sha256": "57bc0a179c9a2ff98659c556255562c3973c4b29c63af840f092b910dee54cb9",
       "value": "2"
     },
     {
@@ -20326,8 +20326,8 @@
       "id": "source_bytes.11",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "source_sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e",
-      "value": "134683"
+      "source_sha256": "57bc0a179c9a2ff98659c556255562c3973c4b29c63af840f092b910dee54cb9",
+      "value": "135006"
     },
     {
       "anchor": "//! Library CRUD.",
@@ -20398,8 +20398,8 @@
       "id": "source_bytes.2",
       "rule_id": "exact_registered_utf8_file_bytes_v1",
       "source_path": "crates/plurx-core/src/store/background_jobs.rs",
-      "source_sha256": "efd58cb947e5b68c43b79711b932afc5487816ebccd36e9e575d605fa9e93a4e",
-      "value": "188065"
+      "source_sha256": "e83bd0777415bab7bf6287362fcc22ad50433460ef05e969e5cb422d801b6fa1",
+      "value": "190669"
     },
     {
       "anchor": "\"\"\"Closed registries and graph import. Importing a graph is inventory, not proof.\"\"\"",
@@ -32119,7 +32119,7 @@
     },
     {
       "path": "crates/plurx-core/src/store/background_jobs.rs",
-      "sha256": "efd58cb947e5b68c43b79711b932afc5487816ebccd36e9e575d605fa9e93a4e"
+      "sha256": "e83bd0777415bab7bf6287362fcc22ad50433460ef05e969e5cb422d801b6fa1"
     },
     {
       "path": "crates/plurx-core/src/store/background_jobs_domain.rs",
@@ -32163,7 +32163,7 @@
     },
     {
       "path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e"
+      "sha256": "57bc0a179c9a2ff98659c556255562c3973c4b29c63af840f092b910dee54cb9"
     },
     {
       "path": "crates/plurx-worker-control/src/library_driver.rs",

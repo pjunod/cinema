@@ -30,7 +30,10 @@ fn invalid() -> StoreError {
     StoreError::Task("invalid text translation slice".into())
 }
 fn valid_source(source: &JobPayload) -> Result<String, StoreError> {
-    if !matches!(source, JobPayload::SubtitleTextTranslate { .. }) {
+    if !matches!(
+        source,
+        JobPayload::SubtitleTextTranslate { .. } | JobPayload::SubtitleTextTranslateArtifact { .. }
+    ) {
         return Err(invalid());
     }
     artifact_key(source)
@@ -75,7 +78,7 @@ pub(super) async fn publish<T: QueueSql>(
     let body = encode(
         &json!({"token":input.token,"source":input.source,"recipe":recipe,"cues":cues,"now_ms":input.now_ms}),
     )?;
-    let owns=format!("{SUBTITLE_OWNS} AND job.kind='subtitle_text_translate' AND job.payload_json=json(json_extract($1,'$.source'))");
+    let owns=format!("{SUBTITLE_OWNS} AND job.kind IN ('subtitle_text_translate','subtitle_text_translate_artifact') AND job.payload_json=json(json_extract($1,'$.source'))");
     let guard=format!("{CURRENT} AND EXISTS(SELECT 1 FROM background_jobs job WHERE {owns}) AND NOT EXISTS(SELECT 1 FROM json_each($1,'$.cues') incoming JOIN subtitle_text_translation_cues old ON old.job_id=json_extract($1,'$.token.job_id') AND old.recipe_digest=json_extract($1,'$.recipe') AND old.cue_index=json_extract(incoming.value,'$.cue_index') WHERE old.body!=json_extract(incoming.value,'$.body'))");
     store.queue_sql(format!("INSERT INTO subtitle_text_translation_cues(job_id,recipe_digest,cue_index,input_sha256,start_ms,end_ms,body,created_at_ms) SELECT json_extract($1,'$.token.job_id'),json_extract($1,'$.recipe'),json_extract(cue.value,'$.cue_index'),json_extract(cue.value,'$.input_sha256'),json_extract(cue.value,'$.start_ms'),json_extract(cue.value,'$.end_ms'),json_extract(cue.value,'$.body'),json_extract($1,'$.now_ms') FROM json_each($1,'$.cues') cue WHERE {guard} AND (SELECT COALESCE(sum(length(CAST(body AS BLOB))),0) FROM subtitle_text_translation_cues)+(SELECT sum(length(CAST(json_extract(value,'$.body') AS BLOB))) FROM json_each($1,'$.cues'))<=67108864 AND (SELECT COALESCE(sum(length(CAST(body AS BLOB))),0) FROM subtitle_text_translation_cues WHERE job_id=json_extract($1,'$.token.job_id'))+(SELECT sum(length(CAST(json_extract(value,'$.body') AS BLOB))) FROM json_each($1,'$.cues'))<=1048576 ON CONFLICT(job_id,recipe_digest,cue_index) DO NOTHING"),body.clone(),true,false).await?;
     let rows=store.queue_sql(format!("SELECT 'true' AS result_json WHERE {guard} AND NOT EXISTS(SELECT 1 FROM json_each($1,'$.cues') incoming WHERE NOT EXISTS(SELECT 1 FROM subtitle_text_translation_cues saved WHERE saved.job_id=json_extract($1,'$.token.job_id') AND saved.recipe_digest=json_extract($1,'$.recipe') AND saved.cue_index=json_extract(incoming.value,'$.cue_index') AND saved.body=json_extract(incoming.value,'$.body')))"),body,false,true).await?;

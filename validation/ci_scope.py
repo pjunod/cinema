@@ -145,6 +145,8 @@ ANDROID_JVM_PATHS = (
 # the embedded web sources and the tooling that drives or grades the sweep —
 # the `web.experience` point's compiled surface, minus prose.
 WEB_LAYOUT_PATHS = (
+    "validation/web_unit_receipts.py",
+    "tests/validation/test_web_unit_receipts.py",
     "validation/web_cohort_retention.py",
     "tests/operations/test_web_cohort_retention.py",
     "brand/tokens.css",

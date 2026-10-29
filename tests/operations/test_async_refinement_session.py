@@ -215,8 +215,9 @@ class CapabilityAndStorageTests(unittest.TestCase):
         api=SimpleNamespace(scratch=ROOT/'.agent-proof-fixtures/native-main')
         artifacts=[{'name':'native-adoption-10-1','id':20,'run_id':10,'expired':False}]
         report={'version':1,'scope':{'repository':1,'pr':7},'current_commit':'a'*40,
-                'current_run':10,'adoptions':{},'compatibility':'pinned native source contract'}
-        return api,reg,artifacts,report,{'id':30,'task_id':40,'attempt':1}
+                'current_run':10,'adoptions':{},'compatibility':'pinned native source contract',
+                'tv_cases': {'required_tests': [], 'passes': {}, 'pending': []}}
+        return api,reg,artifacts,report,{'id':30,'task_id':40,'attempt':1,'run_id':10,'repo_id':1,'status':'success'}
 
     def test_desktop_main_consumption_uses_only_shared_strict_current_validator(self):
         from validation import native_receipts as native
@@ -264,20 +265,33 @@ class CapabilityAndStorageTests(unittest.TestCase):
             with patch.object(s,'authenticated_main_artifact',return_value=[{'path':'receipt.json'}]), \
                  patch.object(p,'read',return_value=report),patch.object(p,'artifact_bytes',return_value=archive), \
                  patch.object(p,'upload_slice',return_value=('transaction',sha,0,1)) as transaction, \
-                 patch.object(native,'archive_member',return_value=b'{"actual":"receipt"}'), \
-                 patch.object(native,'verify_tv') as verify:
+                 patch.object(native,'current_tv_result',return_value={'disposition':'composed_cases','original_cases':{'Suite/test':{}},'receipt_sha256':'b'*64}) as verify:
                 value=s.authenticate_native(api,reg,10,artifacts,lines,{'apple':True,'desktop_macos':False},ROOT,job)
                 transaction.assert_called_once_with(lines,artifact['name'],21,7)
                 self.assertEqual(value['tv_navigation']['archive_sha256'],sha)
-                verify.assert_called_once_with({'actual':'receipt'},'a'*40)
+                self.assertEqual(verify.call_args.args[:5], (api, {'repository':1,'pr':7}, 'a'*40, 10, report))
+                self.assertEqual(value['tv_navigation']['disposition'], 'composed_cases')
                 self.assertFalse(archive.exists())
         with patch.object(s,'authenticated_main_artifact',return_value=[{'path':'receipt.json'}]), \
              patch.object(p,'read',return_value=report), \
              patch.object(p,'upload_slice',side_effect=receipts.ReceiptError('transaction absent')), \
-             patch.object(native,'verify_tv') as verify:
+             patch.object(native,'current_tv_result') as verify:
             with self.assertRaises(receipts.ReceiptError):
                 s.authenticate_native(api,reg,10,artifacts,lines,{'apple':True,'desktop_macos':False},ROOT,job)
             verify.assert_not_called()
+
+    def test_current_native_report_requires_exact_member_and_successful_job(self):
+        from validation import native_receipts as native
+        api, reg, artifacts, report, job = self.native_consumer_fixture()
+        with patch.object(s, 'authenticated_main_artifact', return_value=[{'path': 'other.json'}]), \
+                patch.object(p, 'read', return_value=report), patch.object(native, 'current_tv_result') as verify:
+            with self.assertRaises(receipts.ReceiptError):
+                s.authenticate_native(api, reg, 10, artifacts, [], {'apple': True, 'desktop_macos': False}, ROOT, job)
+            verify.assert_not_called()
+        with patch.object(s, 'authenticated_main_artifact') as artifact:
+            with self.assertRaises(receipts.ReceiptError):
+                s.authenticate_native(api, reg, 10, artifacts, [], {'apple': True, 'desktop_macos': False}, ROOT, {**job, 'status': 'failure'})
+            artifact.assert_not_called()
 
 if __name__ == '__main__':unittest.main()
 

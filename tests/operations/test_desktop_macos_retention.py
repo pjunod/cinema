@@ -903,6 +903,9 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             self.assertEqual(native.workflow_scope(ROOT,CURRENT,legacy),
                              {'sha256':native.digest(current),'kind':'adapted'})
         variants=[
+            current.replace(native.NATIVE_TV_REAUTH, b'', 1),
+            current.replace(b'--verify-tv-plan --family tv_navigation', b'--verify-tv-plan', 1),
+            current.replace(b'          PLURX_TV_NAVIGATION_PLAN: .main-preflight-receipts/native/receipt.json\n', b'', 1),
             current.replace(b'--family tv_navigation',b'--family desktop_macos',1),
             current.replace(b'--family tv_navigation',b'--family tv_navigation --family desktop_macos',1),
             current.replace(b'run: python3 -m validation.desktop_macos_retention --fresh-on-new-inputs',

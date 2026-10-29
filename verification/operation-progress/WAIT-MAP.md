@@ -4,6 +4,49 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## macOS parser runtime — scoped lock refresh on 2026-10-29
+
+Wasmtime 50.0.0 includes the [upstream Mach receiver fix](https://github.com/bytecodealliance/wasmtime/pull/14414).
+The macOS-only runtime and required Cranelift dependencies change; native traps,
+epoch deadlines, memory/stack limits and import restrictions remain. Tokio
+1.53.1 and Hiqlite 0.14.0 remain pinned. Refresh only the live Cargo.lock
+whole-file hash. Selected library-worker behavior, historical anchors, models,
+configurations, toolchain and qualification identities are unchanged. This
+source correspondence adds no formal execution or progress claim.
+
+The bounded native fixture stress changes only its test module in `main.rs`.
+Four workers still accompany all 300 fixture executions, with 1,200 checked
+fork attempts and joined ownership on failures. The selected worker spawn,
+argument, shutdown protocol and model scope remain unchanged; Table 44 gets
+only its live whole-file correspondence update.
+
+## Current validation fixtures — scoped refresh on 2026-10-29
+
+Scoped review on 2026-10-29 of the startup test listener seam: the test-only constructor retains a prebound socket through startup; non-test binding and the selected background_work_loop spawn/argument are unchanged. Refresh only live Table44 correspondence. No selected-worker scheduling, shutdown, model, configuration, anchor or historical qualification identity changes; this source review is not execution evidence.
+
+## Historical schema fixtures — scoped refresh on 2026-10-29
+
+Compared with `d5cd473536`, the caption schema source changes only the
+[v115 migration test](../../crates/plurx-core/src/store/subtitle_translation_schema.rs):
+it expects the current composed schema and verifies the managed v2 resources.
+The production recognizer and migration SQL remain unchanged. Refresh its one
+whole-file pin while retaining the exact anchor and historical source anchors.
+
+The [SQLite fixture rewind](../../crates/plurx-core/tests/support/queue_fixture.rs)
+now validates the exact empty v120 text/caption tail, continuity layout and
+managed v2 marker before planning any mutation. Unknown objects, marker drift
+and retained work refuse without changing DDL, versions or data. Historical
+SQLite layouts retain their legacy translation witness; the published
+replicated fixture witnesses remain separate. This closes the SQLite v115-only
+limitation recorded in the earlier scoped review, without claiming a general
+downgrade or complete replicated-schema qualification.
+
+The consistent-read census records existing committed-authority reads and keeps
+its unannotated ceiling at 237. No selected library claim, publication,
+reservation, lease or progress behavior changes. Models, configurations,
+properties and qualification identities retain their bytes; fresh mapping and
+smoke results are separate execution evidence.
+
 ## Sharing host startup — scoped refresh on 2026-10-28
 
 Compared the pinned `main.rs` from `2975dec487d2` with `10f45ae5f`.

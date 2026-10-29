@@ -12,6 +12,49 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+## macOS parser runtime — scoped lock refresh on 2026-10-29
+
+Wasmtime 50.0.0 includes the [upstream Mach receiver fix](https://github.com/bytecodealliance/wasmtime/pull/14414).
+The macOS-only runtime and required Cranelift dependencies change; native traps,
+epoch deadlines, memory/stack limits and import restrictions remain. Tokio
+1.53.1 and Hiqlite 0.14.0 remain pinned. Refresh only the live Cargo.lock
+whole-file hash. Selected library-worker behavior, historical anchors, models,
+configurations, toolchain and qualification identities are unchanged. This
+source correspondence adds no formal execution or progress claim.
+
+## Current validation fixtures — scoped refresh on 2026-10-29
+
+Scoped review on 2026-10-29 of conformance parent registration: the exact Store inventory records four existing text-caption methods with new typed dispatch/absence/refusal coverage on all backends. Formal-publication module registration and selected library positive examples are unchanged. Positive caption publication on Hiqlite is not claimed. Refresh only live M2 parent correspondence; historical anchors, model/configuration and qualification identities remain unchanged; source review is not execution evidence.
+
+The final replicated fixture review also checks the exact current tail and marker
+inventories before one child-first mutation transaction. Its refusal matrix and
+ordinary-bootstrap round trip are runtime checks, separate from this correspondence
+record. The selected formal-publication examples and historical identities stay
+unchanged.
+
+## Historical schema fixtures — scoped refresh on 2026-10-29
+
+Compared with `d5cd473536`, the caption schema source changes only the
+[v115 migration test](../../crates/plurx-core/src/store/subtitle_translation_schema.rs):
+it expects the current composed schema and verifies the managed v2 resources.
+The production recognizer and migration SQL remain unchanged. Refresh its one
+whole-file pin while retaining the exact anchor and historical source anchors.
+
+The [SQLite fixture rewind](../../crates/plurx-core/tests/support/queue_fixture.rs)
+now validates the exact empty v120 text/caption tail, continuity layout and
+managed v2 marker before planning any mutation. Unknown objects, marker drift
+and retained work refuse without changing DDL, versions or data. Historical
+SQLite layouts retain their legacy translation witness; the published
+replicated fixture witnesses remain separate. This closes the SQLite v115-only
+limitation recorded in the earlier scoped review, without claiming a general
+downgrade or complete replicated-schema qualification.
+
+The consistent-read census records existing committed-authority reads and keeps
+its unannotated ceiling at 237. No selected library claim, publication,
+reservation, lease or progress behavior changes. Models, configurations,
+properties and qualification identities retain their bytes; fresh mapping and
+smoke results are separate execution evidence.
+
 ## Managed-v2 fixture follow-through — scoped refresh on 2026-10-28
 
 The test-only follow-through on `48e2acc2a` restores the current managed marker
@@ -29,6 +72,26 @@ Only the whole-file pin for the conformance parent module changes. Its
 selected conformance module. No production queue, reservation, lease, binding or
 publication transition changes. Model/configuration/property/toolchain inputs
 remain unchanged; this source review supplies no new execution qualification.
+
+## Artifact-only text translation — scoped source review on 2026-10-28
+
+Managed v3 / SQLite v121 exempts only the new closed
+`subtitle_text_translate_artifact` job kind. Its worker reads pinned, bounded,
+materialized VTT bytes, verifies the original input SHA, and retains source,
+model, configuration, administrative and publication authority checks. A miss
+fails explicitly; Retry reacquires input before enqueue. Legacy
+`subtitle_text_translate` remains source-fenced because old workers can extract
+media. Old candidate-kind filters cannot dispatch the new kind; queued and
+running legacy jobs are not rewritten. The upgrade requires exact v2 DDL and
+marker, commits atomically, and preserves existing owners and reservations.
+
+The selected `library_scan` / `metadata_refresh` source-domain and provider
+rows, claim identity, renewal, binding, publication and settlement remain
+unchanged, as do the two-reader and one-speculative-reader limits. The v3 view
+and upgrade guards are mapped correspondence inputs. Caption inference,
+rolling upgrades and input acquisition remain outside this finite model;
+model/configuration/property/bound/toolchain bytes are unchanged. This source
+review supplies no new runtime, formal-execution or qualification evidence.
 
 ## Subtitle resource admission — scoped refresh on 2026-10-28
 

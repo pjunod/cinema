@@ -162,6 +162,8 @@ NATIVE_TV_METADATA = b'      - name: Authenticate compatible original native tes
 
 
 RECEIPT_COMMON = frozenset(['schema_version', 'case', 'current_commit', 'current_tree', 'current_run', 'current_job', 'current_attempt', 'scope', 'native_execution_key', 'source_manifest_kind', 'current_source_manifest', 'expected_case_ids', 'toolchain_contract', 'adapter_environment', 'producer_workflow_sha256', 'consumer_workflow_sha256', 'recipe_compatibility', 'adapter_sha256', 'policy_sha256', 'build_product_digests', 'current_build_products_exist', 'checkout_attestation'])
+NATIVE_TV_REAUTH = b"      - name: Reauthenticate original native cases before executing the pending selection\n        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n        run: python3 -m validation.native_receipts --verify-tv-plan --family tv_navigation\n"
+
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -497,6 +499,24 @@ def reviewed_apple_roles(legacy_apple,adapted_apple):
     return header,old,adapted,changed
 
 
+NATIVE_TV_PLAN_ENV = b'          PLURX_TV_NAVIGATION_PLAN: .main-preflight-receipts/native/receipt.json\n'
+
+
+def successor_apple_roles(combined):
+    """One exact successor of the independently recognized older composition."""
+    require([name for name, _ in combined].count('Require native TV navigation journeys') == 1,
+            'Reviewed TV execution role cardinality differs')
+    result = []
+    for name, raw in combined:
+        if name == 'Require native TV navigation journeys':
+            command = b'        run: make apple-tv-navigation-test\n'
+            require(raw.count(command) == 1, 'Reviewed TV command is ambiguous')
+            raw = raw.replace(command, NATIVE_TV_PLAN_ENV + command, 1)
+            result.append(('Reauthenticate original native cases before executing the pending selection', NATIVE_TV_REAUTH))
+        result.append((name, raw))
+    return result
+
+
 def workflow_scope(workspace,commit,legacy):
     require(isinstance(commit,str) and re.fullmatch('[0-9a-f]{40}',commit),'Invalid native workflow commit')
     require(digest(legacy) == PRODUCER_WORKFLOW,'Unrecognized native producer workflow')
@@ -521,7 +541,7 @@ def workflow_scope(workspace,commit,legacy):
     scoped_apple = apple_without_reviewed_cache(apple, cache)
     header,old_roles,adapted_roles,combined_roles=reviewed_apple_roles(legacy_apple,adapted_apple)
     current_header,current_roles=apple_role_blocks(scoped_apple)
-    require(current_header==header and current_roles in (old_roles,adapted_roles,combined_roles),
+    require(current_header==header and current_roles in (old_roles,adapted_roles,combined_roles,successor_apple_roles(combined_roles)),
         'Unsupported native Apple job scope (ordered roles)')
     return {'sha256':digest(current),'kind':'legacy' if current_roles==old_roles else 'adapted'}
 
@@ -960,7 +980,8 @@ def policy_fingerprint():
         'job_log_sha256':ORIGIN_JOB_SHA,'roots':ROOTS,'command':COMMAND,
         'workflow_sha256':PRODUCER_WORKFLOW,
         'workflow_scope':{'version':3,'grammar':'closed-ordered-native-roles-LF-UTF8-v2','pins':WORKFLOW_SCOPE_PINS,
-            'tv_metadata_sha256':digest(NATIVE_TV_METADATA),'tv_family':'tv_navigation',
+            'tv_metadata_sha256':digest(NATIVE_TV_METADATA),'tv_reauthentication_sha256':digest(NATIVE_TV_REAUTH),'tv_plan_environment_sha256':digest(NATIVE_TV_PLAN_ENV),
+            'tv_reauthentication_placement':['Compile iOS and tvOS without running simulator tests','Reauthenticate original native cases before executing the pending selection','Require native TV navigation journeys'],'tv_family':'tv_navigation',
             'tv_predicate':"needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'",
             'optional_apple_cache':{'version':1,'sha256':APPLE_CACHE_SHA256,'bytes':645,
                 'placement':'immediately-before-single-compile-step','cardinality':[0,1],

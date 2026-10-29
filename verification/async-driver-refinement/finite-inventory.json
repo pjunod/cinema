@@ -78,7 +78,7 @@
     },
     "queue": {
       "path": "crates/plurx-core/src/store/background_jobs.rs",
-      "sha256": "efd58cb947e5b68c43b79711b932afc5487816ebccd36e9e575d605fa9e93a4e",
+      "sha256": "e83bd0777415bab7bf6287362fcc22ad50433460ef05e969e5cb422d801b6fa1",
       "anchors": [
         {
           "text": "const RENEW_SQL: &str",
@@ -92,7 +92,7 @@
         },
         {
           "text": "async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError> {",
-          "line": 3789,
+          "line": 3862,
           "occurrences": 1
         }
       ]
@@ -243,7 +243,7 @@
     },
     "migrations": {
       "path": "crates/plurx-core/src/store/sqlite/mod.rs",
-      "sha256": "4c0265f0c49eb16dd57a952a3a23da865f4b72a3fecd3b793a072d01fed3cd6e",
+      "sha256": "57bc0a179c9a2ff98659c556255562c3973c4b29c63af840f092b910dee54cb9",
       "anchors": []
     }
   },

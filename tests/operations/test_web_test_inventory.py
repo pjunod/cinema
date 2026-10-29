@@ -18,6 +18,8 @@ naming it there.
 
 from __future__ import annotations
 
+import ast
+import hashlib
 from pathlib import Path
 import re
 import unittest
@@ -89,6 +91,30 @@ def uncommented(text: str) -> list[str]:
     return [line for line in text.splitlines() if not line.lstrip().startswith("#")]
 
 
+
+def expanded_web_commands(text: str) -> str:
+    """Resolve only the reviewed fixed unit wrapper into its actual argv."""
+    selected = re.findall(r"python3 -m validation\.web_unit_receipts --command ([a-z-]+)(?=\s|$)", text)
+    if not selected:
+        return text
+    tree = ast.parse((ROOT / 'validation/web_unit_receipts.py').read_text(encoding='utf-8'))
+    maps = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == 'COMMANDS' for target in node.targets)]
+    assert maps == [{
+        'jsconfig-generated': ['node', 'tests/web/jsconfig-generated.test.js'],
+        'player-typedef': ['node', 'tests/web/player-typedef.test.js'],
+        'suite': ['make', 'web-unit-check'],
+    }], 'The authenticated unit wrapper must retain its exact command inventory'
+    current = {
+        'syntax': "scripts/js-check\ngit ls-files -z 'crates/plurxd/src/web/*.js' | xargs -0 -n1 node --check",
+        'typescript': 'scripts/web-types --base "$PR_BASE_SHA"',
+    }
+    assert all(name in maps[0] or name in current for name in selected), 'Unknown web wrapper route'
+    return text + '\n' + '\n'.join(
+        current[name] if name in current else ' '.join(maps[0][name]) for name in selected)
+
+
+
 def workflow_commands() -> str:
     """Every non-comment line of every workflow and local action."""
     files = sorted((ROOT / ".github" / "workflows").glob("*.yml")) + sorted(
@@ -96,7 +122,7 @@ def workflow_commands() -> str:
     )
     commands = [line for path in files for line in uncommented(path.read_text(encoding="utf-8"))]
     commands.extend(fast_lane_commands())
-    return "\n".join(commands)
+    return expanded_web_commands("\n".join(commands))
 
 
 MAKE_CALL = re.compile(r"(?:\bmake|\$\(MAKE\))((?:\s+-\S+)*)\s+([a-z][\w.-]*)")
@@ -142,19 +168,20 @@ def web_commands() -> list[str]:
 
 
 def fast_lane_commands() -> list[str]:
-    """Resolve only the exact authenticated wrapper's actual fresh branch."""
-    from validation import web_cohort_retention as retention
-    job = fast_lane_web_job()
-    assert "  web_compile:\n" + job == retention.adapted_job(), (
-        "The web inventory recognizes only the reviewed cohort wrapper, not an arbitrary module invocation"
+    """Expand only the exact reviewed single-controller producer recipe."""
+    from validation import web_unit_receipts as controller
+    job = "  web_compile:\n" + fast_lane_web_job()
+    assert hashlib.sha256(job.encode()).hexdigest() == controller.CURRENT_JOB_SHA256, (
+        "The web inventory recognizes only the exact reviewed controller recipe"
     )
-    assert retention.COMMANDS[-1] == "make web-unit-check"
-    return "\n".join(retention.COMMANDS).splitlines()
+    return expanded_web_commands(job).splitlines()
 
 
 def lane_node_test_commands() -> list[str]:
-    """The exact fresh cohort commands and Make target; retention authenticates
-    this same complete inventory instead of fabricating new Node events."""
+    """The exact controller recipes and Make target define the unit inventory.
+
+    Adoption refers to original command events; it never invents current ones.
+    """
     own = [line for line in fast_lane_commands() if re.search(r"\bnode ",line)]
     return command_lines(target_recipe(makefile_text(), "web-unit-check")) + own
 

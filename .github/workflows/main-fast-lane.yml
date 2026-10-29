@@ -458,17 +458,40 @@ jobs:
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.23.4"
-      - name: Retain or execute the reviewed whole web cohort
+      - name: Parse every shipped JavaScript surface
         env:
           GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.web_unit_receipts --command syntax
+      # TypeScript's checker over the same rows, against tests/web/
+      # tsc-baseline.tsv: the counts must match exactly, so a new or raised
+      # diagnostic fails and so does one that fell without the baseline being
+      # lowered. --base also refuses a count the pull request raised in the
+      # TSV without a new `# accepted` line for that key. The script runs
+      # `npm ci` into tools/web-types from its lockfile (one package, no
+      # dependencies) when the pinned tsc is not already there.
+      - name: Type-check the web shell against its baseline
+        env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 -m validation.web_cohort_retention --fresh-on-new-inputs
-      - name: Preserve whole web cohort evidence
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 -m validation.web_unit_receipts --command jsconfig-generated
+          python3 -m validation.web_unit_receipts --command typescript
+          python3 -m validation.web_unit_receipts --command player-typedef
+      # Every Node web and playback test, the same list `make web-check` runs
+      # minus its two real-browser scripts. Until 2026-10-04 a pull request ran
+      # two of them here and the rest ran only when someone typed make; a stale
+      # assertion sat red on main for two days that way.
+      - name: Run every Node web and playback test
+        env:
+          TMPDIR: /tmp
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.web_unit_receipts --command suite
+      - name: Preserve original web unit adoption provenance
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
-          name: web-cohort-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/validation/web-cohort-retention/
+          name: web-unit-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .main-preflight-receipts/web-unit
           if-no-files-found: error
           retention-days: 90
 
@@ -530,10 +553,16 @@ jobs:
       - name: Compile iOS and tvOS without running simulator tests
         if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         run: make apple-build
+      - name: Reauthenticate original native cases before executing the pending selection
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.native_receipts --verify-tv-plan --family tv_navigation
       - name: Require native TV navigation journeys
         if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+          PLURX_TV_NAVIGATION_PLAN: .main-preflight-receipts/native/receipt.json
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
         if: always() && needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'

@@ -35,6 +35,8 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 else:
                     expected_guard += " && steps.native_receipts.outputs.tv_navigation != 'true'"
                     self.assertIn("run: python3 -m validation.native_receipts", apple_job)
+                    self.assertIn("run: python3 -m validation.native_receipts --verify-tv-plan", apple_job)
+                    self.assertIn("PLURX_TV_NAVIGATION_PLAN: .main-preflight-receipts/native/receipt.json", step)
                     build = apple_job.split("- name: Compile iOS and tvOS without running simulator tests", 1)[1].split("- name:", 1)[0]
                     self.assertEqual(re.findall(r"^        if: (.+)$", build, re.MULTILINE), [expected_guard])
                     self.assertIn("run: make apple-build", build)

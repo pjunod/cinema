@@ -1,4 +1,4 @@
-"""Synthetic whole-web-cohort provenance; never executes Node/npm/Make."""
+"""Shared successor web source/runtime guards; never executes Node/npm/Make."""
 import copy
 import hashlib
 import io
@@ -13,37 +13,12 @@ import warnings
 import zipfile
 
 from validation import web_cohort_retention as web
+from validation import web_unit_receipts as controller
 from validation import python_unit_receipts as receipts
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMIT, BASE = 'b'*40, 'c'*40
 SCOPE = {'repository':1,'pr':1263,'branch':'topic','base':'main','workflow':'main-fast-lane.yml'}
-
-
-def fixture_inputs():
-    return {'files':[],'baseline':{'event_base':BASE,'merge_base':BASE,'sha256':'e'*64}}
-
-
-def packed(receipt,log,extra=(),*,log_name='web-cohort.log',log_mode=stat.S_IFREG|0o644):
-    output = io.BytesIO()
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore',UserWarning)
-        with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_STORED) as archive:
-            for name,raw,mode in [('receipt.json',json.dumps(receipt).encode(),stat.S_IFREG|0o644),
-                (log_name,log,log_mode),*extra]:
-                info = zipfile.ZipInfo(name); info.external_attr = mode << 16
-                archive.writestr(info,raw)
-    return output.getvalue()
-
-
-def upload(name,aid,data):
-    size = len(data)
-    return ['With the provided path, there will be 2 files uploaded','Artifact name is valid!',
-        'Root directory input is valid!','Beginning upload of artifact content to blob storage',
-        f'Uploaded bytes {size}','Finished uploading artifact content to blob storage!',
-        'SHA256 hash of uploaded artifact zip is '+web.digest(data),'Finalizing artifact upload',
-        f'Artifact {name}.zip successfully finalized. Artifact ID {aid}',
-        f'Artifact {name} has been successfully uploaded! Final size is {size} bytes. Artifact ID is {aid}']
 
 
 class WebCohortRetentionTests(unittest.TestCase):
@@ -111,60 +86,25 @@ class WebCohortRetentionTests(unittest.TestCase):
                 previous = after
                 contents['crates/plurxd/src/web/'+resource] += b' changed resource'
                 after = web.manifest(ROOT,COMMIT,BASE)
-                self.assertNotEqual(web.execution_key(previous),web.execution_key(after))
+                self.assertNotEqual(web.digest(web.canonical(previous)),web.digest(web.canonical(after)))
                 self.assertEqual(before,frozen)
             different_base = web.manifest(ROOT,COMMIT,'d'*40)
-            self.assertNotEqual(web.execution_key(after),web.execution_key(different_base))
+            self.assertNotEqual(web.digest(web.canonical(after)),web.digest(web.canonical(different_base)))
             self.assertEqual(after['baseline']['sha256'],different_base['baseline']['sha256'])
 
-    def test_web_job_identity_preserves_commands_and_ignores_other_job_bytes(self):
-        for block in (web.LEGACY_JOB,web.adapted_job()):
-            text = 'jobs:\n'+block+'  rust_compile:\n    run: arbitrary unrelated Rust change\n'
-            self.assertEqual(web.web_job(text.encode()),block)
-        for change in ('node-version: "24"','timeout-minutes: 11','runs-on: [self-hosted, Linux, ARM64]'):
-            changed = web.adapted_job().replace('node-version: "22.23.4"',change) if change.startswith('node-version') else (
-                web.adapted_job().replace('timeout-minutes: 10',change) if change.startswith('timeout') else
-                web.adapted_job().replace('runs-on: [self-hosted, Linux, X64, lab, general]',change))
-            with mock.patch.object(web,'git',return_value=('jobs:\n'+changed).encode()):
-                with self.assertRaisesRegex(receipts.ReceiptError,'job/command/environment shape'):
-                    web.workflow_identity(ROOT,COMMIT)
-        self.assertIn('make web-unit-check',web.COMMANDS)
-        self.assertIn('GITHUB_TOKEN: ${{ github.token }}',web.WRAPPER)
-        self.assertNotIn('make web-unit-check',web.WRAPPER)
-
-    def test_current_node_provisioning_matches_exact_runtime_and_legacy_stays_historical(self):
-        self.assertEqual(web.LEGACY_JOB.count('node-version: "22"'),1)
-        self.assertEqual(web.adapted_job().count('node-version: "22.23.4"'),1)
-        self.assertNotIn('node-version: "22"',web.adapted_job())
-        self.assertEqual(web.web_job((ROOT/web.WORKFLOW).read_bytes()),web.adapted_job())
-        for version in ('22','22.23.3'):
-            changed=web.adapted_job().replace('node-version: "22.23.4"','node-version: "'+version+'"')
-            with self.subTest(version=version),mock.patch.object(web,'git',return_value=('jobs:\n'+changed).encode()):
-                with self.assertRaisesRegex(receipts.ReceiptError,'job/command/environment shape'):
-                    web.workflow_identity(ROOT,COMMIT)
-        observed={'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','make':'GNU Make 4.4'}
-        with mock.patch.object(web.sys,'platform','linux'),mock.patch.object(web.platform,'machine',return_value='x86_64'), \
-             mock.patch.object(web.subprocess,'check_output',side_effect=lambda command,**kw:observed[command[0]]+'\n'):
-            self.assertEqual(web.runtime()['job_recorded'],{k:v for k,v in web.RUNTIME.items() if k!='typescript_lock'})
-            observed['node']='v22.23.3'
-            with self.assertRaisesRegex(receipts.ReceiptError,'Unsupported web concrete runtime family'):
+    def test_current_node_provisioning_matches_exact_successor_runtime(self):
+        block = controller.job_block((ROOT / controller.WORKFLOW).read_text(), 'web_compile')
+        self.assertEqual(block.count('node-version: "22.23.4"'), 1)
+        self.assertEqual(web.digest(block.encode()), controller.CURRENT_JOB_SHA256)
+        observed = {'node': 'v22.23.4', 'npm': '10.9.9', 'git': 'git version 2.55.0', 'make': 'GNU Make 4.4'}
+        with mock.patch.object(web.sys, 'platform', 'linux'), \
+                mock.patch.object(web.platform, 'machine', return_value='x86_64'), \
+                mock.patch.object(web.subprocess, 'check_output', side_effect=lambda command, **kw: observed[command[0]] + '\n'):
+            self.assertEqual(web.runtime()['job_recorded'], {k: v for k, v in web.RUNTIME.items() if k != 'typescript_lock'})
+            observed['node'] = 'v22.23.3'
+            with self.assertRaisesRegex(receipts.ReceiptError, 'Unsupported web concrete runtime family'):
                 web.runtime()
 
-    def test_cli_refusal_diagnostics_expose_only_static_stage_and_allowlisted_reason(self):
-        for stage,error,reason in (
-            ('runtime',receipts.ReceiptError('Unsupported web concrete runtime family'),'runtime_family_mismatch'),
-            ('context',receipts.ReceiptError('private-token-value raw API object'),'receipt_guard_failed'),
-            ('context',KeyError('private-token-value'),'metadata_shape_invalid'),
-            ('context',receipts.ReceiptError({'token':'private-token-value'}),'receipt_guard_failed'),
-            ('runtime',web.subprocess.CalledProcessError(1,['private-token-value']),'required_command_failed')):
-            output=io.StringIO()
-            with self.subTest(stage=stage,reason=reason),mock.patch.object(web,'current_context',
-                    side_effect=error if stage=='context' else None,return_value=object()), \
-                 mock.patch.object(web,'runtime',side_effect=error if stage=='runtime' else None), \
-                 mock.patch.object(web,'run_gate') as gate,mock.patch.object(web.sys,'stderr',output):
-                self.assertEqual(web.main([]),1)
-                self.assertEqual(output.getvalue(),'Whole web cohort refused: stage='+stage+' reason='+reason+'; no fallback execution\n')
-                self.assertNotIn('private-token-value',output.getvalue());gate.assert_not_called()
 
     def context(self):
         repo={'id':1,'full_name':'example/project'}
@@ -210,331 +150,10 @@ class WebCohortRetentionTests(unittest.TestCase):
                 pull['head']={**pull['head'],'sha':'d'*40}
                 with self.assertRaisesRegex(receipts.ReceiptError,'Main receipt must match'):web.current_context(ROOT)
 
-    def test_known_origin_tamper_or_failed_job_refuses_without_launch(self):
-        api,pull,event,run,job = self.context()
-        run.update(id=web.ORIGIN_RUN,commit_sha=web.PRODUCER)
-        event['pull_request']['head']['sha']=web.PRODUCER;run['event_payload']=json.dumps(event)
-        job.update(id=web.ORIGIN_JOB,run_id=web.ORIGIN_RUN,task_id=web.ORIGIN_TASK,status='success')
-        raw=b'authenticated but altered log'
-        with mock.patch.object(api,'bytes',return_value=raw,create=True),mock.patch.object(web,'checkout',return_value=[]), \
-             mock.patch.object(web,'manifest',return_value={}),mock.patch.object(web.subprocess,'run') as launch:
-            with self.assertRaisesRegex(receipts.ReceiptError,'Known web origin source/log/task'):web.legacy_result(api,SCOPE,ROOT)
-            job['status']='failure'
-            with self.assertRaisesRegex(receipts.ReceiptError,'did not succeed'):web.legacy_result(api,SCOPE,ROOT)
-            launch.assert_not_called()
-
-    def test_archive_and_command_log_refuse_traversal_symlink_duplicate_and_incomplete(self):
-        log=b'WEB-COHORT-START key\n'
-        for name,mode in (('../escape',stat.S_IFREG|0o644),
-                          ('web-cohort.log',stat.S_IFLNK|0o777),
-                          ('receipt.json',stat.S_IFREG|0o644)):
-            # Exactly two members: each refusal must reach the path/mode/
-            # duplicate guard rather than an unrelated member-count check.
-            data=packed({},log,log_name=name,log_mode=mode)
-            with zipfile.ZipFile(io.BytesIO(data)) as archive:self.assertEqual(len(archive.infolist()),2)
-            with self.subTest(name=name,mode=mode),self.assertRaisesRegex(receipts.ReceiptError,'Unsafe/duplicate'):
-                web.unpack(data)
-        with mock.patch.object(web,'MAX_LOG',2):
-            with self.assertRaisesRegex(receipts.ReceiptError,'size/ratio'):web.unpack(packed({},log))
-        complete=['WEB-COHORT-START key']
-        for i in range(len(web.COMMANDS)):complete += [f'WEB-COHORT-COMMAND {i} START',f'WEB-COHORT-COMMAND {i} PASS']
-        complete += ['WEB-COHORT-TYPESCRIPT Version 6.0.3','WEB-COHORT-FINISH key 0']
-        web.fresh_log(('\n'.join(complete)+'\n').encode(),'key')
-        for changed in (complete[:-1],complete+[complete[-1]],[*complete[:2],*complete[3:]],['WEB-COHORT-START wrong',*complete[1:]]):
-            with self.subTest(changed=changed),self.assertRaisesRegex(receipts.ReceiptError,'incomplete/ambiguous'):
-                web.fresh_log(('\n'.join(changed)+'\n').encode(),'key')
-
-    def test_fresh_branch_preserves_commands_scrubs_credentials_and_has_no_failure_fallback(self):
-        api,pull,event,run,job=self.context();context=(api,SCOPE,COMMIT,run,job,BASE)
-        inputs={**fixture_inputs(),'runtime_contract':web.RUNTIME}
-        scratch=ROOT/'target/web-retention-fixtures';scratch.mkdir(parents=True,exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=scratch) as directory, \
-             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1','sha256':'a'*64}), \
-             mock.patch.object(web,'live_inputs'),mock.patch.object(web,'live_script_resolvers'),mock.patch.object(web,'manifest',return_value=inputs), \
-             mock.patch.object(web,'matching_result',return_value=None),mock.patch.object(web,'current_context',return_value=context), \
-             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:b'' if args[0]=='diff' else COMMIT.encode() if args[0]=='rev-parse' and args[1]=='HEAD' else b'd'*40), \
-             mock.patch.object(web.subprocess,'run',return_value=mock.Mock(returncode=0)) as launch, \
-             mock.patch.object(web.subprocess,'check_output',side_effect=lambda argv,**kw:('cpython\n3.12.3\n'+kw['env']['PYTHONPYCACHEPREFIX']+'\n1\n') if argv[0]=='python3' else 'Version 6.0.3\n'), \
-             mock.patch.dict(os.environ,{'GITHUB_TOKEN':'secret','GH_TOKEN':'secret','ACTIONS_RUNTIME_TOKEN':'secret','PATH':'/tools','TMPDIR':'/scratch','PYTHONPYCACHEPREFIX':'/untrusted/cache','PYTHONDONTWRITEBYTECODE':'0'}):
-            # Different policy/input key selects explicit fresh, never a legacy re-run.
-            out=Path(directory)/'fresh';out.mkdir()
-            with mock.patch.object(web,'manifest',side_effect=[inputs,{**inputs,'different':True},inputs,inputs]):
-                result=web.run_gate(ROOT,context,out,{'typescript':{'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}},True)
-            self.assertTrue(result['current_test_events']);self.assertIsNone(result['origin'])
-            self.assertEqual(result['python_cache_execution']['cache_policy'],web.PYTHON_CACHE_POLICY)
-            self.assertNotIn(str(out),json.dumps(result['python_cache_execution']))
-            self.assertFalse((out/'python-cache').exists())
-            self.assertEqual([call.args[0][-1] for call in launch.call_args_list],list(web.COMMANDS))
-            for call in launch.call_args_list:
-                env=call.kwargs['env'];self.assertEqual(env['PATH'],'/tools')
-                self.assertFalse({'GITHUB_TOKEN','GH_TOKEN','ACTIONS_RUNTIME_TOKEN'} & set(env))
-                self.assertEqual(env['PYTHONPYCACHEPREFIX'],str(out.absolute()/'python-cache'))
-                self.assertEqual(env['PYTHONDONTWRITEBYTECODE'],'1')
-            self.assertNotIn('PR_BASE_SHA',launch.call_args_list[0].kwargs['env'])
-            self.assertEqual(launch.call_args_list[1].kwargs['env']['PR_BASE_SHA'],BASE)
-            self.assertNotIn('PR_BASE_SHA',launch.call_args_list[2].kwargs['env'])
-            self.assertEqual(launch.call_args_list[-1].kwargs['env']['TMPDIR'],'/tmp')
-            launch.reset_mock();launch.return_value=mock.Mock(returncode=1)
-            out=Path(directory)/'failed';out.mkdir()
-            with mock.patch.object(web,'manifest',side_effect=[inputs,{**inputs,'different':True},inputs,inputs]):
-                with self.assertRaisesRegex(receipts.ReceiptError,'failed; no retention/fallback'):
-                    web.run_gate(ROOT,context,out,{'typescript':{'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}},True)
-            self.assertEqual(launch.call_count,1)
-            self.assertNotIn(b'WEB-COHORT-FINISH',(out/'web-cohort.log').read_bytes())
-            launch.reset_mock();out=Path(directory)/'unsupported-cache';out.mkdir()
-            with mock.patch.object(web,'manifest',side_effect=[inputs,{**inputs,'different':True},inputs]), \
-                 mock.patch.object(web.subprocess,'check_output',return_value='cpython\n3.12.3\n/wrong-prefix\n0\n'):
-                with self.assertRaisesRegex(receipts.ReceiptError,'cache isolation is unsupported'):
-                    web.run_gate(ROOT,context,out,{'typescript':{}},True)
-            launch.assert_not_called()
-
-    def test_retention_emits_original_log_and_zero_current_web_events(self):
-        api,pull,event,run,job=self.context();context=(api,SCOPE,COMMIT,run,job,BASE)
-        inputs=fixture_inputs();key=web.execution_key(inputs);raw=b'original raw whole-job execution\n'
-        original={'kind':'legacy','input_key':key,'log_sha256':web.digest(raw)}
-        scratch=ROOT/'target/web-retention-fixtures';scratch.mkdir(parents=True,exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=scratch) as directory, \
-             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1','sha256':'a'*64}), \
-             mock.patch.object(web,'live_inputs'),mock.patch.object(web,'live_script_resolvers'),mock.patch.object(web,'manifest',return_value=inputs), \
-             mock.patch.object(web,'legacy_result',return_value=(original,raw,inputs)), \
-             mock.patch.object(web,'current_context',return_value=context), \
-             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:b'' if args[0]=='diff' else COMMIT.encode() if args[0]=='rev-parse' and args[1]=='HEAD' else b'd'*40), \
-             mock.patch.object(web.subprocess,'run') as launch:
-            result=web.run_gate(ROOT,context,Path(directory),{'typescript':{'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}},True)
-            self.assertEqual(result['mode'],'retained_prior_execution');self.assertFalse(result['current_test_events'])
-            self.assertEqual(result['origin'],original);self.assertEqual((Path(directory)/'web-cohort.log').read_bytes(),raw)
-            launch.assert_not_called()
-
-    def v1_fixture(self):
-        api,pull,event,run,job=self.context();job['status']='success'
-        inputs={**fixture_inputs(),'runtime_contract':web.RUNTIME};key=web.execution_key(inputs)
-        lines=['WEB-COHORT-START '+key]
-        for i in range(len(web.COMMANDS)):lines += [f'WEB-COHORT-COMMAND {i} START',f'WEB-COHORT-COMMAND {i} PASS']
-        log=('\n'.join([*lines,'WEB-COHORT-TYPESCRIPT Version 6.0.3','WEB-COHORT-FINISH '+key+' 0'])+'\n').encode()
-        adapter=b'reviewed adapter bytes';tree='d'*40
-        receipt={'schema_version':1,'mode':'fresh_execution','commit':COMMIT,'tree':tree,'run':6000,'job':6001,
-            'attempt':1,'scope':SCOPE,'inputs':inputs,'input_key':key,'policy_sha256':web.policy_fingerprint(),
-            'adapter_sha256':web.digest(adapter),'web_job':{'kind':'v1','sha256':'a'*64},
-            'runtime':{'job_recorded':{k:v for k,v in web.RUNTIME.items() if k!='typescript_lock'},
-                'policy_compatible':{'python':web.PYTHON_POLICY},
-                'current_diagnostics':{'python':{'implementation':'CPython','version':'3.12.3'}},
-                'typescript':{'declared_locked':'6.0.3','current_binary_observed':'Version 6.0.3','current_qualification_execution':True}},
-            'python_cache_execution':{'implementation':'cpython','version':'3.12.3','cache_policy':web.PYTHON_CACHE_POLICY},
-            'origin':None,'log_sha256':web.digest(log),'current_test_events':True}
-        envelope={'id':7000,'name':'web-cohort-6000-1','run_id':6000,'expired':False}
-        state={'receipt':receipt,'log':log,'data':b'','lines':[]}
-        def seal():
-            state['data']=packed(state['receipt'],state['log']);envelope['size_in_bytes']=len(state['data'])
-            state['lines']=['WEB-COHORT-RECEIPT '+web.digest(web.canonical(state['receipt'])),
-                *upload(envelope['name'],7000,state['data'])]
-        seal()
-        api.pages=lambda path,query=None,field=None:[envelope]
-        api.bytes=lambda path:state['data']
-        return api,run,job,inputs,receipt,state,seal,adapter,tree
-
-    def test_v1_fresh_upload_binds_raw_source_runtime_and_unique_upload_digest(self):
-        api,run,job,inputs,receipt,state,seal,adapter,tree=self.v1_fixture()
-        with mock.patch.object(web,'authenticate_job',side_effect=lambda *a:(run,job,b'authenticated job log',state['lines'],inputs)), \
-             mock.patch.object(web,'workflow_identity',return_value=receipt['web_job']), \
-             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:tree.encode() if args[0]=='rev-parse' else adapter):
-            original,log,original_inputs=web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT)
-            self.assertEqual(original['kind'],'v1_fresh');self.assertEqual(original['artifact_id'],7000);self.assertEqual(log,state['log'])
-            for change in ({'commit':'e'*40},{'inputs':{'files':['tampered']}},{'attempt':True},
-                           {'current_test_events':False},{'adapter_sha256':'f'*64}):
-                before=copy.deepcopy(receipt);receipt.update(change);seal()
-                with self.subTest(change=change),self.assertRaisesRegex(receipts.ReceiptError,'binding differs|origin/event claim'):
-                    web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT)
-                receipt.clear();receipt.update(before);seal()
-            state['lines'].insert(5,'SHA256 hash of uploaded artifact zip is '+'e'*64)
-            with self.assertRaisesRegex(receipts.ReceiptError,'digest/order'):web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT)
-            seal();state['data']=state['data'][:-1]+b'!'
-            with self.assertRaisesRegex(receipts.ReceiptError,'uploaded archive digest/size'):
-                web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT)
-
-    def test_v1_retained_resolves_real_origin_once_and_refuses_chain_or_fabricated_events(self):
-        api,run,job,inputs,receipt,state,seal,adapter,tree=self.v1_fixture()
-        raw=b'original legacy raw log';key=web.execution_key(inputs)
-        origin={'kind':'legacy','run':web.ORIGIN_RUN,'job':web.ORIGIN_JOB,'input_key':key,'log_sha256':web.digest(raw)}
-        receipt.update(mode='retained_prior_execution',origin=origin,current_test_events=False,python_cache_execution=None,log_sha256=web.digest(raw))
-        receipt['runtime']['typescript']={'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}
-        state['log']=raw;seal()
-        with mock.patch.object(web,'authenticate_job',side_effect=lambda *a:(run,job,b'authenticated job log',state['lines'],inputs)), \
-             mock.patch.object(web,'workflow_identity',return_value=receipt['web_job']), \
-             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:tree.encode() if args[0]=='rev-parse' else adapter), \
-             mock.patch.object(web,'legacy_result',return_value=(origin,raw,inputs)) as original:
-            self.assertEqual(web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT),(origin,raw,inputs));original.assert_called_once()
-            with self.assertRaisesRegex(receipts.ReceiptError,'directly to real execution'):
-                web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT,root_only=True)
-            receipt['current_test_events']=True;seal()
-            with self.assertRaisesRegex(receipts.ReceiptError,'directly to real execution'):
-                web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT)
-            receipt['current_test_events']=False;receipt['origin']={'kind':'v1_fresh','run':6000,'job':6001};seal()
-            with self.assertRaisesRegex(receipts.ReceiptError,'cycle/chain'):web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT)
-
-    def test_effective_baseline_projection_preserves_raw_keys_and_all_other_inputs(self):
-        original=fixture_inputs();original['files']=[{'path':'fixture','mode':'100644','blob':'a'*40,'sha256':'b'*64}]
-        changed=copy.deepcopy(original);changed['baseline']['event_base']='d'*40
-        frozen=copy.deepcopy(original)
-        self.assertNotEqual(web.execution_key(original),web.execution_key(changed))
-        self.assertEqual(web.applicability_inputs(original),web.applicability_inputs(changed))
-        projected=web.applicability_inputs(original);projected['files'][0]['path']='mutated copy'
-        self.assertEqual(original,frozen)
-        for field,value in (('merge_base','e'*40),('sha256','f'*64)):
-            different=copy.deepcopy(changed);different['baseline'][field]=value
-            self.assertNotEqual(web.applicability_inputs(original),web.applicability_inputs(different))
-        for field,value in (('files',[]),('runtime_contract',{'node':'different'}),('policy_sha256','0'*64)):
-            different={**changed,field:value}
-            self.assertNotEqual(web.applicability_inputs(original),web.applicability_inputs(different))
-        for baseline in ({}, {'event_base':BASE,'merge_base':BASE,'sha256':'e'*64,'extra':True},
-            {'event_base':'unknown','merge_base':BASE,'sha256':'e'*64},
-            {'event_base':BASE,'merge_base':True,'sha256':'e'*64}):
-            with self.assertRaisesRegex(receipts.ReceiptError,'applicability baseline'):
-                web.applicability_inputs({**original,'baseline':baseline})
-        contents,roots,git,shape=self.source()
-        def missing_baseline(workspace,*args,**kw):
-            if args[0]=='show':raise receipts.ReceiptError('Required web Git source unavailable')
-            return git(workspace,*args,**kw)
-        with mock.patch.object(web,'git',side_effect=missing_baseline), \
-             mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}), \
-             mock.patch.object(web,'SHAPE_FAMILIES',{'fixture':shape}):
-            with self.assertRaisesRegex(receipts.ReceiptError,'Required web Git source unavailable'):
-                web.manifest(ROOT,COMMIT,BASE)
-
-    def test_reviewed_predecessor_authenticates_own_adapter_and_raw_receipt_key(self):
-        import subprocess
-        predecessor=subprocess.check_output(['git','show','dd8d8595d50fcdb855cd7562b65d764d7a1bd590:'+web.ADAPTER],cwd=ROOT)
-        self.assertEqual(web.digest(predecessor),web.PREDECESSOR_ADAPTER_SHA256)
-        api,run,job,inputs,receipt,state,seal,adapter,tree=self.v1_fixture()
-        receipt['adapter_sha256']=web.PREDECESSOR_ADAPTER_SHA256
-        self.assertEqual(web.policy_fingerprint(),'a6fd8264c349ed82a3478a04a9a775ee9e06a5ed12d88c74bbbc784e08956ef0')
-        source={'raw':predecessor};consumer='e'*40
-        def source_git(workspace,*args,**kw):
-            if args[0]=='rev-parse':return tree.encode()
-            return source['raw'] if args[-1]==COMMIT+':'+web.ADAPTER else b'reviewed current consumer'
-        seal()
-        with mock.patch.object(web,'authenticate_job',side_effect=lambda *a:(run,job,b'authenticated job log',state['lines'],inputs)), \
-             mock.patch.object(web,'workflow_identity',return_value=receipt['web_job']), \
-             mock.patch.object(web,'git',side_effect=source_git):
-            pointer,log,original_inputs=web.v1_result(api,SCOPE,ROOT,6000,6001,consumer)
-            self.assertEqual(pointer['input_key'],web.execution_key(inputs));self.assertEqual(original_inputs,inputs)
-            self.assertEqual(log,state['log'])
-            for change in ({'adapter_sha256':web.digest(b'reviewed current consumer')},{'input_key':'0'*64},
-                {'inputs':{**inputs,'baseline':{**inputs['baseline'],'event_base':'d'*40}}}):
-                saved=copy.deepcopy(receipt);receipt.update(change);seal()
-                with self.subTest(change=change),self.assertRaisesRegex(receipts.ReceiptError,'API/source/policy/input binding differs'):
-                    web.v1_result(api,SCOPE,ROOT,6000,6001,consumer)
-                receipt.clear();receipt.update(saved)
-            seal();source['raw']=predecessor+b'\n# unknown changed byte\n'
-            with self.assertRaisesRegex(receipts.ReceiptError,'adapter compatibility unknown'):
-                web.v1_result(api,SCOPE,ROOT,6000,6001,consumer)
-
-    def test_effective_baseline_history_matches_only_independently_reconstructed_inputs(self):
-        api,pull,event,run,job=self.context();job['status']='success'
-        original=fixture_inputs();current=copy.deepcopy(original);current['baseline']['event_base']='d'*40
-        raw=b'original producer bytes'
-        pointer={'kind':'v1_fresh','run':6000,'job':6001,'attempt':1,'commit':COMMIT,
-            'input_key':web.execution_key(original),'log_sha256':web.digest(raw),
-            'artifact_id':7001,'artifact_sha256':'a'*64,'job_log_sha256':'b'*64}
-        api.pages=lambda path,query=None,field=None:([job] if path.endswith('/jobs') else
-            [{'id':7001,'name':'web-cohort-6000-1','run_id':6000,'expired':False,'size_in_bytes':128}] if path.endswith('/artifacts') else [run])
-        with mock.patch.object(web,'git',return_value=b'reviewed source'), \
-             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1'}), \
-             mock.patch.object(web,'manifest',return_value=original) as manifest, \
-             mock.patch.object(web,'v1_result',return_value=(pointer,raw,original)) as result:
-            self.assertEqual(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,current),(pointer,raw,original))
-            manifest.assert_called_with(ROOT,COMMIT,BASE)
-            for baseline in ({**current['baseline'],'merge_base':'e'*40},{**current['baseline'],'sha256':'f'*64}):
-                result.reset_mock()
-                self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,{**current,'baseline':baseline}))
-                result.assert_not_called()
-
-    def test_supported_different_history_is_classified_before_positive_adapter_authentication(self):
-        api,pull,event,run,job=self.context();job['status']='success'
-        artifacts=[{'id':7001,'name':'web-cohort-6000-1','run_id':6000,'expired':False,'size_in_bytes':128}]
-        api.pages=lambda path,query=None,field=None:([job] if path.endswith('/jobs') else
-            artifacts if path.endswith('/artifacts') else [run])
-        original=fixture_inputs();current={**original,'files':[{'path':'reviewed-new-input'}]}
-        order=[]
-        def source(*args):order.append('source');return original
-        def adapter(*args):order.append('adapter');raise receipts.ReceiptError('Web adapter compatibility unknown')
-        with mock.patch.object(web,'git',return_value=b'validation.web_cohort_retention'), \
-             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1'}), \
-             mock.patch.object(web,'manifest',side_effect=source) as manifest, \
-             mock.patch.object(web,'producer_adapter',side_effect=adapter) as producer, \
-             mock.patch.object(web,'v1_result') as result, \
-             mock.patch.object(web.subprocess,'run') as launch:
-            self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,current))
-            self.assertEqual(order,['source']);producer.assert_not_called();result.assert_not_called();launch.assert_not_called()
-            # Exact matching inputs still need positive protocol authentication.
-            order.clear()
-            with self.assertRaisesRegex(receipts.ReceiptError,'adapter compatibility unknown'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,original)
-            self.assertEqual(order,['source','adapter']);result.assert_not_called()
-            # Unknown closure cannot be misclassified as different inputs.
-            manifest.side_effect=receipts.ReceiptError('Unsupported web executable/recipe/dependency shape; closure review required')
-            producer.reset_mock()
-            with self.assertRaisesRegex(receipts.ReceiptError,'Unsupported web executable'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,current)
-            producer.assert_not_called();result.assert_not_called();launch.assert_not_called()
-            # Matching successful producers still require a complete artifact.
-            manifest.side_effect=None;manifest.return_value=original
-            producer.side_effect=None;producer.return_value='f'*64;artifacts.clear()
-            with self.assertRaisesRegex(receipts.ReceiptError,'Matching web cohort artifact missing'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,original)
-            result.assert_not_called();launch.assert_not_called()
-            artifacts.append({'name':'web-cohort-malformed'})
-            manifest.reset_mock()
-            with self.assertRaisesRegex(receipts.ReceiptError,'artifact name malformed'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,current)
-            manifest.assert_not_called();launch.assert_not_called()
-
-    def test_retained_effective_baseline_keeps_original_pointer_log_and_producer_inputs(self):
-        api,pull,event,run,job=self.context();current=fixture_inputs();current['baseline']['event_base']='d'*40
-        original=fixture_inputs();raw=('WEB-COHORT-START '+web.execution_key(original)+'\noriginal log\n').encode()
-        pointer={'kind':'v1_fresh','run':5900,'job':5901,'attempt':1,'commit':'f'*40,
-            'input_key':web.execution_key(original),'log_sha256':web.digest(raw),
-            'artifact_id':7001,'artifact_sha256':'a'*64,'job_log_sha256':'b'*64}
-        frozen=copy.deepcopy(pointer);context=(api,SCOPE,COMMIT,run,job,'d'*40)
-        scratch=ROOT/'target/web-retention-fixtures';scratch.mkdir(parents=True,exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=scratch) as directory, \
-             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1','sha256':'a'*64}), \
-             mock.patch.object(web,'live_inputs'),mock.patch.object(web,'live_script_resolvers'), \
-             mock.patch.object(web,'manifest',side_effect=[current,{**original,'different':True},current,current]), \
-             mock.patch.object(web,'matching_result',return_value=(pointer,raw,original)), \
-             mock.patch.object(web,'current_context',return_value=context), \
-             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:b'' if args[0]=='diff' else COMMIT.encode() if args[0]=='rev-parse' and args[1]=='HEAD' else b'd'*40), \
-             mock.patch.object(web.subprocess,'run') as launch:
-            result=web.run_gate(ROOT,context,Path(directory),{'typescript':{}},True)
-            self.assertEqual(result['input_key'],web.execution_key(current));self.assertNotEqual(result['input_key'],pointer['input_key'])
-            self.assertEqual(result['origin'],frozen);self.assertEqual(pointer,frozen)
-            self.assertEqual((Path(directory)/'web-cohort.log').read_bytes(),raw)
-            self.assertFalse(result['current_test_events']);launch.assert_not_called()
-        # Retained v1 validation compares the independently authenticated root
-        # inputs, while its own raw key and receipt marker remain separate.
-        api,run,job,inputs,receipt,state,seal,adapter,tree=self.v1_fixture()
-        origin_inputs=copy.deepcopy(inputs);receipt['inputs']=copy.deepcopy(inputs)
-        receipt['inputs']['baseline']['event_base']='d'*40
-        wrapper_inputs=receipt['inputs'];receipt['input_key']=web.execution_key(wrapper_inputs)
-        wrapper_event=json.loads(run['event_payload']);wrapper_event['pull_request']['base']['sha']='d'*40
-        run['event_payload']=json.dumps(wrapper_event)
-        pointer={'kind':'legacy','run':web.ORIGIN_RUN,'job':web.ORIGIN_JOB,'attempt':1,'commit':web.PRODUCER,
-            'input_key':web.execution_key(origin_inputs),'log_sha256':web.digest(raw)}
-        receipt.update(mode='retained_prior_execution',origin=pointer,current_test_events=False,python_cache_execution=None,log_sha256=web.digest(raw))
-        receipt['runtime']['typescript']={'declared_locked':'6.0.3','current_binary_observed':None,'current_qualification_execution':False}
-        state['log']=raw;seal()
-        with mock.patch.object(web,'authenticate_job',side_effect=lambda *a:(run,job,b'authenticated job log',state['lines'],wrapper_inputs)), \
-             mock.patch.object(web,'workflow_identity',return_value=receipt['web_job']), \
-             mock.patch.object(web,'git',side_effect=lambda workspace,*args,**kw:tree.encode() if args[0]=='rev-parse' else adapter), \
-             mock.patch.object(web,'legacy_result',return_value=(pointer,raw,origin_inputs)):
-            self.assertEqual(web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT),(pointer,raw,origin_inputs))
-            origin_inputs['baseline']['merge_base']='e'*40
-            pointer['input_key']=web.execution_key(origin_inputs);seal()
-            with self.assertRaisesRegex(receipts.ReceiptError,'retained original provenance/input differs'):
-                web.v1_result(api,SCOPE,ROOT,6000,6001,COMMIT)
-
     def test_adapter_changes_select_the_real_web_job_and_live_aliases_refuse(self):
         from validation import ci_scope
-        for path in ('validation/web_cohort_retention.py','tests/operations/test_web_cohort_retention.py'):
+        for path in ('validation/web_cohort_retention.py', 'tests/operations/test_web_cohort_retention.py',
+                     'validation/web_unit_receipts.py', 'tests/validation/test_web_unit_receipts.py'):
             self.assertTrue(ci_scope.scope_for_paths(ci_scope.load_catalog(),(path,))['web_layout'])
         with mock.patch.object(web,'selectors'),mock.patch.object(web,'git',return_value=b'unknown.js\0'):
             with self.assertRaisesRegex(receipts.ReceiptError,'Untracked/ignored web closure'):
@@ -543,45 +162,6 @@ class WebCohortRetentionTests(unittest.TestCase):
              mock.patch.dict(os.environ,{'NODE_OPTIONS':'--require /outside/helper.js'}):
             with self.assertRaisesRegex(receipts.ReceiptError,'interpreter configuration'):
                 web.live_inputs(ROOT)
-
-    def test_checkout_runtime_sections_accept_real_two_git_observations_and_reject_conflicts(self):
-        # Sanitized section/order fixture reconstructed from complete job 57771:
-        # initialization Git, final checkout HEAD, setup-node environment, then
-        # checkout Post Git and completion. The private 595,925-byte log stays out.
-        action='https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
-        lines=[
-            'Runner 00000000-0000-0000-0000-000000000001 (version:v13.1.0) received task 23006 of job web_compile, triggered by event: pull_request',
-            'workflow prepared','⭐ Run Main '+action,'Syncing repository: example/project',
-            '##[group]Getting Git version info',"Working directory is '/work/project'",
-            '[command]/usr/bin/git version','git version 2.55.0','##[endgroup]',
-            '[command]/usr/bin/git init /work/project',
-            '[command]/usr/bin/git log -1 --format=%H',COMMIT,
-            '##[group]Removing auth','##[endgroup]','::remove-matcher owner=checkout-git::',
-            'Found in cache @ /tools/node/22.23.4/x64','##[group]Environment details',
-            'node: v22.23.4','npm: 10.9.9','yarn: ','##[endgroup]',
-            'js-check: 96 served scripts OK','PASS jsconfig.json',
-            'web-types: installing typescript 6.0.3','web-types: OK, unchanged',
-            'PASS the Player typedef','TAP version 13','ok 1 - complete web cohort',
-            '# fail 0','# cancelled 0','# skipped 0',
-            '⭐ Run Post https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
-            '  ✅  Success - Post https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
-            '⭐ Run Post '+action,'[command]/usr/bin/git version','git version 2.55.0',
-            '[command]/usr/bin/git config --local --name-only --get-regexp core.sshCommand',
-            '  ✅  Success - Post '+action,'🏁  Job succeeded']
-        def raw(values):return ('\n'.join('2026-10-25T23:27:07.0000000Z '+line for line in values)+'\n').encode()
-        job={'task_id':23006}
-        self.assertEqual(web.checkout(raw(lines),COMMIT,job),lines)
-        versions=[i for i,line in enumerate(lines) if line == 'git version 2.55.0']
-        self.assertEqual(len(versions),2)
-        for index in versions:
-            conflicting=lines.copy();conflicting[index]='git version 2.54.0'
-            with self.subTest(index=index),self.assertRaisesRegex(receipts.ReceiptError,'Git runtime sections differ'):
-                web.checkout(raw(conflicting),COMMIT,job)
-        for changed in (lines[:versions[1]]+lines[versions[1]+1:],
-                        lines[:-1]+['git version 2.55.0',lines[-1]],
-                        [line for line in lines if line != '⭐ Run Post '+action]):
-            with self.assertRaisesRegex(receipts.ReceiptError,'runtime section|Git runtime sections'):
-                web.checkout(raw(changed),COMMIT,job)
 
     def test_reviewed_raw_shape_families_keep_distinct_keys_and_pin_imported_helpers(self):
         contents,roots,git,shape=self.source()
@@ -597,7 +177,7 @@ class WebCohortRetentionTests(unittest.TestCase):
             old=web.manifest(ROOT,COMMIT,BASE)
             contents['tests/web/check.test.js']=raw
             current=web.manifest(ROOT,COMMIT,BASE)
-            self.assertNotEqual(web.execution_key(old),web.execution_key(current))
+            self.assertNotEqual(web.digest(web.canonical(old)),web.digest(web.canonical(current)))
             self.assertEqual(original,frozen)
             self.assertNotEqual(old['files'],current['files'])
             for helper in ('tests/vendor/acorn.js','scripts/playback-startup-lab'):
@@ -605,174 +185,6 @@ class WebCohortRetentionTests(unittest.TestCase):
                 with self.subTest(helper=helper),self.assertRaisesRegex(receipts.ReceiptError,'executable/recipe/dependency shape'):
                     web.manifest(ROOT,COMMIT,BASE)
                 contents[helper]=original_helper
-
-    def test_terminal_failed_nonproducer_history_is_classified_before_source_compatibility(self):
-        api,pull,event,run,job=self.context()
-        original_payload=run['event_payload'];original_event=json.loads(original_payload)
-        state={'artifacts':[],'jobs':[job]}
-        def pages(path,query=None,field=None):
-            return state['jobs'] if path.endswith('/jobs') else state['artifacts'] if path.endswith('/artifacts') else [run]
-        api.pages=pages
-        with mock.patch.object(web,'git',return_value=b'validation.web_cohort_retention unsupported old wrapper/adapter') as source, \
-             mock.patch.object(web,'manifest') as manifest,mock.patch.object(web,'v1_result') as result, \
-             mock.patch.object(web,'producer_adapter',return_value='f'*64) as producer, \
-             mock.patch.object(web.subprocess,'run') as launch,mock.patch('builtins.print') as report:
-            for attempt in (1,2,7):
-                for draft in (False,True):
-                    for status in ('failure','cancelled','skipped'):
-                        for task in (0,6002):
-                            event=copy.deepcopy(original_event);event['pull_request']['draft']=draft
-                            run['event_payload']=json.dumps(event)
-                            job.update(status=status,attempt=attempt,task_id=task)
-                            with self.subTest(attempt=attempt,draft=draft,status=status,task=task):
-                                self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs()))
-                                report.assert_called_with('Web history: no accepted whole-cohort result; execution unknown',flush=True)
-            event['action']='converted_to_draft';run['event_payload']=json.dumps(event)
-            self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs()))
-            for value in (None,'false',0,1):
-                event=copy.deepcopy(original_event);event['pull_request']['draft']=value
-                run['event_payload']=json.dumps(event)
-                with self.subTest(draft=value),self.assertRaisesRegex(receipts.ReceiptError,'nonproducer event draft field malformed'):
-                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            del event['pull_request']['draft'];run['event_payload']=json.dumps(event)
-            with self.assertRaisesRegex(receipts.ReceiptError,'nonproducer event draft field malformed'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            run['event_payload']=original_payload
-            source.assert_not_called();manifest.assert_not_called();producer.assert_not_called();result.assert_not_called();launch.assert_not_called()
-            # Actual-shaped traversal: allocated skipped 6088, draft/pre-v1
-            # skipped 5849 and retried skipped 5834 grant no pass or compatibility.
-            earlier=copy.deepcopy(run);earlier['id']=6088
-            later=copy.deepcopy(run);later.update(id=5849,commit_sha='d'*40)
-            event=json.loads(later['event_payload']);event['pull_request'].update(draft=True)
-            event['pull_request']['head']['sha']='d'*40;later['event_payload']=json.dumps(event)
-            retried_run=copy.deepcopy(run);retried_run.update(id=5834,commit_sha='d0ce00f7a6f5fc24583196561cca40fcb19005ab')
-            event=json.loads(retried_run['event_payload']);event['pull_request']['head']['sha']=retried_run['commit_sha']
-            retried_run['event_payload']=json.dumps(event)
-            allocated={**job,'id':58960,'run_id':6088,'attempt':1,'task_id':23810,'status':'skipped'}
-            unassigned={**job,'id':56915,'run_id':5849,'attempt':1,'task_id':0,'status':'skipped'}
-            retried={**job,'id':56784,'run_id':5834,'attempt':2,'task_id':0,'status':'skipped'}
-            original_get,original_pages=api.get,api.pages
-            api.get=lambda path:earlier if path=='/actions/runs/6088' else later if path=='/actions/runs/5849' else retried_run if path=='/actions/runs/5834' else original_get(path)
-            api.pages=lambda path,query=None,field=None:([allocated] if path=='/actions/runs/6088/jobs'
-                else [unassigned] if path=='/actions/runs/5849/jobs' else [retried] if path=='/actions/runs/5834/jobs'
-                else [earlier,later,retried_run] if path=='/actions/runs' else original_pages(path,query,field))
-            source.return_value=('jobs:\n'+web.LEGACY_JOB).encode();report.reset_mock()
-            self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs()))
-            self.assertEqual(report.call_count,3)
-            source.assert_not_called();manifest.assert_not_called();producer.assert_not_called()
-            api.get,api.pages=original_get,original_pages
-            source.return_value=b'validation.web_cohort_retention unsupported old wrapper/adapter'
-            job.update(status='skipped',task_id=6002)
-            for change in ({'attempt':0},{'attempt':-1},{'attempt':True},{'attempt':False},{'attempt':None},{'attempt':2.0},{'attempt':'2'},{'task_id':-1},{'task_id':True},{'task_id':0.0},{'task_id':'0'},{'task_id':None},{'repo_id':2},{'repo_id':True},{'run_id':1},{'run_id':True},{'id':0},{'id':True}):
-                saved=job.copy();job.update(change)
-                with self.subTest(change=change),self.assertRaisesRegex(receipts.ReceiptError,'repository/run/task/attempt'):
-                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-                job.clear();job.update(saved)
-            attempt=job.pop('attempt')
-            with self.assertRaisesRegex(receipts.ReceiptError,'Web nonproducer job repository/run/task/attempt/status differs'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            job['attempt']=attempt
-            task=job.pop('task_id')
-            with self.assertRaisesRegex(receipts.ReceiptError,'Web nonproducer job repository/run/task/attempt/status differs'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            job['task_id']=task
-            with self.assertRaisesRegex(receipts.ReceiptError,'Web nonproducer job repository/run/task/attempt/status differs'):
-                web.check_nonproducer_job({**job,'name':'other job'},SCOPE,run['id'])
-            for path,value in ((('number',),1264),(('repository','id'),2),(('repository','full_name'),'other/project'),
-                (('pull_request','head','sha'),'e'*40),(('pull_request','head','repo','id'),2),
-                (('pull_request','base','repo','id'),2),(('pull_request','base','ref'),'effort/topic'),
-                (('pull_request','state'),'closed'),(('action',),'unknown')):
-                event=copy.deepcopy(original_event);target=event
-                for key in path[:-1]:target=target[key]
-                target[path[-1]]=value;run['event_payload']=json.dumps(event)
-                with self.subTest(event_path=path),self.assertRaises(receipts.ReceiptError):
-                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            run['event_payload']=original_payload;saved_workflow=run['workflow_id'];run['workflow_id']='other.yml'
-            with self.assertRaises(receipts.ReceiptError):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            run['workflow_id']=saved_workflow
-            # Use the supported recipe so status/artifact guards, rather than
-            # unrelated recipe rejection, enforce these refusal boundaries.
-            source.return_value=('jobs:\n'+web.adapted_job()).encode()
-            manifest.return_value=fixture_inputs()
-            with mock.patch.object(web,'check_nonproducer_job') as negative:
-                for status in ('success','running','queued','unknown'):
-                    job.update(status=status,attempt=2)
-                    with self.subTest(status=status),self.assertRaisesRegex(receipts.ReceiptError,'Matching web history is incomplete/ambiguous|Matching web cohort artifact missing'):
-                        web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-                negative.assert_not_called()
-            job['status']='skipped'
-            for artifacts in ([{'name':'web-cohort-6000-1'}],[{'name':'web-cohort-malformed'}]):
-                state['artifacts']=artifacts
-                with self.subTest(artifacts=artifacts),self.assertRaisesRegex(receipts.ReceiptError,'Matching web history is incomplete/ambiguous|artifact name malformed'):
-                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            state['artifacts']=[{'name':None}]
-            with self.assertRaisesRegex(receipts.ReceiptError,'artifact listing has malformed names'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            state['artifacts']=[];state['jobs']=[job,job.copy()]
-            with self.assertRaisesRegex(receipts.ReceiptError,'Matching web history is incomplete/ambiguous'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-            # Positive authority stays ready-only, including artifact-bearing
-            # skipped/task-zero history and success without a required artifact.
-            state['jobs']=[job];source.return_value=('jobs:\n'+web.adapted_job()).encode()
-            event=copy.deepcopy(original_event);event['pull_request']['draft']=True
-            run['event_payload']=json.dumps(event)
-            with mock.patch.object(web,'check_nonproducer_job') as negative:
-                for status in ('failure','cancelled','skipped','success'):
-                    job.update(status=status,attempt=2,task_id=0)
-                    state['artifacts']=[{'name':'web-cohort-6000-1','run_id':6000,'expired':False}]
-                    with self.subTest(draft_artifact_status=status),self.assertRaisesRegex(receipts.ReceiptError,'not a ready PR event'):
-                        web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-                state['artifacts']=[];job['status']='success'
-                with self.assertRaisesRegex(receipts.ReceiptError,'not a ready PR event'):
-                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,fixture_inputs())
-                negative.assert_not_called()
-            run['event_payload']=original_payload
-            state['artifacts']=[{'name':'web-cohort-6000-1','run_id':6000,'expired':False}]
-            inputs=fixture_inputs();manifest.return_value=inputs
-            with mock.patch.object(web,'check_nonproducer_job') as negative:
-                for status in ('failure','skipped'):
-                    job.update(status=status,attempt=2,task_id=0)
-                    with self.subTest(artifact_status=status),self.assertRaisesRegex(receipts.ReceiptError,'Matching web history is incomplete/ambiguous'):
-                        web.matching_result(api,SCOPE,ROOT,COMMIT,7000,inputs)
-                negative.assert_not_called()
-            job.update(status='success',attempt=1,task_id=0)
-            with self.assertRaisesRegex(receipts.ReceiptError,'Web job repository/run/task/attempt differs'):
-                web.authenticate_job(api,SCOPE,ROOT,run['id'],job['id'])
-            # A valid allocated task isolates the positive attempt-one boundary.
-            job.update(attempt=2,task_id=6002)
-            with self.assertRaisesRegex(receipts.ReceiptError,'Web job repository/run/task/attempt differs'):
-                web.authenticate_job(api,SCOPE,ROOT,run['id'],job['id'])
-            launch.assert_not_called();result.assert_not_called()
-
-    def test_history_excludes_pre_v1_but_missing_matching_v1_never_becomes_fresh(self):
-        api,pull,event,run,job=self.context();job['status']='success'
-        inputs=fixture_inputs();key=web.execution_key(inputs)
-        state={'workflow':('jobs:\n'+web.LEGACY_JOB).encode(),'artifacts':[]}
-        def pages(path,query=None,field=None):
-            if path.endswith('/artifacts'):return state['artifacts']
-            if path.endswith('/jobs'):return [job]
-            return [run]
-        api.pages=pages
-        def git(workspace,*args,**kwargs):
-            return state['workflow'] if args[-1].endswith(':'+web.WORKFLOW) else b'reviewed adapter'
-        with mock.patch.object(web,'git',side_effect=git),mock.patch.object(web,'manifest',return_value=inputs) as manifest, \
-             mock.patch.object(web,'v1_result',return_value=({'kind':'v1_fresh'},b'original log',inputs)) as result:
-            self.assertIsNone(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,inputs))
-            manifest.assert_not_called();result.assert_not_called()
-            state['workflow']=('jobs:\n'+web.adapted_job()).encode()
-            with self.assertRaisesRegex(receipts.ReceiptError,'artifact missing/invalid/ambiguous'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,inputs)
-            artifact={'id':7001,'name':'web-cohort-6000-1','run_id':6000,'expired':False}
-            for artifacts in ([{**artifact,'expired':True}],[artifact,artifact]):
-                state['artifacts']=artifacts
-                with self.subTest(artifacts=artifacts),self.assertRaisesRegex(receipts.ReceiptError,'artifact missing/invalid/ambiguous'):
-                    web.matching_result(api,SCOPE,ROOT,COMMIT,7000,inputs)
-            state['artifacts']=[artifact]
-            self.assertEqual(web.matching_result(api,SCOPE,ROOT,COMMIT,7000,inputs),({'kind':'v1_fresh'},b'original log',inputs))
-            state['workflow']=state['workflow'].replace(b'node-version: "22.23.4"',b'node-version: "24"')
-            with self.assertRaisesRegex(receipts.ReceiptError,'job/command/environment shape'):
-                web.matching_result(api,SCOPE,ROOT,COMMIT,7000,inputs)
 
     def test_script_resolver_namespace_refuses_socket_packages_and_node_precedence_but_allows_cache(self):
         contents,roots,git,shape=self.source()
@@ -826,21 +238,19 @@ class WebCohortRetentionTests(unittest.TestCase):
         with mock.patch.object(web,'git',side_effect=git), \
              mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}), \
              mock.patch.object(web,'SHAPE_FAMILIES',{'fixture':shape}), \
-             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1'}), \
              mock.patch.object(web,'live_inputs'),mock.patch.object(web,'live_script_resolvers'), \
-             mock.patch.object(web,'legacy_result') as legacy,mock.patch.object(web,'matching_result') as history, \
              mock.patch.object(web.subprocess,'run') as launch:
             for path,raw in cases.items():
                 original=contents[path];contents[path]=raw
                 with self.subTest(path=path),self.assertRaisesRegex(receipts.ReceiptError,'executable/recipe/dependency shape'):
-                    web.run_gate(ROOT,context,ROOT/'target/web-retention-never-created',{},True)
+                    web.manifest(ROOT, COMMIT, BASE)
                 contents[path]=original
             for suffix in ('.js','.mjs','.cjs','.ts','.d.ts','.html','.json'):
                 path='crates/plurxd/src/web/new-loader'+suffix;contents[path]=b'new unreviewed member'
                 with self.subTest(suffix=suffix),self.assertRaisesRegex(receipts.ReceiptError,'executable/recipe/dependency shape'):
-                    web.run_gate(ROOT,context,ROOT/'target/web-retention-never-created',{},True)
+                    web.manifest(ROOT, COMMIT, BASE)
                 del contents[path]
-            legacy.assert_not_called();history.assert_not_called();launch.assert_not_called()
+            launch.assert_not_called()
 
     def test_all_test_members_refuse_bytecode_native_extensions_packages_and_node_selectors(self):
         contents,roots,git,shape=self.source()
@@ -852,16 +262,14 @@ class WebCohortRetentionTests(unittest.TestCase):
         with mock.patch.object(web,'git',side_effect=git), \
              mock.patch.object(web,'SCRIPTS_RESOLVER_FAMILIES',{'fixture':git.resolver_layout_sha256}), \
              mock.patch.object(web,'SHAPE_FAMILIES',{'fixture':shape}), \
-             mock.patch.object(web,'workflow_identity',return_value={'kind':'v1'}), \
              mock.patch.object(web,'live_inputs'),mock.patch.object(web,'live_script_resolvers'), \
-             mock.patch.object(web,'legacy_result') as legacy,mock.patch.object(web,'matching_result') as history, \
              mock.patch.object(web.subprocess,'run') as launch:
             for path in paths:
                 contents[path]=b'unreviewed committed resolver input'
                 with self.subTest(path=path),self.assertRaisesRegex(receipts.ReceiptError,'executable/recipe/dependency shape'):
-                    web.run_gate(ROOT,context,ROOT/'target/web-retention-never-created',{},True)
+                    web.manifest(ROOT, COMMIT, BASE)
                 del contents[path]
-            legacy.assert_not_called();history.assert_not_called();launch.assert_not_called()
+            launch.assert_not_called()
 
     def test_node_package_scopes_pin_absence_and_reviewed_bytes_in_git_and_live_checkout(self):
         contents,roots,git,shape=self.source()

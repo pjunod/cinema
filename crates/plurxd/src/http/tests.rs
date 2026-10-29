@@ -8729,6 +8729,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
                     | "probe_reporter_named"
                     | "sources_match_their_scan_whole"
                     | "stored_source_self_test"
+                    | "dv_fel_live_slot"
                     | "stored_source_local_cache"
                     | "stored_source_free_space"
                     | "local_cache"
@@ -8798,6 +8799,13 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
         ),
         "the reporter row never claims a build it did not read: {seen:?}"
     );
+    // Live FEL occupancy is a process observation on Linux; other platforms
+    // cannot read it. Its exact verdict is covered by the facts helper tests.
+    let live_slot = seen.get("dv_fel_live_slot").map(String::as_str);
+    #[cfg(target_os = "linux")]
+    assert!(matches!(live_slot, Some("met" | "unmet")));
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(live_slot, Some("unavailable"));
     assert_eq!(
         green,
         vec![
@@ -12083,7 +12091,7 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         post(
             "/api/v1/sharing/invitations",
             Some(&admin),
-            json!({"library_ids":[seeded.lib.to_string()]}),
+            json!({"library_ids":[seeded.lib.to_string()],"include_network":false}),
         ),
     )
     .await;
