@@ -4168,6 +4168,23 @@ Source decimal strings; they are never local catalogue IDs. A full item
 reference contains the import, Source server, catalogue epoch, library and
 item. File references add the Source file, revision and import lifecycle.
 
+Item details include optional `item.presentation`: `runtime_ms`, `air_date`,
+canonical string `tmdb_id`, `imdb_id`, and up to four cached review-site
+`ratings` (`source`, `value`, `scale`, optional `votes`). The Source reads
+these fields from the authorized item snapshot and its existing ratings
+cache; browsing does not call a rating provider. B requests the extension
+with `?presentation=1` on the Source detail read. Older Sources may omit it,
+and requests from older receivers retain the original response shape. This
+extension applies to item details; catalogue pages keep their bounded summary
+records. The web detail page also renders the already-delivered year, genres,
+video, audio and subtitle facts.
+
+Shared Auto decisions use a supported encoded plan when an HEVC remux has no
+usable HLS index: Shared playback cannot use Local's continuous progressive
+remux fallback. The Source selects the plan before initial preparation, with
+the same client capabilities and track choices. Explicit Original requests
+retain their copy semantics; H.264 remux can still build its index on demand.
+
 | Method | Absolute path | Operation |
 |---|---|---|
 | GET | `/api/v1/shared/libraries` | List this viewer's assigned import/library identities and Source names. Availability is explicitly unverified until the Source is read. |

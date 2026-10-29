@@ -127,6 +127,15 @@ bump may break compatibility and a **patch** bump never does.
   waits to publish its next playlist; valid temporary upload files no longer
   terminate the stream a few seconds after startup.
 
+- Shared library browsing uses responsive poster grids instead of overlapping
+  inline panels. Shared details show artwork, year, genres, runtime, cached
+  review-site ratings, and video, audio and subtitle facts. Playback failures
+  retain their typed preparation error instead of reporting every refusal as
+  an unavailable decision.
+- Shared Auto playback selects a supported encoded plan when an HEVC remux
+  lacks a usable HLS index, avoiding a Source startup refusal for titles that
+  local playback can serve through its progressive fallback.
+
 - Restrict the Linux external player preference to Dolby Vision files on Linux;
   other formats and operating systems retain web playback, including mixed-version titles.
 

@@ -272,3 +272,49 @@ test("HLS HEVC requires selected MSE transport and every claimed profile",async(
  for(const override of [{nativeHls:true},{hlsJsSupported:false},{mediaSource:{isTypeSupported:()=>false}},{mediaCapabilities:{decodingInfo:async()=>({supported:false})}}])
   assert.deepEqual(Array.from(await probe([true,true,false,true,false],null,{...injected,...override})),[]);
 });
+
+
+test("Shared Start keeps a bounded typed refusal instead of reporting a decision failure",async()=>{
+ for(const [code,message]of [["sharing_start_unresolved","could not confirm playback preparation"],["sharing_start_deadline","took too long"],["sharing_start_capacity","is busy"]]){
+  const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify({code,message:"untrusted peer detail"}),u,o.method==='GET'?200:503));
+  const c=(await h.details(ref)).files[0].context;
+  await assert.rejects(h.start(c,startBody(h)),e=>e.status===503&&e.code===code&&e.message.includes(message)&&!e.message.includes("untrusted"));
+ }
+ for(const body of ["not JSON",JSON.stringify({code:"private_source_reason",message:"secret upstream path"}),"x".repeat(16385)]){
+  const h=harness((u,o)=>response(o.method==='GET'?detail():body,u,o.method==='GET'?200:503));
+  const c=(await h.details(ref)).files[0].context;
+  await assert.rejects(h.start(c,startBody(h)),e=>e.status===503&&e.code===undefined&&e.message==="Shared playback could not prepare.");
+ }
+});
+
+
+test("a streamed Shared authorization refusal retires context without draining its body",async()=>{
+ for(const status of [401,403]){
+  let cancelled=false;
+  const h=harness((u,o)=>{
+   if(o.method==='GET')return response(detail(),u);
+   const r=new Response(new ReadableStream({pull(){return new Promise(()=>{});},cancel(){cancelled=true;}}),{status});
+   Object.defineProperty(r,'url',{value:u});return r;
+  });
+  const c=(await h.details(ref)).files[0].context;
+  await assert.rejects(h.decision(c),e=>e.status===status&&e.message.includes("authorization"));
+  assert.equal(cancelled,true,"refused body is cancelled without waiting on a chunk");
+  const before=h.requests.length;await assert.rejects(h.decision(c));assert.equal(h.requests.length,before,"refused context retires before another request");
+ }
+});
+
+
+test("Shared authorization refusal invalidates accepted sessions as well as page contexts",async()=>{
+ for(const status of [401,403]){
+  const h=harness((u,o)=>response(o.method==='GET'?detail():u.endsWith('/hls/sessions')?JSON.stringify(startReply()):'{}',u,o.method==='GET'||u.endsWith('/hls/sessions')?200:status));
+  const baseContext=(await h.details(ref)).files[0].context;
+  const bound=(await h.start(baseContext,startBody(h)))._sharedContext;
+  await assert.rejects(h.decision(bound),e=>e.status===status);
+  const before=h.requests.length;
+  await assert.rejects(h.decision(bound));
+  await assert.rejects(h.start(bound,startBody(h)));
+  await assert.rejects(h.progress(bound,1000,90000,false));
+  await assert.rejects(h.decision(baseContext));
+  assert.equal(h.requests.length,before,"no accepted-session or page request survives authorization refusal");
+ }
+});
