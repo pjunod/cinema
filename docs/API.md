@@ -4142,6 +4142,16 @@ initial address setup; a configured manifest contains `revision` and
 before Create and offers the existing address editor, retaining the selected
 libraries for return. Address updates remain explicit `expected_revision`
 CAS writes with pin confirmation; no invitation POST is replayed.
+
+`GET /api/v1/sharing/status` also returns node-local `host_setup` with
+`state`, `message` and `checked_at_ms`. States distinguish `pending`,
+`disabled`, `ready`, `tailscale_missing`, `sign_in_required`,
+`permission_required`, `port_conflict`, `host_helper_required`,
+`deployment_required` and `unavailable`. `ready` confirms local host
+configuration; peer access and two-home reachability still need pairing.
+Managed host reconciliation may CAS-update this node's observed address and
+certificate in the endpoint manifest. Other hosts, custom ports and an existing
+four-host selection are preserved. This never creates or approves an invitation.
 Configuration does not prove reachability. See
 [Cinema address setup](OPERATIONS.md#sharing-cinema-addresses--set-up-before-creating-invitations)
 for the private Serve port and trusted pin source.
