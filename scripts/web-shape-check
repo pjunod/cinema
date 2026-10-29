@@ -8,6 +8,7 @@ const assert = require("node:assert/strict");
 const {shellSource, WEB, SIDECARS} = require("../tests/web/shell-source.js");
 const {analyze} = require("../tests/web/asset-graph.js");
 const generated = require("./player-contract-table");
+const {NOT_CHECKED} = require("./web-jsconfig");
 const ROOT = path.resolve(__dirname, "..");
 const read = rel => fs.readFileSync(path.join(ROOT, rel), "utf8");
 
@@ -221,7 +222,6 @@ function fixtureShape() {
 
 function jsconfigShape(shell) {
   const {files, compilerOptions} = JSON.parse(fs.readFileSync(path.join(WEB, "jsconfig.json"), "utf8"));
-  const {NOT_CHECKED} = require("./web-jsconfig");
   const expected = [...shell.rows.head, ...shell.rows.body].filter(f => !NOT_CHECKED.includes(f));
   assert.deepEqual(files, ["types/globals.d.ts", ...expected]);
   assert.ok(expected.length >= 60);
@@ -308,15 +308,7 @@ function playerShape() {
   assert.deepEqual(missing, [], "actual source names absent Player fields");
 }
 
-function main() {
-  const shell = shellSource();
-  const onDisk = ["core", "layouts", "detail", "player", "pages"]
-    .flatMap(folder => fs.readdirSync(path.join(WEB, folder)).map(name => `${folder}/${name}`))
-    .concat(fs.readdirSync(WEB).filter(name => name === "router.js" || name === "app.css"))
-    .filter(name => /\.(js|css)$/.test(name));
-  assetShape(shell, read("crates/plurxd/src/http/web.rs"), read("docs/clients/WEB-SHELL-LAYOUT.md"), onDisk);
-  const graph = analyze();
-  for (const key of ["missingPrologue", "duplicates", "forwardRefs"]) assert.deepEqual(graph[key], [], key);
+function authoredModuleShape(rows) {
   // Acorn already refuses import/export in sourceType:script. Also refuse
   // CommonJS exports in authored global rows without evaluating those rows.
   function visit(node, file) {
@@ -330,7 +322,19 @@ function main() {
       else if (value && typeof value === "object") visit(value, file);
     }
   }
-  for (const row of graph.rows) if (row.path !== "hls.min.js") visit(row.program, row.path);
+  for (const row of rows) if (!NOT_CHECKED.includes(row.path)) visit(row.program, row.path);
+}
+
+function main() {
+  const shell = shellSource();
+  const onDisk = ["core", "layouts", "detail", "player", "pages"]
+    .flatMap(folder => fs.readdirSync(path.join(WEB, folder)).map(name => `${folder}/${name}`))
+    .concat(fs.readdirSync(WEB).filter(name => name === "router.js" || name === "app.css"))
+    .filter(name => /\.(js|css)$/.test(name));
+  assetShape(shell, read("crates/plurxd/src/http/web.rs"), read("docs/clients/WEB-SHELL-LAYOUT.md"), onDisk);
+  const graph = analyze();
+  for (const key of ["missingPrologue", "duplicates", "forwardRefs"]) assert.deepEqual(graph[key], [], key);
+  authoredModuleShape(graph.rows);
   jsconfigShape(shell);
   const contract = fixtureShape();
   domShape(shell, contract);
@@ -338,5 +342,5 @@ function main() {
   console.log("web-shape-check: current-source assets, graph, DOM, embeds and Player shape OK (no behavior fixtures)");
 }
 
-module.exports = {tableRows, assetShape, exactBlock, fixtureShape, infoShape, inputExtraShape, surfaceExtraShape, jsconfigShape, domShape};
+module.exports = {authoredModuleShape, tableRows, assetShape, exactBlock, fixtureShape, infoShape, inputExtraShape, surfaceExtraShape, jsconfigShape, domShape};
 if (require.main === module) main();
