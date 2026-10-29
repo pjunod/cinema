@@ -6,6 +6,50 @@ die() {
   exit 1
 }
 
+# Explicit bases are caller-owned existing siblings, never aliases into source
+# or proof evidence. Legacy four-argument selection remains unchanged.
+validate_storage_base() {
+  local requested workspace canonical component excluded
+  requested=$1
+  workspace=$2
+  case "$requested" in /*) ;; *) die "explicit storage base must be absolute" ;; esac
+  case "$requested" in *$'\n'*|*$'\r'*) die "unsafe explicit storage base" ;; esac
+  [ -n "$workspace" ] && [ -d "$workspace" ] || die "workspace is required for explicit storage"
+  canonical=$(cd -P -- "$requested" 2>/dev/null && pwd -P) || die "explicit storage base must exist"
+  [ "$canonical" = "$requested" ] || die "explicit storage base must be canonical"
+  [ "$canonical" != / ] || die "filesystem root cannot be explicit cache storage"
+  component=$requested
+  while [ "$component" != / ]; do
+    [ ! -L "$component" ] || die "symbolic explicit storage component"
+    component=$(dirname -- "$component")
+  done
+  workspace=$(cd -P -- "$workspace" && pwd -P)
+  [ "$workspace" != / ] || die "source workspace cannot be filesystem root"
+  for excluded in "$workspace" /srv/plurx-async-proof/paged-proof-owner; do
+    if [ -d "$excluded" ]; then excluded=$(cd -P -- "$excluded" && pwd -P); fi
+    case "$canonical/" in "$excluded/"*) die "explicit storage overlaps source or proof" ;; esac
+    case "$excluded/" in "$canonical/"*) die "explicit storage contains source or proof" ;; esac
+  done
+  printf '%s\n' "$canonical"
+}
+
+if [ "${1:-}" = --validate-storage-base ]; then
+  [ "$#" -eq 3 ] || die "usage: --validate-storage-base <base> <workspace>"
+  validate_storage_base "$2" "$3"
+  exit 0
+fi
+if [ "${1:-}" = --validate-cache-root ]; then
+  [ "$#" -eq 4 ] || die "usage: --validate-cache-root <base> <workspace> <cache-root>"
+  base=$(validate_storage_base "$2" "$3")
+  root=$(validate_storage_base "$4" "$3")
+  case "$root" in "$base/plurx-ci/cargo/"*) relative=${root#"$base/plurx-ci/cargo/"} ;; *) die "cache root escaped explicit storage base" ;; esac
+  IFS=/ read -r namespace release extra <<< "$relative"
+  [[ "$namespace" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && [[ "$release" =~ ^rust-[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -z "$extra" ] \
+    || die "invalid explicit cache root shape"
+  printf '%s\n' "$root"
+  exit 0
+fi
+
 [ "$#" -eq 4 ] \
   || die "usage: ci-cargo-cache-prepare <runner-tool-cache> <runner-name> <toolchain> <lane>"
 requested_tool_cache=$1

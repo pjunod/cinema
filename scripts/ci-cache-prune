@@ -6,18 +6,25 @@ die() {
   exit 1
 }
 
-[ "$#" -eq 2 ] || die "usage: ci-cache-prune <cache-root> <budget-gb>"
+[ "$#" -eq 2 ] || [ "$#" -eq 3 ] || die "usage: ci-cache-prune <cache-root> <budget-gb> [storage-base]"
 requested_root=$1
 budget_gb=$2
 [[ "$budget_gb" =~ ^[1-9][0-9]*$ ]] || die "budget must be whole gigabytes"
-test -n "${RUNNER_TOOL_CACHE:-}" || die "RUNNER_TOOL_CACHE is required"
+if [ "$#" -eq 3 ]; then
+  script_dir=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+  "$script_dir/ci-cargo-cache-prepare" --validate-cache-root "$3" "${GITHUB_WORKSPACE:-}" "$requested_root" >/dev/null
+  selected_tool_cache=$3
+else
+  test -n "${RUNNER_TOOL_CACHE:-}" || die "RUNNER_TOOL_CACHE is required"
+  selected_tool_cache=$RUNNER_TOOL_CACHE
+fi
 
 canonical_directory() {
   [ -d "$1" ] || return 1
   (cd -P -- "$1" 2>/dev/null && pwd -P)
 }
 
-tool_cache=$(canonical_directory "$RUNNER_TOOL_CACHE") \
+tool_cache=$(canonical_directory "$selected_tool_cache") \
   || die "cannot resolve RUNNER_TOOL_CACHE"
 cache_root=$(canonical_directory "$requested_root") \
   || die "cache root does not exist: $requested_root"

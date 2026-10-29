@@ -2,6 +2,9 @@ name: Finalize Cargo cache
 description: Refresh explicit LRU state and enforce the post-job cache bounds.
 
 inputs:
+  storage-base:
+    description: Explicit canonical safety anchor emitted by setup; empty uses legacy selection.
+    required: false
   cache-root:
     description: Canonical root emitted by the Cargo cache setup action.
     required: true
@@ -21,9 +24,12 @@ runs:
         CACHE_BUDGET_GB: ${{ inputs.budget-gb }}
         CACHE_LAST_USED: ${{ inputs.last-used }}
         CACHE_ROOT: ${{ inputs.cache-root }}
+        CACHE_STORAGE_BASE: ${{ inputs.storage-base }}
       run: |
         set -euo pipefail
+        set --
+        if [ -n "${CACHE_STORAGE_BASE:-}" ]; then set -- "$CACHE_STORAGE_BASE"; fi
         "$GITHUB_WORKSPACE/scripts/ci-cargo-cache-refresh" \
-          "$CACHE_ROOT" "$CACHE_LAST_USED"
+          "$CACHE_ROOT" "$CACHE_LAST_USED" "$@"
         "$GITHUB_WORKSPACE/scripts/ci-cache-prune" \
-          "$CACHE_ROOT" "$CACHE_BUDGET_GB"
+          "$CACHE_ROOT" "$CACHE_BUDGET_GB" "$@"

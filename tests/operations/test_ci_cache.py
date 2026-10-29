@@ -1229,5 +1229,124 @@ class CiCacheContractCase(unittest.TestCase):
             self.assertIn("forgejo-runner-03", outputs["builder_name"])
 
 
+    def test_explicit_cargo_cache_survives_disposable_workspaces_and_runner_names(self):
+        scratch = ROOT.parent / '.agent-proof-fixtures/persistent-cargo'
+        scratch.mkdir(parents=True, exist_ok=True)
+        block = self._composite_run_block('.github/actions/cargo-cache/action.yml', 'Select and bound')
+        with tempfile.TemporaryDirectory(dir=scratch) as raw:
+            fixture, _, env = self._runner_fixture(raw)
+            base = fixture / 'compiler-cache'
+            base.mkdir()
+            outputs = []
+            for ordinal in (1, 2):
+                workspace = fixture / f'workspace-{ordinal}'
+                workspace.mkdir()
+                hostname = fixture / 'bin/hostname'
+                hostname.write_text(f'#!/bin/sh\necho disposable-host-{ordinal}\n')
+                hostname.chmod(493)
+                (workspace / 'scripts').symlink_to(ROOT / 'scripts', target_is_directory=True)
+                env.update(GITHUB_WORKSPACE=str(workspace), RUNNER_NAME=f'different-container-{ordinal}', CACHE_STORAGE_BASE=str(base), CACHE_NAMESPACE='async-proof-owned')
+                for field in ('GITHUB_ENV', 'GITHUB_OUTPUT'):
+                    env[field] = str(fixture / f'{field}-{ordinal}')
+                result = subprocess.run(['bash', '-c', block], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                row = dict((line.split('=', 1) for line in Path(env['GITHUB_OUTPUT']).read_text().splitlines()))
+                outputs.append(row)
+                self.assertEqual(row['storage_base'], str(base))
+                written = Path(env['GITHUB_ENV']).read_text()
+                self.assertNotIn('RUNNER_NAME=', written)
+                self.assertNotIn('RUNNER_TOOL_CACHE=', written)
+                marker = Path(row['target_dir']) / 'retained-object'
+                if ordinal == 1:
+                    marker.write_text('exact compiler cache')
+                else:
+                    self.assertEqual(marker.read_text(), 'exact compiler cache')
+            self.assertEqual(outputs[0]['cache_root'], outputs[1]['cache_root'])
+            self.assertEqual(outputs[0]['target_dir'], outputs[1]['target_dir'])
+            self.assertIn('async-proof-owned/rust-1.97.1/rust-gate/target', outputs[0]['target_dir'])
+
+    def test_explicit_cargo_inputs_are_paired_without_default_fallback(self):
+        scratch = ROOT.parent / '.agent-proof-fixtures/persistent-cargo'
+        scratch.mkdir(parents=True, exist_ok=True)
+        block = self._composite_run_block('.github/actions/cargo-cache/action.yml', 'Select and bound')
+        with tempfile.TemporaryDirectory(dir=scratch) as raw:
+            fixture, _, env = self._runner_fixture(raw)
+            base = fixture / 'compiler-cache'
+            base.mkdir()
+            for storage, namespace in ((str(base), ''), ('', 'async-proof-owned'), (str(base), '../escape')):
+                env.update(CACHE_STORAGE_BASE=storage, CACHE_NAMESPACE=namespace)
+                result = subprocess.run(['bash', '-c', block], env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(list(base.iterdir()), [])
+
+    def test_explicit_cargo_base_rejects_alias_missing_and_source_overlap(self):
+        scratch = ROOT.parent / '.agent-proof-fixtures/persistent-cargo'
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as raw:
+            fixture = Path(raw)
+            base = fixture / 'compiler-cache'
+            base.mkdir()
+            workspace = fixture / 'workspace'
+            workspace.mkdir()
+            link = fixture / 'alias'
+            link.symlink_to(base, target_is_directory=True)
+            source_child = workspace / 'nested'
+            source_child.mkdir()
+            for candidate in ('/', 'relative', str(fixture / 'missing'), str(link), str(link) + '/nested', str(base) + '/', str(source_child), str(fixture)):
+                result = subprocess.run([str(ROOT / 'scripts/ci-cargo-cache-prepare'), '--validate-storage-base', candidate, str(workspace)], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0, candidate)
+            self.assertEqual(list(base.iterdir()), [])
+
+    def test_explicit_cargo_finalizer_prunes_only_its_anchor_not_proof_sibling(self):
+        scratch = ROOT.parent / '.agent-proof-fixtures/persistent-cargo'
+        scratch.mkdir(parents=True, exist_ok=True)
+        setup = self._composite_run_block('.github/actions/cargo-cache/action.yml', 'Select and bound')
+        finish = self._composite_run_block('.github/actions/cargo-cache-finalize/action.yml', 'Refresh use')
+        with tempfile.TemporaryDirectory(dir=scratch) as raw:
+            fixture, _, env = self._runner_fixture(raw)
+            base = fixture / 'compiler-cache'
+            base.mkdir()
+            proof = fixture / 'paged-proof-owner'
+            proof.mkdir()
+            (proof / 'lease-and-evidence').write_text('preserve')
+            env.update(CACHE_STORAGE_BASE=str(base), CACHE_NAMESPACE='async-proof-owned')
+            result = subprocess.run(['bash', '-c', setup], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            row = dict((line.split('=', 1) for line in Path(env['GITHUB_OUTPUT']).read_text().splitlines()))
+            old = Path(row['cache_root']).parent / 'rust-1.96.0'
+            old.mkdir()
+            du = fixture / 'bin/du'
+            du.write_text('#!/bin/sh\nif [ -d "$PRUNE_OLD" ]; then echo "2097152 $2"; else echo "0 $2"; fi\n')
+            du.chmod(493)
+            env.update(CACHE_ROOT=row['cache_root'], CACHE_LAST_USED=row['last_used'], CACHE_BUDGET_GB='1', PRUNE_OLD=str(old), RUNNER_TOOL_CACHE=str(proof))
+            result = subprocess.run(['bash', '-c', finish], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(old.exists())
+            self.assertTrue(Path(row['target_dir']).is_dir())
+            self.assertEqual((proof / 'lease-and-evidence').read_text(), 'preserve')
+            bad = subprocess.run([str(ROOT / 'scripts/ci-cache-prune'), str(proof), '1', str(base)], env=env, capture_output=True, text=True)
+            self.assertNotEqual(bad.returncode, 0)
+            self.assertEqual((proof / 'lease-and-evidence').read_text(), 'preserve')
+
+    def test_async_modes_use_fixed_persistent_cache_pair_and_finalizer_anchor(self):
+        workflow = (ROOT / '.github/workflows/async-proof-session.yml').read_text()
+        self.assertEqual(workflow.count('          storage-base: /srv/plurx-async-proof/compiler-cache'), 2)
+        self.assertEqual(workflow.count('          cache-namespace: async-proof-owned'), 2)
+        self.assertEqual(workflow.count('          storage-base: ${{ steps.cargo-cache.outputs.storage-base }}'), 2)
+        self.assertNotIn('github.event.inputs.cache', workflow)
+
+    def test_empty_explicit_cargo_inputs_preserve_default_runner_paths(self):
+        scratch = ROOT.parent / '.agent-proof-fixtures/persistent-cargo'
+        scratch.mkdir(parents=True, exist_ok=True)
+        block = self._composite_run_block('.github/actions/cargo-cache/action.yml', 'Select and bound')
+        with tempfile.TemporaryDirectory(dir=scratch) as raw:
+            fixture, tool_cache, env = self._runner_fixture(raw)
+            env.update(CACHE_STORAGE_BASE='', CACHE_NAMESPACE='', RUNNER_NAME='actual-runner-instance')
+            result = subprocess.run(['bash', '-c', block], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = dict((line.split('=', 1) for line in Path(env['GITHUB_OUTPUT']).read_text().splitlines()))
+            self.assertEqual(outputs['storage_base'], '')
+            self.assertEqual(Path(outputs['cache_root']), tool_cache.resolve() / 'plurx-ci/cargo/actual-runner-instance/rust-1.97.1')
+
 if __name__ == "__main__":
     unittest.main()

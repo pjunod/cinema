@@ -73,6 +73,8 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: async-proof-session
+          storage-base: /srv/plurx-async-proof/compiler-cache
+          cache-namespace: async-proof-owned
       - name: Provision locked offline inputs
         run: |
           set -euo pipefail
@@ -348,6 +350,7 @@ jobs:
         uses: ./.github/actions/cargo-cache-finalize
         with:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          storage-base: ${{ steps.cargo-cache.outputs.storage-base }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
@@ -404,6 +407,8 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: async-proof-session
+          storage-base: /srv/plurx-async-proof/compiler-cache
+          cache-namespace: async-proof-owned
       - name: Provision locked offline inputs
         run: |
           set -euo pipefail
@@ -679,6 +684,7 @@ jobs:
         uses: ./.github/actions/cargo-cache-finalize
         with:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          storage-base: ${{ steps.cargo-cache.outputs.storage-base }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
       - name: Finalize authenticated post-upload control

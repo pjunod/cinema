@@ -7,6 +7,12 @@ inputs:
   lane:
     description: Stable, filesystem-safe name for this Cargo compilation lane.
     required: true
+  storage-base:
+    description: Existing canonical persistent storage base; requires cache-namespace.
+    required: false
+  cache-namespace:
+    description: Stable cache ownership namespace, separate from actual runner identity.
+    required: false
   disk-gb:
     description: >-
       Free space required before this job starts, in whole gigabytes. A full
@@ -21,6 +27,9 @@ inputs:
     default: "30"
 
 outputs:
+  storage-base:
+    description: Canonical explicit safety anchor, empty for default selection.
+    value: ${{ steps.configure.outputs.storage_base }}
   local:
     description: Whether this job uses persistent runner-local storage.
     value: ${{ steps.configure.outputs.local }}
@@ -47,8 +56,24 @@ runs:
         CACHE_BUDGET_GB: ${{ inputs.budget-gb }}
         DISK_GB: ${{ inputs.disk-gb }}
         CACHE_LANE: ${{ inputs.lane }}
+        CACHE_STORAGE_BASE: ${{ inputs.storage-base }}
+        CACHE_NAMESPACE: ${{ inputs.cache-namespace }}
       run: |
         set -euo pipefail
+        storage_base=""
+        if [ -n "${CACHE_STORAGE_BASE:-}" ] || [ -n "${CACHE_NAMESPACE:-}" ]; then
+          [ -n "${CACHE_STORAGE_BASE:-}" ] && [ -n "${CACHE_NAMESPACE:-}" ] || {
+            echo "::error::storage-base and cache-namespace must be supplied together" >&2
+            exit 1
+          }
+          [[ "$CACHE_NAMESPACE" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || {
+            echo "::error::cache namespace must be filesystem-safe" >&2
+            exit 1
+          }
+          storage_base=$("$GITHUB_WORKSPACE/scripts/ci-cargo-cache-prepare" \
+            --validate-storage-base "$CACHE_STORAGE_BASE" "$GITHUB_WORKSPACE")
+        fi
+        echo "storage_base=$storage_base" >> "$GITHUB_OUTPUT"
         # First, and before the cache mode is even chosen. A runner that
         # cannot fit this build reports a linker bus error rather than a full
         # disk, and that message costs an hour to read correctly.
@@ -123,41 +148,47 @@ runs:
         # those self-hosted jobs on a bounded local cache by selecting a
         # job-scoped root inside the workspace. Propagate the effective value
         # so the post-job finalizer validates the same filesystem namespace.
-        if [ -n "${RUNNER_TOOL_CACHE:-}" ] \
-          && [ ! -d "$RUNNER_TOOL_CACHE" ]; then
-          RUNNER_TOOL_CACHE="$GITHUB_WORKSPACE/.runner-tool-cache"
-          mkdir -p "$RUNNER_TOOL_CACHE"
-          export RUNNER_TOOL_CACHE
-          echo "RUNNER_TOOL_CACHE=$RUNNER_TOOL_CACHE" >> "$GITHUB_ENV"
+        if [ -n "$storage_base" ]; then
+          selected_tool_cache=$storage_base
+          runner_name=$CACHE_NAMESPACE
+        else
+          if [ -n "${RUNNER_TOOL_CACHE:-}" ] \
+            && [ ! -d "$RUNNER_TOOL_CACHE" ]; then
+            RUNNER_TOOL_CACHE="$GITHUB_WORKSPACE/.runner-tool-cache"
+            mkdir -p "$RUNNER_TOOL_CACHE"
+            export RUNNER_TOOL_CACHE
+            echo "RUNNER_TOOL_CACHE=$RUNNER_TOOL_CACHE" >> "$GITHUB_ENV"
+          fi
+          if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
+            || [ -z "${RUNNER_TOOL_CACHE:-}" ]; then
+            target_dir="$GITHUB_WORKSPACE/target"
+            echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
+            echo "local=false" >> "$GITHUB_OUTPUT"
+            echo "target_dir=$target_dir" >> "$GITHUB_OUTPUT"
+            echo "cache_root=" >> "$GITHUB_OUTPUT"
+            echo "budget_gb=" >> "$GITHUB_OUTPUT"
+            echo "last_used=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Forgejo's runner does not export RUNNER_NAME -- that is a GitHub
+          # Actions variable, and under `set -u` reading it aborted the step with
+          # `RUNNER_NAME: unbound variable`. Nothing caught it because this branch
+          # had never executed on any job: the gate above sent every one of them
+          # down the hosted path instead.
+          #
+          # The fallback has to stay unique per runner INSTANCE, not per host:
+          # media1 runs four runners and lab5 five, and two of them sharing a
+          # Cargo cache root would have them pruning each other's target
+          # directories mid-build. Each instance already has its own runner root
+          # -- /opt/forgejo-runner, -02, -03 -- and RUNNER_TOOL_CACHE sits inside
+          # it, so the root's name is that identity.
+          runner_name=${RUNNER_NAME:-}
+          if [ -z "$runner_name" ]; then
+            runner_name="$(hostname -s)-$(basename -- "$(dirname -- "$RUNNER_TOOL_CACHE")")"
+          fi
+          runner_name=$(printf '%s' "$runner_name" | tr -c 'A-Za-z0-9_.-' '-')
+          selected_tool_cache=$RUNNER_TOOL_CACHE
         fi
-        if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
-          || [ -z "${RUNNER_TOOL_CACHE:-}" ]; then
-          target_dir="$GITHUB_WORKSPACE/target"
-          echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
-          echo "local=false" >> "$GITHUB_OUTPUT"
-          echo "target_dir=$target_dir" >> "$GITHUB_OUTPUT"
-          echo "cache_root=" >> "$GITHUB_OUTPUT"
-          echo "budget_gb=" >> "$GITHUB_OUTPUT"
-          echo "last_used=" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        # Forgejo's runner does not export RUNNER_NAME -- that is a GitHub
-        # Actions variable, and under `set -u` reading it aborted the step with
-        # `RUNNER_NAME: unbound variable`. Nothing caught it because this branch
-        # had never executed on any job: the gate above sent every one of them
-        # down the hosted path instead.
-        #
-        # The fallback has to stay unique per runner INSTANCE, not per host:
-        # media1 runs four runners and lab5 five, and two of them sharing a
-        # Cargo cache root would have them pruning each other's target
-        # directories mid-build. Each instance already has its own runner root
-        # -- /opt/forgejo-runner, -02, -03 -- and RUNNER_TOOL_CACHE sits inside
-        # it, so the root's name is that identity.
-        runner_name=${RUNNER_NAME:-}
-        if [ -z "$runner_name" ]; then
-          runner_name="$(hostname -s)-$(basename -- "$(dirname -- "$RUNNER_TOOL_CACHE")")"
-        fi
-        runner_name=$(printf '%s' "$runner_name" | tr -c 'A-Za-z0-9_.-' '-')
         toolchain=$(rustc -Vv | sed -n 's/^release: //p')
         [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
           echo "::error::Cannot derive the pinned Rust toolchain"
@@ -171,7 +202,7 @@ runs:
           cache_paths[${#cache_paths[@]}]=$cache_path
         done < <(
           "$GITHUB_WORKSPACE/scripts/ci-cargo-cache-prepare" \
-            "$RUNNER_TOOL_CACHE" "$runner_name" "$toolchain" "$CACHE_LANE"
+            "$selected_tool_cache" "$runner_name" "$toolchain" "$CACHE_LANE"
         )
         [ "${#cache_paths[@]}" -eq 4 ] || {
           echo "::error::Cargo cache preparation returned an incomplete path set"
@@ -181,8 +212,10 @@ runs:
         target_dir=${cache_paths[1]}
         cargo_home=${cache_paths[2]}
         last_used=${cache_paths[3]}
+        set --
+        if [ -n "$storage_base" ]; then set -- "$storage_base"; fi
         "$GITHUB_WORKSPACE/scripts/ci-cache-prune" \
-          "$cache_root" "$CACHE_BUDGET_GB"
+          "$cache_root" "$CACHE_BUDGET_GB" "$@"
         {
           echo "CARGO_HOME=$cargo_home"
           echo "CARGO_TARGET_DIR=$target_dir"

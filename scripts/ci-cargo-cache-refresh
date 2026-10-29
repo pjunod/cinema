@@ -6,10 +6,14 @@ die() {
   exit 1
 }
 
-[ "$#" -eq 2 ] \
-  || die "usage: ci-cargo-cache-refresh <cache-root> <last-used>"
+{ [ "$#" -eq 2 ] || [ "$#" -eq 3 ]; } \
+  || die "usage: ci-cargo-cache-refresh <cache-root> <last-used> [storage-base]"
 requested_cache_root=$1
 last_used=$2
+if [ "$#" -eq 3 ]; then
+  script_dir=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+  "$script_dir/ci-cargo-cache-prepare" --validate-cache-root "$3" "${GITHUB_WORKSPACE:-}" "$requested_cache_root" >/dev/null
+fi
 
 [ ! -L "$requested_cache_root" ] && [ -d "$requested_cache_root" ] \
   || die "cache root is missing or symbolic: $requested_cache_root"
