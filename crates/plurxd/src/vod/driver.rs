@@ -122,37 +122,40 @@ async fn retire_failed_rendition(shared: &Shared, rendition: &Arc<Rendition>) {
     .await;
 }
 
-fn record_performed_step(shared: &Shared, rendition: &Rendition, step: Step) {
+fn record_performed_step(
+    shared: &Shared,
+    rendition: &Rendition,
+    step: Step,
+    effect: crate::prodrun::StepEffect,
+) {
     if let Some(encoding) = &rendition.recipe.encoding {
         use plurx_core::resource_observation::WorkPhase;
-        let phase = match step {
-            Step::Start { .. } => Some(WorkPhase::Preparing),
-            Step::Restart { .. } => Some(WorkPhase::Retrying),
-            Step::Resume => Some(WorkPhase::Producing),
-            Step::Stop => Some(WorkPhase::BufferPaced),
-            Step::Terminate { .. } => Some(WorkPhase::Retiring),
+        let transition = match step {
+            Step::Start { .. } => Some((WorkPhase::Preparing, true)),
+            Step::Restart { .. } => Some((WorkPhase::Retrying, true)),
+            Step::Resume => Some((WorkPhase::Producing, true)),
+            Step::Stop => Some((WorkPhase::BufferPaced, false)),
+            Step::Terminate { .. } => Some((WorkPhase::Retiring, false)),
             _ => None,
         };
-        if let Some(phase) = phase {
-            encoding.note_resource_phase(rendition.gen_epoch.load(Relaxed), phase);
-        }
-        match step {
-            Step::Start { .. } | Step::Restart { .. } => {
-                #[cfg(target_os = "linux")]
-                if encoding.dv_runtime.is_some() {
-                    // spawn_generation checks exact credit and contiguous
-                    // entry before continuing the logical processing episode.
-                    return record_performed_step_metrics(shared, rendition, step);
-                }
-                encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), true)
-            }
-            Step::Resume => {
-                encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), true)
-            }
-            Step::Stop | Step::Terminate { .. } => {
-                encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), false)
-            }
-            _ => {}
+        if let Some((phase, active)) = transition {
+            let reset_active = Some(active);
+            #[cfg(target_os = "linux")]
+            let reset_active = if matches!(step, Step::Start { .. } | Step::Restart { .. })
+                && encoding.dv_runtime.is_some()
+            {
+                // spawn_generation checks exact credit and contiguous entry
+                // before continuing the original logical processing episode.
+                None
+            } else {
+                reset_active
+            };
+            encoding.note_performed_resource_phase(
+                rendition.gen_epoch.load(Relaxed),
+                phase,
+                reset_active,
+                effect,
+            );
         }
     }
     record_performed_step_metrics(shared, rendition, step);
@@ -217,6 +220,7 @@ pub(super) async fn request_registered_driver_retirement(
             Step::Terminate {
                 why: Termination::Idle,
             },
+            crate::prodrun::StepEffect::Performed,
         );
     }
     Ok(())
@@ -239,8 +243,8 @@ pub(super) async fn perform_driver_step(
             "recovered finite output has no producer to control",
         ));
     }
-    let performed = rendition.slot.perform(step, || {}).await?;
-    record_performed_step(shared, rendition, step);
+    let (performed, effect) = rendition.slot.perform_with_effect(step, || {}).await?;
+    record_performed_step(shared, rendition, step, effect);
     Ok(performed)
 }
 

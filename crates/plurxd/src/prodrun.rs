@@ -384,6 +384,15 @@ pub enum Performed {
     NeedsSpawn { at: u32 },
 }
 
+/// Outcome of this exact slot-locked execution, separate from the unchanged
+/// caller acknowledgment. Replayed Stop/Resume do not send a signal or create
+/// a fresh resource-observation event. This is not native closure authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StepEffect {
+    Performed,
+    Unchanged,
+}
+
 impl ProducerSlot {
     /// An empty slot: no child, and the belief [`prodexec`](crate::prodexec)
     /// starts from — absent, having produced nothing.
@@ -569,7 +578,20 @@ impl ProducerSlot {
     /// belief exactly as it was: the belief and the slot disagreeing is the
     /// caller's bug, and recording an operation that did not happen would
     /// paper over it in the worst possible way.
+    #[cfg(test)]
     pub async fn perform(&self, step: Step, touch: impl FnOnce()) -> io::Result<Performed> {
+        self.perform_with_effect(step, touch)
+            .await
+            .map(|(ack, _)| ack)
+    }
+
+    /// Report the actual effect selected under the same owned slot lock.
+    /// Existing test callers keep the same acknowledgment through perform().
+    pub(crate) async fn perform_with_effect(
+        &self,
+        step: Step,
+        touch: impl FnOnce(),
+    ) -> io::Result<(Performed, StepEffect)> {
         self.perform_for_generation(None, step, touch).await
     }
     /// Observe only this registered child without transferring its ownership.
@@ -696,7 +718,7 @@ impl ProducerSlot {
         generation: Option<&ProducerRegistration>,
         step: Step,
         touch: impl FnOnce(),
-    ) -> io::Result<Performed> {
+    ) -> io::Result<(Performed, StepEffect)> {
         let mut inner = loop {
             let state = self.inner.lock().await;
             if let Some(generation) = generation {
@@ -720,7 +742,7 @@ impl ProducerSlot {
             // goes through `after` so this file decides nothing.
             Step::Nothing | Step::MakeRoom { .. } | Step::Report { .. } => {
                 inner.belief = after(inner.belief, step);
-                Ok(Performed::Done)
+                Ok((Performed::Done, StepEffect::Unchanged))
             }
 
             Step::Start { at } => {
@@ -731,7 +753,7 @@ impl ProducerSlot {
                     ));
                 }
                 // The belief stays absent until `attach` records the spawn.
-                Ok(Performed::NeedsSpawn { at })
+                Ok((Performed::NeedsSpawn { at }, StepEffect::Performed))
             }
 
             Step::Stop => {
@@ -741,7 +763,7 @@ impl ProducerSlot {
                 // touch — a repeat must not reset a watchdog's motion clock.
                 if matches!(inner.belief, Producer::Stopped { .. }) {
                     inner.belief = after(inner.belief, step);
-                    return Ok(Performed::Done);
+                    return Ok((Performed::Done, StepEffect::Unchanged));
                 }
                 inner
                     .child
@@ -751,14 +773,14 @@ impl ProducerSlot {
                     .await?;
                 touch();
                 inner.belief = after(inner.belief, step);
-                Ok(Performed::Done)
+                Ok((Performed::Done, StepEffect::Performed))
             }
 
             Step::Resume => {
                 // Symmetric with `Stop`: already running means no signal.
                 if matches!(inner.belief, Producer::Running { .. }) {
                     inner.belief = after(inner.belief, step);
-                    return Ok(Performed::Done);
+                    return Ok((Performed::Done, StepEffect::Unchanged));
                 }
                 inner
                     .child
@@ -771,7 +793,7 @@ impl ProducerSlot {
                 // motion clock that still spans the suspension.
                 touch();
                 inner.belief = after(inner.belief, step);
-                Ok(Performed::Done)
+                Ok((Performed::Done, StepEffect::Performed))
             }
 
             Step::Terminate { .. } | Step::Restart { .. } => {
@@ -786,7 +808,9 @@ impl ProducerSlot {
                 };
                 let Some(child) = inner.child.take() else {
                     return match step {
-                        Step::Restart { at } => Ok(Performed::NeedsSpawn { at }),
+                        Step::Restart { at } => {
+                            Ok((Performed::NeedsSpawn { at }, StepEffect::Performed))
+                        }
                         _ => Err(no_child()),
                     };
                 };
@@ -802,10 +826,13 @@ impl ProducerSlot {
                 inner.reaping = Some(Arc::clone(&operation));
                 drop(inner);
                 operation.wait().await;
-                Ok(match step {
-                    Step::Restart { at } => Performed::NeedsSpawn { at },
-                    _ => Performed::Done,
-                })
+                Ok((
+                    match step {
+                        Step::Restart { at } => Performed::NeedsSpawn { at },
+                        _ => Performed::Done,
+                    },
+                    StepEffect::Performed,
+                ))
             }
         }
     }

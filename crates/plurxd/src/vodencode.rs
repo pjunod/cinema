@@ -443,6 +443,59 @@ impl ActiveProductionWindow {
         contiguous
     }
 
+    fn observe_service_phase(
+        &mut self,
+        at: Instant,
+        generation: u64,
+        phase: plurx_core::resource_observation::WorkPhase,
+    ) {
+        use plurx_core::process::observation::{Metric, UnknownReason};
+        use plurx_core::resource_observation::{ServiceUnit, WorkSample};
+        let completed = self
+            .service
+            .snapshot_with_sample(at)
+            .filter(|(event, _)| event.generation == generation)
+            .map_or(0, |(event, _)| event.completed);
+        self.service.observe(WorkSample {
+            generation,
+            phase,
+            unit: ServiceUnit::MediaMilliseconds,
+            completed,
+            deadline_slack_ms: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            queued_bytes: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            at,
+        });
+    }
+
+    fn reset_with_service_phase(
+        &mut self,
+        at: Instant,
+        generation: u64,
+        active: bool,
+        phase: plurx_core::resource_observation::WorkPhase,
+    ) {
+        // Reset the recipe-proof interval, retaining the accepted diagnostic
+        // history until the actual phase event is observed. This preserves
+        // the same-generation frontier and does not freshen repeated phases
+        // which the service cadence correctly refuses to accept again.
+        self.reset_retaining_service(generation, active);
+        self.observe_service_phase(at, generation, phase);
+    }
+
+    fn reset_retaining_service(&mut self, generation: u64, active: bool) {
+        let service = std::mem::take(&mut self.service);
+        let service_entry = (self.generation == generation)
+            .then_some(self.service_entry)
+            .flatten();
+        *self = Self {
+            generation,
+            active,
+            service,
+            service_entry,
+            ..Self::default()
+        };
+    }
+
     fn observe_service(&mut self, now: Instant, generation: u64, entry: u32, end_ms: i64) {
         if !self.active || self.generation != generation {
             return;
@@ -960,29 +1013,51 @@ impl Encoding {
 
     /// The physical executor records state changes independently of encoder
     /// speed. This diagnostic does not alter recipe proofs or admission.
+    #[cfg(target_os = "linux")]
     pub(crate) fn note_resource_phase(
         &self,
         generation: u64,
         phase: plurx_core::resource_observation::WorkPhase,
     ) {
-        use plurx_core::process::observation::{Metric, UnknownReason};
-        use plurx_core::resource_observation::{ServiceUnit, WorkSample};
         let mut window = self.active_production.lock().expect("active production");
-        let now = Instant::now();
-        let completed = window
-            .service
-            .snapshot(now)
-            .map_or(0, |sample| sample.completed);
-        window.service.observe(WorkSample {
-            generation,
-            phase,
-            unit: ServiceUnit::MediaMilliseconds,
-            completed,
-            deadline_slack_ms: Metric::Unknown(UnknownReason::InsufficientEvidence),
-            queued_bytes: Metric::Unknown(UnknownReason::InsufficientEvidence),
-            at: now,
-        });
+        // This timestamp belongs to an actual executor phase event, never a
+        // diagnostic poll or a reconstructed output-frontier observation.
+        window.observe_service_phase(Instant::now(), generation, phase);
         tracing::trace!(target: "plurxd::resources", generation, ?phase,
+            "VOD producer resource phase");
+    }
+
+    /// Record one actually performed driver transition and its legacy proof
+    /// reset under the same lock. The diagnostic event survives that reset.
+    /// Processed Start/Restart pass None because their original entitlement
+    /// window remains with begin_processed_window, as before. The effect comes
+    /// from the actual slot-locked outcome; no-signal replay retains event.at.
+    pub(crate) fn note_performed_resource_phase(
+        &self,
+        generation: u64,
+        phase: plurx_core::resource_observation::WorkPhase,
+        reset_active: Option<bool>,
+        effect: crate::prodrun::StepEffect,
+    ) {
+        let mut window = self.active_production.lock().expect("active production");
+        let event_at = match effect {
+            crate::prodrun::StepEffect::Performed => Some(Instant::now()),
+            crate::prodrun::StepEffect::Unchanged => None,
+        };
+        match (reset_active, event_at) {
+            (Some(active), Some(at)) => {
+                window.reset_with_service_phase(at, generation, active, phase)
+            }
+            (Some(active), None) => window.reset_retaining_service(generation, active),
+            (None, Some(at)) => window.observe_service_phase(at, generation, phase),
+            (None, None) => {}
+        }
+        // Replayed Done acknowledgments preserve the original diagnostic
+        // sample, while retaining the same legacy reset/proof behavior.
+        if reset_active.is_some() && self.shared_audio.is_none() {
+            self.production_proofs.remove(self.candidate_recipe);
+        }
+        tracing::trace!(target: "plurxd::resources", generation, ?phase, ?event_at,
             "VOD producer resource phase");
     }
 
@@ -1031,11 +1106,25 @@ impl Encoding {
     pub(crate) fn resource_service_observation(
         &self,
     ) -> Option<plurx_core::resource_observation::ServiceObservation> {
+        self.resource_service_sample(Instant::now())
+            .map(|(_, observation)| observation)
+    }
+
+    /// Retain the original accepted generation/phase/frontier event time for
+    /// future policy consumers. The existing serving metric projects only the
+    /// observation, so this does not change its serialized wire shape.
+    pub(crate) fn resource_service_sample(
+        &self,
+        now: Instant,
+    ) -> Option<(
+        plurx_core::resource_observation::WorkSample,
+        plurx_core::resource_observation::ServiceObservation,
+    )> {
         self.active_production
             .lock()
             .ok()?
             .service
-            .snapshot(Instant::now())
+            .snapshot_with_sample(now)
     }
 
     pub(crate) fn reset_active_production(&self, generation: u64, active: bool) {
@@ -1778,6 +1867,59 @@ pub(crate) fn frame_grid(probe: Option<&str>) -> Option<VodFrameGrid> {
 mod resource_service_tests {
     use super::*;
     use plurx_core::process::observation::{Metric, UnknownReason};
+
+    #[test]
+    fn service_phase_polling_keeps_event_time_and_generation_frontier_boundary() {
+        use plurx_core::resource_observation::WorkPhase;
+        let now = Instant::now();
+        let mut window = ActiveProductionWindow {
+            generation: 7,
+            active: true,
+            ..Default::default()
+        };
+        for (seconds, entry, frontier) in [(0, 0, 4_000), (1, 1, 8_000), (2, 2, 12_000)] {
+            window.observe_service(now + Duration::from_secs(seconds), 7, entry, frontier);
+        }
+        let phase_at = now + Duration::from_secs(3);
+        window.reset_with_service_phase(phase_at, 7, false, WorkPhase::Paused);
+        window.reset_with_service_phase(
+            phase_at + Duration::from_millis(100),
+            7,
+            false,
+            WorkPhase::Paused,
+        );
+        for second in [4, 10, 20] {
+            let (event, _) = window
+                .service
+                .snapshot_with_sample(now + Duration::from_secs(second))
+                .expect("accepted paused service sample remains available while polling");
+            assert_eq!(
+                (event.at, event.generation, event.phase, event.completed),
+                (phase_at, 7, WorkPhase::Paused, 12_000)
+            );
+        }
+        let successor_at = now + Duration::from_secs(21);
+        window.reset_with_service_phase(successor_at, 8, true, WorkPhase::Preparing);
+        let (event, observation) = window
+            .service
+            .snapshot_with_sample(successor_at)
+            .expect("accepted successor generation service sample is available");
+        assert_eq!(
+            (event.at, event.generation, event.phase, event.completed),
+            (successor_at, 8, WorkPhase::Preparing, 0)
+        );
+        assert_eq!(observation.interval_ms, 0);
+        assert_eq!(observation.advancing_samples, 0);
+        assert_eq!(
+            observation.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
+        assert!(window.evidence.is_none());
+        assert!(
+            window.points.is_empty(),
+            "service diagnostics create no recipe/capacity proof"
+        );
+    }
 
     #[test]
     fn audio_service_observation_cannot_mint_video_recipe_proof() {

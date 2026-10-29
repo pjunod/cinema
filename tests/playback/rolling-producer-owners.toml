@@ -1,3 +1,18 @@
+# M2 original producer observations ownership review (2026-10-29, parent29a238af):
+# +1 Command and +1 kill-on-drop are one test-only controllable sleep child.
+# The canonical owned launcher retains its real ChildJob; the same slot owns
+# its registered generation through actual stop/resume and bounded restart.
+# The fixture registers no output writer/pipe; its original empty application
+# boundary is settled, while the slot still owes actual child kill/wait before
+# its original registered reap receipt and joined writer barrier may complete.
+# +4 namespaced timers are the bounded cadence sleep/timeout (executed twice),
+# original child restart kill/wait bound, and original registered-reap join bound.
+# Replayed no-signal Stop/Resume preserve event time after actual >1s cadence;
+# timeout is failure, never closure or trial/entitlement/capacity evidence.
+# No extra spawn/task site is introduced; the fixture uses the existing owned
+# launcher and slot reaper. Patterns/roots/scoped rows/forbidden zeroes unchanged.
+# Source correspondence only; behavioral/native qualification remains separate.
+
 # Main 6c8c98c79 sharing source correspondence (2026-10-29):
 # +3 task sites: two daemon BackgroundLoopGuard-token loops and the invitation
 # issue owner that keeps state/cleanup-file responsibility after receiver loss.
@@ -5078,7 +5093,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
 # Main 6c8c98c79 composition: 2002 + (1901 - 1899) = 2004; source equality remains required.
-expected_occurrences = 2008
+expected_occurrences = 2012
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5570,7 +5585,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # the original launcher command and a test self-exec. observation.rs Command is test-only.
 # Other new constructors are isolated finite/probe fixtures and the title scanner using the
 # existing bounded collector with the original keeper.
-expected_occurrences = 312
+expected_occurrences = 313
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6762,7 +6777,7 @@ pattern = "kill_on_drop\\s*\\("
 # decode_facts controls. Added fixed_planning_engine/observation sites are original bounded
 # launch and test child; finite restart adds a fixture guard. kill_on_drop remains a request,
 # never a confirmed native-close receipt.
-expected_occurrences = 121
+expected_occurrences = 122
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

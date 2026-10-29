@@ -19,7 +19,7 @@
 //! - **The producer driver** turns wait-pool and reader demand into
 //!   [`prodsched::decide`](crate::prodsched::decide) →
 //!   [`prodexec::next_step`](crate::prodexec::next_step) →
-//!   [`ProducerSlot::perform`], and spawns real `ffmpeg` generations whose
+//!   [`ProducerSlot::perform_with_effect`], and spawns real `ffmpeg` generations whose
 //!   output [`vodgen::run`] cuts on the plan's own boundaries.
 //!
 //! The plan is normative (ledger D10): it is fetched from the store or
