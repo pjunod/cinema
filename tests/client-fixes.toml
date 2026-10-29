@@ -1,6 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1326: abandoned completed provider jobs retain durable cleanup intent.
+[[fixes]]
+id = "sharing.abandoned-network-invitation-cleanup"
+commits = ["e94b4f7af012d2e94dd95b5f68484fb14fa3e2f4"]
+source = "crates/plurxd/src/sharing_network.rs"
+source_anchor = "fn abandon_file(path: &Path) -> Result<()>"
+test = "crates/plurxd/src/sharing_network.rs"
+test_anchor = "fn abandoned_completed_network_job_keeps_durable_cleanup_intent()"
+
 # PR #1326: external recipients explicitly authorize the private connection before import.
 [[fixes]]
 id = "sharing.external-recipient-consent"
