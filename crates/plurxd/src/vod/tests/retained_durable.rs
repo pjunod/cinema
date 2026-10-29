@@ -90,6 +90,12 @@ async fn durable_restore_preserves_none_incumbent_and_original_execution_identit
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let fresh = local_serve(base.path().to_owned(), store);
+    // A concurrent fork can inherit the old namespace lease until exec, even
+    // with CLOEXEC and after Shared drops. Observe actual namespace ownership
+    // before exercising the single strict Restore below.
+    wait_until("fresh retained namespace ownership", Duration::from_secs(5), async || {
+        fresh.shared.retained_artifacts.own_namespace(base.path()).await
+    }).await;
     let restored_request = request("issued", 0.0);
     fresh.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
         measured_candidate: None, retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),

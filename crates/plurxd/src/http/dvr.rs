@@ -2253,3 +2253,7 @@ mod visibility_tests {
         assert!(parse_attention_cursor(Some("not-hex")).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "dvr_http_tests.rs"]
+mod lifecycle_tests;

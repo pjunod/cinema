@@ -8715,6 +8715,8 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
     // which a ride-along test in this binary may have driven either way.
     // The local-cache row depends on the host filesystem and whether its
     // classifier is implemented on this platform.
+    // The live FEL slot is reported only on Linux workers. This idle fixture
+    // owns no reconstruction, so its single slot must be available there.
     let green = seen
         .iter()
         .filter(|(_, status)| status.as_str() == "met")
@@ -8741,6 +8743,26 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             )
         })
         .collect::<Vec<_>>();
+    let live_slot = items
+        .iter()
+        .find(|item| item["id"] == "dolby_vision_fel_reencode")
+        .expect("live FEL card")["requirements"]
+        .as_array()
+        .expect("live FEL requirements")
+        .iter()
+        .find(|row| row["id"] == "dv_fel_live_slot")
+        .expect("live FEL slot requirement");
+    let slot_evidence = live_slot["evidence"].as_str().expect("slot evidence");
+    if cfg!(target_os = "linux") {
+        assert_eq!(live_slot["status"], "met");
+        assert!(
+            slot_evidence.starts_with("0 of 1 live FEL reconstruction slot"),
+            "the idle fixture has its live reconstruction slot: {slot_evidence}"
+        );
+    } else {
+        assert_eq!(live_slot["status"], "unavailable");
+        assert!(slot_evidence.contains("Linux playback workers only"));
+    }
     // Startup inventory may settle between the two readiness requests.
     // Its status must report the same snapshot as its evidence; this
     // empty fixture owns no preparation media or pending cleanup.
@@ -11499,7 +11521,8 @@ async fn sharing_pinned_transport_recovers_committed_claim_and_rotation_after_re
         post(
             "/api/v1/sharing/invitations",
             Some(&source_admin),
-            json!({"library_ids":[seeded.lib.to_string()]}),
+            // CGNAT/TLS connectivity is owned by this fixture, not a provider invitation.
+            json!({"library_ids":[seeded.lib.to_string()],"include_network":false}),
         ),
     )
     .await;
@@ -12086,6 +12109,24 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1["code"], "sharing_invalid_request");
     }
+    // Combined external invitations are the production default. This owned
+    // fixture has no provider authorization and must retain that refusal.
+    let (status, denied) = call(
+        &app,
+        post(
+            "/api/v1/sharing/invitations",
+            Some(&admin),
+            json!({"library_ids":[seeded.lib.to_string()]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        denied,
+        json!({"code":"sharing_network_authorization_required","message":"sharing network authorization required"})
+    );
+    // The claim/approval/rotation contract below owns its endpoint manifest;
+    // request the supported Cinema-only invitation without an external share.
     let (status, created) = call(
         &app,
         post(
@@ -12095,7 +12136,12 @@ async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected invitation code: {:?}",
+        created.get("code")
+    );
     let invitation = Invitation::parse(&Secret::from_cleartext(
         created["invitation"]
             .as_str()

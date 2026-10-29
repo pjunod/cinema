@@ -822,6 +822,23 @@ fn rewind(file: &std::fs::File) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Capture the selected tool once, preserving explicit overrides while
+/// resolving ordinary PATH defaults before the clean child environment drops
+/// PATH. Resolution/hashing owns no child; cancellation is checked after it
+/// joins so a cancelled request cannot proceed to launch.
+#[cfg(unix)]
+async fn media_program(
+    program: &str,
+    cancel: &CancellationToken,
+) -> Result<std::path::PathBuf, StoreError> {
+    interrupted(cancel)?;
+    let captured = crate::ffmpeg::EncodedExecutable::capture_program(program).await;
+    interrupted(cancel)?;
+    captured
+        .map(|executable| executable.path)
+        .map_err(|_| failure("engine_unavailable"))
+}
+
 /// Re-probe the held source, then use the same normalized container/audio
 /// mapping advertised by options. Multiple audio tracks are selected by ordinal.
 #[cfg(unix)]
@@ -829,11 +846,9 @@ async fn selected_clock(
     source: &VerifiedSource,
     ordinal: i64,
     container_ms: i64,
+    cancel: &CancellationToken,
 ) -> Result<super::SourceClock, StoreError> {
-    let probe = crate::ffmpeg::ffprobe_bin();
-    if !Path::new(&probe).is_absolute() {
-        return Err(failure("engine_unavailable"));
-    }
+    let probe = media_program(&crate::ffmpeg::ffprobe_bin(), cancel).await?;
     rewind(&source.fence.handle)?;
     let mut command = tokio::process::Command::new(probe);
     command.args([
@@ -940,9 +955,7 @@ async fn decode_window(
     let (begin_sample, end_sample) = (begin * 16, end * 16);
     let preroll = (begin - 2_000).max(0);
     let wav = scratch.join("audio.wav");
-    if !Path::new(decoder).is_absolute() {
-        return Err(failure("engine_unavailable"));
-    }
+    let decoder = media_program(decoder, cancel).await?;
     rewind(source)?;
     let mut decode = tokio::process::Command::new(decoder);
     let filter = format!(
@@ -951,6 +964,9 @@ async fn decode_window(
     decode
         .args([
             "-nostdin",
+            // Progress uses carriage returns and can prefix the next clock
+            // record on the same stderr line. Keep observed frames separate.
+            "-nostats",
             "-v",
             "info",
             "-xerror",
@@ -1171,6 +1187,7 @@ pub(crate) async fn translate_range(
             recipe.audio_index,
             file.duration_ms
                 .ok_or_else(|| failure("source_clock_unsupported"))?,
+            &cancel,
         )
         .await?;
         let catalog = super::selected_file_capability(state, file, recipe.audio_index)
@@ -2327,3 +2344,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "runtime_tests.rs"]
+mod lifecycle_tests;

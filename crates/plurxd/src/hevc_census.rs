@@ -455,6 +455,10 @@ mod tests {
         assert!(!historical.retains_hevc_parameter_sets());
         let argv = transcode::copy_video_args(&changing, retaining).join(" ");
         assert!(
+            argv.contains("-tag:v hvc1"),
+            "retention does not change the admitted HLS sample entry: {argv}"
+        );
+        assert!(
             !argv.contains("32-34"),
             "retained copies keep types 32-34: {argv}"
         );
@@ -494,15 +498,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_retained_film_still_indexes_as_vod_presentable() {
-        // The index compares each clean fragment's promotion inputs. With the
-        // redefinitions travelling in band, those carry different PPS bytes
-        // at every shot change; promotion never copies a type the record
-        // already configures, so they must not count as a disagreement.
+    async fn retained_index_outcome_matches_the_actual_decoder_configuration() {
+        use plurx_core::fmp4::{self, Fmp4Error, PromotionInputs};
+        use sha2::{Digest, Sha256};
+
+        // Keeping the actual PPS updates preserves decoded pixels, as the
+        // preceding native regression proves. Native FFmpeg versions differ
+        // in hvcC array-completeness flags, so inspect the actual init rather
+        // than assuming either indexability or an incomplete configuration.
+        // An indexable stream alone is not a client/VOD qualification claim.
         let temp = crate::test_tempdir().expect("tempdir");
         let (_, changing_path) = changing_pps_fixture(temp.path());
         let changing = hevc_file(&changing_path, 4_000);
         let census = measure(&changing).await.expect("census");
+        assert_eq!(census.verdict, hevc_census::Verdict::Varying);
         let probe = format!(
             r#"{{"streams":[],"{}":{}}}"#,
             hevc_census::PROBE_KEY,
@@ -510,18 +519,77 @@ mod tests {
         );
         let retaining = CopyVideoOptions::from_probe(&changing, Some(&probe), false, false);
         assert!(retaining.retains_hevc_parameter_sets());
+
+        // Use the same selected FFmpeg and production argv as the index pass.
+        // Derive promotion independently from the actual first clean fragment.
+        let output = Command::new(crate::ffmpeg::ffmpeg_bin())
+            .args(transcode::copy_index_pipe_args(&changing, retaining))
+            .output()
+            .expect("capturing the actual retaining copy");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut reader = FragmentReader::new();
+        reader.push(&output.stdout);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("actual copy init") else {
+            panic!("the copy pipe must begin with an initialization segment");
+        };
+        let Some(Unit::Fragment(first)) = reader.next_unit().expect("first copy fragment") else {
+            panic!("the copy pipe must produce a video fragment after its init");
+        };
+        assert!(fmp4::classify(&first, &init).is_clean());
+        let mut promotion = PromotionInputs::from_fragment(&first, &init);
+        promotion.hdr10_sei.clear();
+        promotion.indexed_hdr10_metadata = true;
+        let mut served_init = init.clone();
+        fmp4::promote_from(&mut served_init, &promotion)
+            .expect("production-shaped promotion of the actual init");
+        let configuration = fmp4::validate_hevc_decoder_configuration(&served_init);
+
         let outcome =
             crate::fragindex::build(&changing, retaining, temp.path(), Duration::from_secs(60))
                 .await;
-        let crate::fragindex::IndexOutcome::Built(index) = outcome else {
-            panic!("a retaining copy must index: {outcome:?}");
-        };
-        assert!(index.parameter_sets_constant, "{:?}", index.promotion);
-        assert!(
-            index.promotion.parameter_sets.is_empty(),
-            "{:?}",
-            index.promotion
-        );
+        match configuration {
+            Ok(()) => {
+                let crate::fragindex::IndexOutcome::Built(index) = outcome else {
+                    panic!("a validated actual configuration must index: {outcome:?}");
+                };
+                assert_eq!(
+                    index.init_sha256,
+                    hex::encode(Sha256::digest(&init.bytes)),
+                    "the index must describe the actual production-pipe init"
+                );
+                assert!(
+                    !index.rows.is_empty(),
+                    "a built index must cover actual fragments"
+                );
+                assert!(
+                    index.parameter_sets_constant,
+                    "retained updates must not create conflicting promotion inputs: {:?}",
+                    index.promotion
+                );
+                assert!(
+                    index.promotion.parameter_sets.is_empty(),
+                    "the configured init must not acquire redundant retained parameter sets: {:?}",
+                    index.promotion
+                );
+            }
+            Err(Fmp4Error::Unsupported(expected))
+                if expected.contains("out-of-band HEVC decoder configuration")
+                    && expected.contains("complete VPS/SPS/PPS") =>
+            {
+                let crate::fragindex::IndexOutcome::Unsupported(reason) = outcome else {
+                    panic!("the actual incomplete configuration must be refused: {outcome:?}");
+                };
+                assert!(
+                    reason.contains(&expected),
+                    "the index refusal must match the actual decoder-configuration failure: {reason}"
+                );
+            }
+            Err(error) => panic!("unexpected retaining-copy configuration error: {error}"),
+        }
     }
 
     #[test]

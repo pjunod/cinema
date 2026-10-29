@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "reviewed_on_base": "4805cb6cf599789a9a2aa52a0e1f0334ebdfb829",
+  "review_note": "Recomputed all 525 archive inputs against 2b3730f8: only the ungated shared-playlist parser and its ordinary test changed. Source review and a separate archive/boundary recomputation retain the cluster/Hiqlite selection. Current complete default success and strict feature/artifact checks remain mandatory; any later input drift forces full augmented core execution.",
+  "sha256": "fca40a5c5662730e95879e7db32ed9a4ed740eaf546a8b89c66a7a3923963e5f",
+  "input_count": 525
+}

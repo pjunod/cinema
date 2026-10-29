@@ -730,3 +730,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "wal_offline_tests.rs"]
+mod offline_lifecycle_tests;

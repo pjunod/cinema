@@ -696,8 +696,8 @@ mod tests {
 
     #[test]
     fn the_playback_start_path_never_reads_the_cache() {
-        // The real GET and POST routes share `decision`; this catches a
-        // future edit that diverts either through the detail observation.
+        // The authenticated GET and POST wrappers delegate to the real
+        // decision handlers; neither may divert through detail observation.
         let routes = include_str!("http/mod.rs");
         let decision_route = routes
             .split_once("\"/files/{id}/decision\",")
@@ -726,6 +726,7 @@ mod tests {
                 body.contains(delegation),
                 "the scoped wrapper keeps the fresh-read handler"
             );
+            assert!(!body.contains("availability"));
         }
 
         let source = include_str!("http/stream.rs");

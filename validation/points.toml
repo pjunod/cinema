@@ -527,6 +527,7 @@ paths = [
   "crates/plurx-core/tests/store_contract/dv_title_probe_provenance.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
   "crates/plurx-core/tests/store_contract/formal_publication.rs",
+  "crates/plurx-core/tests/store_contract/subtitle_text.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/fixtures/startup_observer.rs",
   "crates/plurx-core/tests/support/fragment_prune_budget.rs",
@@ -760,6 +761,7 @@ paths = [
   "crates/plurxd/src/backup.rs",
   "crates/plurxd/src/http/cluster_operations.rs",
   "crates/plurxd/src/wal_cli.rs",
+  "crates/plurxd/src/wal_offline_tests.rs",
   "scripts/replicated-write-capture",
   "scripts/replicated-write-capture-sampler",
   "scripts/replicated-write-capture.fleet.example.json",
@@ -933,6 +935,7 @@ paths = [
   # S-08's stored-probe field-order backfill page: catalogue maintenance that
   # gives probed rows the token the scanner writes for the same document.
   "crates/plurx-core/src/store/field_order_backfill.rs",
+  "crates/plurxd/src/state/backfill_tests.rs",
   "crates/plurx-core/src/store/sqlite/library.rs",
   "crates/plurx-core/src/store/sqlite/media.rs",
   "crates/plurxd/src/http/{browse,comingsoon,images,images_worker,items,libraries,photos,scan}.rs",
@@ -1049,6 +1052,7 @@ paths = [
   "crates/plurx-core/tests/fixtures/hevc-progressive-configuration.json",
   "crates/plurx-core/tests/fixtures/dv-runtime/**",
   "crates/plurxd/src/dv_runtime.rs",
+  "crates/plurxd/src/dv_runtime/observe_tests.rs",
   "crates/plurx-core/examples/dv_target_policy.rs",
   "crates/plurx-core/examples/dv_target_fixtures.rs",
   "crates/plurxd/src/dv_report_lifetime.rs",
@@ -1172,6 +1176,7 @@ paths = [
   "crates/plurxd/src/live_tv/atsc_audio_tests.rs",
   "crates/plurxd/src/live_tv/caption_probe.rs",
   "crates/plurxd/src/http/live_tv.rs",
+  "crates/plurxd/src/http/live_tv_http_tests.rs",
   "crates/plurxd/src/http/internal_live_tv.rs",
   "crates/plurxd/src/web/live-tv.js",
   "tests/web/live-tv.test.js",
@@ -1205,6 +1210,7 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_library_channels.rs",
   "crates/plurx-core/src/store/sqlite/library_channels.rs",
   "crates/plurxd/src/http/library_channels.rs",
+  "crates/plurxd/src/http/library_channels_http_tests.rs",
   "crates/plurxd/src/web/library-channels.js",
   "docs/features/LIBRARY-CHANNELS-PLAYBACK-REPAIR.md",
   "docs/features/LIBRARY-CHANNELS-STATUS.md",
@@ -1218,10 +1224,12 @@ title = "Recording from the tuner, and reminders"
 contract = "Recording rules and one-off requests materialise one row per airing, identified by channel and start for that airing's whole life, so a cancelled recording is never resurrected by a rule that still matches it. The owner node alone opens tuner transports and writes the live and terminal states, recording back-to-back airings on one channel through a single tuner GET; a viewer is never refused a tuner by a recording without being told which recording holds it and offered a way to stop it. Every capture is an Activity row with a reason and a stop, recordings scan into a library from their own sidecars with no provider lookups, and reminders fire from a loop that needs neither the tuner nor the recording switch. Readiness facts in Developer settings are advisory and never gate enablement."
 paths = [
   "crates/plurxd/src/live_tv/dvr/tests.rs",
+  "crates/plurxd/src/live_tv/dvr/lifecycle_tests.rs",
   "crates/plurx-core/src/dvr.rs",
   "crates/plurx-core/src/store/hiqlite_dvr.rs",
   "crates/plurx-core/src/store/sqlite/dvr.rs",
   "crates/plurxd/src/http/dvr.rs",
+  "crates/plurxd/src/http/dvr_http_tests.rs",
   "crates/plurxd/src/live_tv/dvr.rs",
   "crates/plurxd/src/live_tv/schedule.rs",
   "crates/plurxd/src/live_tv/webhook.rs",
@@ -1547,6 +1555,8 @@ paths = [
   "swarm/*.txt",
   "scripts/ci-flake-report",
   "scripts/publish-badge",
+  "scripts/unit_coverage/**",
+  "scripts/unit-coverage",
   "scripts/ripwire",
   "scripts/ripwire.lock.json",
   "scripts/ripwire-smoke",
@@ -1740,7 +1750,7 @@ timeout_seconds = 600
 id = "diagnostics.reports"
 title = "Bounded private incident reports"
 contract = "Diagnostic reports use a closed schema and bounded archives without playback authority or secret fields."
-paths = ["crates/plurx-core/src/diagnostics.rs", "crates/plurx-core/examples/diagnostic-inspect.rs", "crates/plurx-core/tests/fixtures/diagnostics-v1.json", "crates/plurx-core/tests/fixtures/diagnostics-events-v1.json", "tests/web/diagnostics-support-browser.cjs", "crates/plurxd/src/web/core/diagnostics-wire.js", "tests/web/diagnostics-wire.test.js", "tests/web/diagnostics-recorder.test.js", "crates/plurxd/src/web/core/diagnostics-*.js", "crates/plurxd/src/web/pages/diagnostics.js", "scripts/remote-diagnostics-status", "crates/plurxd/src/diagnostics.rs", "crates/plurxd/src/diagnostics_delivery.rs", "crates/plurx-support/**", "clients/apple/Sources/Diagnostic*.swift", "clients/apple/Tests/Diagnostic*.swift", "clients/android/app/src/main/java/tv/plurx/app/diagnostics/Diagnostic*.kt", "clients/android/app/src/test/java/tv/plurx/app/diagnostics/Diagnostic*.kt"]
+paths = ["crates/plurx-core/src/diagnostics.rs", "crates/plurx-core/examples/diagnostic-inspect.rs", "crates/plurx-core/tests/fixtures/diagnostics-v1.json", "crates/plurx-core/tests/fixtures/diagnostics-events-v1.json", "tests/web/diagnostics-support-browser.cjs", "crates/plurxd/src/web/core/diagnostics-wire.js", "tests/web/diagnostics-wire.test.js", "tests/web/diagnostics-recorder.test.js", "crates/plurxd/src/web/core/diagnostics-*.js", "crates/plurxd/src/web/pages/diagnostics.js", "scripts/remote-diagnostics-status", "crates/plurxd/src/diagnostics.rs", "crates/plurxd/src/diagnostics_snapshot_tests.rs", "crates/plurxd/src/diagnostics_delivery.rs", "crates/plurx-support/**", "clients/apple/Sources/Diagnostic*.swift", "clients/apple/Tests/Diagnostic*.swift", "clients/android/app/src/main/java/tv/plurx/app/diagnostics/Diagnostic*.kt", "clients/android/app/src/test/java/tv/plurx/app/diagnostics/Diagnostic*.kt"]
 checks = ["diagnostics-contract", "rust-gate"]
 
 [[points]]

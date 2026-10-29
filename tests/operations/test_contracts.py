@@ -2241,12 +2241,8 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("persist-credentials: false", coverage)
         self.assertIn("components: llvm-tools-preview", coverage)
         self.assertIn("lane: coverage", coverage)
-        self.assertIn('major: "6"', coverage)
-        self.assertIn(
-            "cargo llvm-cov --workspace --locked --exclude plurx-cluster-check",
-            coverage,
-        )
-        self.assertIn("--failure-mode all", coverage)
+        self.assertIn("scripts/unit-coverage --image", coverage)
+        self.assertIn('cp -- "$output/cov.json" cov.json', coverage)
         steps = workflow_step_blocks(coverage)
         publish = steps["Publish the unit coverage badge"]
         self.assertNotIn("continue-on-error", publish)
@@ -2254,7 +2250,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("scripts/publish-badge", publish)
         self.assertIn("--branch badges", publish)
         self.assertIn("--alias codex/badges", publish)
-        self.assertIn("date -u +%F", publish)
+        self.assertIn("measured_at_utc", publish)
+        self.assertIn("astimezone(timezone.utc)", publish)
+        self.assertIn('--receipt "$receipt"', publish)
         self.assertIn('--message "${msg}% · ${measured_on} UTC"', publish)
         self.assertLess(
             coverage.index("Measure line coverage"),
@@ -2266,35 +2264,28 @@ assert.equal(context.ACT_TIMER, null);
                 self.assertNotIn("--filename coverage", path.read_text())
 
     def test_coverage_uses_general_runner_with_pinned_ffmpeg_container(self):
-        # Retain this historical regression anchor after reserving its pool.
+        # Retain this historical regression anchor through the host-wrapper move.
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
-        self.assertIn(
-            "runs-on: [self-hosted, Linux, X64, lab, ci-coverage]\n",
-            coverage,
-        )
-        self.assertIn("image: ubuntu:24.04", coverage)
-        self.assertIn("options: --cpus 2 --memory 6g --memory-swap 10g", coverage)
+        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]\n", coverage)
+        self.assertNotIn("    container:", coverage)
+        self.assertIn("timeout-minutes: 240", coverage)
         self.assertIn('CARGO_BUILD_JOBS: "1"', coverage)
         self.assertIn('RUST_TEST_THREADS: "2"', coverage)
-        steps = workflow_step_blocks(coverage)
-        install = steps["Install coverage prerequisites"]
-        for package in (
-            "git", "jq", "nodejs", "python3", "build-essential", "clang",
-            "libssl-dev", "libgtk-4-dev", "libdbus-1-dev",
-        ):
-            self.assertRegex(install, rf"\b{package}\b")
-        self.assertLess(
-            coverage.index("Install coverage prerequisites"),
-            coverage.index("actions/checkout@"),
-        )
-        self.assertIn('major: "6"', coverage)
-        self.assertLess(
-            coverage.index("./.github/actions/ffmpeg"),
-            coverage.index("Measure line coverage"),
-        )
-        cleanup = steps["Restore persistent runner workspace ownership"]
-        self.assertIn("if: always()", cleanup)
-        self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', cleanup)
+        self.assertRegex(coverage, r"COVERAGE_IMAGE: ubuntu@sha256:[0-9a-f]{64}")
+        measure = workflow_step_blocks(coverage)["Measure line coverage"]
+        self.assertIn('--cache-root "${{ steps.cargo-cache.outputs.cache-root }}"', measure)
+        wrapper = read("scripts/unit-coverage")
+        for package in ("libssl-dev", "libgtk-4-dev", "libdbus-1-dev", "ffmpeg"):
+            self.assertIn(package, wrapper)
+        for resource in ("--cpus", "--memory", "--memory-swap", "--pids-limit"):
+            self.assertIn(resource, wrapper)
+        campaign = read("scripts/unit_coverage/campaign.py")
+        self.assertIn("LLVM_COV = '0.9.1'", campaign)
+        self.assertIn("ffmpeg version n?6", campaign)
+        self.assertIn("'--no-fail-fast'", campaign)
+        self.assertIn("PLURX_SHARING_FIXTURE_IP", campaign)
+        self.assertIn("cluster-integration-tests", campaign)
+        self.assertIn("objects-default", campaign)
 
     def test_manual_qualification_dispatch_inputs_have_explicit_string_types(self):
         dispatch = read(".github/workflows/ci.yml").split(
@@ -4497,7 +4488,7 @@ assert.equal(context.ACT_TIMER, null);
                 }:
                     expected = general
                 elif path == ".github/workflows/coverage.yml" and name == "coverage":
-                    expected = local("Linux", "X64", "lab", "ci-coverage")
+                    expected = local("Linux", "X64", "lab", "unit-memory-16g")
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
                 elif path == ".github/workflows/ci.yml" and name == "publish_main":
@@ -5065,10 +5056,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("make effort-rust-check", fast)
         self.assertNotIn("make unit", fast)
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
-        self.assertIn("image: ubuntu:24.04", coverage)
-        self.assertIn('major: "6"', coverage)
+        self.assertRegex(coverage, r"COVERAGE_IMAGE: ubuntu@sha256:[0-9a-f]{64}")
+        self.assertIn("ffmpeg version n?6", read("scripts/unit_coverage/campaign.py"))
         self.assertNotIn("plurx-ci@sha256:", coverage)
-        self.assertIn("cargo llvm-cov --workspace --locked --exclude plurx-cluster-check", coverage)
+        self.assertIn("scripts/unit-coverage --image", coverage)
         action = read(".github/actions/ffmpeg/action.yml")
         self.assertIn('if [ -n "$WANT_BINARY" ]', action)
 

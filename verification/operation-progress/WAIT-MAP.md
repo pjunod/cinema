@@ -4,6 +4,100 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+
+## Local main integration — source correspondence on 2026-10-29
+
+The repair source `59c648db` is combined locally with main `5ac9d8f25`.
+Both parent audits below retain their historical source identities. Incoming
+Cargo.lock and `main.rs` pins follow the reviewed macOS runtime update and
+bounded test-only fork stress. The merged Store and caption fixtures retain
+both parents' closed shape, marker, retained-data and atomic refusal checks,
+including schema 121 with managed v3. Their live whole-file hashes follow the
+resolved source; selected formal-publication and library-worker anchors remain.
+
+This reconciliation changes no model, configuration, property, fairness
+premise, validator or historical qualification receipt and supplies no new
+runtime or TLC evidence. The frozen `59c648db` measurement and this integration
+candidate are separate source identities; neither substitutes for the other's
+required validation.
+
+## Main metadata integration — scoped reconciliation on 2026-10-29
+
+Codex agent `coverage_review` reconciled repair parent `6eaa9c72d` with
+main `85910425c`. Both parents' startup and repair audits below are retained.
+Incoming main changes since `6c8c98c79` affect no Rust/Cargo or served-asset
+bytes; current mapped source pins and exact anchors therefore stay unchanged.
+This reconciliation changes no model, configuration, validator, fairness
+premise or historical receipt and supplies no new runtime or TLC evidence.
+
+## Sharing startup integration — scoped source review on 2026-10-29
+
+Codex agent `coverage_review` compared main `66a33d723` with incoming main
+`10f45ae5f2619ab3e807b5576bf6ffb39ade6e86` and the repair worktree.
+[Startup](../../crates/plurxd/src/main.rs) adds a read-only Sharing host
+capability command and separate host-reconciliation and invitation-network
+loops using the existing background shutdown token. The mapped
+`background_work_loop` call, selected library scheduler/worker bodies and
+token/publication wait and lock order are unchanged. Sharing host setup and
+invitation-network lifecycle, including their child work and shutdown, remain
+outside this selected-worker model. This review does not prove their resource
+contention or liveness.
+
+[The translation schema test](../../crates/plurx-core/src/store/subtitle_translation_schema.rs)
+changes only its upgraded-version expectation from 119 to 120. Its production
+recognizer and upgrade guards are unchanged. Two whole-file row pins follow
+the reviewed bytes; retained exact anchors remain unique.
+
+This agent authored the mapping refresh; parent and independent Codex diagnose_core_failures metadata review found no issues.
+Model/configuration/toolchain bytes, bounds, fairness premises, properties,
+scope, validators and historical source receipts remain unchanged. This
+review ran no builds, tests or TLC and supplies no new runtime, refinement,
+liveness or qualification evidence.
+
+## Combined-source integration — scoped author audit on 2026-10-29
+
+The repair is combined with main `66a33d723096ee931ce2e05e860f51f8f3671513`.
+Retain its reviewed resource-admission v2 schema and mapping inputs. The
+historical rewind now validates schema 119 with managed v1, or schema 120
+with managed v2, before any mutation; crossed pairs are refused atomically.
+The conformance parent retains the selected `formal_publication` module and
+combines the independently reviewed strict caption/continuity teardown with
+main's exact managed shape/data planner. Relative to this main, `state.rs`
+adds only the test-module declaration; mapped production bodies are unchanged.
+
+Only affected whole-file pins follow the combined source; anchors, models,
+configurations, properties, bounds and historical source receipts retain their
+identities. Independent Codex agent `coverage_review` reviewed the merged source pins, both parents' anchors and the combined ownership census, finding no blockers. That source review ran no builds, tests or TLC. This is a
+source correspondence audit and supplies no new runtime or TLC qualification.
+
+## Unit-coverage repair — scoped author audit on 2026-10-28
+
+Codex agent `/root/diagnose_core_failures` compared immutable base
+`24d1bad72bed328b6de9a568a3537f375f9c206f` with runtime/test source
+`d03c8abdf17dea7147e112a32fec274834151fca`. Previous pins match the base.
+This agent authored the core SQL repairs; this audit is source-author
+correspondence, not independent review of that implementation. Independent Codex agent `coverage_review` reviewed the implementation diff and this metadata disposition on 2026-10-28, finding no blockers. That review ran no builds, tests or TLC checks and supplies no new qualification claim.
+
+[Membership](../../crates/plurx-core/src/cluster/membership.rs) corrects
+Hiqlite parameter binding in maintenance lease consumption, heartbeat
+acknowledgment and status capability/active-session projection. Exact
+node/claim/lease, maintenance and active-session predicates remain; values
+now reach their intended predicates in first-appearance order. Tables 31–32
+retain byte-identical `ClusterJobAuthority` and `may_run_cluster_jobs`
+bodies: local maintenance and absent committed-voter authority still refuse
+selected library work. Membership lifecycle, status and drain behavior are
+outside this selected-worker model; this audit does not prove them.
+
+[State](../../crates/plurxd/src/state.rs) adds only a `cfg(test)` backfill
+module declaration. Tables 42–43 retain the scheduler/worker bodies, selected
+claim/bind/renew/settle/publication flow and token/publication wait and lock
+ordering. Four whole-file row pins follow this source; exact anchors remain
+unique. Model/configuration/toolchain bytes, bounds, fairness premises,
+properties, scope, validators and historical source-anchor snapshots are
+unchanged. This audit supplies no new runtime or TLC execution, refinement,
+liveness, physical acceptance or qualification; earlier receipts retain only
+their recorded source identities. Fresh affected execution is separate.
+
 ## macOS parser runtime — scoped lock refresh on 2026-10-29
 
 Wasmtime 50.0.0 includes the [upstream Mach receiver fix](https://github.com/bytecodealliance/wasmtime/pull/14414).

@@ -2725,3 +2725,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "live_tv_http_tests.rs"]
+mod lifecycle_tests;

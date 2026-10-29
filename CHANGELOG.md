@@ -121,6 +121,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Progressive subtitle translation keeps FFmpeg progress updates out of source
+  clock evidence, preventing valid decoded ranges from failing before inference.
+
+- Shared playback handoff and quality reopen accept the producer's bounded
+  playlist start hint instead of returning 503 when playback resumes after zero.
 - Update the macOS source parser runtime to fix an abort in native exception
   handling, preserving its deadline, memory, stack and capability limits.
 
@@ -137,6 +142,19 @@ bump may break compatibility and a **patch** bump never does.
   coverage or offering unsupported retries.
 - Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
 
+
+- Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
+- Progressive subtitle decoding resolves the normal PATH-based media tools to
+  canonical executables before launching its clean, descriptor-bound children.
+
+- Cluster maintenance commits its release intent with the elected coordinator's
+  exact lease, acknowledges the current process, and counts active sessions
+  before allowing maintenance exit.
+
+- Recording lists bind paging, state filters, and capture boundaries independently
+  instead of returning a database error.
+- Model and media-tool verification detects immediate same-size byte changes
+  even when filesystem timestamps coincide.
 - Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.
 - Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
   headers, allowing floating-point parsing with the macOS 12 deployment target.

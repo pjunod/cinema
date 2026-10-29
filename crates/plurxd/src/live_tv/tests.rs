@@ -2332,9 +2332,11 @@ fn publishing_ffmpeg(root: &Path, keep_input: bool) -> String {
         r#"echo "$$ $(/bin/date +%s%N)" >> '{spawns}'
 for output do playlist="$output"; done
 directory=${{playlist%/*}}
+(
 printf 'transport-stream' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000001.ts" > /dev/null
 printf 'transport-stream-two' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$directory/segment-000002.ts" > /dev/null
 printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.000000,\nsegment-000001.ts\n#EXTINF:1.000000,\nsegment-000002.ts\n' | /usr/bin/curl --noproxy '*' -fsS -X PUT --data-binary @- "$playlist" > /dev/null
+) &
 exec /bin/cat > {sink}"#,
         spawns = root.join("ffmpeg.spawns").display(),
     )
@@ -5954,6 +5956,58 @@ async fn live_scratch_inventory_enforces_list_deletion_and_temp_budgets() {
         .await
         .expect("sixth deletion lag");
     assert!(inspect_scratch(directory).await.is_err());
+}
+
+#[test]
+fn scratch_scan_accepts_bounded_put_staging_without_publishing_it() {
+    let root = crate::test_tempdir().expect("scratch root");
+    let directory = root.path();
+    std::fs::write(directory.join("segment-000001.ts"), b"published").expect("segment");
+    for name in [
+        "segment-000002.ts.0.tmp",
+        "index.m3u8.17.tmp",
+        "init.mp4.18446744073709551615.tmp",
+    ] {
+        let path = directory.join(name);
+        std::fs::write(&path, b"staging").expect("PUT staging");
+        let scan = scan_scratch_directory(directory)
+            .expect("owned PUT temporary is valid")
+            .expect("directory");
+        assert_eq!(scan.final_segments.len(), 1, "staging is not published");
+        assert!(scan.init.is_none(), "a staging init is not published");
+        let second = directory.join("segment-000003.ts.1.tmp");
+        std::fs::write(&second, b"second staging").expect("second staging");
+        let overlapping = scan_scratch_directory(directory)
+            .expect("concurrent PUT temporaries fit the bounded upload budget")
+            .expect("directory");
+        assert_eq!(overlapping.final_segments.len(), 1);
+        assert!(overlapping.final_segments.contains_key(&1));
+        assert!(overlapping.init.is_none(), "staging is not published");
+        std::fs::remove_file(second).expect("remove second staging");
+        std::fs::File::create(&path)
+            .expect("staging file")
+            .set_len(MAX_SESSION_BYTES + 1)
+            .expect("oversized staging");
+        assert!(
+            scan_scratch_directory(directory).is_err(),
+            "staging bytes count toward the scratch budget"
+        );
+        std::fs::remove_file(path).expect("remove staging");
+    }
+    for name in [
+        "notes.txt.1.tmp",
+        "segment-000002.ts..tmp",
+        "segment-000002.ts.-1.tmp",
+        "index.m3u8.18446744073709551616.tmp",
+    ] {
+        let path = directory.join(name);
+        std::fs::write(&path, b"unexpected").expect("stray file");
+        assert!(
+            scan_scratch_directory(directory).is_err(),
+            "unexpected filename: {name}"
+        );
+        std::fs::remove_file(path).expect("remove stray file");
+    }
 }
 
 /// Plan L-02 §5.4 / correction 13: the scan moved into one blocking walk

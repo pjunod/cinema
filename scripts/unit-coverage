@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""Run committed unit coverage in an owned, bounded standard Docker container."""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import fcntl
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import tempfile
+import uuid
+
+
+OWNER_LABEL = "tv.plurx.unit-coverage.owner"
+CACHE_LABEL = "tv.plurx.unit-coverage.cache"
+SUBNET = ipaddress.ip_network("100.127.250.0/24")
+FIXTURE_IP = "100.127.250.2"
+RFC1918 = tuple(map(ipaddress.ip_network, ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")))
+GIB = 1024**3
+PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+CONTAINER_ENV = {
+    "PATH": PATH,
+    "HOME": "/root",
+    "LANG": "C.UTF-8",
+    "DEBIAN_FRONTEND": "noninteractive",
+    "CARGO_HOME": "/opt/coverage-cache/cargo-home",
+    "RUSTUP_HOME": "/opt/coverage-cache/rustup",
+    "CARGO_TARGET_DIR": "/opt/coverage-cache/coverage/target",
+    "CARGO_BUILD_JOBS": "1",
+    "CARGO_INCREMENTAL": "0",
+    "RUST_TEST_THREADS": "2",
+    "RUST_MIN_STACK": "8388608",
+    "PLURX_SHARING_FIXTURE_IP": FIXTURE_IP,
+}
+PACKAGES = (
+    "build-essential ca-certificates clang cmake curl git iproute2 jq libssl-dev "
+    "lld llvm libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config "
+    "python3 fontconfig fonts-dejavu-core bubblewrap ffmpeg"
+)
+
+
+def call(args, *, env, cwd=None, timeout=60):
+    result = subprocess.run(args, env=env, cwd=cwd, text=True, capture_output=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr[-3000:]}")
+    return result.stdout
+
+
+def write_receipt(path, data):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def file_sha256(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def publish_result(root, output, commit, archive_sha256):
+    """Publish immutable copies; the receipt is the final commit marker."""
+    receipt = root / "campaign/receipt.json"
+    report = root / "campaign/cov.json"
+    if any(path.is_symlink() or not path.is_file() for path in (receipt, report)):
+        raise ValueError("campaign success receipt/report must be regular owned files")
+    receipt_bytes = receipt.read_bytes()
+    measured = json.loads(receipt_bytes)
+    if (
+        measured.get("status") != "passed"
+        or measured.get("source_commit") != commit
+        or measured.get("source_sha256") != archive_sha256
+        or file_sha256(root / "source.tgz") != archive_sha256
+        or measured.get("report_sha256") != file_sha256(report)
+    ):
+        raise ValueError("campaign success/source/report digest validation failed")
+    staged = []
+    published = []
+    try:
+        for source in (report, receipt):
+            descriptor, name = tempfile.mkstemp(prefix=".unit-coverage-publish-", dir=output)
+            staging = Path(name)
+            staged.append(staging)
+            with os.fdopen(descriptor, "wb") as stream, source.open("rb") as original:
+                shutil.copyfileobj(original, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            expected = measured["report_sha256"] if source == report else hashlib.sha256(receipt_bytes).hexdigest()
+            if file_sha256(staging) != expected:
+                raise ValueError("coverage publication bytes changed after validation")
+            target = output / source.name
+            os.link(staging, target)  # Atomic no-replace; receipt is published last.
+            published.append((target, staging.stat()))
+    except BaseException:
+        for target, identity in reversed(published):
+            try:
+                current = target.lstat()
+            except FileNotFoundError:
+                continue
+            if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                target.unlink()
+        raise
+    finally:
+        for staging in staged:
+            staging.unlink(missing_ok=True)
+
+
+def require_space(path):
+    free = shutil.disk_usage(path).free
+    if free < 25 * GIB:
+        raise RuntimeError(f"{path}: {free // GIB} GiB free; coverage requires at least 25 GiB")
+
+
+def prepared_cache(path):
+    """Require the existing ci-cargo-cache-prepare contract, never invent a cache."""
+    cache = path.resolve(strict=True)
+    if (
+        cache.name != "rust-1.97.1"
+        or cache.parent.parent.name != "cargo"
+        or cache.parent.parent.parent.name != "plurx-ci"
+    ):
+        raise ValueError("--cache-root must be the Rustroot emitted by scripts/ci-cargo-cache-prepare")
+    for relative in ("cargo-home", "coverage", "coverage/target", "coverage/.last-used"):
+        child = cache / relative
+        if child.is_symlink() or child.resolve(strict=True) != child:
+            raise ValueError(f"unsafe prepared cache component: {relative}")
+        if not (child.is_file() if relative.endswith(".last-used") else child.is_dir()):
+            raise ValueError(f"missing prepared cache component: {relative}")
+    # The cache is a data/compiler mount, not a host credential capability.
+    cargo = cache / "cargo-home"
+    for name in ("credentials", "credentials.toml", ".credentials", ".credentials.toml", ".git-credentials"):
+        if (cargo / name).exists() or (cargo / name).is_symlink():
+            raise ValueError("refusing to mount a Cargo cache containing credentials")
+    import re
+
+    for name in ("config", "config.toml"):
+        config = cargo / name
+        if config.exists() or config.is_symlink():
+            if config.is_symlink() or re.search(
+                r"(?i)credential|password|token\s*=|https?://[^/\s]+@", config.read_text()
+            ):
+                raise ValueError("refusing Cargo cache configuration with credential capabilities")
+    return cache, cache.parents[3]
+
+
+def assert_network_space(routes, networks):
+    for route in routes:
+        destination = route.get("dst", "default")
+        if destination in ("default", "0.0.0.0/0"):
+            continue
+        network = ipaddress.ip_network(destination, strict=False)
+        if network.version == 4 and SUBNET.overlaps(network):
+            raise ValueError(f"CGNAT fixture subnet overlaps host route {network}")
+    for entry in networks:
+        for config in entry.get("IPAM", {}).get("Config", []) or []:
+            if config.get("Subnet"):
+                network = ipaddress.ip_network(config["Subnet"], strict=False)
+                if network.version == 4 and SUBNET.overlaps(network):
+                    raise ValueError(f"CGNAT fixture subnet overlaps Docker subnet {network}")
+    bridge = next((entry for entry in networks if entry.get("Name") == "bridge"), None)
+    if bridge is None or not any(
+        ipaddress.ip_network(config["Subnet"]).version == 4
+        and any(ipaddress.ip_network(config["Subnet"]).subnet_of(private) for private in RFC1918)
+        for config in bridge.get("IPAM", {}).get("Config", []) or []
+        if config.get("Subnet")
+    ):
+        raise ValueError("the ordinary Docker bridge must provide an RFC1918 outbound network")
+
+
+def assert_container_policy(inspected, mounts):
+    host = inspected["HostConfig"]
+    expected = {"Memory": 16 * GIB, "MemorySwap": 18 * GIB, "NanoCpus": 3_000_000_000, "PidsLimit": 4096}
+    for key, value in expected.items():
+        if host.get(key) != value:
+            raise ValueError(f"container policy mismatch: {key}")
+    for key in ("Privileged", "CapAdd", "SecurityOpt", "Devices", "DeviceRequests", "PidMode", "UTSMode", "UsernsMode"):
+        if host.get(key):
+            raise ValueError(f"nonstandard container isolation: {key}")
+    if host.get("NetworkMode") != "bridge" or host.get("IpcMode") not in ("", "private"):
+        raise ValueError("container must retain ordinary bridge and private IPC isolation")
+    actual = {entry["Destination"]: entry["Source"] for entry in inspected["Mounts"]}
+    if actual != mounts or len(inspected["Mounts"]) != 3 or any(entry["Type"] != "bind" for entry in inspected["Mounts"]):
+        raise ValueError("container mount inventory differs from the three owned binds")
+    return {key: host.get(key) for key in (*expected, "Privileged", "CapAdd", "SecurityOpt", "NetworkMode")}
+
+
+def logged(args, *, env, log):
+    """Interrupt the CLI promptly; owned-container removal handles its work."""
+    with log.open("xb") as stream:
+        process = subprocess.Popen(args, env=env, stdout=stream, stderr=subprocess.STDOUT)
+        try:
+            return process.wait()
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            raise
+
+
+def campaign_script(commit, digest, epoch, native):
+    # Inputs below are generated hex/integer identities, never shell text from callers.
+    return f"""set -euo pipefail
+. /etc/os-release
+test "$ID" = ubuntu && test "$VERSION_ID" = 24.04
+apt-get -o Acquire::Retries=3 update
+apt-get -o Acquire::Retries=3 install -y --no-install-recommends {PACKAGES}
+ffmpeg -version | head -n 1 | grep -E '^ffmpeg version 6[.]'
+python3 - <<'PYTHON'
+import ipaddress,json,shutil,subprocess
+private=[ipaddress.ip_network(x) for x in ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16')]
+routes=json.loads(subprocess.check_output(['ip','-j','-4','route','show','default']))
+assert routes and all(any(ipaddress.ip_address(r['gateway']) in n for n in private) for r in routes), 'RFC1918 outbound route required'
+addresses=json.loads(subprocess.check_output(['ip','-j','-4','addr','show']))
+assert any(a.get('local') == '{FIXTURE_IP}' for i in addresses for a in i['addr_info']), 'CGNAT fixture IP missing'
+for path in ('/workspace/noirr/plurx','/opt/coverage-cache','/opt/coverage-output'):
+    assert shutil.disk_usage(path).free >= 25 * 1024**3, 'coverage requires25 GiB before compilation: '+path
+PYTHON
+python3 scripts/unit_coverage/campaign.py --source-archive /opt/coverage-output/source.tgz --source-sha256 {digest} --source-commit {commit} --source-epoch {epoch} --output /opt/coverage-output/campaign{' --native' if native else ''}
+"""
+
+
+def execute(args):
+    if sys.platform != "linux":
+        raise ValueError("unit-coverage requires the existing Linux host-mode Docker runner")
+    cache, tool_cache = prepared_cache(args.cache_root)
+    output = args.output.resolve()
+    if output == cache or output.is_relative_to(cache) or cache.is_relative_to(output):
+        raise ValueError("--output must be separate from the compiler cache")
+    output.mkdir(parents=True, exist_ok=True)
+    if any((output / name).exists() or (output / name).is_symlink() for name in ("cov.json", "receipt.json")):
+        raise ValueError("--output already has published coverage; use a fresh run-attempt output")
+    for path in (cache, output):
+        if any(character in str(path) for character in (",", "\n", "\r", "\0")):
+            raise ValueError("bind paths cannot contain mount separators or control characters")
+        require_space(path)
+    if not args.image or args.image.startswith("-") or any(c.isspace() for c in args.image):
+        raise ValueError("--image must be one Docker image reference")
+    owner = uuid.uuid4().hex
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    root = output / f"run-{stamp}-{owner}"
+    root.mkdir(mode=0o700)
+    # Even this empty CLI configuration stays outside all three child binds.
+    host_home = tempfile.TemporaryDirectory(prefix=f".unit-coverage-host-{owner}-", dir=output)
+    try:
+        home = Path(host_home.name)
+        docker_config = home / ".docker"
+        docker_config.mkdir(mode=0o700)
+        env = {"PATH": PATH, "HOME": str(home), "DOCKER_CONFIG": str(docker_config), "LANG": "C.UTF-8", "RUNNER_TOOL_CACHE": str(tool_cache), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0"}
+        cache_id = hashlib.sha256(str(cache).encode()).hexdigest()
+        record = {"version": 1, "owner": owner, "cache": str(cache), "output": str(root), "requested_image": args.image, "native": args.native, "status": "preparing"}
+        receipt = root / "host.json"
+        write_receipt(receipt, record)
+        print(f"unit-coverage: retained run root: {root}", flush=True)
+
+        def docker(*command, timeout=60):
+            return call(["docker", *command], env=env, timeout=timeout)
+
+        def owned_ids(kind, label):
+            command = ("ps", "-aq") if kind == "container" else ("network", "ls", "-q")
+            return docker(*command, "--filter", f"label={label}").split()
+
+        def remove_owned(kind):
+            for identity in owned_ids(kind, f"{OWNER_LABEL}={owner}"):
+                inspection = json.loads(docker(*(("inspect", identity) if kind == "container" else ("network", "inspect", identity))))[0]
+                labels = inspection.get("Config", {}).get("Labels", {}) if kind == "container" else inspection.get("Labels", {})
+                if labels.get(OWNER_LABEL) != owner or labels.get(CACHE_LABEL) != cache_id:
+                    raise RuntimeError("refusing cleanup without exact run/cache ownership labels")
+                docker(*(("rm", "--force", identity) if kind == "container" else ("network", "rm", identity)))
+
+        lock_fd = os.open(cache / ".unit-coverage.lock", os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(lock_fd, "w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeError("another coverage run owns this compiler cache") from error
+            # A hard-killed wrapper can leave work behind. Never prune underneath it.
+            leftovers = {kind: owned_ids(kind, f"{CACHE_LABEL}={cache_id}") for kind in ("container", "network")}
+            if any(leftovers.values()):
+                raise RuntimeError(f"prior owned Docker resources need receipt-based recovery: {leftovers}")
+            repository = Path(call(["git", "rev-parse", "--show-toplevel"], env=env).strip())
+            commit = call(["git", "rev-parse", "HEAD"], env=env, cwd=repository).strip()
+            epoch = int(call(["git", "show", "-s", "--format=%ct", commit], env=env, cwd=repository).strip())
+            archive = root / "source.tgz"
+            with archive.open("xb") as stream:
+                subprocess.run(["git", "archive", "--format=tar.gz", commit], cwd=repository, env=env, stdout=stream, check=True)
+            digest = file_sha256(archive)
+            source = root / "source"
+            source.mkdir(mode=0o700)
+            with tarfile.open(archive, "r:gz") as source_tar:
+                if source_tar.pax_headers.get("comment") != commit:
+                    raise ValueError("source archive does not identify HEAD")
+                if any(".git" in Path(member.name).parts for member in source_tar.getmembers()):
+                    raise ValueError("source archive contains Git metadata")
+                source_tar.extractall(source, filter="data")
+            record.update(source_commit=commit, source_sha256=digest, source_epoch=epoch)
+            write_receipt(receipt, record)
+            helpers = source / "scripts"
+
+            def bound_cache():
+                call([str(helpers / "ci-cargo-cache-refresh"), str(cache), str(cache / "coverage/.last-used")], env=env)
+                call([str(helpers / "ci-cache-prune"), str(cache), "30"], env=env, timeout=300)
+
+            bound_cache()
+            require_space(cache)
+            require_space(root)
+            routes = json.loads(call(["ip", "-j", "-4", "route", "show", "table", "all"], env=env))
+            network_ids = docker("network", "ls", "-q").split()
+            networks = json.loads(docker("network", "inspect", *network_ids)) if network_ids else []
+            assert_network_space(routes, networks)
+            name = f"plurx-unit-coverage-{owner}"
+            network = name + "-cgnat"
+            mounts = {"/workspace/noirr/plurx": str(source), "/opt/coverage-cache": str(cache), "/opt/coverage-output": str(root)}
+            labels = ["--label", f"{OWNER_LABEL}={owner}", "--label", f"{CACHE_LABEL}={cache_id}"]
+            error = None
+            container_created = False
+            try:
+                try:
+                    image = json.loads(docker("image", "inspect", args.image))[0]
+                except RuntimeError:
+                    docker("pull", args.image, timeout=600)
+                    image = json.loads(docker("image", "inspect", args.image))[0]
+                if image.get("Config", {}).get("Volumes"):
+                    raise ValueError("coverage image must not create undeclared anonymous volumes")
+                record["image_id"] = image["Id"]
+                record["network_id"] = docker("network", "create", "--driver", "bridge", "--internal", "--subnet", str(SUBNET), "--gateway", "100.127.250.1", *labels, network).strip()
+                command = ["create", "--name", name, *labels, "--network", "bridge", "--cpus", "3", "--memory", "16g", "--memory-swap", "18g", "--pids-limit", "4096", "--workdir", "/workspace/noirr/plurx", "--entrypoint", "/bin/sleep"]
+                for target, host_path in mounts.items():
+                    command += ["--mount", f"type=bind,src={host_path},dst={target}"]
+                record["container_id"] = docker(*command, image["Id"], "infinity").strip()
+                container_created = True
+                record["container_policy"] = assert_container_policy(json.loads(docker("inspect", name))[0], mounts)
+                docker("start", name)
+                docker("network", "connect", "--ip", FIXTURE_IP, network, name)
+                inspection = json.loads(docker("network", "inspect", network))[0]
+                if not inspection["Internal"] or inspection["Labels"].get(OWNER_LABEL) != owner:
+                    raise ValueError("CGNAT network isolation/ownership mismatch")
+                bootstrap = root / "bootstrap.sh"
+                bootstrap.write_text(campaign_script(commit, digest, epoch, args.native))
+                record["status"] = "running"
+                write_receipt(receipt, record)
+                print(f"unit-coverage: {commit}; receipts and full log: {root}", flush=True)
+                child_env = [f"{key}={value}" for key, value in CONTAINER_ENV.items()]
+                status = logged(["docker", "exec", name, "/usr/bin/env", "-i", *child_env, "/bin/bash", "/opt/coverage-output/bootstrap.sh"], env=env, log=root / "campaign.log")
+                record["exit_status"] = status
+                if status:
+                    raise RuntimeError(f"coverage campaign failed ({status}); see {root / 'campaign.log'}")
+                record["status"] = "complete"
+            except BaseException as caught:
+                error = caught
+                record["status"] = "interrupted" if isinstance(caught, KeyboardInterrupt) else "failed"
+                record["error"] = str(caught)
+            finally:
+                cleanup_errors = []
+                if container_created:
+                    try:
+                        identity = record["container_id"]
+                        inspection = json.loads(docker("inspect", identity))[0]
+                        labels = inspection["Config"].get("Labels", {})
+                        if labels.get(OWNER_LABEL) != owner or labels.get(CACHE_LABEL) != cache_id:
+                            raise RuntimeError("refusing bind cleanup without exact container ownership")
+                        # Stop the whole proved-owned container before restoring
+                        # mounts. Restart runs only the configured idle sleep.
+                        assert_container_policy(inspection, mounts)
+                        docker("stop", "--time", "20", identity)
+                        docker("start", identity)
+                        assert_container_policy(json.loads(docker("inspect", identity))[0], mounts)
+                        docker("exec", identity, "/usr/bin/chown", "-R", "--", f"{os.getuid()}:{os.getgid()}", *mounts, timeout=120)
+                    except Exception as caught:
+                        cleanup_errors.append(f"bind ownership restoration: {caught}")
+                for kind in ("container", "network"):
+                    try:
+                        remove_owned(kind)
+                    except Exception as caught:
+                        cleanup_errors.append(f"{kind} cleanup: {caught}")
+                try:
+                    bound_cache()
+                except Exception as caught:
+                    cleanup_errors.append(f"cache finalization: {caught}")
+                record["cleanup_errors"] = cleanup_errors
+                if cleanup_errors:
+                    record["status"] = "failed"
+                write_receipt(receipt, record)
+                if cleanup_errors and error is None:
+                    error = RuntimeError("; ".join(cleanup_errors))
+            if error is not None:
+                raise error
+            try:
+                publish_result(root, output, commit, digest)
+            except BaseException as caught:
+                record.update(status="failed", error=f"coverage publication: {caught}")
+                write_receipt(receipt, record)
+                raise
+            record["published"] = [str(output / name) for name in ("cov.json", "receipt.json")]
+            write_receipt(receipt, record)
+        print(f"unit-coverage: complete; {receipt}", flush=True)
+    finally:
+        host_home.cleanup()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--cache-root", type=Path, required=True, help="prepared rust-1.97.1 root from ci-cargo-cache-prepare")
+    parser.add_argument("--output", type=Path, required=True, help="retained receipts/source root outside compiler cache")
+    parser.add_argument("--native", action="store_true")
+    args = parser.parse_args()
+
+    def interrupt(_number, _frame):
+        raise KeyboardInterrupt("coverage cancelled")
+
+    signal.signal(signal.SIGTERM, interrupt)
+    try:
+        execute(args)
+    except KeyboardInterrupt as error:
+        print(f"unit-coverage: {error}", file=sys.stderr)
+        return 130
+    except Exception as error:
+        print(f"unit-coverage: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
