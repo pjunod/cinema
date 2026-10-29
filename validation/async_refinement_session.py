@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -49,7 +50,92 @@ NULL_PROGRESS = {'context': None, 'record_kind': None, 'after_key': None, 'fifo_
 REGISTRATION_KEYS = ('schema_version', 'source', 'repository', 'repository_name', 'pr', 'event_base',
                      'ref', 'workflow', 'event', 'modes', 'source_files', 'source_archive_sha256',
                      'accounting_method_sha256','accounting_method',
-                     'storage', 'runtime', 'runner', 'expires_at', 'cases', 'main_workflow_sha256', 'upload_slot_count')
+                     'storage', 'runtime', 'runner', 'route', 'expires_at', 'cases', 'main_workflow_sha256', 'upload_slot_count')
+
+
+
+ROUTE_FILE='validation/runner-fleet.toml'
+ROUTE_LABELS=['self-hosted','Linux','X64','lab','general','high-cpu','async-proof-owned']
+
+
+def route_contract(root):
+    fleet=tomllib.loads((Path(root)/ROUTE_FILE).read_text())
+    route=fleet.get('async_proof_route')
+    expected={'state':route.get('state') if type(route) is dict else None,
+        'logical_slot':'gha-lab5-general-03','labels':ROUTE_LABELS,
+        'mount_root':'/srv/plurx-async-proof',
+        'container_bind':'/srv/plurx-async-proof:/srv/plurx-async-proof'}
+    p.require(route==expected and route['state'] in ('provisioning_required','active'),'dedicated proof routing/provisioning contract differs')
+    owners=[row for row in fleet['runners'] if row['name']==route['logical_slot']]
+    p.require(len(owners)==1 and owners[0]['os']=='Linux' and owners[0]['arch']=='X64',
+              'logical proof slot has no unique roster owner')
+    installed=[row['name'] for row in fleet['runners'] if 'async-proof-owned' in row['labels']]
+    p.require(installed==([] if route['state']=='provisioning_required' else [route['logical_slot']]),
+              'planned/active proof route does not match installed roster labels')
+    return route
+
+
+def registration_route(reg,root):
+    route=route_contract(root);binding=reg['route']
+    p.closed(binding,('logical_slot','contract_sha256','runner_id','runner_uuid'))
+    receipts.positive(binding['runner_id'])
+    p.require(type(binding['runner_uuid']) is str and re.fullmatch(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',binding['runner_uuid']) is not None,
+        'actual scheduler runner UUID is absent')
+    p.closed(reg['runner'],('name','os','arch'))
+    p.require(binding['logical_slot']==route['logical_slot']
+              and binding['contract_sha256']==p.file_sha(Path(root)/ROUTE_FILE)
+              and reg['source_files'].get(ROUTE_FILE)==binding['contract_sha256']
+              and reg['runner']['os']=='Linux' and reg['runner']['arch']=='X64'
+              and type(reg['runner']['name']) is str and reg['runner']['name']
+              and reg['storage']['mount_root']==route['mount_root'],
+              'registration substitutes the dedicated proof route/storage owner')
+    # The public roster name is a logical placement, never an actual API name.
+    return route
+
+
+def visible_runner_inventory(api):
+    """Authenticate a complete visible eligible inventory, including offline slots."""
+    rows=[];total=None
+    for page in range(1,receipts.MAX_PAGES+1):
+        batch=api.get('/actions/runners',{'visible':'true','page':page,'limit':50})
+        headers=getattr(api,'response_headers',{})
+        raw=headers.get('x-total-count','')
+        p.require(type(batch) is list and len(batch)<=50 and re.fullmatch(r'[0-9]+',raw) is not None,
+                  'complete visible runner inventory/count unavailable')
+        observed=int(raw)
+        p.require(total is None or total==observed,'runner inventory changed during pagination')
+        total=observed;rows.extend(batch)
+        p.require(len(rows)<=total,'runner inventory exceeds declared total')
+        if len(rows)==total:return rows
+        p.require(batch,'runner inventory ended before declared total')
+    raise receipts.ReceiptError('Visible runner inventory pagination allowance exhausted')
+
+
+def authenticate_runner_route(api,reg,root):
+    route=registration_route(reg,root)
+    p.require(route['state']=='active','dedicated proof route provisioning is not activated in source')
+    rows=visible_runner_inventory(api);ids=set();uuids=set();carriers=[]
+    for row in rows:
+        p.require(type(row) is dict,'runner inventory row invalid')
+        ident=receipts.positive(row.get('id'));uid=row.get('uuid');labels=row.get('labels')
+        p.require(type(uid) is str and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',uid) is not None
+                  and ident not in ids and uid not in uuids
+                  and type(row.get('name')) is str and row['name']
+                  and type(row.get('ephemeral')) is bool
+                  and type(labels) is list and all(type(v) is str and v for v in labels)
+                  and len(labels)==len(set(labels)) and row.get('status') in ('idle','active','offline'),
+                  'duplicate/inconsistent visible runner inventory')
+        ids.add(ident);uuids.add(uid)
+        # Count every carrier of the reserved label, including offline/misconfigured ones.
+        if 'async-proof-owned' in labels:carriers.append(row)
+    p.require(len(carriers)==1,'dedicated proof route has no unique visible scheduler owner')
+    row=carriers[0];binding=reg['route']
+    p.require(set(route['labels'])<=set(row['labels']) and row['id']==binding['runner_id']
+              and row['uuid']==binding['runner_uuid'] and row.get('name')==reg['runner']['name']
+              and row['status'] in ('idle','active') and row.get('ephemeral') is False,
+              'actual dedicated runner identity/availability differs from registration')
+    return row
 
 
 def utc(value):
@@ -115,6 +201,7 @@ def registration(value, root, now=None):
               and all(p.file_sha(Path(root)/name)==files[name] for name in ACCOUNTING_METHOD_FILES), 'unregistered accounting method')
     p.require(p.digest(p.canonical(value['runtime'])) == value['source']['toolchain_sha256'],
               'runtime/toolchain identity differs')
+    registration_route(value,root)
     storage_identity(value['storage'])
     for name in CAPABILITY_ACTION_FILES:
         p.require(files.get(name)==p.file_sha(Path(root)/name),'capability action source bytes differ')
@@ -634,6 +721,7 @@ class SessionAPI(receipts.API):
         data=bytearray()
         try:
             with self.opener.open(request,timeout=15) as incoming:
+                self.response_headers={key.lower():value for key,value in incoming.headers.items()}
                 p.require(hasattr(incoming,'read1'),'bounded session API reader unavailable')
                 while block:=incoming.read1(64*1024):
                     p.require(time.monotonic()<self.deadline and len(data)+len(block)<=receipts.MAX_BYTES,
@@ -673,6 +761,7 @@ def dispatch(api, state, control, root):
     path = '/actions/workflows/' + p.WORKFLOW + '/dispatches'
     request = urllib.request.Request(api.root + path, data=payload, method='POST',
               headers={'Authorization': 'token ' + api.token, 'Content-Type': 'application/json'})
+    authenticate_runner_route(api,reg,root)
     with api.opener.open(request, timeout=30) as response:
         p.require(response.status in (200, 201, 204), 'dispatch was not accepted')
     # API acceptance is not run authentication/capability; controller polls
@@ -1593,6 +1682,7 @@ def dispatch_probe(control, root, output):
               'registration_sha256':p.digest(p.canonical(reg)),'control':p.canonical(control).decode()}})
     request = urllib.request.Request(api.root+'/actions/workflows/'+p.WORKFLOW+'/dispatches',
               data=payload,method='POST',headers={'Authorization':'token '+api.token,'Content-Type':'application/json'})
+    authenticate_runner_route(api,reg,root)
     with api.opener.open(request,timeout=30) as response:
         p.require(response.status in (200,201,204),'candidate workflow probe dispatch rejected')
     p.write(output/'probe-dispatch.json',{'registration_sha256':p.digest(p.canonical(reg)),
@@ -2428,15 +2518,17 @@ def finalize_uploads(output,root):
 
 def validate_storage(storage,source_root):
     storage_identity(storage)
+    p.require(os.geteuid()==os.getuid(),'proof storage requires matching effective/real container owner')
     root=Path(storage['root']);mount=Path(storage['mount_root']);lease=Path(storage['lease_file'])
     p.require(root.is_absolute() and root.is_dir() and root.resolve()==root
               and mount.is_absolute() and mount.resolve()==mount and mount.is_mount()
-              and root!=mount and mount in root.parents and root.stat().st_dev==storage['mount_device']
+              and root!=mount and mount in root.parents and root.stat().st_dev==mount.stat().st_dev==storage['mount_device']
               and Path(source_root).resolve() not in (root,*root.parents)
               and not set(root.parts)&{'.cache','target','tmp','.git'},'persistent owned noncache mount unavailable')
-    p.require(root.stat().st_uid==os.getuid() and root.stat().st_mode & 0o022==0
-              and lease.parent==root and lease.is_file() and lease.stat().st_uid==os.getuid()
-              and not lease.is_symlink() and p.file_sha(lease)==storage['lease_sha256']
+    p.require(root.stat().st_uid==os.geteuid() and root.stat().st_mode & 0o022==0
+              and lease.parent==root and lease.is_file() and lease.stat().st_uid==os.geteuid()
+              and not lease.is_symlink() and lease.stat().st_mode & 0o022==0
+              and lease.stat().st_dev==storage['mount_device'] and p.file_sha(lease)==storage['lease_sha256']
               and time.time()<utc(storage['lease_expires_at']), 'persistent owned lease absent/expired')
     return root
 
@@ -2460,6 +2552,15 @@ def validate_workflow_protocol(root):
                   and block.count('      - name: Finalize authenticated post-upload control')==1,
                   'fixed native slots/finalizer registration differs')
         header=block.split('    steps:',1)[0]
+        route=route_contract(root)
+        expected_header='    runs-on: ['+', '.join(route['labels'])+']\n'
+        expected_container='    container:\n      image: ubuntu:24.04\n      volumes:\n        - '+route['container_bind']+'\n'
+        container=re.search(r'(?ms)^    container:\n.*?(?=^    [^ \n]|\Z)',header)
+        p.require(header.count('    runs-on:')==1 and expected_header in header
+                  and header.count('    container:')==1 and container is not None
+                  and container.group(0)==expected_container
+                  and header.count('      volumes:')==1 and 'options:' not in header,
+                  'registered dedicated route/container mount differs')
         p.require('continue-on-error' not in header and 'strategy:' not in header,
                   'producer job may tolerate failure or multiply native tasks')
         for ordinal in range(32):
@@ -3019,6 +3120,8 @@ def runner(control,root,output,mode,operation):
     p.require(control['schema_version']==1 and type(control['schema_version']) is int
               and control['session_id']==plan['session_id'] and plan['source']==reg['source'],
               'producer control session/source differs before storage')
+    p.require(registration_route(reg,root)['state']=='active',
+              'producer cannot execute a route pending source activation')
     owned=validate_storage(reg['storage'],root)/control['session_id']
     owned.mkdir(parents=True,exist_ok=True)
     lock=owned/'execution.lock'

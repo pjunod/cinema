@@ -279,3 +279,13 @@ host = "macb"
 os = "Linux"
 arch = "ARM64"
 labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "primary"]
+
+# Reserved routing contract, NOT a claim that this label or bind is installed.
+# Activate through the runner provisioning authority only after source review;
+# the controller then checks all visible eligible scheduler registrations live.
+[async_proof_route]
+state = "provisioning_required"
+logical_slot = "gha-lab5-general-03"
+labels = ["self-hosted", "Linux", "X64", "lab", "general", "high-cpu", "async-proof-owned"]
+mount_root = "/srv/plurx-async-proof"
+container_bind = "/srv/plurx-async-proof:/srv/plurx-async-proof"

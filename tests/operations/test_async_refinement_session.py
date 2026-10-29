@@ -280,3 +280,111 @@ class CapabilityAndStorageTests(unittest.TestCase):
             verify.assert_not_called()
 
 if __name__ == '__main__':unittest.main()
+
+
+class DedicatedRouteTests(unittest.TestCase):
+    def registration(self):
+        route=s.route_contract(ROOT)
+        return {'route':{'logical_slot':route['logical_slot'],'contract_sha256':p.file_sha(ROOT/s.ROUTE_FILE),
+                    'runner_id':19,'runner_uuid':'00000000-0000-4000-8000-000000000019'},
+                'runner':{'name':'actual-private-fixture-slot','os':'Linux','arch':'X64'},
+                'storage':{'mount_root':route['mount_root']},
+                'source_files':{s.ROUTE_FILE:p.file_sha(ROOT/s.ROUTE_FILE)}}
+
+    def runner(self,**changes):
+        reg=self.registration()
+        return {'id':reg['route']['runner_id'],'uuid':reg['route']['runner_uuid'],
+            'name':reg['runner']['name'],'labels':s.ROUTE_LABELS.copy(),
+            'status':'idle','ephemeral':False,**changes}
+
+    def inventory_api(self,pages,totals=None):
+        from types import SimpleNamespace
+        api=SimpleNamespace(calls=[],response_headers={})
+        def get(path,query):
+            self.assertEqual(path,'/actions/runners');self.assertEqual(query['visible'],'true')
+            self.assertEqual(query['limit'],50);api.calls.append(query['page'])
+            api.response_headers={'x-total-count':str((totals or [sum(map(len,pages))]*len(pages))[query['page']-1])}
+            return pages[query['page']-1]
+        api.get=get;return api
+
+    def test_both_producer_modes_pin_the_same_source_route_and_container_bind(self):
+        route=s.route_contract(ROOT)
+        self.assertIn(route['state'],('provisioning_required','active'))
+        self.assertNotEqual(self.registration()['runner']['name'],route['logical_slot'])
+        s.validate_workflow_protocol(ROOT)
+        text=(ROOT/'.github/workflows/async-proof-session.yml').read_text()
+        self.assertEqual(text.count('    runs-on: ['+', '.join(s.ROUTE_LABELS)+']'),2)
+        self.assertEqual(text.count('        - '+route['container_bind']),2)
+        self.assertNotIn('${{ github.event.inputs.runner',text)
+        for changed in (text.replace('async-proof-owned','general'),
+                        text.replace('/srv/plurx-async-proof:/srv/plurx-async-proof','/wrong:/srv/plurx-async-proof'),
+                        text.replace('    timeout-minutes: 30','        - /unrelated:/extra\n    timeout-minutes: 30')):
+            with patch.object(s.Path,'read_text',return_value=changed), \
+                 patch.object(s,'route_contract',return_value=route),self.assertRaises(receipts.ReceiptError):
+                s.validate_workflow_protocol(ROOT)
+
+    def test_registration_rejects_substituted_route_mount_and_identity(self):
+        reg=self.registration();s.registration_route(reg,ROOT)
+        for section,key,value in (('route','logical_slot','another-slot'),('route','runner_id',0),
+                ('route','contract_sha256','f'*64),('route','runner_uuid','unobserved'),
+                ('runner','arch','ARM64'),('storage','mount_root','/unprovisioned')):
+            bad=copy.deepcopy(reg);bad[section][key]=value
+            with self.subTest(key=key),self.assertRaises(receipts.ReceiptError):s.registration_route(bad,ROOT)
+
+    def authenticate_active(self,api,reg):
+        route={**s.route_contract(ROOT),'state':'active'}
+        with patch.object(s,'route_contract',return_value=route):
+            return s.authenticate_runner_route(api,reg,ROOT)
+
+    def test_planned_route_refuses_dispatch_authority_without_source_activation(self):
+        from unittest.mock import Mock
+        route={**s.route_contract(ROOT),'state':'provisioning_required'}
+        api=Mock()
+        with patch.object(s,'route_contract',return_value=route),self.assertRaises(receipts.ReceiptError):
+            s.authenticate_runner_route(api,self.registration(),ROOT)
+        api.get.assert_not_called()
+
+    def test_visible_route_is_unique_across_pages_including_offline_carriers(self):
+        reg=self.registration();owner=self.runner()
+        other=self.runner(id=20,uuid='00000000-0000-4000-8000-000000000020',
+            labels=['self-hosted','Linux','X64','lab','general','high-cpu'],status='offline')
+        api=self.inventory_api([[other],[owner]])
+        self.assertEqual(self.authenticate_active(api,reg),owner)
+        self.assertEqual(api.calls,[1,2])
+        for rows in ([owner,{**other,'labels':s.ROUTE_LABELS}], [owner,owner],
+                     [{**owner,'status':'offline'}],[{**owner,'ephemeral':True}],
+                     [{**owner,'name':'substituted'}],[{**owner,'id':22}],
+                     [{**owner,'uuid':other['uuid']}],[],[{**owner,'labels':['async-proof-owned']} ]):
+            with self.subTest(rows=rows),self.assertRaises(receipts.ReceiptError):
+                self.authenticate_active(self.inventory_api([rows]),reg)
+
+    def test_visible_inventory_rejects_missing_count_truncation_and_changed_total(self):
+        for pages,totals in (([[self.runner()],[]],[2,2]),([[self.runner()],[self.runner()]],[2,3])):
+            with self.subTest(totals=totals),self.assertRaises(receipts.ReceiptError):
+                s.visible_runner_inventory(self.inventory_api(pages,totals))
+        from types import SimpleNamespace
+        with self.assertRaises(receipts.ReceiptError):
+            s.visible_runner_inventory(SimpleNamespace(get=lambda *args:[],response_headers={}))
+
+    def test_every_dispatch_refuses_unavailable_live_route_before_post(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import tempfile
+        scratch=ROOT/'.agent-proof-fixtures/route';scratch.mkdir(parents=True,exist_ok=True)
+        reg={**self.registration(),'ref':'candidate'}
+        api=SimpleNamespace(root='https://forge.invalid/api/v1/repos/example/repo',token='fixture',opener=Mock())
+        with tempfile.TemporaryDirectory(dir=scratch) as directory, \
+             patch.object(s,'registration',return_value=reg),patch.object(s,'live_pr'), \
+             patch.object(s,'reject_prior_ordinal_dispatch'), \
+             patch.object(s,'authenticate_runner_route',side_effect=receipts.ReceiptError('unavailable')) as check:
+            for stage in ('expand','complete'):
+                state={'registration':reg,'stage':stage,'checkpoint':{},'phase':'running','retry_authorized':True,
+                    'next_ordinal':0,'resource_plan':{'record':{'maximum_units':3}}}
+                if stage=='complete':state['final_input_checkpoint_sha256']=p.digest(p.canonical({}))
+                with self.assertRaises(receipts.ReceiptError):s.dispatch(api,state,{},ROOT)
+            control={key:None for key in s.CONTROL_KEYS}
+            control.update(registration=reg,unit_runs=[],attempt_runs=[],resume_decisions=[],
+                probe_case='success',probe_nonce='a'*64)
+            with patch.object(s,'api_environment',return_value=api),self.assertRaises(receipts.ReceiptError):
+                s.dispatch_probe(control,ROOT,directory)
+            self.assertEqual(check.call_count,3);api.opener.open.assert_not_called()

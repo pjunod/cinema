@@ -29,8 +29,12 @@ jobs:
   unit:
     name: async proof session producer
     if: github.event.inputs.mode == 'unit'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    container: ubuntu:24.04
+    # Reserved dedicated route; provisioning and live uniqueness are prerequisites.
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, async-proof-owned]
+    container:
+      image: ubuntu:24.04
+      volumes:
+        - /srv/plurx-async-proof:/srv/plurx-async-proof
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "1"
@@ -356,8 +360,12 @@ jobs:
   complete:
     name: Main promotion gate
     if: github.event.inputs.mode == 'complete'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    container: ubuntu:24.04
+    # Reserved dedicated route; provisioning and live uniqueness are prerequisites.
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, async-proof-owned]
+    container:
+      image: ubuntu:24.04
+      volumes:
+        - /srv/plurx-async-proof:/srv/plurx-async-proof
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "1"
