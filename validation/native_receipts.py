@@ -68,8 +68,8 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    'Makefile': 'dfa597e076491ab83aea07f81fb6bf3c1789e16582a19c846a7d7543e953e925',
-    'clients/apple/project.yml': 'de38b2df36a09b732abc5ba16f96ec9a1ba9f69df3a7a08437f22a80d9097a0c',
+    'Makefile': 'a8dfee1e29ba93b43cf58ee5233a5aef1aeddd381765a759d47b05c8126b23c2',
+    'clients/apple/project.yml': 'e9e1e028125da79afc8c63f583aa5a24cfff51ae00d365777585f4c44b2708a3',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',
