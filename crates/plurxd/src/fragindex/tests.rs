@@ -1993,7 +1993,7 @@ async fn a_landing_in_a_real_index_resolves_uniquely() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod dv_title_companion {
     use super::*;
 
@@ -2063,6 +2063,7 @@ mod dv_title_companion {
 
     /// The daemon's own index pass on a real title, with an installed
     /// processing bundle, yields the aggregate the standalone scan published.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "physical: a processing bundle (PLURX_DV_PROCESSING_DIR), a Dolby Vision title and its standalone aggregate"]
     async fn physical_the_index_pass_reads_the_standalone_title_aggregate() {

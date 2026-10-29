@@ -757,9 +757,9 @@ fn validated_caption_rewind(connection: &rusqlite::Connection) -> (String, i64) 
         );
         return (String::new(), version);
     }
-    assert_eq!(
-        version, 119,
-        "only the current caption fixture may be rewound"
+    assert!(
+        matches!(version, 119 | 120),
+        "only the published complete caption fixtures may be rewound"
     );
     assert_eq!(
         actual,
@@ -1232,27 +1232,227 @@ fn historical_caption_rewind_refuses_owned_data_and_partial_shapes_without_mutat
 
 #[test]
 fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions() {
-    let directory = tempfile::tempdir().expect("historical fixture directory");
-    let path = directory.path().join("current.db");
-    drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
-    let connection = rusqlite::Connection::open(path).expect("owned fixture");
-    rewind_empty_managed_subtitle_schema(&connection);
-    let retained:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE name GLOB 'subtitle_translation_*' OR name GLOB 'subtitle_text_translation_*' OR name GLOB 'shared_caption_*' OR name GLOB 'playback_handoffs*'",[],|row|row.get(0)).expect("complete extension inventory");
-    assert_eq!(
-        retained, 0,
-        "no partial extension remains after the empty rewind"
-    );
+    for (schema_version, managed_version) in [(119, 1), (120, 2), (119, 2), (120, 1)] {
+        let directory = tempfile::tempdir().expect("historical fixture directory");
+        let path = directory.path().join("current.db");
+        drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
+        let connection = rusqlite::Connection::open(path).expect("owned fixture");
+        if managed_version == 1 {
+            // Reconstruct the exact published v119 predecessor, never edit a
+            // marker to impersonate v1 while retaining the v2 resource view.
+            let predecessor = managed_fixture_rows(&managed_fixture_connection(1));
+            let definition = |name: &str| {
+                &predecessor
+                    .iter()
+                    .find(|(object, _)| object == name)
+                    .expect("published predecessor object")
+                    .1
+            };
+            connection.execute_batch(&format!(
+                "DROP VIEW background_job_required_resources; DROP TABLE subtitle_managed_schema; {}; INSERT INTO subtitle_managed_schema VALUES(1,1); {};",
+                definition("subtitle_managed_schema"),
+                definition("background_job_required_resources"),
+            )).expect("exact managed v1 predecessor");
+        }
+        connection
+            .pragma_update(None, "user_version", schema_version)
+            .expect("published fixture version");
+        let snapshot = || {
+            let shape = connection
+                .prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+                .expect("complete fixture shape")
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .expect("fixture shape rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("complete shape rows");
+            let marker: i64 = connection
+                .query_row(
+                    "SELECT version FROM subtitle_managed_schema WHERE singleton=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("managed marker snapshot");
+            let version: i64 = connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .expect("fixture version snapshot");
+            (shape, marker, version, connection.total_changes())
+        };
+        if matches!((schema_version, managed_version), (119, 2) | (120, 1)) {
+            let before = snapshot();
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rewind_empty_managed_subtitle_schema(&connection);
+                }))
+                .is_err(),
+                "mismatched schema {schema_version}/managed v{managed_version} must refuse"
+            );
+            assert_eq!(
+                snapshot(),
+                before,
+                "version refusal leaves the complete fixture unchanged"
+            );
+            continue;
+        }
+        rewind_empty_managed_subtitle_schema(&connection);
+        let retained:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE name GLOB 'subtitle_translation_*' OR name GLOB 'subtitle_text_translation_*' OR name GLOB 'shared_caption_*' OR name GLOB 'playback_handoffs*'",[],|row|row.get(0)).expect("complete extension inventory");
+        assert_eq!(
+            retained, 0,
+            "no partial extension remains after the empty rewind"
+        );
+    }
 }
 
 /// Rewind only an exact empty managed extension in an owned historical fixture.
 #[allow(dead_code)]
+pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
+pub(crate) const MANAGED_FIXTURE_DATA_SQL: &str = "SELECT (SELECT count(*) FROM subtitle_model_receipts) + (SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_model_operation','subtitle_transcribe_managed','subtitle_text_model_operation','subtitle_text_translate'))";
+
+fn managed_fixture_connection(version: i64) -> rusqlite::Connection {
+    assert!(
+        matches!(version, 1 | 2),
+        "only published managed fixture versions are recognized"
+    );
+    let expected = rusqlite::Connection::open_in_memory().expect("closed managed metadata witness");
+    expected.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE VIEW background_job_required_resources AS SELECT 1;").expect("closed metadata dependencies");
+    expected
+        .execute_batch(include_str!("../../src/store/subtitle_managed_schema.sql"))
+        .expect("published managed v1 objects");
+    if version == 2 {
+        expected
+            .execute_batch(include_str!(
+                "../../src/store/subtitle_managed_resources_v2.sql"
+            ))
+            .expect("published managed v2 objects");
+    }
+    expected
+}
+fn managed_fixture_rows(connection: &rusqlite::Connection) -> Vec<(String, String)> {
+    connection
+        .prepare(MANAGED_FIXTURE_SHAPE_SQL)
+        .expect("managed shape query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("managed shape rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete managed shape")
+}
+/// Historical v1 and current v2 each require their own exact DDL and marker.
+/// This pure plan cannot discard accepted work or silently repair schema drift.
+pub(crate) fn validated_empty_managed_rewind(
+    shape: &[(String, String)],
+    marker_version: i64,
+    data_count: i64,
+) -> Vec<String> {
+    assert_eq!(
+        shape,
+        managed_fixture_rows(&managed_fixture_connection(marker_version)),
+        "only the exact published managed shape may be rewound"
+    );
+    assert_eq!(
+        data_count, 0,
+        "accepted managed work or receipts cannot be rewound"
+    );
+    let old_view = include_str!("../../src/store/background_jobs_probe.sql")
+        .split("-- next statement")
+        .find(|sql| {
+            sql.trim_start()
+                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
+        })
+        .expect("published predecessor resource view");
+    let mut statements = [
+        "DROP TRIGGER subtitle_managed_config_write",
+        "DROP TRIGGER subtitle_managed_source_deleted",
+        "DROP TRIGGER subtitle_managed_source_changed",
+        "DROP VIEW background_job_required_resources",
+        "DROP TABLE subtitle_model_receipts",
+        "DROP TABLE subtitle_managed_schema",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    statements.push(old_view.to_owned());
+    statements
+}
+
+#[test]
+fn managed_fixture_rewind_accepts_exact_empty_v1_and_v2() {
+    for version in [1, 2] {
+        let connection = managed_fixture_connection(version);
+        let statements =
+            validated_empty_managed_rewind(&managed_fixture_rows(&connection), version, 0);
+        connection
+            .execute_batch(&format!(
+                "SAVEPOINT managed_test; {}; RELEASE managed_test;",
+                statements.join(";")
+            ))
+            .expect("apply complete validated rewind");
+        let remaining:i64=connection.query_row("SELECT count(*) FROM sqlite_master WHERE name LIKE 'subtitle_managed_%' OR name='subtitle_model_receipts'",[],|row|row.get(0)).expect("removed managed objects");
+        assert_eq!(remaining, 0);
+        let view: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='background_job_required_resources'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("complete historical resource view");
+        assert!(!view.contains("subtitle_model_operation"));
+    }
+}
+
+#[test]
+fn managed_fixture_rewind_refuses_v2_drift_marker_and_populated_work_without_mutation() {
+    for damage in ["drift", "receipt", "text-job", "marker", "wrong-marker"] {
+        let connection = managed_fixture_connection(2);
+        match damage {
+            "drift"=>connection.execute_batch("DROP VIEW background_job_required_resources; CREATE VIEW background_job_required_resources AS SELECT 1 AS job_id,'source_io' AS resource_key").expect("drift"),
+            "receipt"=>{connection.execute("INSERT INTO subtitle_model_receipts VALUES('node','model','{}')",[]).expect("receipt");},
+            "text-job"=>{connection.execute("INSERT INTO background_jobs(id,kind) VALUES('accepted','subtitle_text_model_operation')",[]).expect("accepted model work");},
+            "marker"=>{connection.execute("DELETE FROM subtitle_managed_schema",[]).expect("missing marker");},
+            "wrong-marker"=>{},
+            _=>unreachable!(),
+        }
+        let snapshot = || {
+            let shape = managed_fixture_rows(&connection);
+            let data: i64 = connection
+                .query_row(MANAGED_FIXTURE_DATA_SQL, [], |row| row.get(0))
+                .expect("data inventory");
+            let marker:i64=connection.query_row("SELECT COALESCE(max(version),0) FROM subtitle_managed_schema WHERE singleton=1",[],|row|row.get(0)).expect("marker inventory");
+            (shape, data, marker)
+        };
+        let before = snapshot();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                validated_empty_managed_rewind(
+                    &before.0,
+                    if damage == "wrong-marker" {
+                        1
+                    } else {
+                        before.2
+                    },
+                    before.1,
+                )
+            }))
+            .is_err(),
+            "{damage} must refuse"
+        );
+        assert_eq!(
+            snapshot(),
+            before,
+            "refusal preserves DDL, marker and accepted work"
+        );
+    }
+}
+
 pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connection) {
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture schema version");
     let (caption_rewind, version) = validated_caption_rewind(connection);
     let (handoff_rewind, version) = validated_handoff_rewind(connection, version);
     let (title_rewind, version) = validated_title_rewind(connection, version);
     let annotations_rewind = validated_annotations_rewind(connection, version);
     let translation_rewind = validated_translation_rewind(connection, version);
-    const SHAPE: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
     let objects: i64 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write')", [], |row|row.get(0)).expect("managed fixture inventory");
     if objects == 0 {
         assert!(
@@ -1270,47 +1470,23 @@ pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connec
     assert_eq!(source, 0, "Source installation cannot be rewound");
     let marker: i64 = connection
         .query_row(
-            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=1",
+            "SELECT version FROM subtitle_managed_schema WHERE singleton=1",
             [],
             |row| row.get(0),
         )
         .expect("managed marker");
-    assert_eq!(marker, 1, "current managed marker required");
-    let data: i64 = connection.query_row("SELECT (SELECT count(*) FROM subtitle_model_receipts) + (SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_model_operation','subtitle_transcribe_managed'))", [], |row|row.get(0)).expect("managed fixture data");
-    assert_eq!(
-        data, 0,
-        "accepted managed work or receipts cannot be rewound"
+    assert!(
+        matches!((schema_version, marker), (111..=119, 1) | (120, 2)),
+        "managed marker must match its published SQLite schema version"
     );
-    let expected = rusqlite::Connection::open_in_memory().expect("closed managed metadata witness");
-    expected.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE VIEW background_job_required_resources AS SELECT 1;").expect("closed metadata dependencies");
-    expected
-        .execute_batch(include_str!("../../src/store/subtitle_managed_schema.sql"))
-        .expect("published current managed objects");
-    let shape = |conn: &rusqlite::Connection| {
-        conn.prepare(SHAPE)
-            .expect("managed shape query")
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .expect("managed shape rows")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("complete managed shape")
-    };
-    assert_eq!(
-        shape(connection),
-        shape(&expected),
-        "only the exact current managed shape may be rewound"
-    );
-    let old_view = include_str!("../../src/store/background_jobs_probe.sql")
-        .split("-- next statement")
-        .find(|sql| {
-            sql.trim_start()
-                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
-        })
-        .expect("published predecessor resource view");
+    let data: i64 = connection
+        .query_row(MANAGED_FIXTURE_DATA_SQL, [], |row| row.get(0))
+        .expect("managed fixture data");
+    let managed_rewind =
+        validated_empty_managed_rewind(&managed_fixture_rows(connection), marker, data).join(";");
     // Preserve a complete predecessor while the common-queue removal follows.
     // A savepoint keeps this atomic even inside an outer fixture transaction.
-    connection.execute_batch(&format!("SAVEPOINT rewind_managed_fixture; {caption_rewind} {handoff_rewind} {title_rewind} {annotations_rewind} {translation_rewind} DROP TRIGGER subtitle_managed_config_write; DROP TRIGGER subtitle_managed_source_deleted; DROP TRIGGER subtitle_managed_source_changed; DROP VIEW background_job_required_resources; DROP TABLE subtitle_model_receipts; DROP TABLE subtitle_managed_schema; {old_view} RELEASE rewind_managed_fixture;")).expect("atomic empty managed fixture rewind");
+    connection.execute_batch(&format!("SAVEPOINT rewind_managed_fixture; {caption_rewind} {handoff_rewind} {title_rewind} {annotations_rewind} {translation_rewind} {managed_rewind}; RELEASE rewind_managed_fixture;")).expect("atomic empty managed fixture rewind");
 }
 
 /// Wind a current test database back across the durable-queue introduction.

@@ -2,7 +2,7 @@
 
 This is the launcher half of the native Linux player in [the Linux player plan](../../docs/clients/LINUX-PLAYER-PLAN.md). Browsing stays in the plurx web app. When Settings → Playback → **Dolby Vision playback on Linux** says **plurx Player (Linux)**, a cold Play of a local Dolby Vision file in a Linux browser mints a one-time handoff code and opens `plurx-player://play?server=<origin>&code=<code>`. Other formats and clients on other operating systems keep playing in the web UI; the setting is disabled outside Linux. This launcher handles that URL: it redeems the code for a token scoped to one file, asks the server how to deliver the file, plays it in mpv, and keeps the server informed until mpv closes. It is Python 3 with the standard library only (`urllib`, `json`, a Unix socket for mpv's JSON IPC, `subprocess`), so it installs on any Ubuntu with no dependencies beyond `zenity`.
 
-Status: 0.4.0 source adds Cinema-style controls, library metadata, server-backed
+Status: 0.4.1 source adds live playback Info to Cinema controls, library metadata, server-backed
 quality selection and sequential next-episode authorization. The private
 mpv/libplacebo/Dolby equations are unchanged from 0.3.2. The
 [release ledger](../../docs/clients/LINUX-PLAYER-CINEMA-UI.md) distinguishes
@@ -43,8 +43,16 @@ playback keeps them visible. Mouse movement reveals them.
 Audio and subtitle menus list tracks mpv actually has, including loaded
 sidecars. Library metadata comes from the handoff's restricted context:
 title, series and episode identity, year, runtime, air date and synopsis.
-About opens the scrollable synopsis; Playback info reports actual mpv
-properties rather than inferring a Dolby Vision treatment.
+Both Info buttons open the same scrollable Playback info panel. It reports
+mpv's decoded frame, OSD window and active video-area dimensions, codec/pixel format, input color
+and Dolby Vision/PQ/HLG observations, VO target color/peak, active renderer
+and hardware decoder, estimated FPS, packet bitrate, renderer/decoder drops,
+stream/decoded/output audio, sync and demuxer buffer/input-rate estimates.
+Delivery method, transport and session kind come from whitelisted launcher
+facts. Missing observations read Unavailable; the panel refreshes only while
+open, including while paused. Target properties describe mpv's output target,
+not measured panel luminance or proof of physical HDR output. The panel does
+not expose media URLs, session credentials, private paths or synopsis text.
 
 Quality offers Auto, Original and the server's advertised encode heights.
 Changing it retains the full-film position and paused state. A provisional

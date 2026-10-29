@@ -1673,6 +1673,7 @@ impl IntegrationMetrics {
 /// How long a fresh title's Dolby Vision scan waits for the node-local index
 /// pass, which reads fresh files ahead of its backlog and scans the title in
 /// the same read. Past it, the title job reads the file itself.
+#[cfg(target_os = "linux")]
 pub(crate) const TITLE_SCAN_INDEX_WAIT: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
 
@@ -8203,11 +8204,12 @@ impl JobManager {
     /// node-local index pass has the file at the front of its queue and its
     /// ride-along reads the title's RPUs in the same read. Once the pass has
     /// examined the file, built or not, the scan no longer waits.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn set_local_index_pass(&self, local: bool) {
         self.local_index_pass.store(local, Ordering::Relaxed);
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn title_scan_awaits_index_pass(&self, file_id: i64) -> bool {
         self.local_index_pass.load(Ordering::Relaxed)
             && self

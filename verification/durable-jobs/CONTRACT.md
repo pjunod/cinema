@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`d03c8abdf17dea7147e112a32fec274834151fca` (scoped author audit below) · **Scope:** bound `library_scan` and
+`66a33d723` plus the repair worktree (scoped integration audit below) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,22 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Combined-source integration — scoped author audit on 2026-10-29
+
+The repair is combined with main `66a33d723096ee931ce2e05e860f51f8f3671513`.
+Retain its reviewed resource-admission v2 schema and mapping inputs. The
+historical rewind now validates schema 119 with managed v1, or schema 120
+with managed v2, before any mutation; crossed pairs are refused atomically.
+The conformance parent retains the selected `formal_publication` module and
+combines the independently reviewed strict caption/continuity teardown with
+main's exact managed shape/data planner. Relative to this main, `state.rs`
+adds only the test-module declaration; mapped production bodies are unchanged.
+
+Only affected whole-file pins follow the combined source; anchors, models,
+configurations, properties, bounds and historical source receipts retain their
+identities. Independent Codex agent `coverage_review` reviewed the merged source pins, both parents' anchors and the combined ownership census, finding no blockers. That source review ran no builds, tests or TLC. This is a
+source correspondence audit and supplies no new runtime or TLC qualification.
 
 ## Unit-coverage repair — scoped author audit on 2026-10-28
 
@@ -37,6 +53,55 @@ validators and historical source-anchor snapshots are unchanged. This audit
 supplies no new runtime or TLC execution, refinement theorem, liveness,
 physical acceptance or qualification. Historical receipts retain their
 recorded source identities; fresh affected execution is separate evidence.
+
+## Managed-v2 fixture follow-through — scoped refresh on 2026-10-28
+
+The test-only follow-through on `48e2acc2a` restores the current managed marker
+as v2 in the owned replicated refusal fixtures. Both backend rewind helpers use
+the canonical published v1/v2 DDL with a matching marker and reject populated,
+partial or drifted managed extensions before mutation. Historical v1 authority
+remains exact; a v1 marker cannot certify the v2 view. The v120 downgrade
+inventory entry names the new managed marker definition. At that historical reviewed snapshot, the separate baseline
+handoff rewind supported v115 only and its v116–v119 inventory gap remained;
+these focused managed-fixture checks do not qualify a complete current-schema
+historical downgrade.
+
+Only the whole-file pin for the conformance parent module changes. Its
+`formal_publication` registration remains unique and byte-identical, as does the
+selected conformance module. No production queue, reservation, lease, binding or
+publication transition changes. Model/configuration/property/toolchain inputs
+remain unchanged; this source review supplies no new execution qualification.
+
+## Subtitle resource admission — scoped refresh on 2026-10-28
+
+Codex reviewed `c3d764a01` against `f2120bd9a`. The shared claim SQL adds
+qualified progressive caption preparation/range demand to the reserved live
+source-reader slot. A new claim requires the current operation, source,
+configuration and unexpired administrative demand; a held range can retain its
+exact claim-fence continuity grant while that demand remains valid. These
+branches require caption job and waiter kinds. Ordinary `library_scan` and
+`metadata_refresh` callers do not gain that authority. The existing two-reader
+ceiling and one-speculative-reader ceiling remain unchanged.
+
+The managed v2 resource view exempts artifact-only text model setup from
+`source_io`; both selected library kinds retain their existing source-domain
+and provider rows. SQLite v120 validates the exact v1 predecessor inside its
+migration transaction. The replicated installer checks the predecessor marker
+and exact view in one transaction, accepts a verified v2 winner after ambiguous
+acknowledgement, and preserves that view during bootstrap. Existing queue
+owners, leases, attempts and reservations are retained. Mapping now pins this
+active view, its historical predecessor and the shape/transaction guards;
+valid installed schema remains a premise, not a modeled migration theorem.
+
+The changed queue trait/token/adapter, renewal, expiry, resource-currentness,
+fenced SQLite transaction, replicated timeout and retention anchors remain
+unique and unchanged. Selected library claim identity, binding, publication,
+renewal and settlement authority is unchanged. Nineteen whole-file pins are
+refreshed after this review; model, configuration, property, bound and toolchain
+bytes retain their identities. Caption fairness, online upgrade correctness and
+physical playback are outside this model. Runtime regressions for model
+contention, upgrade preservation and demand-bound caption admission are separate
+source evidence; this mapping refresh claims no new execution or qualification.
 
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 

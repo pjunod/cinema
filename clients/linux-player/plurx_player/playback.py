@@ -402,6 +402,13 @@ class Playback:
         self.mpv.set("force-media-title", display_title(info))
         self.mpv.set("user-data/cinema", {
             "metadata": info, "next": data.get("next"),
+            # Presentation facts only: never forward the decision/session maps,
+            # whose URLs and owner credentials do not belong on screen.
+            "playback": {"mode": self.mode if self.mode in ("direct", "remux", "transcode") else None,
+                         "transport": "progressive" if self.mode == "direct" else
+                                      "hls" if self.mode in ("remux", "transcode") else None,
+                         "session": "vod" if self.session and self.session.get("vod") else
+                                    "live" if self.session else "none" if self.mode == "direct" else None},
             "quality": {"selected": self.quality, "choices": quality_choices(self.decision or {})},
             "autoplay_next": self.autoplay_next, "busy": self.changing, "error": self.chrome_error,
             "retryable": self.retryable, "revision": self.chrome_revision})

@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 75] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 76] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1740,6 +1740,9 @@ mod tests {
             // triggers and continuity tables before replaying their migrations.
             "DROP TRIGGER subtitle_translation_mutate",
             "CREATE TABLE subtitle_translation_range_continuities",
+            // v120: managed rewind recognizes the exact v2 view/marker before
+            // removing the empty extension; v111 reconstructs its predecessor.
+            "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2))",
         ];
 
         assert!(

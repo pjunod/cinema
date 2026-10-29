@@ -4,6 +4,22 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Combined-source integration — scoped author audit on 2026-10-29
+
+The repair is combined with main `66a33d723096ee931ce2e05e860f51f8f3671513`.
+Retain its reviewed resource-admission v2 schema and mapping inputs. The
+historical rewind now validates schema 119 with managed v1, or schema 120
+with managed v2, before any mutation; crossed pairs are refused atomically.
+The conformance parent retains the selected `formal_publication` module and
+combines the independently reviewed strict caption/continuity teardown with
+main's exact managed shape/data planner. Relative to this main, `state.rs`
+adds only the test-module declaration; mapped production bodies are unchanged.
+
+Only affected whole-file pins follow the combined source; anchors, models,
+configurations, properties, bounds and historical source receipts retain their
+identities. Independent Codex agent `coverage_review` reviewed the merged source pins, both parents' anchors and the combined ownership census, finding no blockers. That source review ran no builds, tests or TLC. This is a
+source correspondence audit and supplies no new runtime or TLC qualification.
+
 ## Unit-coverage repair — scoped author audit on 2026-10-28
 
 Codex agent `/root/diagnose_core_failures` compared immutable base
