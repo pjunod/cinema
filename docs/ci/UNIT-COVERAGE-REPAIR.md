@@ -127,6 +127,19 @@ revision 2 after restart and retains the SPKI, import, grant and catalogue-epoch
 assertions. One isolated old-source diagnostic reproduced the timeout; fresh
 fixed-source execution remains required before the full workspace suite.
 
+The full `4805cb6cf` run passes 2,032 core and 301 Store tests, then reports
+4,675 daemon passes and one shared-audio fixture failure. Its immediate CPU-zero
+assertion can race the real driver's prepared-permit clone: session End joins
+reader/root cleanup and slot termination joins the registered child, while the
+detached driver still has to observe removed demand. The fixture now uses its
+existing five-second predicate waiter at both family teardown boundaries to
+observe actual CPU release. Exact zero, empty-reader, atomic-refusal and media
+assertions remain; every retained admission binding must also be absent. No
+production admission or cleanup policy changes. One isolated old-source run
+passes, confirming that the failed full run is not a deterministic standalone
+reproduction. Fixed-source serial/concurrent checks and a fresh full run remain
+required; the failed measurement cannot update the badge.
+
 ## Reproducing the measurement
 
 The manual workflow uses `scripts/unit-coverage` on the existing capacity-one
@@ -146,6 +159,16 @@ reviewed source digest matches; any drift selects the full augmented core
 suite. The eight affected integration targets run completely. Optional `--native`
 adds twelve named software-media/storage tests, never hardware qualification.
 No corpus phase stops early based on the measured percentage.
+
+The core execution boundary was re-reviewed for `4805cb6cf` against the prior
+`2b3730f8` pin. Both archive computations cover all 525 inputs and reproduce the
+old digest; 524 inputs and every path/mode are unchanged. Only the ungated
+shared-playlist parser and its ordinary regression differ. Their local parser
+logic has no cluster/Hiqlite feature dependency. The renewed digest retains the
+same affected prefixes and every feature-added test, after complete default
+success and the strict live Cargo feature audit. This metadata review supplies
+no augmented execution evidence; any later guarded-input drift still selects
+the full augmented core suite. Both object manifests remain in the denominator.
 
 Clean-environment probe and desktop-control children deliberately discard the
 profile output environment variable. Postflight preserves their raw profiles
