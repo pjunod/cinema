@@ -59,7 +59,7 @@ internal class SharedSharingManagementClient private constructor(private val aut
         require(next == null || next != after); return ExportPage(rows, next)
     }
     private fun invitation(value: String): String {
-        require(SharedSharingValidation.invitation(value)) { "Paste a valid cinema-share-v1 invitation." }; return value
+        require(SharedSharingValidation.invitation(value)) { "Paste a valid Cinema invitation." }; return value
     }
     suspend fun invite(libraries: List<String>, ttlSeconds: Long = 86400): SharedSharingInvitation {
         SharedSharingValidation.ids(libraries); require(libraries.isNotEmpty() && ttlSeconds in 1..604800)
@@ -67,6 +67,22 @@ internal class SharedSharingManagementClient private constructor(private val aut
             put("library_ids", JsonArray(libraries.map(::JsonPrimitive))); put("ttl_seconds", ttlSeconds)
         })
         return json.decodeFromJsonElement<SharedSharingInvitation>(wire).also { id(it.id); invitation(it.invitation) }
+    }
+    data class NetworkShare(val fqdn: String, val url: String)
+    data class Connection(val shares: List<NetworkShare>, val connected: Boolean)
+    suspend fun connection(value: String, probe: Boolean = false): Connection {
+        val wire = request("sharing/connection", "POST", buildJsonObject { put("invitation", invitation(value)); put("probe", probe) }).jsonObject
+        val shares = wire.getValue("network").jsonArray.map { item ->
+            val row = item.jsonObject
+            val url = row.getValue("invite_url").jsonPrimitive.content
+            require(url.matches(Regex("^https://login\\.tailscale\\.com/admin/invite/[A-Za-z0-9_-]{1,256}$")))
+            NetworkShare(row.getValue("ts_fqdn").jsonPrimitive.content, url)
+        }
+        require(shares.size <= 4 && shares.map { it.fqdn }.toSet().size == shares.size)
+        return Connection(shares, wire.getValue("connected").jsonPrimitive.boolean)
+    }
+    suspend fun authorizeNetwork(token: String) {
+        require(request("sharing/network-authorization", "PUT", buildJsonObject { put("token", token) }).jsonObject.getValue("configured").jsonPrimitive.boolean)
     }
     suspend fun importSource(value: String): SharedSharingImport = decodeImport(request("sharing/imports", "POST", buildJsonObject { put("invitation", invitation(value)) }))
     suspend fun rePair(row: SharedSharingImportSummary, value: String): SharedSharingImport {

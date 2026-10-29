@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-28, plurx has 405 routes declared by the ordinary listener's
+As of 2026-10-28, plurx has 407 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 405 routes across the registered routers.
+plurx has 407 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -4119,7 +4119,9 @@ including errors, carries `Cache-Control: no-store`.
 | GET / PUT | `/api/v1/sharing/settings` | Read or save the sharing enabled choice. Saving either choice succeeds independently of readiness. |
 | GET | `/api/v1/sharing/status` | Read this serving node's timestamped listener, certificate, egress and import observations. Unobserved host Serve and node-key state are `unknown`. |
 | GET / PUT | `/api/v1/sharing/endpoints` | Read or replace approved source endpoints with `expected_revision` CAS. |
-| POST | `/api/v1/sharing/invitations` | Issue an expiring invitation for selected local movie/show libraries. |
+| GET / PUT | `/api/v1/sharing/network-authorization` | Inspect node-local authorization/cleanup facts or seal a verified user-owned Tailscale API key; never returns the key. |
+| POST | `/api/v1/sharing/connection` | Inspect a combined invitation, return bounded Tailscale consent links, or probe pinned reachability with `probe: true`; never accepts provider permissions on behalf of the recipient. |
+| POST | `/api/v1/sharing/invitations` | Issue one expiring Cinema invitation including single-use Tailscale device shares for selected local movie/show libraries. `include_network: false` explicitly issues the legacy format for an existing private connection. |
 | DELETE | `/api/v1/sharing/invitations/{id}` | Cancel the invitation. |
 | GET | `/api/v1/sharing/exports` | List source grants and their pending or active authority. |
 | POST | `/api/v1/sharing/exports/{id}/approve` | Approve the compared pairing code using the expected grant generation. |
