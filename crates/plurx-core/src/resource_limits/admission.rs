@@ -19,14 +19,17 @@ pub struct AdmissionObservation {
 /// failed or uncertain effects. Scratch is available logical filesystem space,
 /// not a physical-device or future-allocation guarantee.
 pub fn snapshot(output_root: &Path) -> AdmissionObservation {
-    let measured_at = Instant::now();
-    let limits = super::snapshot();
+    // CPU/RAM/NOFILE may be cached. Preserve their precise oldest sample time
+    // even though FD/task/filesystem headroom below is sampled for this call.
+    let sample = super::snapshot_with_sample();
+    let measured_at = sample.at;
+    let limits = sample.value;
     #[cfg(not(target_os = "linux"))]
     let _ = output_root;
     #[cfg(target_os = "linux")]
     let (handles, kernel_tasks) = (
         linux_handle_headroom(limits.open_file_ceiling),
-        linux_task_headroom(),
+        linux_task_headroom(sample.view.as_ref()),
     );
     #[cfg(not(target_os = "linux"))]
     let (handles, kernel_tasks) = (
@@ -39,19 +42,36 @@ pub fn snapshot(output_root: &Path) -> AdmissionObservation {
     #[cfg(not(target_os = "linux"))]
     let scratch_bytes = Metric::Unknown(UnknownReason::Unsupported);
 
+    #[cfg(target_os = "linux")]
+    let context_unchanged = sample
+        .view
+        .as_ref()
+        .is_some_and(super::LinuxView::matches_current);
+    #[cfg(not(target_os = "linux"))]
+    let context_unchanged = true;
+    let context_bound = |value| {
+        if context_unchanged {
+            value
+        } else {
+            Metric::Unknown(UnknownReason::IncompleteTree)
+        }
+    };
+
     AdmissionObservation {
         measured_at,
         capacity: ResourceCapacity {
-            cpu_ns_per_second: limits.cpu_ns_per_second,
-            memory_bytes: limits.memory_ceiling_bytes,
-            handles,
+            cpu_ns_per_second: context_bound(limits.cpu_ns_per_second),
+            memory_bytes: context_bound(limits.memory_ceiling_bytes),
+            // Preserve one coherent observation vector. In particular a
+            // changed mount view cannot leave old scratch headroom usable.
+            handles: context_bound(handles),
             // Every root process requires at least one Linux kernel task, so
             // observed task headroom is a conservative process-count ceiling.
-            processes: kernel_tasks,
-            kernel_tasks,
+            processes: context_bound(kernel_tasks),
+            kernel_tasks: context_bound(kernel_tasks),
             hardware_slots: Metric::Unknown(UnknownReason::InsufficientEvidence),
             tuner_slots: Metric::Unknown(UnknownReason::InsufficientEvidence),
-            scratch_bytes,
+            scratch_bytes: context_bound(scratch_bytes),
         },
     }
 }
@@ -90,7 +110,7 @@ fn linux_handle_headroom(ceiling: Metric<u64>) -> Metric<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_task_headroom() -> Metric<u64> {
+fn linux_task_headroom(view: Option<&super::LinuxView>) -> Metric<u64> {
     let Some(global_limit) = read_decimal(Path::new("/proc/sys/kernel/threads-max")) else {
         return Metric::Unknown(UnknownReason::Inaccessible);
     };
@@ -102,111 +122,78 @@ fn linux_task_headroom() -> Metric<u64> {
     };
     let mut available = global_available;
 
-    let Some(cgroups) = super::read_bounded(Path::new("/proc/self/cgroup")) else {
-        return Metric::Unknown(UnknownReason::Inaccessible);
-    };
-    let Some(mounts) = super::read_bounded(Path::new("/proc/self/mountinfo")) else {
-        return Metric::Unknown(UnknownReason::Inaccessible);
-    };
-    let Some((root, leaf)) = super::unified_path(&cgroups, &mounts) else {
+    let Some(view) = view else {
         return Metric::Unknown(UnknownReason::IncompleteTree);
     };
-    let mut current = leaf.as_path();
-    let mut ancestors = 0_u8;
-    loop {
-        ancestors = match ancestors.checked_add(1) {
-            Some(value) if value <= 64 => value,
-            _ => return Metric::Unknown(UnknownReason::IncompleteTree),
-        };
-        let Some(limit_text) = super::read_bounded(&current.join("pids.max")) else {
-            return Metric::Unknown(UnknownReason::Inaccessible);
-        };
-        let Some(current_text) = super::read_bounded(&current.join("pids.current")) else {
-            return Metric::Unknown(UnknownReason::Inaccessible);
-        };
-        let Some(cgroup_current) = parse_decimal(&current_text) else {
-            return Metric::Unknown(UnknownReason::InvalidCounter);
-        };
-        match parse_limit(&limit_text) {
-            Some(Some(limit)) => {
-                let Some(headroom) = limit.checked_sub(cgroup_current) else {
-                    return Metric::Unknown(UnknownReason::InvalidCounter);
-                };
-                available = available.min(headroom);
-            }
-            Some(None) => {}
-            None => return Metric::Unknown(UnknownReason::InvalidCounter),
-        }
-        if current == root {
-            break;
-        }
-        let Some(parent) = current.parent() else {
-            return Metric::Unknown(UnknownReason::IncompleteTree);
-        };
-        current = parent;
+    if !view.matches_current() {
+        return Metric::Unknown(UnknownReason::IncompleteTree);
     }
+    available = match hierarchy_task_headroom(&view.root, &view.leaf, available, |path| {
+        view.native.read_controller(path)
+    }) {
+        Ok(value) => value,
+        Err(reason) => return Metric::Unknown(reason),
+    };
 
-    let uid = current_real_uid();
-    if uid != 0 {
-        match rlimit_nproc_limit() {
-            Some(Some(limit)) => {
-                let Some(uid_tasks) = same_uid_task_count(uid) else {
-                    return Metric::Unknown(UnknownReason::IncompleteTree);
-                };
-                let Some(headroom) = limit.checked_sub(uid_tasks) else {
-                    return Metric::Unknown(UnknownReason::InvalidCounter);
-                };
-                available = available.min(headroom);
-            }
-            Some(None) => {}
-            None => return Metric::Unknown(UnknownReason::Inaccessible),
+    // Namespace UID 0 is not proof of the initial-user NPROC exemption.
+    // A private PID namespace also cannot census all tasks of a real UID.
+    // Kernel loadavg reports global nr_threads, an upper bound on that UID's
+    // tasks. Subtracting it is conservative and never invents spare tasks.
+    match rlimit_nproc_limit() {
+        Some(Some(limit)) => {
+            let Some(headroom) = conservative_nproc_headroom(limit, global_tasks) else {
+                return Metric::Unknown(UnknownReason::IncompleteTree);
+            };
+            available = available.min(headroom);
         }
+        Some(None) => {}
+        None => return Metric::Unknown(UnknownReason::Inaccessible),
+    }
+    if !view.matches_current() {
+        return Metric::Unknown(UnknownReason::IncompleteTree);
     }
     Metric::Known(available)
 }
 
 #[cfg(target_os = "linux")]
-fn current_real_uid() -> u32 {
-    // SAFETY: getuid reads the calling process's real UID and has no pointer arguments.
-    unsafe { libc::getuid() }
+fn hierarchy_task_headroom(
+    root: &Path,
+    leaf: &Path,
+    mut available: u64,
+    mut read: impl FnMut(&Path) -> Option<String>,
+) -> Result<u64, UnknownReason> {
+    leaf.strip_prefix(root)
+        .map_err(|_| UnknownReason::IncompleteTree)?;
+    let mut current = leaf;
+    let mut ancestors = 1_u8;
+    while current != root {
+        ancestors = ancestors
+            .checked_add(1)
+            .filter(|count| *count <= 64)
+            .ok_or(UnknownReason::IncompleteTree)?;
+        let limit = read(&current.join("pids.max")).ok_or(UnknownReason::Inaccessible)?;
+        let used = read(&current.join("pids.current")).ok_or(UnknownReason::Inaccessible)?;
+        let used = parse_decimal(&used).ok_or(UnknownReason::InvalidCounter)?;
+        if let Some(limit) = parse_limit(&limit).ok_or(UnknownReason::InvalidCounter)? {
+            available = available.min(
+                limit
+                    .checked_sub(used)
+                    .ok_or(UnknownReason::InvalidCounter)?,
+            );
+        }
+        current = current.parent().ok_or(UnknownReason::IncompleteTree)?;
+    }
+    Ok(available)
 }
 
 #[cfg(target_os = "linux")]
-fn same_uid_task_count(uid: u32) -> Option<u64> {
-    use std::fs;
-
-    let entries = fs::read_dir("/proc").ok()?;
-    let mut seen = 0_usize;
-    let mut tasks = 0_u64;
-    for entry in entries {
-        let entry = entry.ok()?;
-        seen = seen.checked_add(1)?;
-        if seen > MAX_PROC_ENTRIES {
-            return None;
-        }
-        let name = entry.file_name();
-        if name
-            .to_str()
-            .is_none_or(|value| !value.bytes().all(|b| b.is_ascii_digit()))
-        {
-            continue;
-        }
-        let status = super::read_bounded(&entry.path().join("status"))?;
-        let (mut real_uid, mut thread_count) = (None, None);
-        for line in status.lines() {
-            if let Some(value) = line.strip_prefix("Uid:") {
-                real_uid = value.split_whitespace().next()?.parse::<u32>().ok();
-            } else if let Some(value) = line.strip_prefix("Threads:") {
-                thread_count = Some(parse_decimal(value)?);
-            }
-        }
-        let real_uid = real_uid?;
-        let thread_count = thread_count?;
-        if real_uid == uid {
-            tasks = tasks.checked_add(thread_count)?;
-        }
+fn conservative_nproc_headroom(limit: u64, global_tasks: u64) -> Option<u64> {
+    if global_tasks == 0 {
+        return None;
     }
-    Some(tasks)
+    limit
+        .checked_sub(global_tasks)
+        .filter(|headroom| *headroom > 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -274,5 +261,69 @@ fn filesystem_headroom(path: &Path) -> Metric<u64> {
     {
         Some(bytes) => Metric::Known(bytes),
         None => Metric::Unknown(UnknownReason::InvalidCounter),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod hierarchy_tests {
+    use super::*;
+
+    #[test]
+    fn task_headroom_keeps_parent_limit_and_never_reads_true_root_interfaces() {
+        let values = [
+            ("/h/team/job/pids.max", "100"),
+            ("/h/team/job/pids.current", "5"),
+            ("/h/team/pids.max", "20"),
+            ("/h/team/pids.current", "7"),
+        ];
+        let result =
+            hierarchy_task_headroom(Path::new("/h"), Path::new("/h/team/job"), 1000, |path| {
+                assert_ne!(path.parent(), Some(Path::new("/h")));
+                values
+                    .iter()
+                    .find(|(name, _)| path == Path::new(name))
+                    .map(|(_, value)| (*value).into())
+            });
+        assert_eq!(result, Ok(13));
+    }
+
+    #[test]
+    fn missing_or_malformed_nonroot_task_interface_stays_unknown() {
+        for missing in ["pids.max", "pids.current"] {
+            assert_eq!(
+                hierarchy_task_headroom(Path::new("/h"), Path::new("/h/job"), 1000, |path| {
+                    match path.file_name()?.to_str()? {
+                        name if name == missing => None,
+                        "pids.max" => Some("100".into()),
+                        "pids.current" => Some("5".into()),
+                        _ => None,
+                    }
+                }),
+                Err(UnknownReason::Inaccessible)
+            );
+        }
+        assert_eq!(
+            hierarchy_task_headroom(Path::new("/h"), Path::new("/h/job"), 1000, |path| Some(
+                if path.ends_with("pids.max") {
+                    "invalid"
+                } else {
+                    "5"
+                }
+                .into()
+            )),
+            Err(UnknownReason::InvalidCounter)
+        );
+    }
+
+    #[test]
+    fn finite_nproc_uses_global_task_upper_bound_for_every_uid() {
+        assert_eq!(conservative_nproc_headroom(100, 80), Some(20));
+        assert_eq!(conservative_nproc_headroom(100, 100), None);
+        assert_eq!(conservative_nproc_headroom(100, 101), None);
+        assert_eq!(conservative_nproc_headroom(100, 0), None);
+        // Hidden peer UID tasks cannot turn a partial PID view into headroom.
+        assert!(
+            conservative_nproc_headroom(100, 80).expect("positive conservative headroom") < 100 - 5
+        );
     }
 }
