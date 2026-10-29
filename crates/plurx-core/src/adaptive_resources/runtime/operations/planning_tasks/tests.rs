@@ -545,16 +545,15 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
         EntryFence::Epoch | EntryFence::Drain | EntryFence::Overage
     );
     let held_parent = if both_refused {
-        let mut bundle = preparation.state.lock().await;
-        let role = &mut bundle.roles[0];
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
         let source_member = role.planning_tasks.as_ref().unwrap().source_member;
         Some(
             role.sources
-                .get_mut(&source_member)
+                .get(&source_member)
                 .unwrap()
-                .take_probe_lease()
-                .expect("actual original parent alias")
-                .0,
+                .planning_parent_alias_for_test()
+                .expect("actual original parent alias without consuming collector lease"),
         )
     } else {
         None
@@ -581,7 +580,7 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
         runtime.collect_planning_tasks(&preparation, deadline()),
     ));
     tokio::select! {
-        result = collect.as_mut().expect("same borrowed collector") => panic!("original P skipped registered entry boundary: {}", result.is_ok()),
+        result = collect.as_mut().expect("same borrowed collector") => panic!("original P skipped registered entry boundary; error: {:?}", result.err()),
         () = gate.entered() => {},
         () = tokio::time::sleep(Duration::from_secs(15)) => panic!("real original P registration watchdog"),
     }

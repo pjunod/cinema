@@ -422,6 +422,27 @@ impl SourceCell {
         Ok((lease, length, object_version))
     }
 
+    /// Pin this SAME committed original File for an alias-barrier fixture.
+    /// This does not consume the collector's one-shot lease or open an FD.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn planning_parent_alias_for_test(&self) -> Result<Arc<File>, OperationError> {
+        if !matches!(self.plan, v2::MemberPlan::FixedProbeDiscoverSourceV1 { .. })
+            || !self.observed_committed
+            || self.pending.is_some()
+            || self.spec.is_some()
+            || self.lease_issued
+            || !matches!(self.parent_close, ParentCloseState::NotStarted)
+        {
+            return Err(OperationError::State);
+        }
+        let file = self
+            .result
+            .as_ref()
+            .and_then(|result| result.file.as_ref())
+            .ok_or(OperationError::State)?;
+        Ok(Arc::clone(file))
+    }
+
     /// Await only the original source-open worker if it was registered. The
     /// actual file/observation remain cached; this does not launch or observe it.
     pub(super) async fn join_registered(&mut self) -> Result<(), OperationError> {
