@@ -330,7 +330,9 @@ function main() {
       else if (value && typeof value === "object") visit(value, file);
     }
   }
-  for (const row of graph.rows) if (row.path !== "hls.min.js") visit(row.program, row.path);
+  // These pinned browser bundles include UMD/CommonJS compatibility branches.
+  // Authored global scripts still cannot export a CommonJS module.
+  for (const row of graph.rows) if (!["hls.min.js", "vendor/jsQR.js"].includes(row.path)) visit(row.program, row.path);
   jsconfigShape(shell);
   const contract = fixtureShape();
   domShape(shell, contract);
