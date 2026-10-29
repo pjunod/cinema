@@ -113,10 +113,6 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- Live TV keeps playing while the HTTP output writer uploads a segment or
-  waits to publish its next playlist; valid temporary upload files no longer
-  terminate the stream a few seconds after startup.
-
 - Fresh macOS media builds retain caller macro paths and expose Homebrew
   aclocal macros to the source-built Automake tools used by libass.
 
@@ -126,6 +122,10 @@ bump may break compatibility and a **patch** bump never does.
 
 - Fresh macOS source installs build Automake without creating a circular
   GNUmakefile symlink when the temporary directory uses a symlinked path.
+
+- Live TV keeps playing while the HTTP output writer uploads a segment or
+  waits to publish its next playlist; valid temporary upload files no longer
+  terminate the stream a few seconds after startup.
 
 - Restrict the Linux external player preference to Dolby Vision files on Linux;
   other formats and operating systems retain web playback, including mixed-version titles.
