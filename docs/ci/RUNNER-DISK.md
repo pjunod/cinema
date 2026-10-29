@@ -9,51 +9,64 @@ deletes them, and what to do when a runner fills anyway*.
 Read this before adding a cache to any workflow, and before believing a
 `ld terminated with signal 7 [Bus error]` in a CI log.
 
-## Paged proof route — provisioning required
+## Paged proof route — observed active
 
-The schema 6 session workflow reserves `async-proof-owned` for the logical
+The schema 6 session workflow selects `async-proof-owned` on the logical
 `gha-lab5-general-03` slot in `validation/runner-fleet.toml`. Both producer modes
-require that fixed label plus the existing Linux/X64 lab/general/high-cpu labels,
-and bind `/srv/plurx-async-proof:/srv/plurx-async-proof` into the job container.
-The route is currently **provisioning_required**. Neither the workflow nor the
-planned fleet record establishes an installed label, durable mount or capacity.
-The ordinary roster-satisfiability check remains unchanged and will reject this
-pending selection until activation is recorded. The controller also refuses
-dispatch while the source route remains `provisioning_required`.
+retain the fixed Linux/X64 lab/general/high-cpu selectors and bind
+`/srv/plurx-async-proof:/srv/plurx-async-proof` into the job container.
 
-After the corrected source review, the operator must:
+Target-only provisioning was observed on **2026-10-29**, after source approval.
+The complete authenticated inventory contained 25 of 25 visible registrations and
+exactly one dedicated-label carrier. The existing registration and eight original
+labels were preserved. Actual ID/UUID/name, configuration rollback hashes,
+container-visible device and the private lease remain in operator evidence;
+neutral roster names are logical placements, not substitutions for actual names.
+The activation metadata still requires its narrow source review before probes.
+No capability trio, proof admission or qualification is established here.
 
-1. Use the private provisioning authority to identify the physical owner of that
-   neutral slot. Provision the dedicated label on only its persistent repository-
-   eligible runner. Do not infer its actual name from the neutral roster name.
-2. Make the durable mount available through the runner's container volume policy
-   and the exact workflow bind. Create a separate private child for `storage.root`
-   and its immediate lease file. Observe the effective UID inside the job
-   container, including any user-namespace mapping, and assign only that child
-   and lease to that owner. Do not recursively change unrelated data. Record the
-   actual container-visible device, lease hash and expiry; the mount itself is
-   not the owned child.
-3. Observe the complete authenticated repository runner inventory using
-   `/actions/runners?visible=true`. Preserve the actual ID, UUID and name in the
-   private immutable registration, separately from its source logical slot.
-   Every dispatch re-enumerates all visible registrations with stable total-count
-   pagination. Exactly one may carry the dedicated label, including offline
-   carriers in that count. It must match those identities, be online and
-   non-ephemeral. Missing API access, incomplete inventory or a second carrier
-   refuses dispatch; no saved inventory or operator uniqueness flag substitutes.
-4. Update only the observed active roster labels and route state to `active`,
-   rebind the exact source identity, and obtain the narrow activation-delta
-   review before qualification. This is source metadata review, not proof credit.
-5. Only after approval, run the actual capability trio and resource calibration
-   on that owner, followed by a resumed unit using the same durable lease.
-   Runtime still checks the actual name/OS/architecture and container-visible
-   mount/device/effective ownership/private lease. A successful label lookup
-   alone supplies neither admission nor an authenticated Init or checkpoint.
+| Observed target-slot policy | Value |
+|---|---|
+| Capacity | 1 job |
+| Container memory | 20 GiB (`21474836480` bytes) |
+| Container memory+swap | 20 GiB; observed `memory.swap.max=0` |
+| CPU | 4; observed `cpu.max=400000 100000` |
+| Container volume allowance | Only literal `/srv/plurx-async-proof` |
+| Future graceful runner shutdown | Explicit `runner.shutdown_timeout=3h` |
+| Target systemd stop | `KillMode=mixed`, `TimeoutStopSec=3h5min` |
 
-The private registration's `route` object has exactly `logical_slot`,
+An owned `ubuntu:24.04` observation used the actual daemon, configured resource
+options, user namespace and sole fixed bind, without source, credentials or a
+Docker socket inside it. It observed UID/GID 0 mapping to host 0 before the separate
+owned child was assigned `0700` and its immediate lease `0600`. The bind supplied a
+persistent mount inside the container on the existing durable filesystem; no
+partition or unrelated ownership change was made. The observation container was
+removed. The target daemon was started once with its preserved registration.
+
+The policy affects future containers on this slot, including ordinary jobs;
+other runners, existing jobs and host limits were unchanged. Provisioning used
+a fresh host availability prerequisite of at least 22 GiB. That observation is
+neither reserved capacity nor a promise that 20 GiB fits the complete proof.
+Working/RSS allowances, indivisible records, actual runtime overhead and total
+storage still require fresh source-bound measurement and immutable admission.
+Insufficient fit remains unadmitted/resource-blocked; caps never rise automatically.
+
+Before each dispatch, the controller completely enumerates the authenticated
+repository `/actions/runners?visible=true` inventory with stable total-count
+pagination. Exactly one registration may carry the dedicated label, counting
+offline carriers too. It must match the immutable actual ID/UUID/name, be online
+and non-ephemeral. Runtime independently checks actual name/OS/architecture and
+container-visible mount/device/effective ownership/private lease. No saved
+inventory, uniqueness flag or successful label lookup substitutes for those checks.
+
+The private registration's `route` object remains exactly `logical_slot`,
 `contract_sha256` (the whole fleet file), `runner_id` and `runner_uuid`.
-`runner.name` remains the actual API/runtime name; no hostname or path dispatch
-selector is accepted. Full source closure includes the fleet and workflow bytes.
+Full source closure includes the fleet and workflow bytes. Preserve the exact
+registration and same-host restrictive rollback for future maintenance; do not
+re-register or copy credentials. The bootstrap used an explicitly accepted
+observed-idle maintenance race after label withdrawal, not an atomic drain fence.
+The future graceful settings do not retroactively erase that race.
+
 See [the delivery ledger](../cluster/PAGED-ASYNC-PROOF-IMPLEMENTATION.md) for
 qualification status and [the protocol](../../verification/async-driver-refinement/PAGED-CONTRACT.md)
 for immutable session and resource boundaries.

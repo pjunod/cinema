@@ -144,7 +144,7 @@ name = "gha-lab5-general-03"
 host = "lab5"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04", "async-proof-owned"]
 
 [[runners]]
 name = "gha-lab5-general-04"
@@ -280,11 +280,11 @@ os = "Linux"
 arch = "ARM64"
 labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "primary"]
 
-# Reserved routing contract, NOT a claim that this label or bind is installed.
-# Activate through the runner provisioning authority only after source review;
-# the controller then checks all visible eligible scheduler registrations live.
+# Observed active routing contract (2026-10-29): one eligible owner, exact bind.
+# Private provisioning evidence retains actual identity/device/lease observations;
+# every dispatch still checks all visible scheduler registrations live.
 [async_proof_route]
-state = "provisioning_required"
+state = "active"
 logical_slot = "gha-lab5-general-03"
 labels = ["self-hosted", "Linux", "X64", "lab", "general", "high-cpu", "async-proof-owned"]
 mount_root = "/srv/plurx-async-proof"
