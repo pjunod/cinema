@@ -72,6 +72,16 @@ ffmpeg *next to* plurx is aggregation and leaves plurx's license alone;
 shipping it *inside* plurx's address space would not, which is why the
 subprocess boundary is load-bearing and should stay that way.
 
+**macOS native Vulkan media builds.** libplacebo uses the header-only
+[fast_float](https://github.com/fastfloat/fast_float) library, pinned to
+`97b54ca9e75f5303507699d27c6b4f4efe4641a1`, for floating-point parsing on older
+macOS deployment targets. Copyright (c) 2021 The fast_float authors. plurx
+uses its MIT license option; the [full text](licenses/fast_float-MIT.txt)
+retains that notice. The exact source archive, including its upstream license
+texts, travels with the media package's native Vulkan source offer. These
+headers are compiled into libplacebo inside the FFmpeg subprocess, separately
+from the Rust dependency graph.
+
 ---
 
 ## 2. Bundled in the web UI

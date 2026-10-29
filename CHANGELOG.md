@@ -113,6 +113,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
+  headers, allowing floating-point parsing with the macOS 12 deployment target.
+
 - Fresh macOS media builds retain caller macro paths and expose Homebrew
   aclocal macros to the source-built Automake tools used by libass.
 
