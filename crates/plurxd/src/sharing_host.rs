@@ -9,10 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
-use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 const LIMIT: usize = 256 * 1024;
@@ -229,47 +227,38 @@ fn tailscale_program() -> Result<PathBuf, SetupState> {
     Err(SetupState::TailscaleMissing)
 }
 async fn command(program: &Path, args: &[&str]) -> Result<Vec<u8>, SetupState> {
+    command_with_timeout(program, args, Duration::from_secs(8)).await
+}
+
+async fn command_with_timeout(
+    program: &Path,
+    args: &[&str],
+    deadline: Duration,
+) -> Result<Vec<u8>, SetupState> {
     let mut process = tokio::process::Command::new(program);
-    process
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let (mut child, _job) = crate::process_control::spawn_job_owned(
+    process.args(args);
+    // Host tooling keeps its existing user/IPC environment. The shared owner
+    // isolates its process group and reaps it before timeout/cancellation returns.
+    let output = plurx_core::process::bounded::output_command_inherited_env(
         &mut process,
+        deadline,
+        LIMIT + 1,
         crate::process_control::ChildWork::background("private sharing host setup"),
     )
-    .map_err(|_| SetupState::PermissionRequired)?;
-    let result = tokio::time::timeout(Duration::from_secs(8), async {
-        let mut bytes = Vec::new();
-        child
-            .stdout
-            .take()
-            .ok_or(SetupState::Unavailable)?
-            .take((LIMIT + 1) as u64)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|_| SetupState::Unavailable)?;
-        if bytes.len() > LIMIT {
-            return Err(SetupState::Unavailable);
-        }
-        if !child
-            .wait()
-            .await
-            .map_err(|_| SetupState::Unavailable)?
-            .success()
-        {
-            return Err(SetupState::PermissionRequired);
-        }
-        Ok(bytes)
-    })
     .await
-    .map_err(|_| SetupState::Unavailable)?;
-    if result.is_err() {
-        let _ = child.kill().await;
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound => {
+            SetupState::PermissionRequired
+        }
+        _ => SetupState::Unavailable,
+    })?;
+    if output.stdout.len() > LIMIT {
+        return Err(SetupState::Unavailable);
     }
-    result
+    if !output.status.success() {
+        return Err(SetupState::PermissionRequired);
+    }
+    Ok(output.stdout)
 }
 async fn command_json(program: &Path, args: &[&str]) -> Result<serde_json::Value, SetupState> {
     serde_json::from_slice(&command(program, args).await?).map_err(|_| SetupState::Unavailable)
@@ -565,10 +554,13 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
             } else if enabled && state.sharing.network.bind.to_string() != TARGET {
                 Err(SetupState::DeploymentRequired)
             } else {
-                tokio::select! {
-                    () = shutdown.cancelled() => return,
-                    result = native_setup(&directory, enabled, &state, &mut discovered) => result,
-                }
+                // Signal the child owner and await settlement; dropping this
+                // future on shutdown would skip its confirmed reap path.
+                plurx_core::process::bounded::cancellable(
+                    shutdown.clone(),
+                    native_setup(&directory, enabled, &state, &mut discovered),
+                )
+                .await
             };
             let (setup, address) = match result {
                 Ok(Some(address)) if enabled => match publish_endpoint(&state, &address).await {
@@ -592,6 +584,115 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    fn assert_reaped(pid_file: &std::path::Path) {
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .expect("child pid")
+            .trim()
+            .parse()
+            .expect("pid");
+        assert!(pid > 1);
+        // SAFETY: signal zero observes only the exact fixture PID.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "child still exists after settlement"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_command_timeout_reaps_before_returning() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let pid_file = directory.path().join("child.pid");
+        let result = super::command_with_timeout(
+            std::path::Path::new("/bin/sh"),
+            &[
+                "-c",
+                "echo $$ > \"$1\"; exec /bin/sleep 300",
+                "host-fixture",
+                pid_file.to_str().expect("path"),
+            ],
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(result, Err(super::SetupState::Unavailable));
+        assert_reaped(&pid_file);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_command_cancellation_reaps_before_returning() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let pid_file = directory.path().join("child.pid");
+        let child_path = pid_file.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            plurx_core::process::bounded::cancellable(
+                child_cancel,
+                super::command(
+                    std::path::Path::new("/bin/sh"),
+                    &[
+                        "-c",
+                        "echo $$ > \"$1\"; exec /bin/sleep 300",
+                        "host-fixture",
+                        child_path.to_str().expect("path"),
+                    ],
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if tokio::fs::read_to_string(&pid_file)
+                    .await
+                    .ok()
+                    .and_then(|text| text.trim().parse::<i32>().ok())
+                    .is_some_and(|pid| pid > 1)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child announced itself");
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("settled cancellation")
+            .expect("joined fixture");
+        assert_eq!(result, Err(super::SetupState::Unavailable));
+        assert_reaped(&pid_file);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_command_preserves_status_and_output_bound() {
+        let shell = std::path::Path::new("/bin/sh");
+        assert_eq!(
+            super::command(shell, &["-c", "printf ready"]).await,
+            Ok(b"ready".to_vec())
+        );
+        assert_eq!(
+            super::command(shell, &["-c", "exit 7"]).await,
+            Err(super::SetupState::PermissionRequired)
+        );
+        assert_eq!(
+            super::command(shell, &["-c", "yes x | head -c 262145"]).await,
+            Err(super::SetupState::Unavailable)
+        );
+        assert_eq!(
+            super::command(shell, &["-c", "yes x | head -c 262145; exit 7"]).await,
+            Err(super::SetupState::Unavailable)
+        );
+    }
+
     use super::*;
     use serde_json::json;
     #[cfg(unix)]

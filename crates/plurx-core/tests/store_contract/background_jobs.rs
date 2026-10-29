@@ -6256,3 +6256,120 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
     })
     .await;
 }
+
+#[tokio::test]
+async fn text_caption_dispatch_refuses_unowned_work_and_reads_absent_state() {
+    use plurx_core::store::shared_caption_read::{
+        GrantCaptionPrincipal, GrantCaptionQuery, GrantCaptionRead,
+    };
+    use plurx_core::store::subtitle_text_translation::{PublishTextSlice, TextTranslationCue};
+    for_each_backend(|store, backend| async move {
+        let source = JobPayload::SubtitleTextTranslate {
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 20,
+            subtitle_index: 0,
+            input_sha256: "a".repeat(64),
+            source_language: "de".into(),
+            target_language: "en".into(),
+            engine_sha256: "e".repeat(64),
+            model_id: "opus-mt-mul-en".into(),
+            model_sha256: "b".repeat(64),
+            adapter_contract: "candle-marian-0.11-v1".into(),
+            target_node_id: "worker".into(),
+            admin_user_id: 1,
+        };
+        let publication = PublishTextSlice {
+            token: JobToken {
+                job_id: uuid::Uuid::new_v4().to_string(),
+                node_id: "worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                fence: 1,
+                revision: 1,
+                lease_expires_ms: 2_000,
+            },
+            source: source.clone(),
+            cues: vec![TextTranslationCue {
+                cue_index: 0,
+                input_sha256: "c".repeat(64),
+                id: "cue-0".into(),
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "Translated caption".into(),
+            }],
+            now_ms: 1_000,
+        };
+        assert!(
+            !store
+                .publish_text_translation_slice(publication.clone())
+                .await
+                .expect("unclaimed publication verdict"),
+            "{backend}: no claimed authority"
+        );
+        let mut invalid = publication;
+        invalid.token.fence = 0;
+        assert!(
+            store.publish_text_translation_slice(invalid).await.is_err(),
+            "{backend}: invalid fence refused"
+        );
+        assert!(
+            store
+                .read_text_translation_cues(source)
+                .await
+                .expect("absent text cues")
+                .is_empty(),
+            "{backend}: refused publication created no output"
+        );
+        assert!(
+            store
+                .read_text_translation_cues(JobPayload::MetadataRefresh {
+                    library_id: 1,
+                    generation: uuid::Uuid::new_v4().to_string()
+                })
+                .await
+                .is_err(),
+            "{backend}: unsupported source refused"
+        );
+        let request_id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            store
+                .text_translation_request_receipt(1, &request_id, &"a".repeat(64))
+                .await
+                .expect("absent receipt")
+                .is_none(),
+            "{backend}: no invented receipt"
+        );
+        assert!(
+            store
+                .text_translation_request_receipt(0, &request_id, &"a".repeat(64))
+                .await
+                .is_err(),
+            "{backend}: invalid receipt principal refused"
+        );
+        let read = GrantCaptionRead {
+            principal: GrantCaptionPrincipal {
+                grant_id: uuid::Uuid::new_v4().to_string(),
+                binding_sha256: "f".repeat(64),
+                file_id: 1,
+            },
+            now_ms: 1_000,
+            query: GrantCaptionQuery::Assets { after: None },
+        };
+        assert!(
+            store
+                .read_shared_captions(read.clone())
+                .await
+                .expect("absent shared captions")
+                .is_empty(),
+            "{backend}: no invented asset"
+        );
+        let mut invalid = read;
+        invalid.principal.grant_id = "invalid".into();
+        assert!(
+            store.read_shared_captions(invalid).await.is_err(),
+            "{backend}: invalid grant refused"
+        );
+    })
+    .await;
+}

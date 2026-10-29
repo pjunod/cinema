@@ -71,8 +71,7 @@ async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemap
         .await
         .expect("worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
-    drop(worker_listener); // The startup owner binds this exact reserved origin.
-    let worker = real_source_start_fixture_at(worker_address, fixture_body_budget).await;
+    let worker = real_source_start_fixture_at(worker_listener, fixture_body_budget).await;
     // Exercise both actual node and sharing routes with the strict sharing
     // fallback once; the ordinary web-shell fallback is irrelevant here.
     let worker_router = super::super::router((*worker.state).clone())
@@ -112,8 +111,10 @@ async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemap
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
-    drop(ingress_listener);
-    let observation = Arc::new(crate::StartupObservationHttp::new(ingress_address));
+    let observation = Arc::new(
+        crate::StartupObservationHttp::from_listener(ingress_listener)
+            .expect("owned ingress observation listener"),
+    );
     let mut selected = Box::pin(select_daemon_store_observing(
         &config,
         Some(observation.as_ref()),

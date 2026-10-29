@@ -1,6 +1,14 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1331: stop releases the captured HLS session through its configured owner.
+[[fixes]]
+id = "apple.stop-captured-hls-session-owner"
+commits = ["7acfa41eb3a172735b5dc71c7df5a7672a0eba46"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = 'Task { if let model { await releaseHlsSession(model, sessionId) } }'
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testStopReleasesTheAttachedSessionThroughItsConfiguredOwnerExactlyOnce"
 # PR #1332: native journey harness anchors; execution remains in separate receipts.
 [[fixes]]
 id = "apple.tv-navigation-success-capture-idle-budget"

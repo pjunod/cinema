@@ -510,18 +510,28 @@ pub(crate) async fn issue(state: &AppState, invite: Invitation) -> Result<Secret
                     }
                 }
             }
-            let _ = state.store.cancel_share_invitation(invite.id).await;
-            let result = cleanup(&state).await;
-            *state
-                .sharing
-                .network_invite_error
-                .lock()
-                .expect("network cleanup observation") = result.err();
+            observe_failed_issue_cleanup(&state, invite.id).await;
         }
     });
     receive
         .await
         .map_err(|_| "sharing_network_outcome_unknown")?
+}
+
+async fn observe_failed_issue_cleanup(state: &AppState, invitation: Uuid) {
+    let cancellation = state
+        .store
+        .cancel_share_invitation(invitation)
+        .await
+        .map_err(|_| "sharing_authority_unavailable");
+    // Always attempt cleanup. A failed issue may have no saved job, so an
+    // empty successful sweep must not hide its failed authority cancellation.
+    let cleanup = cleanup(state).await;
+    *state
+        .sharing
+        .network_invite_error
+        .lock()
+        .expect("network cleanup observation") = cancellation.and(cleanup).err();
 }
 
 fn abandon_file(path: &Path) -> Result<()> {
@@ -682,6 +692,85 @@ mod tests {
 #[cfg(test)]
 mod abandonment_test {
     use super::*;
+    #[tokio::test]
+    async fn failed_issue_reports_cancellation_failure_and_preserves_cleanup_intent() {
+        use std::sync::Arc;
+        let root = tempfile::tempdir().expect("owned failed issue fixture");
+        let database = root.path().join("store.sqlite");
+        let store = plurx_core::store::SqliteStore::open(&database).expect("fixture store");
+        let dirs = crate::state::Dirs {
+            artwork: root.path().join("artwork"),
+            transcode: root.path().join("transcode"),
+            cache: root.path().join("cache"),
+            subs: root.path().join("subs"),
+            runtime_cache: root.path().join("runtime"),
+            renditions: root.path().join("renditions"),
+        };
+        let mut state = AppState::new(
+            "test".into(),
+            Arc::new(store),
+            dirs,
+            "test-node".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        state.sharing = Arc::new(crate::sharing::SharingManager::new(
+            Arc::clone(&state.sharing.key),
+            root.path().join("sharing-tls"),
+            Default::default(),
+        ));
+        assert!(directory(&state)
+            .expect("owned journal directory")
+            .starts_with(root.path()));
+        let connection = rusqlite::Connection::open(&database).expect("owned database fault");
+        connection
+            .execute_batch("DROP TABLE sharing_invitations;")
+            .expect("inject cancellation storage failure");
+        let invitation = Uuid::new_v4();
+        assert!(jobs(&state)
+            .expect("no job saved before failed issuance")
+            .is_empty());
+        observe_failed_issue_cleanup(&state, invitation).await;
+        assert_eq!(
+            *state
+                .sharing
+                .network_invite_error
+                .lock()
+                .expect("failure observation"),
+            Some("sharing_authority_unavailable")
+        );
+        let job = Job {
+            invitation,
+            created_at_ms: 1,
+            completed: false,
+            cleanup: false,
+            authorization: "synthetic sealed credential".into(),
+            attempting: None,
+            shares: Vec::new(),
+        };
+        save(&state, &job).expect("owned cleanup journal");
+        observe_failed_issue_cleanup(&state, invitation).await;
+        let recovered: Job = serde_json::from_value(
+            sharing_host::read_json(&job_path(&state, invitation).expect("job path"))
+                .expect("retained journal"),
+        )
+        .expect("retained job");
+        assert!(
+            recovered.cleanup,
+            "cleanup is attempted despite the first cancellation failure"
+        );
+        assert_eq!(recovered.authorization, job.authorization);
+        assert_eq!(
+            *state
+                .sharing
+                .network_invite_error
+                .lock()
+                .expect("retained failure"),
+            Some("sharing_authority_unavailable")
+        );
+    }
+
     #[test]
     fn abandoned_completed_network_job_keeps_durable_cleanup_intent() {
         let root = tempfile::tempdir().expect("network journal directory");

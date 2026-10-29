@@ -139,3 +139,5 @@ Apple growing playlist attachment: [preparation and failover correction](914-gro
 Credential sign-in: [Keep the report action off credential sign-in screens](1321-sign-in-report-button.md).
 
 [Progressive caption recovery](1329-progressive-caption-recovery.md) — stopped-operation discovery, explicit Resume and current-range failures.
+
+[Captured session release](1331-captured-session-release.md) — Stop releases its attached HLS session through the configured owner.

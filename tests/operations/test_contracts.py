@@ -2403,6 +2403,18 @@ assert.equal(context.ACT_TIMER, null);
                                             tv_adopted=False))
                     self.assertFalse(enabled(tv_artifact_guard, apple=True, desktop=False, retained=False,
                                              tv_adopted=True))
+                    # Reauthentication validates retained originals immediately
+                    # before pending TV cases run; it executes no mobile tests.
+                    reauthentication_name = "Reauthenticate original native cases before executing the pending selection"
+                    reauthentication = steps[reauthentication_name]
+                    self.assertEqual(workflow_step_scalar(reauthentication, "run"),
+                                     "python3 -m validation.native_receipts --verify-tv-plan")
+                    self.assertIn("GITHUB_TOKEN: ${{ github.token }}", reauthentication)
+                    step_order = list(steps)
+                    self.assertLess(step_order.index("Compile iOS and tvOS without running simulator tests"),
+                                    step_order.index(reauthentication_name))
+                    self.assertLess(step_order.index(reauthentication_name),
+                                    step_order.index("Require native TV navigation journeys"))
                 self.assertNotIn("xcodegen", steps["Verify the pinned Apple toolchain"])
                 for name, step in steps.items():
                     if path.endswith("main-fast-lane.yml") and name in {
@@ -2412,6 +2424,7 @@ assert.equal(context.ACT_TIMER, null);
                         continue
                     if path.endswith("main-fast-lane.yml") and name in {
                         "Compile iOS and tvOS without running simulator tests",
+                        "Reauthenticate original native cases before executing the pending selection",
                         "Require native TV navigation journeys",
                         "Preserve TV navigation evidence including failures",
                     }:

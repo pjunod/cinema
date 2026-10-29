@@ -5654,28 +5654,31 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
 
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("learner membership data root")?;
-    let (mut cluster, specs, cluster_root) = with_port_retry(|attempt| {
-        let executable = executable.clone();
-        let attempt_root = root.path().join(format!("attempt-{attempt}"));
-        async move {
-            // Five addresses, three processes: both learner port sets are
-            // allocated with the voters so their specs stay stable, and each
-            // process starts only after the cluster has admitted it.
-            let (listeners, all_specs) = allocate_nodes(5)?.into_inner();
-            let cluster = ClusterProcesses::start_with_pre_learner_heartbeat(
-                &executable,
-                &attempt_root,
-                PortReservation {
-                    listeners,
-                    specs: all_specs[..3].to_vec(),
-                },
-                OLD_BINARY_VOTER,
-            )
-            .await?;
-            Ok((cluster, all_specs, attempt_root))
-        }
-    })
-    .await?;
+    let (mut cluster, specs, cluster_root, learner_ports, promoted_ports) =
+        with_port_retry(|attempt| {
+            let executable = executable.clone();
+            let attempt_root = root.path().join(format!("attempt-{attempt}"));
+            async move {
+                // Five addresses, three processes: both learner port sets are
+                // allocated with the voters so their specs stay stable, and each
+                // process starts only after the cluster has admitted it.
+                let LearnerMembershipPorts {
+                    voters,
+                    learner,
+                    promoted,
+                    specs,
+                } = allocate_learner_membership_ports()?;
+                let cluster = ClusterProcesses::start_with_pre_learner_heartbeat(
+                    &executable,
+                    &attempt_root,
+                    voters,
+                    OLD_BINARY_VOTER,
+                )
+                .await?;
+                Ok((cluster, specs, attempt_root, learner, promoted))
+            }
+        })
+        .await?;
     cluster.request(1, Request::Bootstrap).await?.require_ok()?;
     for node_id in 2..=3 {
         cluster
@@ -5792,11 +5795,14 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .require_ok()?;
 
     // A real fourth process, started with Hiqlite's `learner_only` hint set
-    // from its admitted role — the same thing the daemon does.
+    // from its admitted role — the same thing the daemon does. Node 5 stays
+    // reserved and is not advertised to this learner before it can serve.
+    let learner_specs = specs[..4].to_vec();
+    drop(learner_ports);
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(LEARNER, cluster_root.clone(), specs.clone()).as_learner(),
+            NodeLaunch::voter(LEARNER, cluster_root.clone(), learner_specs.clone()).as_learner(),
         )
         .await?;
     cluster
@@ -5972,7 +5978,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(LEARNER, cluster_root.clone(), specs.clone()).as_learner(),
+            NodeLaunch::voter(LEARNER, cluster_root.clone(), learner_specs.clone()).as_learner(),
         )
         .await?;
     // Watch target-local Raft progress while SQLite is restoring. Querying the
@@ -6389,6 +6395,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         )
         .await?
         .require_ok()?;
+    drop(promoted_ports);
     cluster
         .spawn_node(
             &executable,
@@ -13487,6 +13494,34 @@ impl PortReservation {
     pub fn into_inner(self) -> (Vec<TcpListener>, Vec<NodeSpec>) {
         (self.listeners, self.specs)
     }
+}
+
+struct LearnerMembershipPorts {
+    voters: PortReservation,
+    learner: PortReservation,
+    promoted: PortReservation,
+    specs: Vec<NodeSpec>,
+}
+
+fn allocate_learner_membership_ports() -> Result<LearnerMembershipPorts> {
+    let (mut listeners, specs) = allocate_nodes(5)?.into_inner();
+    let promoted = listeners.split_off(8);
+    let learner = listeners.split_off(6);
+    Ok(LearnerMembershipPorts {
+        voters: PortReservation {
+            listeners,
+            specs: specs[..3].to_vec(),
+        },
+        learner: PortReservation {
+            listeners: learner,
+            specs: specs[3..4].to_vec(),
+        },
+        promoted: PortReservation {
+            listeners: promoted,
+            specs: specs[4..].to_vec(),
+        },
+        specs,
+    })
 }
 
 /// Stable protocol identities for harness voters; paths and Raft IDs stay numeric.

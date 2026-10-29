@@ -796,6 +796,37 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         )
     }
 
+    func testStopReleasesTheAttachedSessionThroughItsConfiguredOwnerExactlyOnce() async throws {
+        let model = AppModel()
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        var released: [String] = []
+        creates.answers = [.success(try hlsStart("stopped-owned-session"))]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            releaseHlsSession: { owner, sessionId in
+                XCTAssertTrue(owner === model)
+                released.append(sessionId)
+            },
+            prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("owned HLS item attached") { controller.player.currentItem != nil }
+        controller.stop()
+        try await waitUntil("captured session released through configured owner") { released == ["stopped-owned-session"] }
+        controller.stop()
+        await Task.yield()
+        XCTAssertEqual(released, ["stopped-owned-session"])
+        XCTAssertNil(controller.player.currentItem)
+    }
+
     /// The ladder, through the shipped `open()`: the same identity on every
     /// rung, the review's three delays, and the prompt when it is spent.
     func testTheCreateLadderReplaysOneIdentityAndThenRaisesExhausted() async throws {
@@ -816,12 +847,16 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         try await waitUntil("initial decision") { decisions.requests.count == 1 }
         decisions.resolve(0, with: .success((try coldDecision(), caps)))
         try await waitUntil("the first attempt") { creates.attempts.count == 1 }
+        try await waitUntil("one absolute deadline is armed") { waits.waits.contains { $0.ms == PlaybackCreateRetry.deadlineMs } }
         for (rung, delay) in [1_000, 2_000, 4_000].enumerated() {
-            try await waitUntil("the backoff for rung \(rung)") { waits.waits.count == rung + 2 }
-            XCTAssertEqual(waits.waits[rung + 1].ms, delay, "rung \(rung) of the ladder")
-            waits.fire(rung + 1)
+            try await waitUntil("the backoff for rung \(rung)") { waits.waits.contains { $0.ms == delay && $0.continuation != nil } }
+            let index = try XCTUnwrap(waits.waits.firstIndex { $0.ms == delay && $0.continuation != nil })
+            XCTAssertEqual(waits.waits[index].ms, delay, "rung \(rung) of the ladder")
+            waits.fire(index)
             try await waitUntil("attempt \(rung + 2)") { creates.attempts.count == rung + 2 }
         }
+        XCTAssertEqual(waits.waits.filter { $0.ms == PlaybackCreateRetry.deadlineMs }.count, 1)
+        XCTAssertEqual(waits.waits.filter { $0.ms != PlaybackCreateRetry.deadlineMs }.map(\.ms), [1_000, 2_000, 4_000])
         try await waitUntil("the ladder is spent") { controller.surface.surface.cls == .exhausted }
         XCTAssertEqual(creates.attempts.count, 4, "three retries, and then the owner gives up")
         let identities = Set(creates.attempts.compactMap { $0.body.requestId })

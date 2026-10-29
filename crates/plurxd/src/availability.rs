@@ -703,8 +703,30 @@ mod tests {
             .split_once("\"/files/{id}/decision\",")
             .expect("playback decision route")
             .1;
-        assert!(decision_route.contains("get(stream::decision)"));
-        assert!(decision_route.contains(".post(stream::decision_post)"));
+        let decision_route = decision_route.split_once(".route(").expect("next route").0;
+        assert!(decision_route.contains("get(playback_handoffs::scoped_decision)"));
+        assert!(decision_route.contains(".post(playback_handoffs::scoped_decision_post)"));
+        let wrappers = include_str!("http/playback_handoffs.rs");
+        for (handler, delegation) in [
+            ("pub async fn scoped_decision(", "super::stream::decision("),
+            (
+                "pub async fn scoped_decision_post(",
+                "super::stream::decision_post(",
+            ),
+        ] {
+            let body = wrappers
+                .split_once(handler)
+                .expect("scoped decision wrapper")
+                .1
+                .split_once("\n}\n")
+                .expect("wrapper body")
+                .0;
+            assert!(body.contains("principal.require_file(id)?;"));
+            assert!(
+                body.contains(delegation),
+                "the scoped wrapper keeps the fresh-read handler"
+            );
+        }
 
         let source = include_str!("http/stream.rs");
         let start = source
