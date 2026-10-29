@@ -2445,7 +2445,7 @@ fn real_source_start_fixture_at(
     ))
 }
 #[cfg(test)]
-fn source_http_fixture_store(
+pub(crate) fn source_http_fixture_store(
     config: plurx_core::config::Config,
     startup_clock: Option<std::sync::Arc<crate::StartupObservationHttp>>,
 ) -> std::pin::Pin<

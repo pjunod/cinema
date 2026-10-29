@@ -174,13 +174,22 @@ async fn actual_open_timeout_retains_original_work_and_unknown_after_worker_exit
         .await
         .expect("same native job released")
         .expect("original return witness");
+    // Weak exhaustion precedes FragmentAdmission field destruction. Observe
+    // completion in its actual pool/heavy/restart books as well, rather than
+    // racing _permit disposal against the later _heavy field.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while original.upgrade().is_some() {
+        loop {
+            let original_gone = original.upgrade().is_none();
+            let (pool, heavy) = manager.original_legacy_drain_counts();
+            let admissions = serving.restart_drain_status(0).await.admissions_in_flight;
+            if original_gone && pool.software_used == 0 && !heavy && admissions == 0 {
+                break;
+            }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("same actual job/result disposed original keeper");
+    .expect("same actual job/result disposed original keeper and all its accounting fields");
     let (pool, heavy) = manager.original_legacy_drain_counts();
     assert_eq!(pool.software_used, 0);
     assert!(!heavy);

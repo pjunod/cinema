@@ -34,9 +34,12 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
     eprintln!("automatic static fixture: before original Store selector");
-    let mut selected_store = crate::sharing_fixture_clock::select_applied_singleton(&config)
-        .await
-        .expect("actual selected singleton");
+    // Only Store bootstrap uses the existing owned debug-frame allowance;
+    // the actual producer and native workers stay on this original runtime.
+    let mut selected_store =
+        crate::http::shared_source_playback::source_http_fixture_store(config.clone(), None)
+            .await
+            .expect("actual selected singleton");
     eprintln!("automatic static fixture: original Store selector returned");
     assert!(
         Box::pin(selected_store.prepare_source_schema_before_serving())

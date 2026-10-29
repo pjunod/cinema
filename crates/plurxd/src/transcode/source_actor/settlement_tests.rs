@@ -86,6 +86,12 @@ pub(super) async fn exercise(
     } else {
         Instant::now() + Duration::from_secs(30)
     };
+    // Install these manager-local observers before the actual worker can
+    // launch. A first spawned_pid() read after startup would install empty
+    // test hooks after the original after_spawn event already used Noop.
+    assert_eq!(manager.source_workers.index_hooks.spawned_pid(), 0);
+    assert_eq!(manager.source_workers.probe_hooks.spawned_pid(), 0);
+    assert_eq!(manager.source_workers.native_hooks.spawned_pid(), 0);
     let actor = Box::pin(manager.start_source_worker(
         Arc::clone(&state),
         assignment.clone(),
