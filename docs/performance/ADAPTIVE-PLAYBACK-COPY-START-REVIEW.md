@@ -1,20 +1,16 @@
 # Copy start cleanup — accepted decisions and implementation review
 
-**Status:** open · fixes implemented; required behavioral qualification authorized after source checks.
-**Updated:** 2026-10-28.
+**Status:** open · source fixes implemented; current behavioral failure under repair.
+**Updated:** 2026-10-29.
 
 Companion to the [resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) and
-[delivery checklist](ADAPTIVE-PLAYBACK-DELIVERY.md). PR #1293 targets effort
-PR #1248. Source is committed and reviewed through ordinary Git. Required
-behavioral tests are now authorized and running after the supplied source review
-and fixes. The finished native campaign at `dec1576cf60a` recorded 135/135
-Core passes and daemon 14 passes, 29 failures and two stack aborts, with no
-ignored cases. Cgroup-reader/environment and fixture-stack repairs remain
-open. Effort `cc3da4a9003c` includes main `66a33d723` and passed native strict
-Clippy; joined task `02bf1fd46e58` passed all three host compiler phases.
-These separate source receipts do not establish a passing joined behavioral
-candidate. Mutation tests have not run. The bounded design review grants no
-final implementation acceptance.
+[delivery checklist](ADAPTIVE-PLAYBACK-DELIVERY.md). Task PR #1293 targets effort
+PR #1248. Source is committed and shared through ordinary Git. The current
+implementation `b1f2794d79b1012714a6de0644c72df44f10e9e1` passed macOS and Linux
+compiler checks; its first 206-case native run stopped after 31 passes and one
+static fixture failure. All five registered-planning entry/cancellation cases
+passed. The full result and receipt hashes are in the ledger. Further diagnostic
+execution is in progress; no final implementation acceptance is claimed.
 
 The user supplied a review attributed to Claude Opus 5.5, dated 2026-10-26,
 against implementation `46dc2805b9b6688b5052494605250898a6b105c7` and document
@@ -24,9 +20,9 @@ execution. That original request and manifest remain available at `8b6331e`.
 The supplied review's SHA-256 is
 `dc9df50930130a30adee9ec91a52e62bf06392509d25e8bff677dc7439505672`.
 The current [source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW-SOURCE.json)
-pins the earlier published implementation `9903421c871c0146b8030bc88c51340403ba8134`.
-Later local fixes and failed-run evidence are recorded below. The manifest will
-be refreshed after current-source checks; it grants no execution or approval.
+pins implementation `b1f2794d79b1012714a6de0644c72df44f10e9e1`.
+It records exact compiler scope and the current failed behavioral run, while
+preserving the supplied reviews at their original pins. It grants no approval.
 
 **Original** means the same retained instance: Child/ChildJob, JoinHandle,
 source or pipe cell, latch, graph custody and named operation. Reopening a
@@ -459,3 +455,21 @@ and matching host/Linux-target checks in267.793s/320.812s. Those receipts remain
 bound to that earlier source; they are not the current candidate's proof.
 CI6082/index6053 failed locked spike metadata before Rust compilation; its
 other platform/static passes are historical results, not current-head credit.
+
+## 16. Current registered-planning closure and execution — 2026-10-29
+
+Registered probe and engine tasks now pass their original start latches through
+the native-entry fence. Positive receiver-error non-entry requires the same
+registered task join, sealed graph absence, original source-parent alias drain,
+full borrowed DTO validation and durable settlement. Distinct emitted facts
+preserve registered non-entry; panic, loss, mixed entry and overage retain charge.
+The current run passed the five corresponding runtime cases. It also passed the
+remaining 26 Core cases in its first group, then failed the static fixture's
+legacy recipe resolver under its saved zero software budget. This is a real
+recorded failure, not acceptance of the selected static route. The full 206-case
+candidate remains unqualified until that failure and later results are resolved.
+
+The original source-alias fixture repair clones the existing retained file Arc
+without consuming the production collector's one-shot lease. Native/application
+cleanup ordering and all production admission checks remain intact. No supplied
+Opus review is extended to later source by this execution record.
