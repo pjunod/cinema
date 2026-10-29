@@ -248,17 +248,53 @@ class RaisesOnRecord(unittest.TestCase):
 
 class Wired(unittest.TestCase):
     def test_the_fast_lane_checks_raises_against_the_pull_request_base(self):
-        # Without --base (or without the history it reads) the provenance
-        # check never runs where a pull request is judged.
+        # The exact successor recipe must preserve full Git history and route
+        # TypeScript through the authenticated event base, never a caller alias.
+        import hashlib
+        import os
+        from unittest.mock import patch
+        from validation import web_unit_receipts as controller
+
         lane = (ROOT / ".github/workflows/main-fast-lane.yml").read_text(encoding="utf-8")
-        job = lane.split("\n  web_compile:\n", 1)[1].split("\n  apple_compile:\n", 1)[0]
+        job = controller.job_block(lane, 'web_compile')
+        self.assertEqual(hashlib.sha256(job.encode()).hexdigest(), controller.CURRENT_JOB_SHA256)
         self.assertIn("fetch-depth: 0", job)
         self.assertIn("PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}", job)
-        from validation import web_cohort_retention as retention
-        self.assertEqual("  web_compile:\n"+job+"\n",retention.adapted_job())
-        self.assertIn('run: python3 -m validation.web_cohort_retention --fresh-on-new-inputs',job)
-        self.assertIn('GITHUB_TOKEN: ${{ github.token }}',job)
-        self.assertIn('scripts/web-types --base "$PR_BASE_SHA"','\n'.join(retention.COMMANDS))
+        self.assertEqual(job.count('python3 -m validation.web_unit_receipts --command typescript'), 1)
+        self.assertIn('GITHUB_TOKEN: ${{ github.token }}', job)
+
+        current, event_base = 'a' * 40, 'b' * 40
+        scope, run_id = {'repository': 1, 'pr': 3}, 7
+        context = (None, scope, current, {'id': run_id}, {}, event_base)
+        def git(*args):
+            if args == ('rev-parse', '--show-toplevel'):
+                return str(ROOT)
+            return current if args == ('rev-parse', 'HEAD') else ''
+
+        with patch.dict(os.environ, {'PR_BASE_SHA': 'forged-caller-base'}), \
+                patch.object(controller, 'git', side_effect=git), \
+                patch.object(controller.guards, 'current_context', return_value=context), \
+                patch.object(controller, 'producer') as producer, \
+                patch.object(controller.guards, 'live_inputs'), \
+                patch.object(controller.guards, 'live_script_resolvers'), \
+                patch.object(controller.guards, 'manifest', return_value={}) as manifest, \
+                patch.object(controller.guards, 'runtime', return_value={}):
+            workspace, authenticated_base, _, _ = controller.current_guards(scope, current, run_id)
+            producer.assert_called_once_with(current, current)
+            manifest.assert_called_once_with(ROOT, current, event_base)
+            self.assertEqual(authenticated_base, event_base)
+            self.assertEqual(controller.command_argv('typescript', authenticated_base),
+                             ['scripts/web-types', '--base', event_base])
+
+            scratch = ROOT.parent / '.agent-proof-fixtures/web-base-route'
+            scratch.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=scratch) as folder, \
+                    patch.object(controller.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as execute, \
+                    patch.object(controller.subprocess, 'check_output', return_value='Version 6.0.3\n'):
+                self.assertEqual(controller.execute_current('typescript', workspace, authenticated_base,
+                                                           Path(folder) / 'absent-python-cache'), 0)
+                self.assertEqual(execute.call_args.args[0], ['scripts/web-types', '--base', event_base])
+                self.assertNotIn('PR_BASE_SHA', execute.call_args.kwargs['env'])
 
 
 class Pinned(unittest.TestCase):
