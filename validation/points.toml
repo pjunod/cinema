@@ -1551,6 +1551,8 @@ paths = [
   "swarm/*.txt",
   "scripts/ci-flake-report",
   "scripts/publish-badge",
+  "scripts/unit_coverage/**",
+  "scripts/unit-coverage",
   "scripts/ripwire",
   "scripts/ripwire.lock.json",
   "scripts/ripwire-smoke",

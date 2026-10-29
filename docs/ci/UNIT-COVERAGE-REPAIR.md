@@ -1,6 +1,6 @@
 # Unit coverage repair — restore the suite and cover missing behavior
 
-**Status:** open · **Updated:** 2026-10-28
+**Status:** open · **Updated:** 2026-10-29
 
 The 2026-10-28 workspace measurement covered 379,922 of 487,771 lines
 (77.8894%) and completed with 24 failing tests. This effort repairs every
@@ -8,6 +8,10 @@ failure and targets at least 85% measured line coverage, with 90% as the
 upper target. Keep the existing source scope; do not exclude difficult code
 or mark tests ignored to increase the percentage. Hardware qualification
 remains distinct from portable behavior tests.
+
+Repair `2b3730f8` passes all 29 previously failing cases within 103 focused
+regressions. The replacement full workspace and coverage campaign remain
+pending; focused success is not a completed coverage measurement.
 
 ## Execution and ownership
 
@@ -77,6 +81,44 @@ completion.
 - `startup_tests::split_children_log_under_their_parent_target`
 - `subtitle_models::artifacts::local::tests::identity_cache_cannot_hide_model_replacement`
 - `subtitle_models::artifacts::local::tests::metadata_identity_never_qualifies_changed_or_unsafe_model_bytes`
+
+## Full-suite follow-up
+
+The first combined schema-120 run exposed five additional failures. Two
+assertions still expected version 119 after upgrade. The historical retarget
+fixture also retained a managed-v2 marker and resource view while claiming
+version 117; restoring the exact published v1 predecessor preserves populated
+operations and receipts through migration 120. The executable digest cache test
+now observes the existing two-second settling grace. The shutdown fixture uses
+the production two-thread speech admission rather than a machine-dependent
+whole-pool fragment admission. Its child-start, reap, private scratch and
+admission-retention assertions remain intact. These five cases are required
+preflight regressions for the replacement full measurement.
+
+## Reproducing the measurement
+
+The manual workflow uses `scripts/unit-coverage` on the existing capacity-one
+`unit-memory-16g` host registration. It archives committed source without Git
+metadata, creates one bounded standard Docker child, and uses an isolated CGNAT
+bridge for sharing fixtures. No additional container capabilities or host
+network namespace are required. The command preserves source archives, full
+logs, exact Cargo artifact manifests and coverage receipts outside compiler
+cache directories; cleanup targets only its labelled container and network.
+
+The fixed corpus runs the full default workspace suite, the existing ignored
+sharing tests, and the replicated feature graph. Both complete artifact
+manifests remain in the report denominator. The augmented core replay uses the
+reviewed cluster/Hiqlite prefix set plus every feature-added test only while its
+reviewed source digest matches; any drift selects the full augmented core
+suite. The five affected integration targets run completely. Optional `--native`
+adds twelve named software-media/storage tests, never hardware qualification.
+No corpus phase stops early based on the measured percentage.
+
+Only a passing required corpus creates `cov.json` and the success receipt used
+for publication. Source/object mismatches, unexpected feature changes and failed
+commands preserve diagnostic logs but cannot update the badge. Collector guard
+and host-orchestration tests are separate from native execution evidence; the
+final measurement receipt records which corpus actually ran.
 
 ## Additional behavior found by the new tests
 

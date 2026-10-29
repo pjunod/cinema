@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "reviewed_on_base": "2b3730f8f84eabd026af7c58dc103601ae26ab04",
+  "review_note": "Author-audited core/Hiqlite feature boundary including historical fixture corrections in this worktree; any input drift forces full augmented core execution.",
+  "sha256": "48d600e55452b0d4e144eab74af68a3209d445c512b8db09c118369f5356834c",
+  "input_count": 525
+}
