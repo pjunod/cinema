@@ -536,20 +536,26 @@ fn unified_path(cgroups: &str, mounts: &str) -> Option<(std::path::PathBuf, std:
         let Ok(relative) = group.strip_prefix(root) else {
             continue;
         };
-        // A same-filesystem bind can alias another cgroup's controller files.
-        // Reject directory and file overmounts beneath the selected root.
-        if !hierarchy_mount_is_unshadowed(mount, mounts)? {
+        let leaf = mount.join(relative);
+        // Reject aliases of this member's actual ancestry/interfaces. An
+        // unrelated sibling (for example a legacy net_cls mount) cannot hide
+        // this unified member's constraints.
+        if !hierarchy_mount_is_unshadowed(mount, &leaf, mounts)? {
             continue;
         }
-        let leaf = mount.join(relative);
         return Some((mount.to_owned(), leaf));
     }
     None
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn hierarchy_mount_is_unshadowed(root: &std::path::Path, mounts: &str) -> Option<bool> {
+fn hierarchy_mount_is_unshadowed(
+    root: &std::path::Path,
+    leaf: &std::path::Path,
+    mounts: &str,
+) -> Option<bool> {
     use std::path::{Component, Path};
+    leaf.strip_prefix(root).ok()?;
     for line in mounts.lines() {
         let (before, _) = line.split_once(" - ")?;
         let mount = Path::new(before.split_whitespace().nth(4)?);
@@ -560,7 +566,23 @@ fn hierarchy_mount_is_unshadowed(root: &std::path::Path, mounts: &str) -> Option
         {
             return None;
         }
-        if mount != root && mount.starts_with(root) {
+        if mount == root || !mount.starts_with(root) {
+            continue;
+        }
+        if leaf.starts_with(mount) {
+            return Some(false);
+        }
+        let parent = mount.parent()?;
+        let name = mount.file_name()?.to_str()?;
+        let root_marker = parent == root && name == "cpuset.cpus.isolated";
+        let membership = parent == leaf
+            && (matches!(name, "cgroup.procs" | "cgroup.threads")
+                || (leaf != root && name == "cgroup.type"));
+        let controller = parent != root
+            && parent.starts_with(root)
+            && leaf.starts_with(parent)
+            && matches!(name, "cpu.max" | "memory.max" | "pids.max" | "pids.current");
+        if root_marker || membership || controller {
             return Some(false);
         }
     }
@@ -577,12 +599,31 @@ mod tests {
     #[test]
     fn nested_cgroup_directory_and_controller_binds_do_not_certify_complete_hierarchy() {
         let root = "41 25 0:32 / /sys/fs/cgroup ro - cgroup2 cgroup ro";
-        for mount in ["/sys/fs/cgroup/team", "/sys/fs/cgroup/team/cpu.max"] {
+        for mount in [
+            "/sys/fs/cgroup/team",
+            "/sys/fs/cgroup/team/job",
+            "/sys/fs/cgroup/team/cpu.max",
+            "/sys/fs/cgroup/team/job/pids.current",
+            "/sys/fs/cgroup/team/job/cgroup.procs",
+            "/sys/fs/cgroup/team/job/cgroup.threads",
+            "/sys/fs/cgroup/team/job/cgroup.type",
+            "/sys/fs/cgroup/cpuset.cpus.isolated",
+        ] {
             let views = format!("{root}\n42 41 0:32 /other {mount} ro - cgroup2 cgroup ro");
             assert!(unified_path("0::/team/job", &views).is_none());
         }
         let sibling = format!("{root}\n42 25 0:42 / /sys/fs/cgroup-backup ro - tmpfs tmpfs ro");
         assert!(unified_path("0::/team/job", &sibling).is_some());
+    }
+
+    #[test]
+    fn unrelated_legacy_controller_mount_does_not_hide_unified_member_limits() {
+        let mounts = "41 25 0:32 / /sys/fs/cgroup ro - cgroup2 cgroup2 rw\n42 41 0:77 / /sys/fs/cgroup/net_cls ro - cgroup net_cls rw,net_cls";
+        let (root, leaf) = unified_path("0::/system.slice/job\n", mounts)
+            .expect("unrelated legacy controller does not shadow this member");
+        assert_eq!(root, std::path::Path::new("/sys/fs/cgroup"));
+        assert_eq!(leaf, root.join("system.slice/job"));
+        // Parsing paths supplies no native root or membership authority.
     }
 
     #[test]
