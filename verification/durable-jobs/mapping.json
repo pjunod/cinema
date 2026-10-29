@@ -7,13 +7,13 @@
     "tables": [
       {
         "anchor": "name = \"hiqlite\"\nversion = \"0.14.0\"",
-        "sha256": "189b5736b7cb472c0b50176fbc112d275c8db11fc5f455f84cb895b41bb974dc",
+        "sha256": "c39e63b126a56a89cafb7c0ac4499fcaccb65130666c15de6f53dbc6de6a6905",
         "source": "Cargo.lock",
         "table": "proposal \u00a74.2 lockfile runtime dependency pin"
       },
       {
         "anchor": "hiqlite = { version = \"=0.14.0\"",
-        "sha256": "72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f",
+        "sha256": "1a45438a98f7fe5d7ad07a6b3392a954c0e1eed3316b7fb7463b88b29105056a",
         "source": "Cargo.toml",
         "table": "proposal \u00a74.2 runtime dependency pin"
       },
