@@ -9,13 +9,22 @@ upper target. Keep the existing source scope; do not exclude difficult code
 or mark tests ignored to increase the percentage. Hardware qualification
 remains distinct from portable behavior tests.
 
-The latest full `18f11d523` run passes 2,032 core, 301 Store and 4,675 daemon
+The latest `618c0bfe` early focused preflight reports 143 passes and three
+progressive-translation runtime failures, all `source_clock_unsupported`. It
+stops before the full workspace suite; no coverage result is claimed for this
+source. Real FFmpeg 6 output shows that carriage-return progress can prefix a
+clock record that the strict selector must refuse. The decoder now disables
+FFmpeg's progress display with `-nostats`; the selector, parser and assertions
+remain unchanged.
+All three focused Rust regressions pass with the correction. A fresh passing
+measurement remains required.
+
+The previous full `18f11d523` run passes 2,032 core, 301 Store and 4,675 daemon
 cases with one durable-restore fixture failure. Its 80.7446% result is diagnostic
-and cannot replace the badge. The fixture now observes actual namespace lease
+and cannot replace the badge. That fixture now observes actual namespace lease
 ownership before strict Restore. Additional SQLite/filesystem lifecycle tests
-cover diagnostics, offline WAL evidence and DVR retention/recovery. Validation
-on the current integrated source and a passing measurement of at least 85%
-remain required.
+cover diagnostics, offline WAL evidence and DVR retention/recovery. The final
+passing measurement must reach at least 85% without changing source scope.
 
 ## Execution and ownership
 
@@ -162,6 +171,25 @@ Issued facts, original execution identity, source and full-byte validation,
 legacy `None`, contradictory-proof refusal and ownership assertions remain.
 Fixed-source checks and a fresh full measurement are still required; neither
 the failed campaign nor these diagnostic profiles may update the badge.
+
+The `618c0bfe` early focused preflight reports 143 passes and three failures in
+progressive-translation runtime lifecycle cases. All three return
+`source_clock_unsupported`; an isolated replay with the exact captured daemon
+ELF reproduces all three failures. The campaign stops before full default
+execution and provides no new coverage result.
+
+A controlled FFmpeg 6 observation contains 32 LF-separated clock-bearing lines,
+but its carriage-return progress display prefixes one frame record. The strict
+header selector therefore admits only 31. Adding `-nostats` preserves all 32
+strictly selected records and both contiguous observed clocks from sample zero
+through 16,000. This is an observed command-output framing defect; no selector
+or parser relaxation is needed. The correction adds only `-nostats` to the
+progressive decoder argv. Strict frame selection, sample continuity, source
+identity, replacement refusal, cancellation and private-scratch cleanup checks
+remain intact. The controlled command comparison is not fixed-source Rust
+execution. The three normal focused regressions subsequently pass with the
+corrected argv; a fresh full measurement remains pending. Failed `618c0bfe` profiles stay diagnostic and
+cannot qualify the corrected source or update the badge.
 
 ## Reproducing the measurement
 

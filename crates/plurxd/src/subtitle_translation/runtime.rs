@@ -964,6 +964,9 @@ async fn decode_window(
     decode
         .args([
             "-nostdin",
+            // Progress uses carriage returns and can prefix the next clock
+            // record on the same stderr line. Keep observed frames separate.
+            "-nostats",
             "-v",
             "info",
             "-xerror",

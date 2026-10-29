@@ -121,6 +121,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Progressive subtitle translation keeps FFmpeg progress updates out of source
+  clock evidence, preventing valid decoded ranges from failing before inference.
+
 - Shared playback handoff and quality reopen accept the producer's bounded
   playlist start hint instead of returning 503 when playback resumes after zero.
 - Existing-text subtitle inference consumes verified caption artifacts without
