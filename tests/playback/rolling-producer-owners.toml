@@ -1,3 +1,18 @@
+# M4 replicated outage/HTTP caller source ownership review (2026-10-29):
+# Base cc3da4a9003c plus committed M4 6d9f59faea7e and reviewed desktopV2/HTTPV5.
+# +1 namespaced task is the fixture's original selected-Store selector: registered
+# before its one-shot entry send, borrowed for bounded join, never replaced/aborted.
+# +1 method-spawn and +1 launch-shaped match are ONE joined 8 MiB fixture thread,
+# owning its Tokio runtime; failed/uncertain original owners/root/runtime persist.
+# +9 namespaced timers: one production exact-lease durable-inventory read bound;
+# eight fixture observations (setup/body, exact release, Store shutdown, and real
+# local-token/replicated-lease expiry watchdogs plus their two 25 ms observation polls).
+# Ambiguous release retains the original local fence. Timeouts fail or retain owners;
+# they supply no native closure, cached zero, replacement authority or capacity refund.
+# No task/timer is added by the cfg(test) shared SelectedStore state projection or
+# desktop telemetry-start avoidance. Patterns/roots/scoped counts/forbidden zeroes
+# are unchanged. Static source correspondence only; no new behavioral/native proof.
+
 # Adaptive/current-main ownership source audit (2026-10-28, e1d42fb2):
 # Reconciles35 exact counts against main6a2f8156 and effort5cf30d147;
 # per-row notes explain guarded production moves and authored fixture sites.
@@ -3337,7 +3352,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
-expected_occurrences = 1082
+expected_occurrences = 1083
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3583,7 +3598,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # threads relocate existing decode_facts workers. Title ride.spawn is an owned Rust helper
 # invocation. Remaining delta is bounded test launch sites, not independent production
 # authority.
-expected_occurrences = 83
+expected_occurrences = 84
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5054,7 +5069,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 2002
+expected_occurrences = 2011
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6198,7 +6213,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # threads, custodied process launch, and test child/status calls. Each actual changed
 # production launch remains in its original registered/admitted owner; these totals do not
 # equate every output/status match with an OS launch.
-expected_occurrences = 831
+expected_occurrences = 832
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

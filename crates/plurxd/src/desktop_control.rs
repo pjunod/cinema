@@ -1376,31 +1376,17 @@ mod tests {
                 selected.backend,
                 plurx_core::cluster::migration::SelectedBackend::Replicated
             ));
-            let store = Arc::clone(&selected.store);
+            let store = &selected.store;
             if configured {
                 store
                     .create_user("native-admin", "synthetic test hash", true)
                     .await
                     .expect("desktop control fixture");
             }
-            let mut state = crate::build_state(
+            let mut state = AppState::from_selected_store_for_test(
                 &config,
-                selected.identity.node_id.clone(),
-                selected.identity.cluster_id.clone(),
-                Arc::clone(&selected.credential_key),
-                selected.local_client(),
-                selected.replication_monitor(),
-                selected.membership_manager(),
-                selected.catalogue_reader(),
-                store,
+                &selected,
                 crate::create_dirs_for_config(&config).expect("desktop control fixture"),
-                Default::default(),
-                Default::default(),
-                crate::logbuf::LogBuffers {
-                    general: Arc::new(crate::logbuf::LogBuffer::new(32)),
-                    cluster: Arc::new(crate::logbuf::LogBuffer::new(32)),
-                },
-                None,
             );
             state.clock_observer = observation.observer().await.expect("startup clock owner");
             state

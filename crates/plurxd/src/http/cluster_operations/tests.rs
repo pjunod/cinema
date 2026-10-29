@@ -2513,3 +2513,559 @@ fn test_replication_status() -> plurx_core::cluster::migration::status::Replicat
     }))
     .expect("test replication status")
 }
+
+// The full HTTP route additionally requires a fresh plural non-leader rollout
+// verdict. These tests call its exact production durable-zero boundary with
+// an actual selected singleton, original opaque claims and timed local tokens.
+// No cache, fake Store/clock, native close or resource refund is manufactured.
+#[cfg(target_os = "linux")]
+mod adaptive_outage_http_regressions {
+    use super::*;
+    use futures_util::FutureExt as _;
+    use plurx_core::cluster::migration::SelectedStore;
+    use plurx_core::config::Config;
+    use plurx_core::error::StoreError;
+    use plurx_core::playback_principal::PlaybackPrincipal;
+    use plurx_core::store::adaptive_resource_attempts::*;
+    use plurx_core::store::Store;
+    use std::future::Future;
+    use std::panic::AssertUnwindSafe;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    type BodyPanic = Box<dyn std::any::Any + Send + 'static>;
+    type Selected = Result<(Config, SelectedStore), StoreError>;
+
+    // Keep this actual Store setup/body on a finite owned stack. A failure
+    // cannot drop the runtime behind an unreturned original selector.
+    fn run_owned<F>(body: F)
+    where
+        F: for<'a> FnOnce(
+                &'a mut HttpOutageFixture,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+            + Send
+            + 'static,
+    {
+        let thread = std::thread::Builder::new()
+            .name("m4-http-outage-owner".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("owned HTTP outage runtime");
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(Box::pin(async move {
+                        let mut fixture = HttpOutageFixture::new();
+                        let setup = AssertUnwindSafe(fixture.start()).catch_unwind().await;
+                        let outcome: Result<(), BodyPanic> = match setup {
+                            Ok(()) => {
+                                AssertUnwindSafe(async {
+                                    tokio::time::timeout(
+                                        Duration::from_secs(120),
+                                        body(&mut fixture),
+                                    )
+                                    .await
+                                    .expect("bounded actual HTTP outage body");
+                                })
+                                .catch_unwind()
+                                .await
+                            }
+                            Err(panic) => Err(panic),
+                        };
+                        let cleanup = AssertUnwindSafe(fixture.drain()).catch_unwind().await;
+                        let failures =
+                            cleanup.unwrap_or_else(|_| vec!["original cleanup panicked".into()]);
+                        if let Err(panic) = outcome {
+                            drop(fixture); // retain original owners/root before propagation
+                            std::panic::resume_unwind(panic);
+                        }
+                        assert!(
+                            failures.is_empty(),
+                            "HTTP outage cleanup unproved: {failures:?}"
+                        );
+                        fixture.finish();
+                    }))
+                }));
+                if let Err(panic) = result {
+                    std::mem::forget(runtime);
+                    std::panic::resume_unwind(panic);
+                }
+            })
+            .expect("owned HTTP outage thread");
+        if let Err(panic) = thread.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    struct HttpOutageFixture {
+        root: Option<tempfile::TempDir>,
+        selector: Option<tokio::task::JoinHandle<Selected>>,
+        selected: Option<SelectedStore>,
+        state: Option<AppState>,
+        outages: Vec<(Arc<ClusterOperationLease>, Option<PlannedOutageFenceToken>)>,
+    }
+
+    impl HttpOutageFixture {
+        fn new() -> Self {
+            Self {
+                root: Some(crate::test_tempdir().expect("owned HTTP outage root")),
+                selector: None,
+                selected: None,
+                state: None,
+                outages: Vec::new(),
+            }
+        }
+
+        fn state(&self) -> &AppState {
+            self.state
+                .as_ref()
+                .expect("original selected HTTP AppState")
+        }
+
+        async fn start(&mut self) {
+            let root = self
+                .root
+                .as_ref()
+                .expect("retained HTTP outage root")
+                .path()
+                .to_owned();
+            let (enter, entered) = tokio::sync::oneshot::channel();
+            self.selector = Some(tokio::spawn(async move {
+                entered
+                    .await
+                    .map_err(|_| StoreError::Task("HTTP selector never entered".into()))?;
+                let held = (0..3)
+                    .map(|_| {
+                        std::net::TcpListener::bind("127.0.0.1:0")
+                            .expect("original HTTP outage port")
+                    })
+                    .collect::<Vec<_>>();
+                let addresses = held
+                    .iter()
+                    .map(|listener| listener.local_addr().expect("original HTTP outage address"))
+                    .collect::<Vec<_>>();
+                let mut config = Config::default();
+                config.storage.data_dir = root.join("data");
+                std::fs::create_dir_all(&config.storage.data_dir)
+                    .expect("owned actual Store directory");
+                config.server.bind = addresses[0];
+                config.cluster.raft_bind = addresses[1];
+                config.cluster.api_bind = addresses[2];
+                config.cluster.advertise_host = "localhost".into();
+                config.cluster.join_url = format!("http://{}", addresses[0]);
+                config.cluster.artwork_url = config.cluster.join_url.clone();
+                drop(held);
+                // This observer checks the actual applied singleton watch. It
+                // supplies no synthetic remote clock or serving readiness.
+                let selected =
+                    crate::sharing_fixture_clock::select_applied_singleton(&config).await?;
+                Ok((config, selected))
+            }));
+            enter
+                .send(())
+                .expect("original selector registered before entry");
+            let (config, selected) = tokio::time::timeout(
+                Duration::from_secs(120),
+                self.selector.as_mut().expect("retained original selector"),
+            )
+            .await
+            .expect("bounded original selector")
+            .expect("original selector joined")
+            .expect("actual selected HTTP Store");
+            self.selected = Some(selected); // custody before assertions/state construction
+            self.selector = None;
+            let selected = self
+                .selected
+                .as_ref()
+                .expect("retained original selected owner");
+            assert!(matches!(
+                selected.backend,
+                plurx_core::cluster::migration::SelectedBackend::Replicated
+            ));
+            self.state = Some(AppState::from_selected_store_for_test(
+                &config,
+                selected,
+                crate::create_dirs_for_config(&config).expect("actual HTTP state directories"),
+            ));
+            assert_eq!(
+                self.state()
+                    .store
+                    .adaptive_attempt_schema()
+                    .await
+                    .expect("actual adjunct schema"),
+                AttemptSchemaReadiness::Ready
+            );
+        }
+
+        async fn outage(
+            &mut self,
+            duration: Duration,
+        ) -> (Arc<ClusterOperationLease>, PlannedOutageFenceToken) {
+            let state = self.state().clone();
+            let claim = Arc::new(
+                MembershipManager::prepare_restart_preparation_claim(&state.node_id, duration)
+                    .expect("original opaque HTTP restart claim"),
+            );
+            // Retain the original claim before its first cancellable commit.
+            self.outages.push((Arc::clone(&claim), None));
+            state
+                .membership
+                .commit_cluster_operation_lease(&claim)
+                .await
+                .expect("actual original claim commit");
+            let expiry = claim
+                .preparation_expiry_unix_ms(Duration::from_secs(60))
+                .expect("original live claim deadline");
+            let token = state
+                .serving
+                .begin_restart_preparation_until(expiry)
+                .await
+                .expect("original timed HTTP restart token");
+            self.outages.last_mut().expect("registered exact claim").1 = Some(token);
+            assert!(state.serving.planned_outage_is_current(token).await);
+            (claim, token)
+        }
+
+        async fn drain(&self) -> Vec<String> {
+            let mut failures = Vec::new();
+            if self.selector.is_some() {
+                failures.push("original selector has not returned a positively owned Store".into());
+            }
+            if let Some(state) = &self.state {
+                for (claim, token) in &self.outages {
+                    match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        state.membership.release_cluster_operation_lease(claim),
+                    )
+                    .await
+                    {
+                        Ok(Ok(ClusterOperationCleanupOutcome::Confirmed)) => {
+                            if let Some(token) = token {
+                                state
+                                    .serving
+                                    .cancel_planned_outage_preparation(*token, 0)
+                                    .await;
+                            }
+                        }
+                        Ok(Ok(ClusterOperationCleanupOutcome::Ambiguous)) => failures.push(
+                            "original outage release remains ambiguous; retain its local fence"
+                                .into(),
+                        ),
+                        Ok(Err(error)) => {
+                            failures.push(format!("original outage release refused: {error}"))
+                        }
+                        Err(_) => failures.push("original outage release timed out".into()),
+                    }
+                }
+                state.shutdown.cancel();
+            }
+            if let Some(selected) = &self.selected {
+                match tokio::time::timeout(Duration::from_secs(120), selected.shutdown()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        failures.push(format!("original HTTP Store shutdown refused: {error}"))
+                    }
+                    Err(_) => failures.push("original HTTP Store shutdown timed out".into()),
+                }
+            }
+            failures
+        }
+
+        fn finish(mut self) {
+            assert!(
+                self.selector.is_none(),
+                "unreturned selector must remain owned"
+            );
+            drop(std::mem::take(&mut self.outages));
+            drop(self.state.take());
+            drop(
+                self.selected
+                    .take()
+                    .expect("positively drained original Store"),
+            );
+            self.root
+                .take()
+                .expect("positively drained HTTP fixture root")
+                .close()
+                .expect("remove only the positively drained HTTP root");
+        }
+    }
+
+    impl Drop for HttpOutageFixture {
+        fn drop(&mut self) {
+            let path = self.root.as_ref().map(|root| root.path().to_owned());
+            std::mem::forget(std::mem::take(&mut self.outages));
+            std::mem::forget(self.state.take());
+            std::mem::forget(self.selected.take());
+            std::mem::forget(self.selector.take());
+            std::mem::forget(self.root.take());
+            if let Some(path) = path {
+                eprintln!(
+                    "HTTP outage fixture retains original failed/uncertain owners at {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    async fn claim_input(store: &dyn Store, worker: &str) -> AttemptClaim {
+        let id = Uuid::new_v4();
+        let now = i64::try_from(unix_ms()).expect("actual HTTP fixture wall clock");
+        let user = store
+            .create_user(&format!("m4-http-{id}"), "unused-fixture-hash", false)
+            .await
+            .expect("actual request principal");
+        let key = RequestKey {
+            request_id: format!("m4-http-{id}"),
+            request_incarnation_id: Uuid::new_v4(),
+        };
+        let binding = RequestBinding {
+            version: 1,
+            key: key.clone(),
+            principal: PlaybackPrincipal::LocalUser { user_id: user.id },
+            request_fingerprint: "a".repeat(64),
+            playback_id: Uuid::new_v4().to_string(),
+            recovery_epoch: Uuid::new_v4(),
+            planning_generation: 1,
+            planning_source_digest: "b".repeat(64),
+            settings_digest: "c".repeat(64),
+            intent_digest: "d".repeat(64),
+            original_deadline_ms: now + 600_000,
+            expected_predecessor_incarnation_id: None,
+            expected_predecessor_owner_epoch: None,
+            expected_desired_revision: None,
+        };
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    &binding.principal,
+                    &key.request_id,
+                    &binding.request_fingerprint,
+                    &binding.playback_id,
+                    &key.request_incarnation_id.to_string(),
+                    now,
+                    binding.original_deadline_ms
+                )
+                .await
+                .expect("actual original media request"),
+            plurx_core::domain::MediaSessionRequestClaim::Acquired { .. }
+        ));
+        AttemptClaim {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: 0,
+                expected_attempt_sequence: 0,
+                now_ms: now + 1,
+            },
+            binding,
+            key: AttemptKey {
+                request: key,
+                attempt_id: Uuid::new_v4(),
+                route_incarnation_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                worker_node_id: worker.to_owned(),
+                owner_epoch: 1,
+                ordinal: 1,
+            },
+            worker_instance_id: Uuid::new_v4(),
+            serving_generation: 7,
+            domains: vec![format!("processing:{id}")],
+        }
+    }
+
+    async fn release_exact(
+        state: &AppState,
+        claim: &ClusterOperationLease,
+        token: PlannedOutageFenceToken,
+    ) {
+        assert!(matches!(
+            state
+                .membership
+                .release_cluster_operation_lease(claim)
+                .await
+                .expect("actual exact original release"),
+            ClusterOperationCleanupOutcome::Confirmed
+        ));
+        state
+            .serving
+            .cancel_planned_outage_preparation(token, 0)
+            .await;
+    }
+
+    #[test]
+    fn http_outage_zero_rechecks_first_page_after_later_actual_attempt_claim() {
+        run_owned(|fixture| {
+            Box::pin(async move {
+                let state = fixture.state().clone();
+                let (original, token) = fixture.outage(Duration::from_secs(60)).await;
+                require_adaptive_outage_zero(&state, &original, token)
+                    .await
+                    .expect("actual initial fresh zero");
+                assert!(state.serving.planned_outage_is_current(token).await);
+                release_exact(&state, &original, token).await;
+                let claim = claim_input(state.store.as_ref(), &state.node_id).await;
+                assert!(matches!(
+                    state
+                        .store
+                        .claim_adaptive_attempt(&claim)
+                        .await
+                        .expect("actual durable cleanup debt"),
+                    AttemptMutation::Applied(_)
+                ));
+                let (next, next_token) = fixture.outage(Duration::from_secs(60)).await;
+                let error = require_adaptive_outage_zero(&state, &next, next_token)
+                    .await
+                    .expect_err("a prior zero cannot hide later actual debt");
+                assert!(matches!(
+                    error,
+                    ApiError::Typed {
+                        status: StatusCode::CONFLICT,
+                        code: "adaptive_outage_cleanup_pending",
+                        ..
+                    }
+                ));
+                let page = state
+                    .store
+                    .unclosed_adaptive_attempts_under_outage(
+                        &next,
+                        &AttemptInventoryQuery {
+                            worker_node_id: state.node_id.clone(),
+                            after_attempt_id: None,
+                            limit: 1,
+                        },
+                    )
+                    .await
+                    .expect("actual first page under the same live claim");
+                assert_eq!(page.entries.len(), 1);
+                assert_eq!(page.entries[0].attempt.key, claim.key);
+                assert!(state.serving.planned_outage_is_current(next_token).await);
+                assert!(!state.shutdown.is_cancelled());
+                release_exact(&state, &next, next_token).await;
+            })
+        });
+    }
+
+    #[test]
+    fn http_outage_zero_rejects_released_claim_and_superseded_original_token() {
+        run_owned(|fixture| {
+            Box::pin(async move {
+                let state = fixture.state().clone();
+                let (original, token) = fixture.outage(Duration::from_secs(60)).await;
+                require_adaptive_outage_zero(&state, &original, token)
+                    .await
+                    .expect("actual original fresh zero");
+                assert!(matches!(
+                    state
+                        .membership
+                        .release_cluster_operation_lease(&original)
+                        .await
+                        .expect("actual original revocation"),
+                    ClusterOperationCleanupOutcome::Confirmed
+                ));
+                assert!(
+                    state.serving.planned_outage_is_current(token).await,
+                    "local token alone cannot restore revoked claim"
+                );
+                let error = require_adaptive_outage_zero(&state, &original, token)
+                    .await
+                    .expect_err(
+                        "the actual released claim cannot be revived by its still-current token",
+                    );
+                assert!(matches!(error, ApiError::Typed {
+                    status: StatusCode::CONFLICT, code, ..
+                } if code == MembershipError::ClusterOperationPending.code()));
+                state
+                    .serving
+                    .cancel_planned_outage_preparation(token, 0)
+                    .await;
+                let (replacement, replacement_token) =
+                    fixture.outage(Duration::from_secs(60)).await;
+                assert_ne!(replacement_token, token);
+                require_adaptive_outage_zero(&state, &replacement, replacement_token)
+                    .await
+                    .expect("actual replacement original pair sees current fresh zero");
+                let error = require_adaptive_outage_zero(&state, &replacement, token)
+                    .await
+                    .expect_err("an earlier token cannot authorize a current claim");
+                assert!(matches!(
+                    error,
+                    ApiError::Typed {
+                        status: StatusCode::CONFLICT,
+                        code: "restart_preparation_expired",
+                        ..
+                    }
+                ));
+                let error = require_adaptive_outage_zero(&state, &original, token)
+                    .await
+                    .expect_err("the superseded original pair remains invalid");
+                assert!(matches!(
+                    error,
+                    ApiError::Typed {
+                        status: StatusCode::CONFLICT,
+                        code: "restart_preparation_expired",
+                        ..
+                    }
+                ));
+                assert!(
+                    state
+                        .serving
+                        .planned_outage_is_current(replacement_token)
+                        .await
+                );
+                release_exact(&state, &replacement, replacement_token).await;
+            })
+        });
+    }
+
+    #[test]
+    fn http_outage_zero_expires_original_real_claim_and_token_after_prior_zero() {
+        run_owned(|fixture| {
+            Box::pin(async move {
+                let state = fixture.state().clone();
+                // Public claim construction retains the real five-second expiry
+                // grace. No clock, private field or lease identity is altered.
+                let (original, token) = fixture.outage(Duration::ZERO).await;
+                require_adaptive_outage_zero(&state, &original, token)
+                    .await
+                    .expect("actual zero before original expiry");
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while state.serving.planned_outage_is_current(token).await {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                })
+                .await
+                .expect("actual original timed fence expiry");
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        match state.store.unclosed_adaptive_attempts_under_outage(&original, &AttemptInventoryQuery {
+                            worker_node_id: state.node_id.clone(), after_attempt_id: None, limit: 1,
+                        }).await {
+                            Err(StoreError::Migration(message)) if message.contains("expired") => break,
+                            Ok(page) => {
+                                assert!(page.entries.is_empty());
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                            }
+                            result => panic!("original expiry must be proven, not an unrelated Store error: {result:?}"),
+                        }
+                    }
+                }).await.expect("actual original replicated lease expiry");
+                let error = require_adaptive_outage_zero(&state, &original, token)
+                    .await
+                    .expect_err("prior zero cannot authorize after real expiry");
+                assert!(matches!(
+                    error,
+                    ApiError::Typed {
+                        status: StatusCode::CONFLICT,
+                        code: "restart_preparation_expired",
+                        ..
+                    }
+                ));
+                assert!(!state.shutdown.is_cancelled());
+            })
+        });
+    }
+}
