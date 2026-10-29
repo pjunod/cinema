@@ -1639,6 +1639,7 @@ paths = [
   "crates/plurx-core/src/sharing_dns.rs",
   "crates/plurxd/src/sharing.rs",
   "crates/plurxd/src/sharing_host.rs",
+  "crates/plurxd/src/sharing_network.rs",
   "scripts/plurx-sharing-host",
   "scripts/install-sharing-host",
   "tests/operations/test_sharing_host.py",

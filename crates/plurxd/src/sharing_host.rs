@@ -102,7 +102,7 @@ struct HostReport {
     egress_guard: bool,
 }
 
-fn private_directory(path: &Path) -> std::io::Result<()> {
+pub(crate) fn private_directory(path: &Path) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -127,7 +127,7 @@ fn private_directory(path: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
-fn write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
     use std::io::Write;
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
@@ -148,7 +148,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
     }
     result
 }
-fn read_json(path: &Path) -> Result<serde_json::Value, SetupState> {
+pub(crate) fn read_json(path: &Path) -> Result<serde_json::Value, SetupState> {
     read_json_owned(path, false)
 }
 #[cfg(unix)]

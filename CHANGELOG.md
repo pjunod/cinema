@@ -59,6 +59,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- Credential sign-in screens omit Report a problem. Connection setup, saved-
+  session recovery, and signed-in reporting keep their entry points.
+
+- Cinema sharing invitations open as QR codes with expandable text. Save or
+  share the PNG, then upload or scan it on the receiving Cinema; import and
+  pairing approval remain explicit. Web, Apple, and Android clients retain
+  text fallback for oversized invitations.
+
 - Linux player 0.4.0 uses Cinema-style playback controls with scoped library
   metadata and next episode, saved autoplay, and Auto/Original/advertised
   quality choices that retain playback position and paused state.
@@ -113,6 +121,7 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.
 - Fresh macOS Vulkan media builds include libplacebo's pinned fast_float
   headers, allowing floating-point parsing with the macOS 12 deployment target.
 

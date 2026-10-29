@@ -86,6 +86,7 @@ mod sharing;
 mod sharing_client;
 mod sharing_connection_custody;
 mod sharing_host;
+mod sharing_network;
 #[cfg(test)]
 mod sharing_protocol_fixture;
 mod source_probe;
@@ -2374,6 +2375,10 @@ async fn boot_observing(
         state.clone(),
         background_loops.token(),
         native_managed,
+    ));
+    tokio::spawn(sharing_network::run(
+        state.clone(),
+        background_loops.token(),
     ));
     spawn_background_loops(&state, background_loops.token());
 

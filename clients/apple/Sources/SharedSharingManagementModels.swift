@@ -263,6 +263,15 @@ final class SharedSharingSecretDraft: ObservableObject {
         if let pairingCode { codeValue = pairingCode }
         revision += 1
     }
+    /// A delayed photo/file/camera result must not replace a newer edit or a retired account draft.
+    @discardableResult
+    func acceptInvitation(_ invitation: String, ifRevision requestedRevision: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock(); notifyPresentation() }
+        guard active, current() else { clearLocked(); return false }
+        guard revision == requestedRevision else { return false }
+        invitationValue = invitation; revision += 1
+        return true
+    }
     func snapshot() -> Snapshot? {
         lock.lock(); defer { lock.unlock() }
         guard active, current() else { clearLocked(); return nil }
