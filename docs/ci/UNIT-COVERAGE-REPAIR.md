@@ -9,11 +9,13 @@ upper target. Keep the existing source scope; do not exclude difficult code
 or mark tests ignored to increase the percentage. Hardware qualification
 remains distinct from portable behavior tests.
 
-Repair `7080f5fd` passes all 31 previously failing cases within 110 focused
-regressions. Its isolated sharing preflight exposed two further failures with
-one shared playlist-validation cause, described below. The replacement full
-workspace and coverage campaign remain pending; focused success is not a
-completed coverage measurement.
+The latest full `18f11d523` run passes 2,032 core, 301 Store and 4,675 daemon
+cases with one durable-restore fixture failure. Its 80.7446% result is diagnostic
+and cannot replace the badge. The fixture now observes actual namespace lease
+ownership before strict Restore. Additional SQLite/filesystem lifecycle tests
+cover diagnostics, offline WAL evidence and DVR retention/recovery. Validation
+on the current integrated source and a passing measurement of at least 85%
+remain required.
 
 ## Execution and ownership
 
@@ -139,6 +141,27 @@ production admission or cleanup policy changes. One isolated old-source run
 passes, confirming that the failed full run is not a deterministic standalone
 reproduction. Fixed-source serial/concurrent checks and a fresh full run remain
 required; the failed measurement cannot update the badge.
+
+The full `18f11d523` run passes the shared-audio case and reports 4,675
+daemon passes with one failure in
+`durable_restore_preserves_none_incumbent_and_original_execution_identity`,
+the 36th distinct failing case. Its exact issued-artifact Restore is refused;
+the captured failure does not identify which reacquisition check refused it.
+An isolated execution, ten three-case durable runs and one 29-case retained
+suite all pass on that same binary with separate diagnostic profiles. The
+fixture previously treated the old manager's weak-reference disappearance as
+proof that its namespace lease was available. A concurrent fork can retain
+that file description until exec despite `CLOEXEC`; a bounded private Linux
+demonstration confirms that the new lease remains blocked after the parent's
+descriptor closes, then becomes available when the inherited holder exits.
+This establishes the missing fixture boundary, without proving that it caused
+the captured refusal. The fixture now uses the existing helper with a five-second
+polling deadline to observe the fresh registry acquiring the actual namespace
+lease before one strict Restore.
+Issued facts, original execution identity, source and full-byte validation,
+legacy `None`, contradictory-proof refusal and ownership assertions remain.
+Fixed-source checks and a fresh full measurement are still required; neither
+the failed campaign nor these diagnostic profiles may update the badge.
 
 ## Reproducing the measurement
 

@@ -599,6 +599,19 @@ fn mutation_error(outcome: &str, now: i64) -> ApiError {
     };
     config::failure(status, code, now)
 }
+// A refused Create may reveal its exact recipe's handle, never a demand or
+// an accepted receipt. Clients must read/validate it before explicit Resume.
+fn stopped_create_error(value: &Value, now: i64) -> Result<ApiError, ApiError> {
+    let operation_id = field(value, "operation_id")?;
+    id_check(operation_id)?;
+    Ok(ApiError::typed_detail(
+        StatusCode::CONFLICT,
+        "operation_stopped",
+        "Caption generation is stopped; read current status before explicitly resuming",
+        json!({"version":1,"server_now_ms":now,"operation_id":operation_id}),
+    ))
+}
+
 async fn mutate(
     state: &AppState,
     user_id: i64,
@@ -631,6 +644,7 @@ async fn mutate(
         return response(mutation_receipt(&receipt, wire_outcome)?);
     }
     config::fresh_intent(expires, now)?;
+    let discover_stopped = matches!(&action, TranslationAction::Create { .. });
     let reconcile_producer = matches!(
         &action,
         TranslationAction::Create { .. } | TranslationAction::Demand { .. }
@@ -648,6 +662,7 @@ async fn mutate(
         .await?;
     match value["outcome"].as_str() {
         Some("accepted") => {}
+        Some("stopped") if discover_stopped => return Err(stopped_create_error(&value, now)?),
         Some(outcome) => return Err(mutation_error(outcome, now)),
         None => return Err(observation_error()),
     }
@@ -1874,6 +1889,30 @@ pub async fn segment(
 mod tests {
     use super::*;
     use plurx_core::store::{background_jobs::BackgroundJobStore, SqliteStore};
+
+    #[tokio::test]
+    async fn stopped_create_conflict_exposes_only_a_validated_read_handle() {
+        use axum::response::IntoResponse;
+        let operation = "11111111-1111-4111-8111-111111111111";
+        let error = stopped_create_error(&json!({"operation_id":operation,"target_node_id":"private","source_path":"private","demand_id":"private","token":"private"}), 1000).expect("closed conflict");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("bounded conflict");
+        let body: Value = serde_json::from_slice(&bytes).expect("typed error");
+        assert_eq!(body["code"], "operation_stopped");
+        assert_eq!(body["operation_id"], operation);
+        assert_eq!(body["server_now_ms"], 1000);
+        assert_eq!(body.as_object().expect("object").len(), 5);
+        for value in [
+            json!({}),
+            json!({"operation_id":"not-an-id"}),
+            json!({"operation_id":42}),
+        ] {
+            assert!(stopped_create_error(&value, 1000).is_err());
+        }
+    }
 
     #[test]
     fn configured_defaults_preserve_saved_model_and_task_without_readiness() {

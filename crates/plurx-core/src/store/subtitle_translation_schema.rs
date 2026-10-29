@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("upgraded version"),
-            120
+            121
         );
         assert_eq!(
             conn.query_row(

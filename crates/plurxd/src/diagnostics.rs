@@ -817,3 +817,7 @@ mod tests {
         assert!(recorder.local(&forged).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "diagnostics_snapshot_tests.rs"]
+mod snapshot_lifecycle_tests;

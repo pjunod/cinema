@@ -461,6 +461,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_managed_schema.rs",
   "crates/plurx-core/src/store/subtitle_managed_schema.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v2.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v3.sql",
   "Cargo.lock",
   "Cargo.toml",
   "crates/plurx-core/Cargo.toml",
@@ -760,6 +761,7 @@ paths = [
   "crates/plurxd/src/backup.rs",
   "crates/plurxd/src/http/cluster_operations.rs",
   "crates/plurxd/src/wal_cli.rs",
+  "crates/plurxd/src/wal_offline_tests.rs",
   "scripts/replicated-write-capture",
   "scripts/replicated-write-capture-sampler",
   "scripts/replicated-write-capture.fleet.example.json",
@@ -1222,6 +1224,7 @@ title = "Recording from the tuner, and reminders"
 contract = "Recording rules and one-off requests materialise one row per airing, identified by channel and start for that airing's whole life, so a cancelled recording is never resurrected by a rule that still matches it. The owner node alone opens tuner transports and writes the live and terminal states, recording back-to-back airings on one channel through a single tuner GET; a viewer is never refused a tuner by a recording without being told which recording holds it and offered a way to stop it. Every capture is an Activity row with a reason and a stop, recordings scan into a library from their own sidecars with no provider lookups, and reminders fire from a loop that needs neither the tuner nor the recording switch. Readiness facts in Developer settings are advisory and never gate enablement."
 paths = [
   "crates/plurxd/src/live_tv/dvr/tests.rs",
+  "crates/plurxd/src/live_tv/dvr/lifecycle_tests.rs",
   "crates/plurx-core/src/dvr.rs",
   "crates/plurx-core/src/store/hiqlite_dvr.rs",
   "crates/plurx-core/src/store/sqlite/dvr.rs",
@@ -1747,7 +1750,7 @@ timeout_seconds = 600
 id = "diagnostics.reports"
 title = "Bounded private incident reports"
 contract = "Diagnostic reports use a closed schema and bounded archives without playback authority or secret fields."
-paths = ["crates/plurx-core/src/diagnostics.rs", "crates/plurx-core/examples/diagnostic-inspect.rs", "crates/plurx-core/tests/fixtures/diagnostics-v1.json", "crates/plurx-core/tests/fixtures/diagnostics-events-v1.json", "tests/web/diagnostics-support-browser.cjs", "crates/plurxd/src/web/core/diagnostics-wire.js", "tests/web/diagnostics-wire.test.js", "tests/web/diagnostics-recorder.test.js", "crates/plurxd/src/web/core/diagnostics-*.js", "crates/plurxd/src/web/pages/diagnostics.js", "scripts/remote-diagnostics-status", "crates/plurxd/src/diagnostics.rs", "crates/plurxd/src/diagnostics_delivery.rs", "crates/plurx-support/**", "clients/apple/Sources/Diagnostic*.swift", "clients/apple/Tests/Diagnostic*.swift", "clients/android/app/src/main/java/tv/plurx/app/diagnostics/Diagnostic*.kt", "clients/android/app/src/test/java/tv/plurx/app/diagnostics/Diagnostic*.kt"]
+paths = ["crates/plurx-core/src/diagnostics.rs", "crates/plurx-core/examples/diagnostic-inspect.rs", "crates/plurx-core/tests/fixtures/diagnostics-v1.json", "crates/plurx-core/tests/fixtures/diagnostics-events-v1.json", "tests/web/diagnostics-support-browser.cjs", "crates/plurxd/src/web/core/diagnostics-wire.js", "tests/web/diagnostics-wire.test.js", "tests/web/diagnostics-recorder.test.js", "crates/plurxd/src/web/core/diagnostics-*.js", "crates/plurxd/src/web/pages/diagnostics.js", "scripts/remote-diagnostics-status", "crates/plurxd/src/diagnostics.rs", "crates/plurxd/src/diagnostics_snapshot_tests.rs", "crates/plurxd/src/diagnostics_delivery.rs", "crates/plurx-support/**", "clients/apple/Sources/Diagnostic*.swift", "clients/apple/Tests/Diagnostic*.swift", "clients/android/app/src/main/java/tv/plurx/app/diagnostics/Diagnostic*.kt", "clients/android/app/src/test/java/tv/plurx/app/diagnostics/Diagnostic*.kt"]
 checks = ["diagnostics-contract", "rust-gate"]
 
 [[points]]

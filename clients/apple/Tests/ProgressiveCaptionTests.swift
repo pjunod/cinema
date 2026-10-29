@@ -30,6 +30,8 @@ private final class CaptionFixture: @unchecked Sendable {
     var corruptSegment = false
     var wrongPageRevision = false
     var stopped = false
+    var stoppedCreateConflict = false
+    var unprepared = false
     var oversizedOptions = false
     var textEnabled = false
     var resumed = false
@@ -56,7 +58,7 @@ private final class CaptionFixture: @unchecked Sendable {
     func data(_ value: Any) -> Data { try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) }
     var profile: [String: Any] {
         ["profile_id": profileID, "model_id": "small", "model_sha256": model, "task": "transcribe", "output_language": NSNull(),
-         "input_languages": ["en", "de"], "timeline_contract": "source-audio-clock-v1",
+         "input_languages": ["en", "de"], "timeline_contract": "source-audio-clock-v1", "window": ["core_ms": 30000],
          "limits": ["segment_bytes": 16384, "segment_cues": 128, "page_bytes": 65536, "page_entries": 64,
                     "coverage_intervals": 64, "concurrent_fetches": 2, "cue_memory_bytes": 524288, "cue_count": 1024,
                     "cue_window_before_ms": 30000, "cue_window_after_ms": 90000, "poll_min_ms": pollMinMs,
@@ -115,6 +117,9 @@ private final class CaptionFixture: @unchecked Sendable {
                 requestedProfile = offeredProfiles?.first { $0["profile_id"] as? String == input["profile_id"] as? String }
                 requestedLanguage = input["spoken_language"] as? String ?? "en"
             }
+            if stoppedCreateConflict && stopped {
+                return data(["version": 1, "code": "operation_stopped", "message": "Stopped", "operation_id": operation, "server_now_ms": 100000])
+            }
             return data(["version": 1, "outcome": "accepted", "operation_id": operation, "operation_epoch": epoch,
                          "view_revision": viewRevision, "asset_id": asset, "demand_id": demand, "demand_generation": "1",
                          "continuity_id": input["continuity_id"] ?? NSNull(), "state": "partial", "server_now_ms": 100000])
@@ -137,10 +142,12 @@ private final class CaptionFixture: @unchecked Sendable {
         }
         if path.hasSuffix("/operations/" + operation) {
             return data(["version": 1, "operation_id": operation, "operation_epoch": epoch, "view_revision": viewRevision,
-                         "state": stopped ? "stopped" : "partial", "retryable": false, "asset_id": asset, "content_revision": source,
+                         "state": stopped ? "stopped" : "partial", "retryable": false, "asset_id": unprepared ? NSNull() : asset as Any, "content_revision": unprepared ? NSNull() : source as Any,
                          "file_id": "7", "source_size": "10000", "source_mtime": "200", "audio_index": 2,
                          "spoken_language": requestedLanguage, "output_language": activeProfile["task"] as? String == "translate" ? "en" : requestedLanguage,
                          "task": activeProfile["task"] ?? "transcribe", "profile_id": activeProfileID,
+                         "model_id": activeProfile["model_id"] ?? "small", "model_sha256": activeProfile["model_sha256"] ?? model,
+                         "timeline_contract": activeProfile["timeline_contract"] ?? "source-audio-clock-v1",
                          "failed_ranges": [], "server_now_ms": 100000])
         }
         if path.hasSuffix("/manifest") {
@@ -339,6 +346,56 @@ final class ProgressiveCaptionTests: XCTestCase {
         XCTAssertNotEqual(replacement["continuity_id"] as? String, retry["continuity_id"] as? String)
         XCTAssertNotEqual(replacement["playback_id"] as? String, create["playback_id"] as? String)
     }
+    func testStoppedCreateDiscoversUnpreparedOperationAndRequiresExplicitResume() async throws {
+        await configure()
+        fixture.stopped = true; fixture.stoppedCreateConflict = true; fixture.unprepared = true
+        CaptionFixtureProtocol.statusOverrides = ["/subtitle-translation": 409]
+        XCTAssertTrue(owner.request(.transcribe))
+        try await eventually { !self.owner.busy && self.owner.operation?.state == "stopped" }
+        XCTAssertTrue(owner.canRetry); XCTAssertNil(owner.assetId)
+        XCTAssertEqual(fixture.captured.filter { $0.httpMethod == "POST" }.count, 1)
+        XCTAssertFalse(fixture.captured.contains { $0.url?.path.contains("/demands/") == true })
+        owner.retry()
+        try await eventually { !self.owner.busy && self.fixture.resumed }
+        let retry = try body(XCTUnwrap(fixture.captured.first { $0.url?.path.hasSuffix("/retry") == true }))
+        XCTAssertEqual(retry["expected_operation_epoch"] as? String, "9007199254740994")
+        XCTAssertEqual(retry["expected_view_revision"] as? String, "2")
+        XCTAssertEqual(retry["expected_state"] as? String, "stopped")
+    }
+
+    func testRecoveredOperationIdentityAndNonretryableCoreStatusStayFenced() throws {
+        fixture.stopped = true; fixture.unprepared = true
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let options = try decoder.decode(CaptionOptions.self, from: fixture.reply(URLRequest(url: URL(string: "https://captions.test/options")!)))
+        let original = fixture.reply(URLRequest(url: URL(string: "https://captions.test/operations/" + fixture.operation)!))
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        let validate: ([String: Any]) throws -> CaptionOperation = { value in
+            let row = try decoder.decode(CaptionOperation.self, from: self.fixture.data(value))
+            try row.validateRecovery(id: self.fixture.operation, file: 7, options: options, profile: options.models[0], audio: 2, language: "en")
+            return row
+        }
+        _ = try validate(value)
+        for (key, wrong) in [("file_id", "8"), ("source_size", "99"), ("model_sha256", String(repeating: "9", count: 64)), ("profile_id", String(repeating: "9", count: 64)), ("spoken_language", "de"), ("timeline_contract", "other")] {
+            var changed = value; changed[key] = wrong; XCTAssertThrowsError(try validate(changed), key)
+        }
+        value["failed_ranges"] = [["core_index": 2, "range_revision": "1", "retryable": false, "reason": "source_clock_unsupported"]]
+        let row = try validate(value)
+        XCTAssertEqual(row.currentFailure(position: 65000, coreMs: 30000, covered: false)?.reason, "source_clock_unsupported")
+        XCTAssertNil(row.currentFailure(position: 1000, coreMs: 30000, covered: false))
+        XCTAssertNil(row.currentFailure(position: 65000, coreMs: 30000, covered: true))
+        value["active_job"] = ["state": "running", "core_index": 2]
+        XCTAssertNil(try validate(value).currentFailure(position: 65000, coreMs: 30000, covered: false))
+        value.removeValue(forKey: "active_job")
+        value["failed_ranges"] = (0..<16).map { ["core_index": $0, "range_revision": "1", "retryable": false, "reason": "source_clock_unsupported"] as [String: Any] }
+        let firstPage = try validate(value)
+        let later = [CaptionFailedRange(coreIndex: 20, rangeRevision: "1", retryable: false, reason: "source_clock_unsupported")]
+        XCTAssertNil(firstPage.currentFailure(position: 605000, coreMs: 30000, covered: false))
+        XCTAssertEqual(firstPage.currentFailure(position: 605000, coreMs: 30000, covered: false, displayedFailures: later)?.reason, "source_clock_unsupported")
+        XCTAssertNil(firstPage.currentFailure(position: 605000, coreMs: 30000, covered: true, displayedFailures: later))
+        value["active_job"] = ["state": "running", "core_index": 20]
+        XCTAssertNil(try validate(value).currentFailure(position: 605000, coreMs: 30000, covered: false, displayedFailures: later))
+    }
+
     func testDemandReceiptMustEchoSentContinuityExactly() throws {
         let expected = UUID().uuidString.lowercased()
         let json: [String: Any] = ["version": 1, "outcome": "updated", "operation_id": fixture.operation,

@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 76] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 77] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1743,6 +1743,9 @@ mod tests {
             // v120: managed rewind recognizes the exact v2 view/marker before
             // removing the empty extension; v111 reconstructs its predecessor.
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2))",
+            // v121: exact v3 shape/marker and empty accepted-work inventory
+            // share the same managed rewind before v111 reconstructs v1.
+            "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=3))",
         ];
 
         assert!(

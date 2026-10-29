@@ -3,13 +3,17 @@
 This emits adoption evidence, never a replacement native pass. The current
 Apple job still verifies its pinned tools. A successful original job and its
 reviewed producer bind both build and test operations to the unchanged inputs.
-Historical failures or incomplete proof leave both builds and tests due.
+Whole-suite adoption still requires a successful original job. A separate
+case planner retains authenticated native passes from failed original jobs;
+only its missing or inapplicable cases remain due. Builds retain their full
+original-job guard.
 The schema-1 producer did not record a macOS build fingerprint: compatibility
 here is the original workflow's pinned Xcode/architecture/runtime contract,
 not a claim that the host OS or physical-device acceptance was reproduced.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import hashlib
 import http.client
@@ -40,6 +44,7 @@ XCODE = 'Xcode 27.1\nBuild version 27A9275'
 RUNTIME = 'com.apple.CoreSimulator.SimRuntime.tvOS-26-5'
 # Reviewed schema-1 producer: unconditional pinned-tool checks; native make
 # commands conditional only on affected scope; failure-preserving artifacts.
+CASE_LEGACY_JOB_SHA256 = '2543b6deb3f55e0743422125cff95f0fb3d7ecee18c4d9e07cd322b7d4e831d8'
 LEGACY_JOB_SHA256 = 'c6b5c40ac94f5505d0afd1f9d724a9fec8ca4f5a077fff01a6e738933bd8a415'
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
@@ -68,8 +73,8 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    'Makefile': 'dfa597e076491ab83aea07f81fb6bf3c1789e16582a19c846a7d7543e953e925',
-    'clients/apple/project.yml': 'de38b2df36a09b732abc5ba16f96ec9a1ba9f69df3a7a08437f22a80d9097a0c',
+    'Makefile': 'a8dfee1e29ba93b43cf58ee5233a5aef1aeddd381765a759d47b05c8126b23c2',
+    'clients/apple/project.yml': 'e9e1e028125da79afc8c63f583aa5a24cfff51ae00d365777585f4c44b2708a3',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',
@@ -95,7 +100,7 @@ def native_block(workflow):
 def producer(commit, current):
     old = native_block(git('show', commit + ':' + WORKFLOW))
     now = native_block(git('show', current + ':' + WORKFLOW))
-    require(hashlib.sha256(old.encode()).hexdigest() == LEGACY_JOB_SHA256 or old == now,
+    require(hashlib.sha256(old.encode()).hexdigest() in (LEGACY_JOB_SHA256, CASE_LEGACY_JOB_SHA256) or old == now,
             'Unknown native workflow producer')
     # The adapter's own adoption records are deliberately never accepted as
     # native origin evidence; producer output must still be an original pass.
@@ -228,7 +233,7 @@ def download(api, artifact):
         raise
 
 
-def archive_member(stream, name):
+def archive_member(stream, name, maximum=4 * 1024 * 1024):
     with zipfile.ZipFile(stream) as archive:
         members = archive.infolist()
         require(0 < len(members) <= MAX_MEMBERS, 'Archive member bound exceeded')
@@ -244,7 +249,7 @@ def archive_member(stream, name):
                     'Archive expansion/encryption bound exceeded')
         require(name in names, 'Original receipt member unavailable')
         member = archive.getinfo(name)
-        require(not member.is_dir() and member.file_size <= 4 * 1024 * 1024,
+        require(not member.is_dir() and member.file_size <= maximum,
                 'Receipt member exceeds bound')
         return archive.read(member)  # CRC checked; never extract any artifact path.
 
@@ -290,7 +295,7 @@ def verify_desktop(data):
             'Original desktop native test completion unavailable')
 
 
-def origin(api, artifact, scope, current, current_run):
+def origin(api, artifact, scope, current, current_run, *, tv_cases=False):
     rid = positive(artifact['run_id'])
     require(rid < current_run and artifact.get('expired') is False, 'Expired/current/future origin')
     run = api.get(f'/actions/runs/{rid}')
@@ -320,7 +325,9 @@ def origin(api, artifact, scope, current, current_run):
     require(len(jobs) == 1, 'Ambiguous original native job')
     job = jobs[0]
     require(job['run_id'] == rid and job['repo_id'] == scope['repository']
-            and job['attempt'] == 1 and terminal_status(job) == 'success'
+            and job['attempt'] == 1 and (terminal_status(job) == 'success'
+                or (tv_cases and artifact['name'].startswith('tv-navigation-')
+                    and terminal_status(job) == 'failure'))
             and job['runs_on'] == RUNS_ON, 'Original native job did not pass its environment contract')
     name = artifact['name']
     require(name in (f'tv-navigation-{rid}-1', f'desktop-macos-check-{rid}-1'), 'Misnamed original artifact')
@@ -406,20 +413,215 @@ def adopt(api, scope, current, run_id, artifacts):
     return adopted
 
 
-def main():
+# Exact reviewed fixture transitions preserve earlier successful assertions.
+# Nothing else in the input closure may change. Failed journeys are excluded
+# even where their sibling methods' full files have an approved transition.
+FIXTURE_TRANSITIONS = {
+    'clients/apple/UITests/TVNavigationTestCase.swift': (
+        '5d25989409706e2e7b82c3c563f44313b2a020deddbad98f3d2def80fd3106d8',
+        '87ebaaf6158e6114cdb939ba66c00fa05303a336c4f86e71afd50a2174a3f21e'),
+    'clients/apple/UITests/TVLiveNavigationTests.swift': (
+        '464293ad77eaabb18cd3e53eddfb0e99a44b8e8da20b07bfe1a83e209f373873',
+        'ee78be532ccdd614ec4acd108b4191345b817f065d332de6ffa68cd768956846'),
+}
+TRANSITION_INVALIDATES = {
+    'TVLiveNavigationTests/testLiveFullscreenRevealMoreReportAndBackRetainSession',
+    'TVMeridianNavigationTests/testPanelOwnsNativeFocusAndBackPreservesLibraryRoute',
+}
+# Reviewed schema-2 runner; changes require another explicit producer review.
+CASE_RUNNER_SHA256 = '8c9f0687923af53d97608cf90ced64c26d75abce3dd4380cef403aacf0269c68'
+
+
+def case_input_compatibility(commit, current):
+    """Compare every closure entry, allowing only exact reviewed byte pairs."""
+    files = []
+    for source in (commit, current):
+        regular_inputs(source, 'tv_navigation')
+        tree = {}
+        for row in git('ls-tree', '-r', '-z', source).split('\0'):
+            if row:
+                header, path = row.split('\t', 1)
+                if any(matches_input(path, pattern) for pattern in INPUTS['tv_navigation']):
+                    tree[path] = tuple(header.split())
+        files.append(tree)
+    old, now = files
+    require(old.keys() == now.keys(), 'Native input names changed')
+    changed_fixture = False
+    allowed = {**FIXTURE_TRANSITIONS, 'scripts/apple-tv-navigation-test': (
+        BUILD_SPECS['scripts/apple-tv-navigation-test'], CASE_RUNNER_SHA256)}
+    for path in old:
+        if old[path] == now[path]:
+            continue
+        require(old[path][:2] == now[path][:2] and path in allowed,
+                'Native input changed outside reviewed transitions: ' + path)
+        pair = tuple(hashlib.sha256(subprocess.check_output(
+            ['git', 'show', source + ':' + path], timeout=10)).hexdigest()
+            for source in (commit, current))
+        require(pair == allowed[path], 'Unreviewed native input transition: ' + path)
+        changed_fixture |= path in FIXTURE_TRANSITIONS
+    # Every build specification retains its independently reviewed boundary.
+    for source in (commit, current):
+        for path in FAMILY_SPECS['tv_navigation']:
+            digest = hashlib.sha256(subprocess.check_output(
+                ['git', 'show', source + ':' + path], timeout=10)).hexdigest()
+            accepted = (BUILD_SPECS[path], CASE_RUNNER_SHA256) if path == 'scripts/apple-tv-navigation-test' else (BUILD_SPECS[path],)
+            require(digest in accepted, 'Unreviewed native build specification: ' + path)
+    return TRANSITION_INVALIDATES if changed_fixture else set()
+
+
+def case_outcomes(log, selected):
+    """Strict XCTest events, never a substring search for a passing name."""
+    require(isinstance(selected, list) and len(selected) == len(set(selected))
+            and all(isinstance(test, str) for test in selected), 'Invalid native selection')
+    started, outcomes = set(), {}
+    pattern = re.compile(r"^Test Case '-\[plurx_tvOSUITests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' "
+                         r"(started\.|(passed|failed|skipped) \([0-9]+(?:\.[0-9]+)? seconds\)\.)$")
+    for line in log.splitlines():
+        if not line.startswith('Test Case '):
+            continue
+        event = pattern.fullmatch(line)
+        require(event is not None, 'Unrecognized native test event')
+        test = event[1] + '/' + event[2]
+        require(test in selected, 'Unexpected native test identity: ' + test)
+        if event[3] == 'started.':
+            require(test not in started, 'Repeated native test start: ' + test)
+            started.add(test)
+        else:
+            require(test in started and test not in outcomes, 'Ambiguous native test outcome: ' + test)
+            outcomes[test] = event[4]
+    return outcomes
+
+
+def verify_tv_cases(receipt, log, commit):
+    required = required_tests(commit)
+    selected = receipt.get('selected_tests')
+    require(type(receipt.get('schema')) is int and receipt['schema'] in (1, 2)
+            and receipt.get('source_sha') == commit
+            and receipt.get('source_dirty') is False
+            and receipt.get('source_tree_sha256') == full_source_digest(commit)
+            and receipt.get('required_tests') == required
+            and isinstance(selected, list) and selected and len(selected) == len(set(selected))
+            and all(test in required for test in selected)
+            and receipt.get('status') in ('passed', 'failed')
+            and receipt.get('xcode') == XCODE and receipt.get('runtime') == RUNTIME,
+            'Native case source/selection/toolchain mismatch')
+    command = receipt.get('command', [])
+    require(isinstance(command, list) and command[:2] == ['xcodebuild', 'test']
+            and all(isinstance(item, str) for item in command)
+            and [item for item in command if item.startswith('-only-testing:')] ==
+            ['-only-testing:plurx-tvOSUITests/' + test for test in selected],
+            'Native case command selection mismatch')
+    if receipt['schema'] == 1:
+        # This reviewed producer's failed branch lacks an end-snapshot field.
+        # Its initial full Git snapshot, immutable CI checkout, pinned script,
+        # original job and archived raw output are the legacy trust boundary.
+        digest = hashlib.sha256(subprocess.check_output(
+            ['git', 'show', commit + ':scripts/apple-tv-navigation-test'], timeout=10)).hexdigest()
+        require(digest == BUILD_SPECS['scripts/apple-tv-navigation-test'] and selected == required,
+                'Unsupported legacy native case producer')
+    else:
+        require(receipt.get('source_unchanged') is True
+                and receipt.get('finished_source') == {
+                    'sha': commit, 'dirty': False, 'tree_sha256': receipt['source_tree_sha256']},
+                'Native case end-source proof unavailable')
+    outcomes = case_outcomes(log, selected)
+    summary = receipt.get('test_summary', {})
+    require(all(type(summary.get(field)) is int and summary[field] == list(outcomes.values()).count(value)
+                for field, value in (('passedTests', 'passed'), ('failedTests', 'failed'), ('skippedTests', 'skipped'))),
+            'Native named outcomes and summary disagree')
+    if receipt['schema'] == 2:
+        require(receipt.get('case_results') == outcomes, 'Native case inventory differs from original log')
+    if receipt['status'] == 'passed':
+        require(set(outcomes) == set(selected) and set(outcomes.values()) == {'passed'},
+                'Native success omitted selected cases')
+    return {test for test, outcome in outcomes.items() if outcome == 'passed'}
+
+
+def adopt_tv_cases(api, scope, current, run_id, artifacts):
+    passes = {}
+    for artifact in sorted(artifacts, key=lambda item: item.get('run_id', 0), reverse=True)[:MAX_CANDIDATES]:
+        if not re.fullmatch(r'tv-navigation-[1-9][0-9]*-1', str(artifact.get('name', ''))):
+            continue
+        try:
+            record = origin(api, artifact, scope, current, run_id, tv_cases=True)
+            invalidated = case_input_compatibility(record['commit'], current)
+            with download(api, artifact) as stream:
+                data = archive_member(stream, 'receipt.json')
+                stream.seek(0)
+                raw_log = archive_member(stream, 'xcodebuild.log', 32 * 1024 * 1024)
+            tests = verify_tv_cases(bounded_json(data), raw_log.decode('utf-8'), record['commit'])
+            evidence = {**record, 'environment_contract': {**record['environment_contract'], 'runtime': RUNTIME},
+                        'receipt_sha256': hashlib.sha256(data).hexdigest(),
+                        'log_sha256': hashlib.sha256(raw_log).hexdigest(),
+                        'input_digest': input_digest(record['commit'], {'inputs': INPUTS['tv_navigation']}),
+                        'current_input_digest': input_digest(current, {'inputs': INPUTS['tv_navigation']})}
+            for test in sorted(tests - invalidated):
+                passes.setdefault(test, {**evidence, 'test': test})
+        except IntegrityError:
+            raise
+        except UNADOPTABLE_NATIVE as error:
+            print(f"Native cases from artifact {artifact.get('id')}: not retained — {reason(error)}")
+    required = required_tests(current)
+    passes = {test: source for test, source in passes.items() if test in required}
+    return {'required_tests': required, 'passes': passes,
+            'pending': [test for test in required if test not in passes]}
+
+
+
+def planned_artifacts(api, cases):
+    """Resolve only the immutable origins already selected by this plan.
+
+    Repository-wide discovery is intentionally absent: unrelated uploads during
+    compilation must not evict or supersede this plan's authenticated evidence.
+    Every resolved row still goes through the full original-case verifier.
+    """
+    require(isinstance(cases, dict) and isinstance(cases.get('passes'), dict),
+            'Native plan pass map malformed')
+    passes = cases['passes']
+    require(len(passes) <= len(cases.get('required_tests', []))
+            and all(isinstance(source, dict) for source in passes.values()),
+            'Native plan original records malformed')
+    identifiers = sorted({positive(source.get('artifact')) for source in passes.values()})
+    require(len(identifiers) <= MAX_CANDIDATES, 'Native plan origin bound exceeded')
+    artifacts = []
+    for ident in identifiers:
+        artifact = api.get(f'/actions/artifacts/{ident}')
+        require(isinstance(artifact, dict) and type(artifact.get('id')) is int
+                and artifact['id'] == ident, 'Native plan artifact identity mismatch')
+        artifacts.append(artifact)
+    return artifacts
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--verify-tv-plan', action='store_true',
+                        help='Reauthenticate every original case immediately before native execution')
+    options = parser.parse_args(argv)
     api, scope, current, run_id = api_context()
+    if options.verify_tv_plan:
+        safe_storage()
+        plan = bounded_json(REPORT.read_bytes())
+        require(plan.get('scope') == scope and plan.get('current_commit') == current
+                and plan.get('current_run') == run_id, 'Native plan current CI identity mismatch')
+        actual = adopt_tv_cases(api, scope, current, run_id, planned_artifacts(api, plan.get('tv_cases')))
+        require(plan.get('tv_cases') == actual, 'Native plan lacks reauthenticated original case evidence')
+        print(f"Reauthenticated native plan: {len(actual['passes'])} retained; {len(actual['pending'])} due")
+        return
     # api_context authenticates live same-repository PR/head/base/readiness and
     # rejects stale worktrees, reruns, and forged local event metadata.
     try:
         artifacts = native_artifacts(api, run_id)
         adopted = adopt(api, scope, current, run_id, artifacts)
+        tv_cases = adopt_tv_cases(api, scope, current, run_id, artifacts)
     except IntegrityError:
         raise
     except UNADOPTABLE_NATIVE as error:
         print(f'Native history unavailable — {reason(error)}; builds and tests remain due')
         adopted = {}
+        required = required_tests(current)
+        tv_cases = {'required_tests': required, 'passes': {}, 'pending': required}
     report = {'version': 1, 'scope': scope, 'current_commit': current,
-              'current_run': run_id, 'adoptions': adopted,
+              'current_run': run_id, 'adoptions': adopted, 'tv_cases': tv_cases,
               'compatibility': 'Pinned workflow toolchain contract; schema 1 has no host OS fingerprint'}
     safe_storage()
     atomic_json(REPORT, report)

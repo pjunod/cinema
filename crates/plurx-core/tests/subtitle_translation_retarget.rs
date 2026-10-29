@@ -189,8 +189,8 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
         "INSERT INTO subtitle_model_receipts(node_id,model_id,receipt_json) VALUES('worker-a','small','{\"fixture\":true}')",
         [],
     ).expect("owned managed model receipt");
-    // v120 changed the managed marker and resource view. A v117 fixture must
-    // restore their exact published v1 definitions before replaying v120;
+    // v120/v121 changed the managed marker and resource view. A v117 fixture
+    // must restore their exact published v1 definitions before replaying both;
     // retained operation, request, model-receipt and queue rows stay owned.
     let managed_v1 = include_str!("../src/store/subtitle_managed_schema.sql");
     let managed_marker = managed_v1
@@ -236,7 +236,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
                 |row| row.get::<_, i64>(0)
             )
             .expect("upgraded managed marker"),
-        2
+        3
     );
     assert_eq!(
         upgraded.query_row("SELECT receipt_json FROM subtitle_model_receipts WHERE node_id='worker-a' AND model_id='small'", [], |row| row.get::<_, String>(0))

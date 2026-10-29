@@ -531,3 +531,7 @@ async fn script() -> Response {
     );
     private(r)
 }
+
+#[cfg(test)]
+#[path = "operator_http_tests.rs"]
+mod inbox_lifecycle_tests;
