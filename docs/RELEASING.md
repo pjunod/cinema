@@ -177,7 +177,7 @@ builds and publishes the GitHub release for that tag:
 
 | Download | For | Checked before publishing |
 |---|---|---|
-| `plurxd_X.Y.Z-1_amd64.deb`, `_arm64.deb` | Debian 12+, Ubuntu 24.04+ | installed, started as `plurx` to `/readyz`, removed and reinstalled on Debian 12 and Ubuntu 24.04 |
+| `plurxd_X.Y.Z-1_amd64.deb`, `_arm64.deb` | Debian 12+, Ubuntu 24.04+ | installed, started as `plurx` to `/readyz`, force-reinstalled while installed, then removed on Debian 12 and Ubuntu 24.04 |
 | `plurxd-X.Y.Z-1.x86_64.rpm`, `.aarch64.rpm` | Fedora, RHEL 9+ (ffmpeg from RPM Fusion) | the same on Fedora 42; scriptlets and binary on AlmaLinux 9 |
 | `plurxd-X.Y.Z-macos-universal.tar.gz` | macOS, Apple Silicon and Intel | each slice reports its version on its own hardware; complete closure, Developer ID, notarization, stapled ticket and Gatekeeper checks |
 | `plurxd-X.Y.Z-windows-x86_64.zip` | Windows x64 | `scripts/package-windows`; `plurxd.exe --version` on Windows Server 2022 |
@@ -195,7 +195,10 @@ repointed at `/usr/bin`. Installing creates the `plurx` user and
 `/var/lib/plurx` (a directory the package does not own, so no upgrade resets
 it and no removal deletes it), then enables and starts the service; an upgrade
 restarts it only if it is running; removing stops and disables it and keeps
-the state, and installing again re-enables it. The macOS archive is the
+the state. With a retained managed installation record, installing again after
+removal requires restoring the trusted package guard first; preinstall refuses
+to unpack a new payload when that guard is absent. The workflow tests forced
+reinstallation while the guard remains installed, followed by removal. The macOS archive is the
 universal runtime, desktop app and controllers beside `deploy/install`, so
 `./install` in the unpacked folder is the whole install. Actual startup, login,
 reboot and rollback behavior remain separate native qualification evidence.

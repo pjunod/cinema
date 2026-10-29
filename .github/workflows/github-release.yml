@@ -361,8 +361,9 @@ jobs:
             test -x /usr/bin/plurx-control
             test -x /usr/lib/plurx-control/plurx-recovery
             test -f /etc/plurx/installation.json
-            su -s /bin/sh plurx -c "PLURX_DATA_DIR=/var/lib/plurx PLURX_BIND=127.0.0.1:32400 plurxd run" \
+            su -s /bin/sh plurx -c "echo \$\$ > /tmp/plurxd-smoke.pid; exec env PLURX_DATA_DIR=/var/lib/plurx PLURX_BIND=127.0.0.1:32400 plurxd run" \
               > /tmp/plurxd.log 2>&1 &
+            smoke_launcher=$!
             tries=0
             until curl -fsS http://127.0.0.1:32400/readyz >/dev/null 2>&1; do
               tries=$((tries + 1))
@@ -370,10 +371,16 @@ jobs:
               sleep 1
             done
             curl -fsS http://127.0.0.1:32400/api/v1/server; echo
+            # This container has no systemd owner to stop this manual process.
+            read -r smoke_daemon < /tmp/plurxd-smoke.pid
+            [[ "$smoke_daemon" =~ ^[1-9][0-9]*$ ]] && [ "$smoke_daemon" -gt 1 ]
+            kill -TERM -- "$smoke_daemon"
+            wait "$smoke_launcher"
           '
-          # Removal keeps the state and the user and records that it happened;
-          # installing again consumes that record (and so re-enables the
-          # service on a systemd host).
+          # Force reinstall while the trusted guard is still installed, then
+          # remove last. A retained managed record without its removed guard
+          # deliberately requires repair before any new payload is unpacked.
+          # Removal keeps the state/user and records that it happened.
           removed='
             test ! -e /usr/bin/plurxd
             test "$(stat -c %U /var/lib/plurx)" = plurx
@@ -383,42 +390,53 @@ jobs:
             test "$(plurxd --version)" = "$EXPECT_VERSION"
             test ! -e /var/lib/plurx/.plurxd-package-removed
           '
+          package_manager='
+            package_command() {
+              if "$@" > /tmp/plurx-package-manager.log 2>&1; then
+                return 0
+              else
+                status=$?
+                tail -n 80 /tmp/plurx-package-manager.log >&2
+                return "$status"
+              fi
+            }
+          '
           run_in() {
             local image=$1 script=$2
             echo "::group::$image"
             docker run --rm --volume "$PWD/dist:/dist:ro" \
               --env EXPECT_VERSION --env DEB --env RPM \
-              "$image" bash -euo pipefail -c "$script"
+              "$image" bash -euo pipefail -c "$package_manager"$'\n'"$script"
             echo "::endgroup::"
           }
           deb='
             export DEBIAN_FRONTEND=noninteractive
-            apt-get -qq update
-            apt-get -qq install -y --no-install-recommends "/dist/$DEB" curl >/dev/null
+            package_command apt-get -qq update
+            package_command apt-get -qq install -y --no-install-recommends "/dist/$DEB" curl
             '"$serve"'
-            apt-get -qq remove -y plurxd >/dev/null
-            '"$removed"'
-            apt-get -qq install -y --no-install-recommends "/dist/$DEB" >/dev/null
+            package_command apt-get -qq install --reinstall -y --no-install-recommends "/dist/$DEB"
             '"$reinstalled"'
+            package_command apt-get -qq remove -y plurxd
+            '"$removed"'
           '
           run_in debian:12 "$deb"
           run_in ubuntu:24.04 "$deb"
           run_in fedora:42 '
-            dnf -y -q install "/dist/$RPM" util-linux >/dev/null
-            command -v curl >/dev/null || dnf -y -q install curl >/dev/null
+            package_command dnf -y -q install "/dist/$RPM" util-linux
+            command -v curl >/dev/null || package_command dnf -y -q install curl
             '"$serve"'
-            dnf -y -q remove plurxd >/dev/null
-            '"$removed"'
-            dnf -y -q install "/dist/$RPM" >/dev/null
+            package_command dnf -y -q reinstall "/dist/$RPM"
             '"$reinstalled"'
+            package_command dnf -y -q remove plurxd
+            '"$removed"'
           '
           # RHEL takes ffmpeg from RPM Fusion, which a stock image lacks, so
           # this proves the scriptlets and that the binary loads there.
           run_in almalinux:9 '
-            rpm -i --nodeps "/dist/$RPM"
+            package_command rpm -i --nodeps "/dist/$RPM"
             test "$(plurxd --version)" = "$EXPECT_VERSION"
             test "$(stat -c %U:%a /var/lib/plurx)" = plurx:750
-            rpm -e --nodeps plurxd
+            package_command rpm -e --nodeps plurxd
             '"$removed"'
           '
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

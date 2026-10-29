@@ -12,6 +12,7 @@ import plistlib
 import struct
 import subprocess
 import shutil
+import shlex
 import sys
 import tempfile
 import tarfile
@@ -425,6 +426,92 @@ class MacosReleaseSigningCase(unittest.TestCase):
                     self.assertEqual({line.split()[-1] for line in checksums}, set(files))
                 else:
                     self.assertFalse((run / "SHA256SUMS").exists())
+
+    def captured_linux_package_smoke(self):
+        script = self.workflow_step_script("Install, start, reinstall and remove each package on its distributions")
+        commands = self.root / "fake-docker-bin"
+        commands.mkdir()
+        captured = self.root / "captured-containers"
+        captured.mkdir()
+        docker = commands / "docker"
+        docker.write_text("#!" + sys.executable + "\nimport json, os, pathlib, sys\n"
+            "args=sys.argv[1:]; image=args[args.index('bash')-1]\n"
+            "path=pathlib.Path(os.environ['CAPTURE_DIR']) / (image.replace(':','_')+'.json')\n"
+            "path.write_text(json.dumps({'image':image,'script':args[-1]}))\n")
+        docker.chmod(0o755)
+        result = subprocess.run(["bash", "-c", script], cwd=self.root,
+            env={"PATH": str(commands) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+                "CAPTURE_DIR": str(captured), "DEB": "fixture.deb", "RPM": "fixture.rpm"},
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return {value["image"]: value["script"] for value in
+            [json.loads(path.read_text()) for path in captured.glob("*.json")]}
+
+    def test_linux_smoke_stops_owned_daemon_then_forces_reinstall_before_removing_guard(self):
+        containers = self.captured_linux_package_smoke()
+        self.assertEqual(set(containers), {"debian:12", "ubuntu:24.04", "fedora:42", "almalinux:9"})
+        for image in ["debian:12", "ubuntu:24.04", "fedora:42"]:
+            with self.subTest(image=image):
+                script = containers[image]
+                lines = script.splitlines()
+                forced = next(line for line in lines if
+                    "package_command" in line and ("--reinstall" in line or "-q reinstall" in line))
+                tokens = shlex.split(forced)
+                if image.startswith("fedora"):
+                    self.assertIn("dnf", tokens)
+                    self.assertIn("reinstall", tokens)
+                else:
+                    self.assertIn("apt-get", tokens)
+                    self.assertIn("install", tokens)
+                    self.assertIn("--reinstall", tokens)
+                removal = next(line for line in lines if "package_command" in line and "remove" in shlex.split(line))
+                initial = next(line for line in lines if 'package_command' in line and 'install' in shlex.split(line) and '--reinstall' not in line)
+                self.assertLess(script.index(initial), script.index('exec env PLURX_DATA_DIR='))
+                self.assertLess(script.index('exec env PLURX_DATA_DIR='), script.index(forced))
+                self.assertIn(r'echo \$\$ > /tmp/plurxd-smoke.pid', script)
+                self.assertLess(script.index('kill -TERM -- "$smoke_daemon"'), script.index(forced))
+                self.assertLess(script.index('wait "$smoke_launcher"'), script.index(forced))
+                self.assertLess(script.index(forced), script.index(removal))
+                self.assertIn('test ! -e /var/lib/plurx/.plurxd-package-removed', script[script.index(forced):script.index(removal)])
+                self.assertIn('test -f /var/lib/plurx/.plurxd-package-removed', script[script.index(removal):])
+                self.assertNotIn("rm -f /etc/plurx/installation.json", script)
+        self.assertIn('package_command rpm -e --nodeps', containers["almalinux:9"])
+
+    def test_linux_smoke_prints_package_failure_tail_and_preserves_exit_status(self):
+        script = self.captured_linux_package_smoke()["debian:12"]
+        function = re.search(r"(?ms)^\s*package_command\(\) \{.*?^\s*\}\s*$", script).group(0)
+        log = self.root / "package-manager.log"
+        function = function.replace("/tmp/plurx-package-manager.log", str(log))
+        program = "import sys; [print(f'package diagnostic {i:03}') for i in range(100)]; sys.exit(73)"
+        result = subprocess.run(["bash", "-c", function + "\npackage_command " + shlex.quote(sys.executable)
+            + " -c " + shlex.quote(program)], cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 73)
+        self.assertEqual(len(log.read_text().splitlines()), 100)
+        self.assertEqual(len(result.stderr.splitlines()), 80)
+        self.assertNotIn("package diagnostic 019", result.stderr)
+        self.assertIn("package diagnostic 020", result.stderr)
+        self.assertIn("package diagnostic 099", result.stderr)
+        self.assertEqual(result.stdout, "")
+        result = subprocess.run(["bash", "-c", function + "\npackage_command printf success"],
+            cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertEqual(log.read_text(), "success")
+
+    def test_reinstall_preinstall_still_refuses_managed_record_without_trusted_guard(self):
+        fixture = self.root / "removed-installation"
+        record = fixture / "etc/plurx/installation.json"
+        record.parent.mkdir(parents=True)
+        record.write_text('{}')
+        script = (ROOT / "deploy/packaging/preinstall").read_text()
+        script = script.replace("/usr/lib/plurx-control", str(fixture / "usr/lib/plurx-control"))
+        script = script.replace("/etc/plurx", str(fixture / "etc/plurx"))
+        result = subprocess.run(["sh", "-c", script, "preinstall", "install", "1.2.3-1"],
+            capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("managed installation has no trusted package guard", result.stderr)
+        self.assertEqual(record.read_text(), '{}')
+        self.assertFalse((fixture / "usr/lib/plurx-control/plurx-install-helper").exists())
 
 if __name__ == "__main__":
     unittest.main()

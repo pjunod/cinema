@@ -354,7 +354,9 @@ bump may break compatibility and a **patch** bump never does.
   protected job before publication, retaining component hashes and the stapled
   app ticket. Manual installers publish independently of in-app upgrade
   qualification; unqualified releases omit update metadata. Dry-run builds
-  remain available without Apple credentials.
+  remain available without Apple credentials. Linux release smoke tests force
+  reinstall before removal, preserve the missing-guard refusal, and retain
+  package-manager diagnostics on failure.
 
 ## [0.7.0] — 2026-10-17
 
