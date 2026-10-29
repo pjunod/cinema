@@ -2099,11 +2099,20 @@ impl SourceCell {
         &self,
         proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
     ) -> Result<(), OperationError> {
+        self.fixed_probe_native_absence_plan(proof, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixed_probe_native_absence_plan(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined_original_lease: bool,
+    ) -> Result<(), OperationError> {
         let v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } = &self.plan else {
             return Err(OperationError::State);
         };
         if !proof.source_matches(source)
-            || self.lease_issued
+            || self.lease_issued && !joined_original_lease
             || self.failed_join
             || self.root_observed_committed
             || self.selected_root_member.is_some()
@@ -2154,11 +2163,102 @@ impl SourceCell {
     }
 
     #[cfg(target_os = "linux")]
+    fn fixed_probe_registered_nonentry_plan(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined: &super::planning_tasks::JoinedPlanningTaskNeverEntered,
+        binding: ReservationBinding,
+        join_operation: Uuid,
+    ) -> Result<(), OperationError> {
+        if !self.lease_issued
+            || !proof.registered_probe_matches(binding, joined.member())
+            || !joined.matches(binding, joined.member(), Some(join_operation))
+        {
+            return Err(OperationError::State);
+        }
+        self.fixed_probe_native_absence_plan(proof, true)
+    }
+
+    /// A registered probe issued its original held-source lease. Only the
+    /// SAME positively joined receiver-error witness authorizes checking that
+    /// original lease for extinction; Arc::try_unwrap still refuses aliases.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn close_fixed_probe_parent_after_registered_nonentry(
+        &mut self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined: &super::planning_tasks::JoinedPlanningTaskNeverEntered,
+        binding: ReservationBinding,
+        join_operation: Uuid,
+    ) -> Result<(), OperationError> {
+        self.fixed_probe_registered_nonentry_plan(proof, joined, binding, join_operation)?;
+        self.join_registered().await?;
+        self.close_parent_inner(true, true).await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn fixed_probe_registered_nonentry_closed_fact(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined: &super::planning_tasks::JoinedPlanningTaskNeverEntered,
+        binding: ReservationBinding,
+        join_operation: Uuid,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        self.fixed_probe_registered_nonentry_plan(proof, joined, binding, join_operation)?;
+        self.fixed_probe_native_absence_closed_fact(proof, true)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn with_fixed_probe_unentered_observation(
+        &mut self,
+        preflight: impl FnOnce(&Option<v2::Observed>) -> Result<(), OperationError>,
+    ) -> Result<(), OperationError> {
+        if !self.observed_committed
+            || self.root_observed_committed
+            || self.pending_root.is_some()
+            || !self.parent_closed()
+        {
+            return Err(OperationError::State);
+        }
+        // Lend the SAME acknowledged metadata without cloning its dynamic
+        // strings/copy vector. Synchronous RAII restores it even if preflight
+        // rejects or unwinds; no original owner is moved across an await.
+        struct Restore<'a> {
+            slot: &'a mut Option<v2::SourceObserved>,
+            envelope: Option<v2::Observed>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                if let Some(v2::Observed::FixedProbeDiscoverSourceV1 { source }) =
+                    self.envelope.take()
+                {
+                    *self.slot = Some(source);
+                }
+            }
+        }
+        let slot = &mut self.result.as_mut().ok_or(OperationError::State)?.observed;
+        let source = slot.take().ok_or(OperationError::State)?;
+        let restore = Restore {
+            slot,
+            envelope: Some(v2::Observed::FixedProbeDiscoverSourceV1 { source }),
+        };
+        preflight(&restore.envelope)
+    }
+
+    #[cfg(target_os = "linux")]
     pub(super) fn fixed_probe_no_task_closed_fact(
         &self,
         proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
     ) -> Result<v2::ClosedFact, OperationError> {
-        self.fixed_probe_no_task_plan(proof)?;
+        self.fixed_probe_native_absence_closed_fact(proof, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixed_probe_native_absence_closed_fact(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+        joined_original_lease: bool,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        self.fixed_probe_native_absence_plan(proof, joined_original_lease)?;
         if self.pending.is_some() {
             return Err(OperationError::State);
         }

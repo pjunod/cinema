@@ -285,6 +285,8 @@ pub(in crate::adaptive_resources::runtime) fn prepare(
         multiply(profile.max_engine_command_output_bytes, 4)?,
         profile.engine_hash_buffer_bytes,
         profile.retained_custody_bytes,
+        super::super::operations::planning_settlement::registered_planning_preflight_bytes()
+            .ok_or_else(invalid)?,
         u64::try_from(request.requested_heap_bytes().ok_or_else(invalid)?)
             .map_err(|_| invalid())?,
         u64::try_from(std::mem::size_of::<FixedPlanningProbeRequest>()).map_err(|_| invalid())?,

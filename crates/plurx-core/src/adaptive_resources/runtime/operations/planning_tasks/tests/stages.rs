@@ -16,6 +16,7 @@ enum Stage {
     Native,
     Registered,
     BetweenEntries,
+    RegisteredPreflight,
 }
 struct Barrier {
     entered: Notify,
@@ -49,6 +50,9 @@ impl Gate {
     }
     pub(super) fn between_entries(id: Uuid) -> Self {
         Self::install_at(id, Stage::BetweenEntries)
+    }
+    pub(super) fn registered_preflight(id: Uuid) -> Self {
+        Self::install_at(id, Stage::RegisteredPreflight)
     }
     fn install_at(id: Uuid, stage: Stage) -> Self {
         let barrier = Arc::new(Barrier {
@@ -140,4 +144,10 @@ async fn pause_entry(id: Uuid, stage: Stage) {
             .expect("fixture entry release")
             .forget();
     }
+}
+
+pub(in crate::adaptive_resources::runtime::operations) async fn before_registered_preflight(
+    operation: Uuid,
+) {
+    pause_entry(operation, Stage::RegisteredPreflight).await;
 }

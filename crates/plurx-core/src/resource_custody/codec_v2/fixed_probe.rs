@@ -150,6 +150,27 @@ fn bounded_audit_sha256(value: &impl Serialize) -> Result<String, CustodyError> 
     Ok(hex::encode(writer.hash.finalize()))
 }
 
+/// Same serde wire-size bound, without allocating a serialized row or digest.
+/// Borrowed runtime preflight must not clone a 256-slot engine manifest.
+pub(crate) fn validate_bounded_audit_size(value: &impl Serialize) -> Result<(), CustodyError> {
+    use std::io::{self, Write};
+    struct SizeWriter(usize);
+    impl Write for SizeWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .filter(|n| *n <= codec::JSON_LIMIT)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(&mut SizeWriter(0), value).map_err(|_| codec::invalid())
+}
+
 pub(crate) fn engine_task_plan_sha256(
     task: &FixedPlanningEngineTaskV1,
 ) -> Result<String, CustodyError> {

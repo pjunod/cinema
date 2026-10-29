@@ -209,6 +209,13 @@ pub(crate) enum ClosedFact {
         document_close_operation_id: Id,
         owners: Vec<OwnerClosed>,
     },
+    /// Original registered task joined after its sole entry receiver failed.
+    /// No native image/root owner was acquired; unlike NeverAcquired this
+    /// records actual task-frame destruction under its stable join operation.
+    FixedProbeDiscoverTaskNeverEnteredV1 {
+        task: FixedProbeDiscoverTaskV1,
+        join_operation_id: Id,
+    },
     FixedProbeDiscoverTaskNeverAcquiredV1 {
         task: FixedProbeDiscoverTaskV1,
         operation_id: Id,
@@ -230,6 +237,12 @@ pub(crate) enum ClosedFact {
         dependency_close_operation_id: Id,
         used_file_slots: u16,
         owners: Vec<FixedEngineOwnerDispositionV1>,
+    },
+    /// Compact original-plan binding; no executable/media identity invented.
+    FixedPlanningEngineTaskNeverEnteredV1 {
+        member_id: Id,
+        plan_sha256: String,
+        join_operation_id: Id,
     },
     FixedPlanningEngineTaskNeverAcquiredV1 {
         task: FixedPlanningEngineTaskV1,
@@ -405,6 +418,25 @@ pub(crate) fn validate_settlement_scope(
     envelopes: &[Envelope],
     value: &Settlement,
 ) -> Result<(), CustodyError> {
+    validate_settlement_scope_refs(
+        owner_id,
+        graph_id,
+        member_count,
+        envelopes.iter().map(EnvelopeRef::from),
+        value,
+    )
+}
+
+pub(crate) fn validate_settlement_scope_refs<'a, I>(
+    owner_id: Id,
+    graph_id: Id,
+    member_count: usize,
+    envelopes: I,
+    value: &Settlement,
+) -> Result<(), CustodyError>
+where
+    I: Clone + ExactSizeIterator<Item = EnvelopeRef<'a>>,
+{
     if value.version != 2
         || value.graph_id != graph_id
         || value.owner_id != owner_id
@@ -420,11 +452,11 @@ pub(crate) fn validate_settlement_scope(
             return Err(codec::invalid());
         }
         let envelope = envelopes
-            .iter()
+            .clone()
             .find(|e| e.planned.member_id() == id.uuid())
             .ok_or_else(codec::invalid)?;
         match disposition {
-            MemberDisposition::Closed { fact, .. } => match (&envelope.planned, fact) {
+            MemberDisposition::Closed { fact, .. } => match (envelope.planned, fact) {
                 (MemberPlan::LegacyV1 { planned }, ClosedFact::LegacyV1 { fact }) => {
                     if fact.member_id != planned.member_id
                         || fact.adapter != planned.adapter
@@ -435,7 +467,7 @@ pub(crate) fn validate_settlement_scope(
                     }
                     codec::long_text(&fact.object_identity)?;
                     codec::long_text(&fact.evidence)?;
-                    if let Some(Observed::LegacyV1 { identity }) = &envelope.observed {
+                    if let Some(Observed::LegacyV1 { identity }) = envelope.observed {
                         if identity.object_identity != fact.object_identity {
                             return Err(codec::invalid());
                         }
@@ -466,7 +498,7 @@ pub(crate) fn validate_settlement_scope(
                     {
                         return Err(codec::invalid());
                     }
-                    validate_copy_closures(source, &envelope.observed, copies)?;
+                    validate_copy_closures(source, envelope.observed, copies)?;
                 }
                 (
                     MemberPlan::FixedProbeDiscoverSourceV1 { source, .. },
@@ -479,7 +511,7 @@ pub(crate) fn validate_settlement_scope(
                         || copies.iter().any(|closed| match closed {
                             CopyClosed::DomainExtinct { .. } => true,
                             CopyClosed::ProvenNeverAcquired { copy, .. } =>
-                                matches!(&envelope.observed,
+                                matches!(envelope.observed,
                                     Some(Observed::FixedProbeDiscoverSourceV1 { source: observed })
                                         if observed.copies.contains(copy)),
                             CopyClosed::ActualOwnedClose { .. } => false,
@@ -500,7 +532,7 @@ pub(crate) fn validate_settlement_scope(
                     }
                     match &copies[0] {
                         CopyClosed::ProvenNeverAcquired { copy, .. }
-                            if matches!(&envelope.observed,
+                            if matches!(envelope.observed,
                                 Some(Observed::DirectSourceV1 { source: observed })
                                     if observed.copies.contains(copy)) =>
                         {
@@ -523,7 +555,7 @@ pub(crate) fn validate_settlement_scope(
                     },
                 ) if task == closed
                     && !join_operation_id.uuid().is_nil()
-                    && matches!(&envelope.observed,
+                    && matches!(envelope.observed,
                         Some(Observed::VodOutputTaskV1 { task: observed }) if observed == task) =>
                 {
                     validate_closed_owners(owners, &task.inventory)?
@@ -537,7 +569,7 @@ pub(crate) fn validate_settlement_scope(
                     },
                 ) if task == closed
                     && !join_operation_id.uuid().is_nil()
-                    && matches!(&envelope.observed,
+                    && matches!(envelope.observed,
                         Some(Observed::FixedProbeTaskV1 { task: observed }) if observed == task) =>
                 {
                     validate_closed_owners(owners, &task.inventory)?
@@ -558,7 +590,7 @@ pub(crate) fn validate_settlement_scope(
                     && !join_operation_id.uuid().is_nil()
                     && *version_close_operation_id == task.version_close_operation_id
                     && *document_close_operation_id == task.document_close_operation_id
-                    && matches!(&envelope.observed,
+                    && matches!(envelope.observed,
                         Some(Observed::FixedProbeDiscoverTaskV1 { task: observed })
                             if observed.task == *task) =>
                 {
@@ -579,6 +611,14 @@ pub(crate) fn validate_settlement_scope(
                 }
                 (
                     MemberPlan::FixedProbeDiscoverTaskV1 { task, .. },
+                    ClosedFact::FixedProbeDiscoverTaskNeverEnteredV1 { task: closed, join_operation_id },
+                ) if task == closed && envelope.observed.is_none() && !join_operation_id.uuid().is_nil() => {
+                    validate_registered_join_operation(value, *join_operation_id)?;
+                    validate_unentered_planning_roots(value, [task.version_root_member_id, task.document_root_member_id])?;
+                    validate_unentered_probe_child(value, envelopes.clone(), task)?;
+                }
+                (
+                    MemberPlan::FixedProbeDiscoverTaskV1 { task, .. },
                     ClosedFact::FixedProbeDiscoverTaskNeverAcquiredV1 { task: closed, operation_id },
                 ) if task == closed
                     && envelope.observed.is_none()
@@ -594,7 +634,7 @@ pub(crate) fn validate_settlement_scope(
                     && !join_operation_id.uuid().is_nil()
                     && *version_close_operation_id == task.version_close_operation_id
                     && *dependency_close_operation_id == task.dependency_close_operation_id
-                    && matches!(&envelope.observed,
+                    && matches!(envelope.observed,
                         Some(Observed::FixedPlanningEngineTaskV1 { task: observed })
                             if observed.task == *task
                                 && observed.used_file_slots == *used_file_slots) =>
@@ -647,7 +687,7 @@ pub(crate) fn validate_settlement_scope(
                     },
                 ) => {
                     let Some(Observed::FixedPlanningEngineTaskV2 { task: observed }) =
-                        &envelope.observed else { return Err(codec::invalid()); };
+                        envelope.observed else { return Err(codec::invalid()); };
                     fixed_probe::validate_engine_task_observed_v2(task, observed)?;
                     if *member_id != task.member_id
                         || plan_sha256 != &observed.plan_sha256
@@ -696,6 +736,15 @@ pub(crate) fn validate_settlement_scope(
                             return Err(codec::invalid());
                         }
                     }
+                }
+                (
+                    MemberPlan::FixedPlanningEngineTaskV1 { task, .. },
+                    ClosedFact::FixedPlanningEngineTaskNeverEnteredV1 { member_id, plan_sha256, join_operation_id },
+                ) if *member_id == task.member_id && envelope.observed.is_none()
+                    && !join_operation_id.uuid().is_nil()
+                    && *plan_sha256 == fixed_probe::engine_task_plan_sha256(task)? => {
+                    validate_registered_join_operation(value, *join_operation_id)?;
+                    validate_unentered_planning_roots(value, [task.version_root_member_id, task.dependency_root_member_id])?;
                 }
                 (
                     MemberPlan::FixedPlanningEngineTaskV1 { task, .. },
@@ -763,7 +812,7 @@ pub(crate) fn validate_settlement_scope(
                         operation_id,
                     },
                 ) => {
-                    let Some(Observed::ScratchAssetsV3 { state }) = &envelope.observed else {
+                    let Some(Observed::ScratchAssetsV3 { state }) = envelope.observed else {
                         return Err(codec::invalid());
                     };
                     if plan != closed
@@ -814,14 +863,14 @@ pub(crate) fn validate_settlement_scope(
             }
         }
     }
-    codec::encode(value)?;
+    fixed_probe::validate_bounded_audit_size(value)?;
     Ok(())
 }
 fn validate_transfer_identity(
-    envelope: &Envelope,
+    envelope: EnvelopeRef<'_>,
     transfer: &MemberTransfer,
 ) -> Result<(), CustodyError> {
-    match (&envelope.planned, &envelope.observed, &transfer.identity) {
+    match (envelope.planned, envelope.observed, &transfer.identity) {
         (
             MemberPlan::SourceV1 { source: plan, .. },
             Some(Observed::SourceV1 { source: observed }),
@@ -848,7 +897,7 @@ fn validate_transfer_identity(
             {
                 return Err(codec::invalid());
             }
-            validate_copy_closures(plan, &envelope.observed, closed_copies)?;
+            validate_copy_closures(plan, envelope.observed, closed_copies)?;
             Ok(())
         }
         (
@@ -971,5 +1020,61 @@ fn validate_copy_closures(
             CopyClosed::ActualOwnedClose { .. } => {}
         }
     }
+    Ok(())
+}
+
+// Cross-member consistency remains audit validation, never join authority.
+fn validate_unentered_planning_roots(
+    settlement: &Settlement,
+    roots: [Id; 2],
+) -> Result<(), CustodyError> {
+    for root in roots {
+        if !settlement.members.iter().any(|member| matches!(member,
+            MemberDisposition::Closed { member_id, fact: ClosedFact::LegacyNeverAcquiredV1 { planned, operation_id } }
+                if *member_id == root && planned.member_id == root.uuid()
+                    && *operation_id == settlement.operation_id)) { return Err(codec::invalid()); }
+    }
+    Ok(())
+}
+fn validate_unentered_probe_child<'a>(
+    settlement: &Settlement,
+    mut envelopes: impl Iterator<Item = EnvelopeRef<'a>>,
+    task: &FixedProbeDiscoverTaskV1,
+) -> Result<(), CustodyError> {
+    let envelope = envelopes.find(|envelope| matches!(envelope.planned,
+        MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } if source.member_id == task.source_member_id))
+        .ok_or_else(codec::invalid)?;
+    let MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } = envelope.planned else {
+        return Err(codec::invalid());
+    };
+    let [parent, child] = source.planned_copies.as_slice() else {
+        return Err(codec::invalid());
+    };
+    if !matches!(child.owner, CopyOwner::OwnedRoot { root_member_id, .. } if root_member_id == task.document_root_member_id)
+        || !matches!(envelope.observed, Some(Observed::FixedProbeDiscoverSourceV1 { source: observed })
+            if observed.copies.as_slice() == std::slice::from_ref(parent))
+    {
+        return Err(codec::invalid());
+    }
+    if !settlement.members.iter().any(|member| matches!(member,
+        MemberDisposition::Closed { member_id, fact: ClosedFact::FixedProbeDiscoverSourceV1 { copies, .. } }
+            if *member_id == source.member_id && matches!(copies.as_slice(),
+                [CopyClosed::ActualOwnedClose { copy: actual_parent, operation_id: parent_close },
+                 CopyClosed::ProvenNeverAcquired { copy: actual_child, operation_id }]
+                    if actual_parent == parent && !parent_close.uuid().is_nil()
+                        && actual_child == child && *operation_id == settlement.operation_id))) { return Err(codec::invalid()); }
+    Ok(())
+}
+
+fn validate_registered_join_operation(
+    settlement: &Settlement,
+    join: Id,
+) -> Result<(), CustodyError> {
+    // Registered tasks have distinct original JoinHandles; a single joined
+    // task cannot stand in for both. These are audit identities, not authority.
+    if join == settlement.operation_id || settlement.members.iter().filter(|member| matches!(member,
+        MemberDisposition::Closed { fact: ClosedFact::FixedProbeDiscoverTaskNeverEnteredV1 { join_operation_id, .. }
+            | ClosedFact::FixedPlanningEngineTaskNeverEnteredV1 { join_operation_id, .. }, .. }
+                if *join_operation_id == join)).count() != 1 { return Err(codec::invalid()); }
     Ok(())
 }

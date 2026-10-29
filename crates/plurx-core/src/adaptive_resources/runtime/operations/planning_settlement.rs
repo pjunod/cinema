@@ -9,7 +9,9 @@
 //! settlement covers all seven P members. An uncertain or failed native task
 //! is held durably and never refunded. M (roles[1]) stays charged; what
 //! survives P's refund is bounded by `planning_retained_structural_bytes`.
-use super::planning_tasks::{PlanningNativeState, PlanningObservation, PlanningTasks};
+use super::planning_tasks::{
+    JoinedPlanningTaskNeverEntered, PlanningNativeState, PlanningObservation, PlanningTasks,
+};
 use super::*;
 use crate::adaptive_resources::physical_graph::{
     fixed_engine::FixedEngineNativeClosure,
@@ -40,6 +42,11 @@ enum PlanningNativeEvidence {
     },
     NeverEntered {
         _graph: FixedPlanningNoTaskGraph,
+    },
+    RegisteredNeverEntered {
+        _graph: FixedPlanningNoTaskGraph,
+        _probe: JoinedPlanningTaskNeverEntered,
+        _engine: JoinedPlanningTaskNeverEntered,
     },
 }
 impl PlanningNativeClosure {
@@ -89,6 +96,31 @@ pub(in crate::adaptive_resources::runtime) fn planning_retained_structural_bytes
         .checked_add(crate::resource_custody::owned_operation_requested_bytes()?)?;
     u64::try_from(bytes).ok()
 }
+/// Requested allocation/frame bound for the borrowed seven-member preflight.
+/// Plans, source strings and copy vectors are lent from their original owners;
+/// only the existing validators' seen/copy sets and compact hash are allocated.
+pub(in crate::adaptive_resources::runtime) fn registered_planning_preflight_bytes() -> Option<u64> {
+    let bytes = std::mem::size_of::<[v2::EnvelopeRef<'static>; 7]>()
+        // Scope retains its original iterator; lookup and probe source-child
+        // validation may each retain one clone plus two current audit views.
+        .checked_add(
+            std::mem::size_of::<
+                std::iter::Copied<std::slice::Iter<'static, v2::EnvelopeRef<'static>>>,
+            >()
+            .checked_mul(3)?,
+        )?
+        .checked_add(std::mem::size_of::<v2::EnvelopeRef<'static>>().checked_mul(2)?)?
+        // The loan wrapper plus the local unobserved-envelope value.
+        .checked_add(std::mem::size_of::<Option<v2::Observed>>().checked_mul(2)?)?
+        .checked_add(std::mem::size_of::<&mut Option<v2::SourceObserved>>())? // restoration slot
+        .checked_add(std::mem::size_of::<usize>())? // bounded writer counter
+        .checked_add(btree_requested_upper_bound::<v2::Id, ()>(7)?)?
+        .checked_add(btree_requested_upper_bound::<v2::Id, ()>(2)?.checked_mul(3)?)?
+        .checked_add(64)? // engine_task_plan_sha256's exact hex allocation
+        .checked_add(36)?; // Id serialization's one canonical UUID String
+    u64::try_from(bytes).ok()
+}
+
 /// Roles, typed-obligation and family vectors in the planning bundle hold at
 /// most this many entries of capacity; asserted before P settles.
 const MAX_PLANNING_BUNDLE_SLOTS: usize = 4;
@@ -192,6 +224,10 @@ impl NodeResourceRuntime {
                 .native_state();
             match state {
                 PlanningNativeState::Joined => {}
+                PlanningNativeState::RegisteredNeverEntered => {
+                    self.close_registered_unentered_planning_members(bundle_id, role, deadline)
+                        .await?;
+                }
                 PlanningNativeState::Uncertain => {
                     self.hold_uncertain_planning(bundle_id, role, deadline)
                         .await?;
@@ -361,6 +397,130 @@ impl NodeResourceRuntime {
             .map_err(lock_error)??;
             source.fixed_probe_no_task_closed_fact(proof)?;
         }
+        Ok(())
+    }
+
+    async fn close_registered_unentered_planning_members(
+        &self,
+        bundle_id: Uuid,
+        role: &mut OwnedRole,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        let tasks = role.planning_tasks.as_ref().ok_or(OperationError::State)?;
+        let members = tasks.registered_unentered_members(role.binding)?;
+        let source_member = tasks.source_member;
+        if !role.invoked.is_empty()
+            || role.sources.len() != 1
+            || role.sources.keys().any(|member| *member != source_member)
+            || !role.roots.is_empty()
+            || !role.drains.is_empty()
+            || !role.closed_drains.is_empty()
+            || !role.scratch.is_empty()
+            || !role.bootstrap.is_empty()
+            || role.finite_vod.is_some()
+            || role.copy_vod.is_some()
+            || role.retirement.is_some()
+            || role.response_budget.is_some()
+            || role.finite_app.is_some()
+            || role.planning_metadata.is_some()
+            || role.pending_finite_close.is_some()
+            || role
+                .armed
+                .iter()
+                .any(|member| *member != source_member && !members.contains(member))
+            || tasks.source_spec_retained()
+            || (!role.sources.contains_key(&source_member) && role.armed.contains(&source_member))
+        {
+            return Err(OperationError::State);
+        }
+        if let Some(transition) = role.transition.as_mut() {
+            if !matches!(transition.effect, Effect::Arm(member) if member == source_member || members.contains(&member))
+                && !matches!(transition.effect, Effect::Source(member) if member == source_member)
+                && transition.effect != Effect::Seal
+            {
+                return Err(OperationError::State);
+            }
+            if transition.operation.pending.is_none()
+                && !matches!(transition.operation.result, Some(Ok(_)))
+            {
+                transition.operation.retry(&self.journal, deadline)?;
+            }
+            self.finish_planning_transition(bundle_id, role, deadline)
+                .await?;
+        }
+        self.close_retained_entry(role.binding)?;
+        if let Some(graph) = role.graph.take() {
+            role.sealed = Some(graph.seal());
+        }
+        let tasks = role.planning_tasks.as_ref().ok_or(OperationError::State)?;
+        if tasks.registered_unentered_graph.is_none() {
+            let source = role
+                .typed_members
+                .as_ref()
+                .and_then(|plans| {
+                    plans.iter().find_map(|plan| match plan {
+                        v2::MemberPlan::FixedProbeDiscoverSourceV1 { slot, source }
+                            if slot.member_id.uuid() == source_member =>
+                        {
+                            Some(source)
+                        }
+                        _ => None,
+                    })
+                })
+                .ok_or(OperationError::State)?;
+            let graph = role.sealed.as_ref().ok_or(OperationError::State)?;
+            let proof = tokio::time::timeout_at(
+                deadline.into(),
+                graph.try_fixed_planning_no_task_graph(
+                    members,
+                    source,
+                    tasks.settlement_operation_id,
+                ),
+            )
+            .await
+            .map_err(lock_error)??;
+            if proof.source_member() != source_member
+                || !proof.matches(
+                    role.binding,
+                    role.handle
+                        .as_ref()
+                        .ok_or(OperationError::State)?
+                        .graph_id(),
+                    members,
+                )
+            {
+                return Err(OperationError::State);
+            }
+            let tasks = role.planning_tasks.as_mut().ok_or(OperationError::State)?;
+            tasks.registered_unentered_graph = Some(proof);
+            // Original worker inputs were already destroyed before their joined signals.
+        }
+        let tasks = role.planning_tasks.as_ref().ok_or(OperationError::State)?;
+        let proof = tasks
+            .registered_unentered_graph
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        let joined = tasks
+            .probe_never_entered
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        let join = tasks.probe_join_operation.ok_or(OperationError::State)?;
+        let source = role
+            .sources
+            .get_mut(&source_member)
+            .ok_or(OperationError::State)?;
+        tokio::time::timeout_at(
+            deadline.into(),
+            source.close_fixed_probe_parent_after_registered_nonentry(
+                proof,
+                joined,
+                role.binding,
+                join,
+            ),
+        )
+        .await
+        .map_err(lock_error)??;
+        source.fixed_probe_registered_nonentry_closed_fact(proof, joined, role.binding, join)?;
         Ok(())
     }
 
@@ -668,7 +828,28 @@ impl NodeResourceRuntime {
             let tasks = role.planning_tasks.as_ref().ok_or(OperationError::State)?;
             let never_entered = tasks.never_entered.as_ref();
             let source = role.sources.get(&tasks.source_member);
-            let native_ok = if let Some(proof) = never_entered {
+            let native_ok = if let Some(proof) = tasks.registered_unentered_graph.as_ref() {
+                let state = self
+                    .ledger
+                    .inner
+                    .lock()
+                    .map_err(|_| OperationError::State)?;
+                let no_overage = !state.native_overages.values().any(|overage| {
+                    overage.binding == role.binding
+                        && overage.observed_extra != ResourceVector::default()
+                });
+                drop(state);
+                no_overage
+                    && proof.matches(
+                        role.binding,
+                        role.handle
+                            .as_ref()
+                            .ok_or(OperationError::State)?
+                            .graph_id(),
+                        tasks.registered_unentered_members(role.binding)?,
+                    )
+                    && source.is_some_and(source_files::SourceCell::parent_closed)
+            } else if let Some(proof) = never_entered {
                 proof.matches(
                     role.binding,
                     role.handle
@@ -729,6 +910,20 @@ impl NodeResourceRuntime {
         // k. Actual capacities never exceed what M's admission assumed.
         check_planning_survivors(bundle)?;
 
+        #[cfg(test)]
+        if let Some(tasks) = bundle.roles[0]
+            .planning_tasks
+            .as_ref()
+            .filter(|tasks| tasks.registered_unentered_graph.is_some())
+        {
+            // Native graph absence and original acquired-parent close already
+            // cached; cancelling this borrow cannot consume their witnesses.
+            super::planning_tasks::tests::stages::before_registered_preflight(
+                tasks.settlement_operation_id,
+            )
+            .await;
+        }
+
         // l. All facts, in manifest order, before anything is consumed.
         let settlement = {
             let role = &bundle.roles[0];
@@ -746,7 +941,20 @@ impl NodeResourceRuntime {
                         .find(|plan| plan.member_id() == tasks.source_member)
                 })
                 .ok_or(OperationError::State)?;
-            let source_fact = if let Some(proof) = never_entered {
+            let source_fact = if let Some(proof) = tasks.registered_unentered_graph.as_ref() {
+                role.sources
+                    .get(&tasks.source_member)
+                    .ok_or(OperationError::State)?
+                    .fixed_probe_registered_nonentry_closed_fact(
+                        proof,
+                        tasks
+                            .probe_never_entered
+                            .as_ref()
+                            .ok_or(OperationError::State)?,
+                        role.binding,
+                        tasks.probe_join_operation.ok_or(OperationError::State)?,
+                    )?
+            } else if let Some(proof) = never_entered {
                 match role.sources.get(&tasks.source_member) {
                     Some(source) => source.fixed_probe_no_task_closed_fact(proof)?,
                     None => source_files::fixed_probe_unregistered_no_task_closed_fact(
@@ -769,11 +977,16 @@ impl NodeResourceRuntime {
             for plan in planned {
                 let fact = match plan {
                     v2::MemberPlan::LegacyV1 { planned }
-                        if never_entered.is_some()
+                        if (never_entered.is_some()
+                            || tasks.registered_unentered_graph.is_some())
                             && planned.kind == MemberKind::Root
                             && planned.adapter == Adapter::ProcessRoot =>
                     {
-                        let members = tasks.never_entered_members()?;
+                        let members = if tasks.registered_unentered_graph.is_some() {
+                            tasks.registered_unentered_members(role.binding)?
+                        } else {
+                            tasks.never_entered_members()?
+                        };
                         if ![members[0], members[1], members[3], members[4]]
                             .contains(&planned.member_id)
                         {
@@ -782,6 +995,37 @@ impl NodeResourceRuntime {
                         v2::ClosedFact::LegacyNeverAcquiredV1 {
                             planned: planned.clone(),
                             operation_id,
+                        }
+                    }
+                    v2::MemberPlan::FixedProbeDiscoverTaskV1 { task, .. }
+                        if tasks.registered_unentered_graph.is_some()
+                            && *task == tasks.probe_plan =>
+                    {
+                        v2::ClosedFact::FixedProbeDiscoverTaskNeverEnteredV1 {
+                            task: task.clone(),
+                            join_operation_id: v2::Id::new(
+                                tasks
+                                    .probe_never_entered
+                                    .as_ref()
+                                    .ok_or(OperationError::State)?
+                                    .join_operation(),
+                            )?,
+                        }
+                    }
+                    v2::MemberPlan::FixedPlanningEngineTaskV1 { task, .. }
+                        if tasks.registered_unentered_graph.is_some()
+                            && *task == tasks.engine_plan =>
+                    {
+                        v2::ClosedFact::FixedPlanningEngineTaskNeverEnteredV1 {
+                            member_id: task.member_id,
+                            plan_sha256: v2::engine_task_plan_sha256(task)?,
+                            join_operation_id: v2::Id::new(
+                                tasks
+                                    .engine_never_entered
+                                    .as_ref()
+                                    .ok_or(OperationError::State)?
+                                    .join_operation(),
+                            )?,
                         }
                     }
                     v2::MemberPlan::FixedProbeDiscoverTaskV1 { task, .. }
@@ -872,13 +1116,71 @@ impl NodeResourceRuntime {
         // cannot consume the one-shot proof or refund the original charge.
         v2::validate_planning_settlement_size(&settlement)?;
 
+        if bundle.roles[0]
+            .planning_tasks
+            .as_ref()
+            .is_some_and(|tasks| tasks.registered_unentered_graph.is_some())
+        {
+            let role = &mut bundle.roles[0];
+            let source_member = role
+                .planning_tasks
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .source_member;
+            let plans = role.typed_members.as_ref().ok_or(OperationError::State)?;
+            if plans.len() != 7 {
+                return Err(OperationError::State);
+            }
+            role.sources
+                .get_mut(&source_member)
+                .ok_or(OperationError::State)?
+                .with_fixed_probe_unentered_observation(|source_observed| {
+                    let none = None;
+                    let envelopes: [v2::EnvelopeRef<'_>; 7] = std::array::from_fn(|index| {
+                        let planned = &plans[index];
+                        v2::EnvelopeRef {
+                            version: 2,
+                            planned,
+                            observed: if planned.member_id() == source_member {
+                                source_observed
+                            } else {
+                                &none
+                            },
+                        }
+                    });
+                    for envelope in envelopes.iter().copied() {
+                        v2::validate_envelope_members_ref(plans, envelope)?;
+                    }
+                    v2::validate_settlement_scope_refs(
+                        v2::Id::new(self.owner.owner_id)?,
+                        v2::Id::new(handle.graph_id())?,
+                        plans.len(),
+                        envelopes.iter().copied(),
+                        &settlement,
+                    )?;
+                    Ok(())
+                })?;
+        }
+
         // m. No await or fallible work between consuming native evidence and
         // retaining the exact command in this role's transition.
         bundle.prepare.result = None;
         let role = &mut bundle.roles[0];
         let operation_id = settlement.operation_id.uuid();
         let tasks = role.planning_tasks.as_mut().expect("validated P tasks");
-        let evidence = if let Some(graph) = tasks.never_entered.take() {
+        let evidence = if let Some(graph) = tasks.registered_unentered_graph.take() {
+            PlanningNativeEvidence::RegisteredNeverEntered {
+                _graph: graph,
+                _probe: tasks
+                    .probe_never_entered
+                    .take()
+                    .expect("validated original probe join"),
+                _engine: tasks
+                    .engine_never_entered
+                    .take()
+                    .expect("validated original engine join"),
+            }
+        } else if let Some(graph) = tasks.never_entered.take() {
             PlanningNativeEvidence::NeverEntered { _graph: graph }
         } else {
             PlanningNativeEvidence::Joined {

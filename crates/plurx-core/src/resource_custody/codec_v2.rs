@@ -601,6 +601,23 @@ pub(crate) struct Envelope {
     pub planned: MemberPlan,
     pub observed: Option<Observed>,
 }
+/// Synchronous audit view of the SAME retained plan and observation. It has
+/// the exact Envelope wire shape but owns no plan/observation allocation.
+#[derive(Clone, Copy, Serialize)]
+pub(crate) struct EnvelopeRef<'a> {
+    pub version: u32,
+    pub planned: &'a MemberPlan,
+    pub observed: &'a Option<Observed>,
+}
+impl<'a> From<&'a Envelope> for EnvelopeRef<'a> {
+    fn from(value: &'a Envelope) -> Self {
+        Self {
+            version: value.version,
+            planned: &value.planned,
+            observed: &value.observed,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ManifestDocument {
     // Not used on disk as a wrapper: decode_manifest selects the actual version.
@@ -1083,10 +1100,17 @@ pub(crate) fn validate_envelope_members(
     members: &[MemberPlan],
     envelope: &Envelope,
 ) -> Result<(), CustodyError> {
-    if envelope.version != 2 || !members.contains(&envelope.planned) {
+    validate_envelope_members_ref(members, envelope.into())
+}
+
+pub(crate) fn validate_envelope_members_ref(
+    members: &[MemberPlan],
+    envelope: EnvelopeRef<'_>,
+) -> Result<(), CustodyError> {
+    if envelope.version != 2 || !members.contains(envelope.planned) {
         return Err(codec::invalid());
     }
-    match (&envelope.planned, &envelope.observed) {
+    match (envelope.planned, envelope.observed) {
         (_, None) => {}
         (MemberPlan::LegacyV1 { planned }, Some(Observed::LegacyV1 { identity })) => {
             codec::validate_observed(planned, identity)?
@@ -1202,7 +1226,7 @@ pub(crate) fn validate_envelope_members(
         }
         _ => return Err(codec::invalid()),
     }
-    codec::encode(envelope)?;
+    fixed_probe::validate_bounded_audit_size(&envelope)?;
     Ok(())
 }
 

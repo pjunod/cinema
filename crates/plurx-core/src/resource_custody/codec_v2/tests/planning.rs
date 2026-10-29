@@ -643,3 +643,207 @@ fn planning_settlement_preflight_keeps_the_original_global_json_limit() {
     assert!(validate_planning_settlement_size(&settlement).is_err());
     assert!(codec::encode(&settlement).is_err());
 }
+
+/// Audit-only registered-but-never-entered vocabulary. It never constructs
+/// a native closure or changes the fixture's synthetic authority status.
+fn registered_unentered_planning_fixture() -> (Manifest, Vec<Envelope>, Settlement) {
+    let (manifest, mut envelopes, mut settlement) = planning_fixture();
+    for envelope in &mut envelopes {
+        let member = settlement
+            .members
+            .iter_mut()
+            .find(|member| member.member_id().uuid() == envelope.planned.member_id())
+            .unwrap();
+        let MemberDisposition::Closed { fact, .. } = member else {
+            unreachable!()
+        };
+        match &envelope.planned {
+            MemberPlan::LegacyV1 { planned } => {
+                envelope.observed = None;
+                *fact = ClosedFact::LegacyNeverAcquiredV1 {
+                    planned: planned.clone(),
+                    operation_id: settlement.operation_id,
+                };
+            }
+            MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } => {
+                let Some(Observed::FixedProbeDiscoverSourceV1 { source: observed }) =
+                    &mut envelope.observed
+                else {
+                    unreachable!()
+                };
+                observed.copies.truncate(1);
+                let ClosedFact::FixedProbeDiscoverSourceV1 { copies, .. } = fact else {
+                    unreachable!()
+                };
+                copies[1] = CopyClosed::ProvenNeverAcquired {
+                    copy: source.planned_copies[1].clone(),
+                    operation_id: settlement.operation_id,
+                };
+            }
+            MemberPlan::FixedProbeDiscoverTaskV1 { task, .. } => {
+                envelope.observed = None;
+                *fact = ClosedFact::FixedProbeDiscoverTaskNeverEnteredV1 {
+                    task: task.clone(),
+                    join_operation_id: id(),
+                };
+            }
+            MemberPlan::FixedPlanningEngineTaskV1 { task, .. } => {
+                envelope.observed = None;
+                *fact = ClosedFact::FixedPlanningEngineTaskNeverEnteredV1 {
+                    member_id: task.member_id,
+                    plan_sha256: engine_task_plan_sha256(task).unwrap(),
+                    join_operation_id: id(),
+                };
+            }
+            _ => unreachable!("seven P members"),
+        }
+    }
+    (manifest, envelopes, settlement)
+}
+
+#[test]
+fn registered_unentered_planning_has_distinct_task_facts_and_borrowed_wire_shape() {
+    let (manifest, envelopes, settlement) = registered_unentered_planning_fixture();
+    for envelope in &envelopes {
+        validate_envelope(&manifest, envelope).unwrap();
+        let borrowed = EnvelopeRef::from(envelope);
+        assert_eq!(
+            codec::encode(envelope).unwrap(),
+            codec::encode(&borrowed).unwrap()
+        );
+        validate_envelope_members_ref(&manifest.members, borrowed).unwrap();
+    }
+    validate_settlement(&manifest, &envelopes, &settlement).unwrap();
+    validate_settlement_scope_refs(
+        manifest.owner_id,
+        manifest.graph_id,
+        7,
+        envelopes.iter().map(EnvelopeRef::from),
+        &settlement,
+    )
+    .unwrap();
+    let encoded = codec::encode(&settlement).unwrap();
+    assert!(encoded.contains("fixed_probe_discover_task_never_entered_v1"));
+    assert!(encoded.contains("fixed_planning_engine_task_never_entered_v1"));
+    assert!(!encoded.contains("fixed_probe_discover_task_never_acquired_v1"));
+    assert!(!encoded.contains("fixed_planning_engine_task_never_acquired_v1"));
+    assert_eq!(codec::decode::<Settlement>(&encoded).unwrap(), settlement);
+    // Unknown enum tags remain a decode error, never an absence fallback.
+    let future = encoded.replace(
+        "fixed_planning_engine_task_never_entered_v1",
+        "fixed_planning_engine_task_never_entered_v2",
+    );
+    assert!(decode_settlement(&future).is_err());
+}
+
+#[test]
+fn registered_unentered_planning_refuses_observed_task_wrong_roots_and_shared_join() {
+    let (manifest, envelopes, settlement) = registered_unentered_planning_fixture();
+    let (original_manifest, acquired, _) = planning_fixture();
+    let mut observed_task = envelopes.clone();
+    let index = observed_task
+        .iter()
+        .position(|envelope| {
+            matches!(
+                envelope.planned,
+                MemberPlan::FixedProbeDiscoverTaskV1 { .. }
+            )
+        })
+        .unwrap();
+    // Use a typed observation of the same exact plan; its presence alone
+    // contradicts NeverEntered, irrespective of synthetic inventory values.
+    let MemberPlan::FixedProbeDiscoverTaskV1 { task, .. } = &observed_task[index].planned else {
+        unreachable!()
+    };
+    let mut observed = acquired
+        .iter()
+        .find_map(|envelope| match &envelope.observed {
+            Some(Observed::FixedProbeDiscoverTaskV1 { task }) => Some(task.clone()),
+            _ => None,
+        })
+        .unwrap();
+    observed.task = task.clone();
+    observed_task[index].observed = Some(Observed::FixedProbeDiscoverTaskV1 { task: observed });
+    assert!(validate_settlement(&manifest, &observed_task, &settlement).is_err());
+    let _ = original_manifest;
+    let mut wrong_root = settlement.clone();
+    let MemberDisposition::Closed {
+        fact: ClosedFact::LegacyNeverAcquiredV1 { operation_id, .. },
+        ..
+    } = &mut wrong_root.members[0]
+    else {
+        unreachable!()
+    };
+    *operation_id = id();
+    assert!(validate_settlement(&manifest, &envelopes, &wrong_root).is_err());
+    let mut shared_join = settlement.clone();
+    let join = shared_join
+        .members
+        .iter()
+        .find_map(|member| match member {
+            MemberDisposition::Closed {
+                fact:
+                    ClosedFact::FixedProbeDiscoverTaskNeverEnteredV1 {
+                        join_operation_id, ..
+                    },
+                ..
+            } => Some(*join_operation_id),
+            _ => None,
+        })
+        .unwrap();
+    for member in &mut shared_join.members {
+        if let MemberDisposition::Closed {
+            fact:
+                ClosedFact::FixedPlanningEngineTaskNeverEnteredV1 {
+                    join_operation_id, ..
+                },
+            ..
+        } = member
+        {
+            *join_operation_id = join;
+        }
+    }
+    assert!(validate_settlement(&manifest, &envelopes, &shared_join).is_err());
+}
+
+#[test]
+fn registered_unentered_planning_refuses_child_handoff_and_engine_plan_substitution() {
+    let (manifest, envelopes, settlement) = registered_unentered_planning_fixture();
+    let mut acquired_child = envelopes.clone();
+    for envelope in &mut acquired_child {
+        if let (
+            MemberPlan::FixedProbeDiscoverSourceV1 { source, .. },
+            Some(Observed::FixedProbeDiscoverSourceV1 { source: observed }),
+        ) = (&envelope.planned, &mut envelope.observed)
+        {
+            observed.copies = source.planned_copies.clone();
+        }
+    }
+    assert!(validate_settlement(&manifest, &acquired_child, &settlement).is_err());
+    let mut wrong_digest = settlement.clone();
+    for member in &mut wrong_digest.members {
+        if let MemberDisposition::Closed {
+            fact: ClosedFact::FixedPlanningEngineTaskNeverEnteredV1 { plan_sha256, .. },
+            ..
+        } = member
+        {
+            *plan_sha256 = "0".repeat(64);
+        }
+    }
+    assert!(validate_settlement(&manifest, &envelopes, &wrong_digest).is_err());
+    let mut unknown_field = serde_json::to_value(&settlement).unwrap();
+    let fact = unknown_field["members"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find_map(|member| {
+            let fact = member.get_mut("fact")?;
+            (fact.get("kind")?.as_str()? == "fixed_probe_discover_task_never_entered_v1")
+                .then_some(fact)
+        })
+        .expect("strict registered task tag");
+    fact.as_object_mut()
+        .unwrap()
+        .insert("native_digest".into(), "invented".into());
+    assert!(codec::decode::<Settlement>(&unknown_field.to_string()).is_err());
+}

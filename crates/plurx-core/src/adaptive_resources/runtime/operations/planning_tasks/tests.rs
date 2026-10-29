@@ -540,6 +540,25 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
         .await
         .expect("actual original source parent acquired");
     let charged = runtime.accounting().expect("full original P/M charge").used;
+    let both_refused = matches!(
+        fence,
+        EntryFence::Epoch | EntryFence::Drain | EntryFence::Overage
+    );
+    let held_parent = if both_refused {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        let source_member = role.planning_tasks.as_ref().unwrap().source_member;
+        Some(
+            role.sources
+                .get_mut(&source_member)
+                .unwrap()
+                .take_probe_lease()
+                .expect("actual original parent alias")
+                .0,
+        )
+    } else {
+        None
+    };
     let (binding, member) = {
         let bundle = preparation.state.lock().await;
         let role = &bundle.roles[0];
@@ -642,32 +661,54 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
             tasks.probe.is_none() && tasks.engine.is_none(),
             "both original handles joined"
         );
-        let probe = tasks
-            .probe_failure
-            .as_ref()
-            .expect("original probe outcome retained");
-        if matches!(
-            fence,
-            EntryFence::EpochBetweenSiblings | EntryFence::DrainAfterEntry
-        ) {
-            assert!(
-                !matches!(probe.error, DecodeFactError::Deadline),
-                "first released sibling ran its original collector"
+        if both_refused {
+            assert!(tasks.probe_failure.is_none() && tasks.engine_failure.is_none());
+            let probe = tasks
+                .probe_never_entered
+                .as_ref()
+                .expect("same probe joined after receiver error");
+            let engine = tasks
+                .engine_never_entered
+                .as_ref()
+                .expect("same engine joined after receiver error");
+            assert!(probe.matches(
+                binding,
+                tasks.probe_plan.member_id.uuid(),
+                tasks.probe_join_operation
+            ));
+            assert!(engine.matches(
+                binding,
+                tasks.engine_plan.member_id.uuid(),
+                tasks.engine_join_operation
+            ));
+            assert_ne!(probe.join_operation(), engine.join_operation());
+            assert_eq!(
+                tasks.native_state(),
+                PlanningNativeState::RegisteredNeverEntered
             );
         } else {
-            assert!(
-                matches!(probe.error, DecodeFactError::Deadline),
-                "closed original receiver prevented native discovery"
-            );
-        }
-        assert_eq!(
-            tasks
-                .engine_failure
+            let probe = tasks
+                .probe_failure
                 .as_ref()
-                .expect("original engine outcome retained")
-                .phase,
-            crate::process::fixed_planning_engine::FixedEngineFailurePhase::BeforeNativeEntry
-        );
+                .expect("original entered probe failure retained");
+            assert!(
+                !matches!(probe.error, DecodeFactError::Deadline),
+                "released sibling ran its actual collector"
+            );
+            assert!(tasks.probe_never_entered.is_none());
+            if matches!(fence, EntryFence::EpochBetweenSiblings) {
+                assert!(
+                    tasks.engine_never_entered.is_some(),
+                    "unreleased sibling retained its distinct joined witness"
+                );
+                assert!(tasks.engine_failure.is_none());
+            } else {
+                assert!(tasks.engine_never_entered.is_none());
+                assert_eq!(tasks.engine_failure.as_ref().expect("original entered engine failure retained").phase,
+                    crate::process::fixed_planning_engine::FixedEngineFailurePhase::BeforeNativeEntry);
+            }
+            assert_eq!(tasks.native_state(), PlanningNativeState::Uncertain);
+        }
         assert!(tasks.probe_closed.is_none() && tasks.engine_closed.is_none());
         assert!(
             tasks.never_entered.is_none(),
@@ -682,37 +723,170 @@ async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
     }
     assert_eq!(held.used, expected);
     assert!(held.unknown_held > 0);
-    // Joining the outcomes and checked cleanup does not invent a typed P close.
-    runtime
-        .retry_planning_native_failures(&preparation, deadline())
-        .await
-        .expect("same original failed owners positively drained");
-    {
-        let mut bundle = preparation.state.lock().await;
-        for source in bundle.roles[0].sources.values_mut() {
-            source
-                .close_parent()
-                .await
-                .expect("same actual source parent closed");
+    if matches!(fence, EntryFence::Epoch | EntryFence::Drain) {
+        let identities = {
+            let bundle = preparation.state.lock().await;
+            let tasks = bundle.roles[0].planning_tasks.as_ref().unwrap();
+            (
+                tasks.settlement_operation_id,
+                tasks.probe_never_entered.as_ref().unwrap().join_operation(),
+                tasks
+                    .engine_never_entered
+                    .as_ref()
+                    .unwrap()
+                    .join_operation(),
+            )
+        };
+        // Task non-entry never stands in for the actual acquired parent close.
+        assert!(runtime
+            .finish_planning_native(&preparation, deadline())
+            .await
+            .is_err());
+        assert_eq!(runtime.accounting().unwrap().used, expected);
+        {
+            let bundle = preparation.state.lock().await;
+            let role = &bundle.roles[0];
+            let tasks = role.planning_tasks.as_ref().unwrap();
+            assert!(tasks.registered_unentered_graph.is_some());
+            assert!(!role.sources[&tasks.source_member].parent_closed());
+            assert!(!role.refunded);
         }
+        drop(held_parent);
+        let preflight = stages::Gate::registered_preflight(identities.0);
+        let mut finish = Box::pin(runtime.finish_planning_native(&preparation, deadline()));
+        tokio::select! {
+            result = &mut finish => panic!("original registered preflight skipped: {result:?}"),
+            () = preflight.entered() => {},
+            () = tokio::time::sleep(Duration::from_secs(15)) => panic!("registered closure preflight watchdog"),
+        }
+        drop(finish); // only the borrower; all original proofs stay in P
+        {
+            let mut bundle = preparation.state.lock().await;
+            let role = &mut bundle.roles[0];
+            let tasks = role.planning_tasks.as_ref().unwrap();
+            assert!(tasks.registered_unentered_graph.is_some());
+            assert_eq!(
+                (
+                    tasks.settlement_operation_id,
+                    tasks.probe_never_entered.as_ref().unwrap().join_operation(),
+                    tasks
+                        .engine_never_entered
+                        .as_ref()
+                        .unwrap()
+                        .join_operation()
+                ),
+                identities
+            );
+            let source_member = tasks.source_member;
+            let original_s1 = tasks.observed_source.clone().unwrap();
+            let source = role.sources.get_mut(&source_member).unwrap();
+            assert!(source.parent_closed());
+            // A synchronous rejected audit borrower must restore the SAME
+            // acquired metadata, without reopening/re-statting or consuming it.
+            assert!(source
+                .with_fixed_probe_unentered_observation(|observed| {
+                    assert!(
+                        matches!(observed, Some(v2::Observed::FixedProbeDiscoverSourceV1 { source })
+                    if source.source_association.object_version == original_s1)
+                    );
+                    Err(OperationError::State)
+                })
+                .is_err());
+            source
+                .with_fixed_probe_unentered_observation(|observed| {
+                    assert!(
+                        matches!(observed, Some(v2::Observed::FixedProbeDiscoverSourceV1 { source })
+                    if source.source_association.object_version == original_s1)
+                    );
+                    Ok(())
+                })
+                .expect("same metadata restored after rejected borrower");
+            assert!(!role.refunded);
+        }
+        assert_eq!(runtime.accounting().unwrap().used, expected);
+        drop(preflight);
+        runtime.finish_planning_native(&preparation, deadline()).await
+            .expect("same two joined non-entry witnesses plus checked parent close and exact typed journal settlement");
+        assert_only_m_survives(&runtime, &preparation).await;
+        let sequence = preparation.state.lock().await.roles[0].sequence;
+        runtime
+            .finish_planning_native(&preparation, deadline())
+            .await
+            .expect("same P settlement is idempotent");
+        assert_eq!(preparation.state.lock().await.roles[0].sequence, sequence);
+        drop(original);
+        drop(preparation);
+        let until = deadline();
+        while runtime.accounting().unwrap().used != ResourceVector::default() {
+            assert!(
+                Instant::now() < until,
+                "actual original M/application cleanup did not finish"
+            );
+            runtime.maintain_planning_cleanup(until).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(runtime.operations.lock().unwrap().bundles.is_empty());
+        Arc::try_unwrap(runtime)
+            .ok()
+            .expect("sole original runtime")
+            .drain()
+            .expect("original journal drained");
+    } else {
+        // A mixed entered outcome or independent native overage cannot be
+        // discharged by the unopened sibling's exact registered witness.
+        assert!(runtime
+            .finish_planning_native(&preparation, deadline())
+            .await
+            .is_err());
+        runtime
+            .retry_planning_native_failures(&preparation, deadline())
+            .await
+            .expect("same original failed owners positively drained");
+        drop(held_parent);
+        assert!(runtime
+            .finish_planning_native(&preparation, deadline())
+            .await
+            .is_err());
+        {
+            let mut bundle = preparation.state.lock().await;
+            let role = &mut bundle.roles[0];
+            let tasks = role
+                .planning_tasks
+                .as_ref()
+                .expect("same P remains charged");
+            let source_member = tasks.source_member;
+            if matches!(fence, EntryFence::Overage) {
+                assert!(tasks.registered_unentered_graph.is_some());
+                assert!(
+                    tasks.probe_never_entered.is_some() && tasks.engine_never_entered.is_some()
+                );
+                assert!(
+                    role.sources[&source_member].parent_closed(),
+                    "known original parent may close while independent overage stays held"
+                );
+            } else {
+                let source = role.sources.get_mut(&source_member).unwrap();
+                assert!(source.close_parent().await.is_err(), "a generic close cannot override the issued original lease without its exact native witness");
+                assert!(
+                    !source.parent_closed(),
+                    "original parent remains retained with unresolved entered-task custody"
+                );
+            }
+            assert!(!role.refunded);
+        }
+        assert_eq!(runtime.accounting().unwrap().used, expected);
+        drop(original);
+        drop(preparation);
+        Arc::try_unwrap(runtime)
+            .ok()
+            .expect("sole original runtime")
+            .drain()
+            .expect("original journal drained");
+        eprintln!(
+            "retained unresolved original R1 P fixture custody at {}",
+            root.keep().display()
+        );
     }
-    assert_eq!(
-        runtime.accounting().expect("cleanup is not refund").used,
-        expected
-    );
-    drop(original);
-    drop(preparation);
-    Arc::try_unwrap(runtime)
-        .ok()
-        .expect("sole original runtime")
-        .drain()
-        .expect("original journal owner drained");
-    // No registered-but-unentered settlement adapter is claimed by this slice.
-    // Keep the durable full hold rather than remove its original namespace.
-    eprintln!(
-        "retained original R1 P fixture custody at {}",
-        root.keep().display()
-    );
 }
 
 #[tokio::test]
