@@ -341,9 +341,16 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         .await
         .expect_err("selected background R must not bypass the live legacy owner");
     assert!(
-        matches!(error, crate::background_jobs::PreparationError::Retry(ref message)
-        if message.contains("compatibility pool")),
-        "actual compatibility refusal: {error:?}"
+        matches!(
+            &error,
+            crate::background_jobs::PreparationError::Yield("owner_busy")
+        ),
+        "the actual foreground-idle guard must yield before background admission: {error:?}"
+    );
+    assert_eq!(
+        runtime.accounting().expect("foreground yield ledger").used,
+        resource_baseline,
+        "foreground demand refuses background entry before any new P or R charge"
     );
     assert_eq!(
         compatibility_pool.snapshot().software_used,
