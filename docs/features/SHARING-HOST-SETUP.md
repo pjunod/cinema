@@ -168,7 +168,10 @@ Personal device shares cannot be consumed by externally tagged recipient nodes;
 Cinema does not silently change either tailnet's policy or device ownership.
 
 Per-invitation cleanup journals contain exact provider IDs and sealed issuing
-credentials. Known provider invitations are removed after Cinema cancellation,
+credentials. Non-secret provider-ID ownership is replicated so another publishing node can
+recognize a recipient’s other live Cinema grants. Cleanup retains connectivity
+while such a grant or an independent manual share still authorizes that user.
+Known provider invitations are removed after Cinema cancellation,
 expiry or final grant revocation. Active grants retain network connectivity
 beyond bootstrap expiry. Cleanup retries independently; Cinema revocation is
 immediate even if the control API is unavailable. Account replacement cannot

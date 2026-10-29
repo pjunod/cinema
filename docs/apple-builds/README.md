@@ -134,3 +134,5 @@ Apple growing playlist attachment: [preparation and failover correction](914-gro
 
 - [Apple TV focus responsiveness](1130-apple-tv-focus-responsiveness.md) —
   input-update isolation, regression evidence and remaining device acceptance.
+
+[External Cinema invitation](1323-external-sharing-invitation.md) — combined network consent and automatic import continuation.

@@ -10,7 +10,10 @@ use plurx_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -356,9 +359,22 @@ async fn issue_inner(state: &AppState, invite: &Invitation) -> Result<Secret> {
         });
         match result {
             Ok((id, url)) => {
-                job.shares.push(Share { device, id });
+                job.shares.push(Share {
+                    device,
+                    id: id.clone(),
+                });
                 job.attempting = None;
                 save(state, &job)?;
+                // Non-secret cluster metadata lets another publishing node
+                // retain a shared user's other live Cinema grants.
+                state
+                    .store
+                    .put_setting(
+                        &format!("sharing.network.invite.{id}"),
+                        &invite.id.to_string(),
+                    )
+                    .await
+                    .map_err(|_| "sharing_authority_unavailable")?;
                 network.push(NetworkShare {
                     ts_fqdn: endpoint.ts_fqdn.clone(),
                     invite_url: url,
@@ -393,7 +409,9 @@ async fn issue_inner(state: &AppState, invite: &Invitation) -> Result<Secret> {
 pub(crate) async fn cleanup(state: &AppState) -> Result<()> {
     let _guard = state.sharing.network_invite_lock.lock().await;
     for mut job in jobs(state)? {
-        if !job.completed {
+        if !job.completed || job.cleanup {
+            job.cleanup = true;
+            save(state, &job)?;
             state
                 .store
                 .cancel_share_invitation(job.invitation)
@@ -429,7 +447,13 @@ pub(crate) async fn cleanup(state: &AppState) -> Result<()> {
                 &sealed,
             )
             .map_err(|_| "sharing_network_authorization_required")?;
-        while let Some(share) = job.shares.last() {
+        let mut index = 0;
+        while index < job.shares.len() {
+            let share = &job.shares[index];
+            if retain_other_authority(state, &token, share).await? {
+                index += 1;
+                continue;
+            }
             match request(
                 &token,
                 reqwest::Method::DELETE,
@@ -439,13 +463,13 @@ pub(crate) async fn cleanup(state: &AppState) -> Result<()> {
             .await
             {
                 Ok(_) | Err("sharing_network_not_found") => {
-                    job.shares.pop();
+                    job.shares.remove(index);
                     save(state, &job)?;
                 }
                 Err(error) => return Err(error),
             }
         }
-        if job.attempting.is_none() {
+        if job.attempting.is_none() && job.shares.is_empty() {
             std::fs::remove_file(job_path(state, job.invitation)?)
                 .map_err(|_| "sharing_network_storage_unavailable")?;
         }
@@ -474,6 +498,14 @@ pub(crate) async fn issue(state: &AppState, invite: Invitation) -> Result<Secret
         let failed = result.is_err();
         let delivered = send.send(result).is_ok();
         if failed || !delivered {
+            {
+                let _guard = state.sharing.network_invite_lock.lock().await;
+                if let Ok(path) = job_path(&state, invite.id) {
+                    if path.exists() {
+                        let _ = abandon_file(&path);
+                    }
+                }
+            }
             let _ = state.store.cancel_share_invitation(invite.id).await;
             let result = cleanup(&state).await;
             *state
@@ -486,4 +518,164 @@ pub(crate) async fn issue(state: &AppState, invite: Invitation) -> Result<Secret
     receive
         .await
         .map_err(|_| "sharing_network_outcome_unknown")?
+}
+
+fn abandon_file(path: &Path) -> Result<()> {
+    let raw = sharing_host::read_json(path).map_err(|_| "sharing_network_storage_unavailable")?;
+    let mut job: Job =
+        serde_json::from_value(raw).map_err(|_| "sharing_network_storage_unavailable")?;
+    job.cleanup = true;
+    sharing_host::write_json(path, &job).map_err(|_| "sharing_network_storage_unavailable")
+}
+
+fn accepted_user(record: &Value) -> Option<String> {
+    if record.get("accepted").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let value = record.get("acceptedBy")?.get("id")?;
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_u64().map(|n| n.to_string()))
+}
+async fn retain_other_authority(state: &AppState, token: &Secret, share: &Share) -> Result<bool> {
+    let record = match request(
+        token,
+        reqwest::Method::GET,
+        &format!("device-invites/{}", share.id),
+        None,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err("sharing_network_not_found") => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let Some(user) = accepted_user(&record) else {
+        return Ok(false);
+    };
+    let raw = request(
+        token,
+        reqwest::Method::GET,
+        &format!("device/{}/device-invites", share.device),
+        None,
+    )
+    .await?;
+    let rows = raw.as_array().ok_or("sharing_network_invalid_response")?;
+    for other in rows {
+        let Some(id) = other
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| good_id(id))
+        else {
+            return Err("sharing_network_invalid_response");
+        };
+        if id == share.id || accepted_user(other).as_ref() != Some(&user) {
+            continue;
+        }
+        let owner = state
+            .store
+            .get_setting(&format!("sharing.network.invite.{id}"))
+            .await
+            .map_err(|_| "sharing_authority_unavailable")?;
+        // A manual/external share is independent authority. Never revoke its
+        // relationship merely because this Cinema grant ended.
+        let Some(invitation) = owner.and_then(|s| Uuid::parse_str(&s).ok()) else {
+            return Ok(true);
+        };
+        if state
+            .store
+            .sharing_network_retained(invitation, clock_ms())
+            .await
+            .map_err(|_| "sharing_authority_unavailable")?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn endpoint() -> Endpoint {
+        Endpoint {
+            ipv4: "100.64.1.2".parse().expect("fixture IP"),
+            ipv6: None,
+            ts_fqdn: "cinema.tail123.ts.net".into(),
+            port: 32443,
+            spki_sha256: "a".repeat(64),
+        }
+    }
+    #[test]
+    fn external_invite_targets_only_exact_owned_manifest_devices() {
+        let endpoint = endpoint();
+        let mut rows = vec![Device {
+            id: "12345".into(),
+            name: endpoint.ts_fqdn.clone(),
+            addresses: vec![endpoint.ipv4.to_string()],
+            is_external: false,
+        }];
+        assert_eq!(
+            select_devices(&rows, std::slice::from_ref(&endpoint)).expect("owned device"),
+            vec!["12345"]
+        );
+        rows[0].is_external = true;
+        assert!(select_devices(&rows, std::slice::from_ref(&endpoint)).is_err());
+        rows[0].is_external = false;
+        rows[0].addresses = vec!["100.64.9.9".into()];
+        assert!(select_devices(&rows, std::slice::from_ref(&endpoint)).is_err());
+        rows[0].addresses = vec![endpoint.ipv4.to_string()];
+        rows[0].id = "../other".into();
+        assert!(select_devices(&rows, std::slice::from_ref(&endpoint)).is_err());
+    }
+    #[test]
+    fn external_invite_ids_cannot_escape_fixed_control_paths() {
+        for id in [
+            "",
+            "../admin",
+            "123?x=y",
+            "https://other.invalid",
+            "123/456",
+            "123#x",
+        ] {
+            assert!(!good_id(id));
+        }
+        assert!(good_id("n123_CNTRL-456"));
+    }
+}
+
+#[cfg(test)]
+mod abandonment_test {
+    use super::*;
+    #[test]
+    fn abandoned_completed_network_job_keeps_durable_cleanup_intent() {
+        let root = tempfile::tempdir().expect("network journal directory");
+        let id = Uuid::new_v4();
+        let path = root.path().join(format!("{id}.json"));
+        let job = Job {
+            invitation: id,
+            created_at_ms: 1,
+            completed: true,
+            cleanup: false,
+            authorization: "synthetic sealed credential".into(),
+            attempting: None,
+            shares: vec![Share {
+                device: "123".into(),
+                id: "456".into(),
+            }],
+        };
+        sharing_host::write_json(&path, &job).expect("completed job persisted before delivery");
+        abandon_file(&path).expect("lost recipient recorded before authority cancellation");
+        let recovered: Job =
+            serde_json::from_value(sharing_host::read_json(&path).expect("durable journal"))
+                .expect("decode job");
+        assert!(recovered.completed);
+        assert!(
+            recovered.cleanup,
+            "a still-open Cinema invitation cannot hide abandonment after restart"
+        );
+        assert_eq!(recovered.shares[0].id, "456");
+        assert_eq!(recovered.authorization, job.authorization);
+    }
 }
