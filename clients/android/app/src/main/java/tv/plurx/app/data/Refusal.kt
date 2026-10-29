@@ -19,6 +19,7 @@ internal data class RefusalBody(
     val message: String? = null,
     val error: String? = null,
     val film_position_ms: Long? = null,
+    val operation_id: String? = null,
 )
 
 /**
@@ -34,6 +35,7 @@ internal class RefusalException(
     val code: String?,
     override val message: String,
     val positionMs: Long?,
+    val operationId: String? = null,
 ) : Exception(message)
 
 /** Bodies larger than this are not refusals; they are something else entirely. */
@@ -62,6 +64,7 @@ internal fun parseRefusal(status: Int, body: String?): RefusalException? {
         code = parsed.code?.trim()?.takeIf { it.isNotEmpty() },
         message = message,
         positionMs = parsed.film_position_ms,
+        operationId = parsed.operation_id?.takeIf { status == 409 && parsed.code == "operation_stopped" },
     )
 }
 

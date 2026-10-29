@@ -121,6 +121,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Existing-text subtitle inference consumes verified caption artifacts without
+  waiting for unrelated media readers; legacy extraction jobs remain fenced.
+- Progressive captions decode valid surround audio without treating FFmpeg
+  side-data logs as malformed timestamps or losing the final window to log caps.
+- Progressive captions recover an existing stopped operation through a validated
+  read before explicit Resume, including operations without a published asset.
+  Current nonretryable range failures are visible without hiding available
+  coverage or offering unsupported retries.
 - Cinema external invitations accept Tailscale responses that omit false-valued single-use and exit-node flags, while still refusing broader permissions.
 
 - Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.

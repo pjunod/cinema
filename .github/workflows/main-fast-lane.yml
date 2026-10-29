@@ -437,10 +437,11 @@ jobs:
       - name: Type-check the web shell against its baseline
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          node tests/web/jsconfig-generated.test.js
+          python3 -m validation.web_unit_receipts --command jsconfig-generated
           scripts/web-types --base "$PR_BASE_SHA"
-          node tests/web/player-typedef.test.js
+          python3 -m validation.web_unit_receipts --command player-typedef
       # Every Node web and playback test, the same list `make web-check` runs
       # minus its two real-browser scripts. Until 2026-10-04 a pull request ran
       # two of them here and the rest ran only when someone typed make; a stale
@@ -448,7 +449,16 @@ jobs:
       - name: Run every Node web and playback test
         env:
           TMPDIR: /tmp
-        run: make web-unit-check
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.web_unit_receipts --command suite
+      - name: Preserve original web unit adoption provenance
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: web-unit-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .main-preflight-receipts/web-unit
+          if-no-files-found: error
+          retention-days: 90
 
   apple_compile:
     name: Apple compile and native TV navigation
@@ -516,10 +526,16 @@ jobs:
       - name: Compile iOS and tvOS without running simulator tests
         if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         run: make apple-build
+      - name: Reauthenticate original native cases before executing the pending selection
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.native_receipts --verify-tv-plan
       - name: Require native TV navigation journeys
         if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+          PLURX_TV_NAVIGATION_PLAN: .main-preflight-receipts/native/receipt.json
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
         if: always() && needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'

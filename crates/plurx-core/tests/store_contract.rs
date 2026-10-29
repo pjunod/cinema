@@ -12804,7 +12804,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,2)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,3)".to_owned()),
             "translation-shape" | "managed-shape" => {
                 let trigger = if scenario == "translation-shape" {"subtitle_translation_source_changed"} else {"subtitle_managed_source_changed"};
                 let mut rows = client.query_consistent("SELECT sql FROM sqlite_master WHERE name=$1", hiqlite::params!(trigger)).await.expect("original trigger definition");
@@ -12895,7 +12895,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=2) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=3) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -17028,7 +17028,7 @@ mod managed_bootstrap_regressions {
             ),
             (
                 "DELETE FROM subtitle_managed_schema",
-                "INSERT INTO subtitle_managed_schema VALUES(1,2)".into(),
+                "INSERT INTO subtitle_managed_schema VALUES(1,3)".into(),
                 "marker missing",
             ),
         ]

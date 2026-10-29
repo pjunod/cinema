@@ -107,7 +107,7 @@ async fn managed_bootstrap_layout(
 
 async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     let (version, observed_view) = managed_bootstrap_layout(client).await?;
-    if matches!(version, Some(1 | 2)) {
+    if matches!(version, Some(1..=3)) {
         // Reinstall only idempotent probe objects; never replace a managed view.
         let prefix = super::background_jobs_probe::SCHEMA
             .split_once("-- next statement\nDROP VIEW")
@@ -145,7 +145,7 @@ async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<()
                 .map_err(database_error)
         });
     let (settled, _) = managed_bootstrap_layout(client).await?;
-    if matches!(settled, Some(1 | 2)) {
+    if matches!(settled, Some(1..=3)) {
         return Ok(());
     }
     attempt?;

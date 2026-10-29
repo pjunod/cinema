@@ -461,6 +461,7 @@ paths = [
   "crates/plurx-core/src/store/subtitle_managed_schema.rs",
   "crates/plurx-core/src/store/subtitle_managed_schema.sql",
   "crates/plurx-core/src/store/subtitle_managed_resources_v2.sql",
+  "crates/plurx-core/src/store/subtitle_managed_resources_v3.sql",
   "Cargo.lock",
   "Cargo.toml",
   "crates/plurx-core/Cargo.toml",

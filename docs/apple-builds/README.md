@@ -137,3 +137,5 @@ Apple growing playlist attachment: [preparation and failover correction](914-gro
 
 [External Cinema invitation](1323-external-sharing-invitation.md) — combined network consent and automatic import continuation.
 Credential sign-in: [Keep the report action off credential sign-in screens](1321-sign-in-report-button.md).
+
+[Progressive caption recovery](1329-progressive-caption-recovery.md) — stopped-operation discovery, explicit Resume and current-range failures.
