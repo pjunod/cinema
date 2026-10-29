@@ -1,7 +1,14 @@
 import SwiftUI
+#if os(iOS)
+import PhotosUI
+import VisionKit
+#endif
 
 struct SharedSharingManagementView: View {
     @StateObject private var secrets = SharedSharingSecretDraft()
+    @StateObject private var networkSecrets = SharedSharingSecretDraft()
+    @State private var networkLinks: [SharedSharingManagementClient.NetworkShare] = []
+    @State private var networkWaiting = false
     @State private var libraries: [SharedSharingLocalLibrary] = []
     @State private var imports: [SharedSharingImport] = []
     @State private var exports: [SharedSharingExport] = []
@@ -16,6 +23,17 @@ struct SharedSharingManagementView: View {
     @State private var editingExport: SharedSharingExport?
     @State private var editingImport: SharedSharingImport?
     @State private var editingEndpoints: SharedSharingEndpointTarget?
+    #if os(iOS)
+    private struct QRRead { let id = UUID(); let revision: UInt64 }
+    @State private var qrRead: QRRead?
+    @State private var showingQRFiles = false
+    @State private var showingQRPhotos = false
+    @State private var showingQRScanner = false
+    @State private var qrPhoto: PhotosPickerItem?
+    @State private var qrDocument: SharedSharingQRDocument?
+    @State private var showingQRSave = false
+    #endif
+    @State private var showingInvitationText = false
     private enum Confirmation: Identifiable {
         case cancel(String), revoke(String), disconnect(String)
         var id: String { switch self { case .cancel(let id), .revoke(let id), .disconnect(let id): return id } }
@@ -25,6 +43,12 @@ struct SharedSharingManagementView: View {
         Form {
             if secrets.snapshot() == nil { Text("Sharing authorization changed or was refused. Leave and reopen management.") }
             else {
+                Section("Private network") {
+                    Text("Connect the server's Tailscale account once to create external Cinema invitations. The API key is encrypted on this server and never shared with recipients.").font(.caption)
+                    Link("Create a Tailscale user API key", destination: URL(string: "https://login.tailscale.com/admin/settings/keys")!)
+                    SecureField("Tailscale API key", text: Binding(get: { networkSecrets.snapshot()?.invitation ?? "" }, set: { networkSecrets.edit(invitation: $0) }))
+                    Button("Connect Tailscale account") { Task { await authorizeNetwork() } }.disabled(busy || (networkSecrets.snapshot()?.invitation.isEmpty ?? true))
+                }
                 Section("Source invitations") {
                     Text("Select this server's movie/show libraries. An invitation grants no access until you explicitly approve the recipient's pairing code.").font(.caption)
                     ForEach(libraries) { library in
@@ -33,9 +57,16 @@ struct SharedSharingManagementView: View {
                         }))
                     }
                     Button("Create one-day invitation") { Task { await invite() } }.disabled(busy || selected.isEmpty)
-                    TextField("Invitation to import or copy", text: Binding(get: { secrets.snapshot()?.invitation ?? "" }, set: { secrets.edit(invitation: $0) })).autocorrectionDisabled()
+                    invitationExchange
                     Text("Invitation material is transient and cleared on leaving or account changes.").font(.caption)
                     if let invitationId { Button("Cancel this invitation", role: .destructive) { confirmation = .cancel(invitationId) }.disabled(busy) }
+                    if networkWaiting {
+                        Text("Authorize with the Tailscale account used by the importing Cinema server. Import continues automatically when it can connect.").font(.caption)
+                        ForEach(networkLinks, id: \.tsFqdn) { share in
+                            if let url = URL(string: share.inviteUrl) { Link("Authorize connection to \(share.tsFqdn)", destination: url) }
+                        }
+                        Button("Cancel connection") { networkWaiting = false; networkLinks = [] }
+                    }
                     Button("Import this invitation") { Task { await importSource() } }.disabled(busy || (secrets.snapshot()?.invitation.isEmpty ?? true))
                 }
                 Section("Imported Sources") {
@@ -75,16 +106,151 @@ struct SharedSharingManagementView: View {
         .sheet(item: $editingEndpoints) { target in NavigationStack { SharedSharingEndpointEditor(target: target) } }
         .sheet(item: $editingImport) { row in NavigationStack { SharedSharingAssignmentEditor(source: row.import) } }
         .sheet(item: $editingExport) { row in NavigationStack { SharedSharingExportEditor(row: row, libraries: libraries) } }
+        #if os(iOS)
+        .fileImporter(isPresented: $showingQRFiles, allowedContentTypes: [.image]) { result in
+            guard let request = qrRead else { return }
+            switch result {
+            case .success(let url): readQR(request) { try SharedSharingInvitationQR.read(url) }
+            case .failure(let error): finishQRRead(request, error: error)
+            }
+        }
+        .photosPicker(isPresented: $showingQRPhotos, selection: $qrPhoto, matching: .images)
+        .onChange(of: qrPhoto) { _, item in
+            guard let item, let request = qrRead else { return }
+            Task {
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
+                        throw SharedSharingManagementError.invalid("The selected photo could not be read.")
+                    }
+                    readQR(request) { try SharedSharingInvitationQR.decode(data) }
+                } catch { finishQRRead(request, error: error) }
+                qrPhoto = nil
+            }
+        }
+        .sheet(isPresented: $showingQRScanner) {
+            if let request = qrRead {
+                QRCodeScannerView { payload in
+                    showingQRScanner = false
+                    acceptQR(payload, request: request)
+                }
+                .overlay(alignment: .topTrailing) { Button("Cancel") { showingQRScanner = false; qrRead = nil }.padding() }
+            }
+        }
+        .fileExporter(isPresented: $showingQRSave, document: qrDocument, contentType: .png, defaultFilename: "Cinema-sharing-invitation") { result in
+            qrDocument = nil
+            guard secrets.snapshot() != nil else { return }
+            if case .failure(let error) = result { message = error.localizedDescription }
+        }
+        #endif
         .task { await load() }
         .onReceive(secrets.objectWillChange) { _ in
-            if secrets.snapshot() == nil { imports = []; exports = []; invitationId = nil; editingExport = nil; editingImport = nil; editingEndpoints = nil; confirmation = nil }
+            if secrets.snapshot() == nil { networkWaiting = false; networkLinks = []; imports = []; exports = []; invitationId = nil; editingExport = nil; editingImport = nil; editingEndpoints = nil; confirmation = nil; clearQRPresentation() }
         }
-        .onDisappear { secrets.leave(); imports = []; exports = []; invitationId = nil }
+        .onDisappear { networkWaiting = false; networkLinks = []; networkSecrets.leave(); secrets.leave(); imports = []; exports = []; invitationId = nil; clearQRPresentation() }
         .alert(confirmation?.label ?? "Confirm", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } })) {
             Button("Cancel", role: .cancel) { confirmation = nil }
             Button("Confirm", role: .destructive) { if let action = confirmation { confirmation = nil; Task { await confirmed(action) } } }
         } message: { Text("This changes access for the selected recipient or Source. It does not change sharing enablement.") }
     }
+    @ViewBuilder private var invitationExchange: some View {
+        if let invitation = secrets.snapshot()?.invitation, !invitation.isEmpty {
+            if let image = SharedSharingInvitationQR.image(for: invitation) {
+                Image(uiImage: image).interpolation(.none).resizable().scaledToFit().frame(maxWidth: 320, maxHeight: 320)
+                    .accessibilityLabel("Sharing invitation QR code")
+                Text("Send this QR code to the recipient. Importing still requires you to approve their pairing code.").font(.caption)
+                #if os(iOS)
+                if let png = image.pngData() {
+                    HStack {
+                        Button("Save QR code", systemImage: "square.and.arrow.down") {
+                            qrDocument = SharedSharingQRDocument(png: png); showingQRSave = true
+                        }
+                        ShareLink(item: SharedSharingQRShare(png: png), preview: SharePreview("Cinema sharing invitation", image: Image(uiImage: image))) {
+                            Label("Share QR code", systemImage: "square.and.arrow.up")
+                        }
+                    }
+                }
+                #endif
+            } else {
+                Text("This invitation is too large for a QR code. Expand Invitation text to copy it.").font(.caption)
+            }
+        }
+        #if os(iOS)
+        HStack {
+            Button("Choose QR photo") { beginQRRead(); showingQRPhotos = qrRead != nil }.disabled(busy)
+            Button("Upload QR image") { beginQRRead(); showingQRFiles = qrRead != nil }.disabled(busy)
+        }
+        if DataScannerViewController.isSupported {
+            Button("Scan invitation QR code", systemImage: "qrcode.viewfinder") {
+                beginQRRead()
+                guard let request = qrRead else { return }
+                Task {
+                    let outcome = await SharedSharingQRCameraPermission.prepare(
+                        isCurrent: { qrRead?.id == request.id && secrets.accepts(request.revision) },
+                        available: { DataScannerViewController.isAvailable })
+                    guard let outcome, qrRead?.id == request.id, secrets.accepts(request.revision) else { return }
+                    switch outcome {
+                    case .ready: showingQRScanner = true
+                    case .denied:
+                        qrRead = nil; message = "Camera access is disabled. Allow Camera in Settings or upload a QR image."
+                    case .unavailable:
+                        qrRead = nil; message = "Camera scanning is unavailable on this device. Upload a QR image or use invitation text."
+                    }
+                }
+            }.disabled(busy)
+        }
+        #endif
+        #if os(iOS)
+        DisclosureGroup("Invitation text", isExpanded: $showingInvitationText) { invitationText }
+        #else
+        Button(showingInvitationText ? "Hide invitation text" : "Show invitation text") { showingInvitationText.toggle() }
+        if showingInvitationText { invitationText }
+        #endif
+    }
+    @ViewBuilder private var invitationText: some View {
+        TextField("Invitation to import or copy", text: Binding(get: { secrets.snapshot()?.invitation ?? "" }, set: { secrets.edit(invitation: $0) })).autocorrectionDisabled()
+        #if os(iOS)
+            .textInputAutocapitalization(.never)
+        #endif
+        #if os(iOS)
+        if let invitation = secrets.snapshot()?.invitation, !invitation.isEmpty {
+            Button("Copy invitation text") { UIPasteboard.general.string = invitation }
+        }
+        #endif
+    }
+    private func clearQRPresentation() {
+        showingInvitationText = false
+        #if os(iOS)
+        qrRead = nil; qrPhoto = nil; qrDocument = nil
+        showingQRFiles = false; showingQRPhotos = false; showingQRScanner = false; showingQRSave = false
+        #endif
+    }
+    #if os(iOS)
+    private func beginQRRead() {
+        guard let request = secrets.snapshot() else { return }
+        qrRead = QRRead(revision: request.revision)
+    }
+    private func readQR(_ request: QRRead, operation: @escaping @Sendable () throws -> String) {
+        Task {
+            do {
+                let invitation = try await Task.detached(priority: .userInitiated) { try operation() }.value
+                acceptQR(invitation, request: request)
+            } catch { finishQRRead(request, error: error) }
+        }
+    }
+    private func acceptQR(_ payload: String, request: QRRead) {
+        guard qrRead?.id == request.id, secrets.accepts(request.revision) else { return }
+        do {
+            let invitation = try SharedSharingInvitationQR.invitation(payload)
+            guard secrets.acceptInvitation(invitation, ifRevision: request.revision) else { return }
+            qrRead = nil
+            message = "Invitation ready. Choose Import this invitation, then compare the pairing code with the exporting server."
+        } catch { finishQRRead(request, error: error) }
+    }
+    private func finishQRRead(_ request: QRRead, error: Error) {
+        guard qrRead?.id == request.id, secrets.accepts(request.revision) else { return }
+        qrRead = nil; message = error.localizedDescription
+    }
+    #endif
     private func load() async {
         guard secrets.snapshot() != nil else { return }; busy = true; defer { busy = false }
         do {
@@ -110,19 +276,44 @@ struct SharedSharingManagementView: View {
             let client = try SharedSharingManagementClient(); let result = try await client.invite(libraries: selection); try client.requireCurrent()
             invitationId = result.id
             guard secrets.accepts(request.revision) else { message = "Invitation created; a newer edit prevented replacing the draft. Refresh before another action."; return }
-            secrets.edit(invitation: result.invitation); invitationId = result.id; message = "Invitation created. Compare the recipient pairing code before approving."
+            secrets.edit(invitation: result.invitation); invitationId = result.id; showingInvitationText = false
+            message = "Invitation created. Send the QR code and compare the recipient pairing code before approving."
         } catch { message = error.localizedDescription }
+    }
+    private func authorizeNetwork() async {
+        guard let request = networkSecrets.snapshot() else { return }
+        networkSecrets.clear(ifRevision: request.revision); busy = true; defer { busy = false }
+        do { let client = try SharedSharingManagementClient(); try await client.authorizeNetwork(request.invitation); try client.requireCurrent(); message = "Tailscale account connected on this Cinema server." }
+        catch { message = error.localizedDescription }
     }
     private func importSource() async { await consumeInvitation { try await $0.importSource(invitation: $1) } }
     private func rePair(_ row: SharedSharingImport) async { await consumeInvitation { try await $0.rePair(row.import, invitation: $1) } }
     private func consumeInvitation(_ operation: (SharedSharingManagementClient, String) async throws -> SharedSharingImport) async {
-        guard let request = secrets.snapshot() else { return }; busy = true; defer { busy = false }
+        guard let request = secrets.snapshot() else { return }; busy = true; defer { networkWaiting = false; networkLinks = []; busy = false }
         do {
-            let client = try SharedSharingManagementClient(); let result = try await operation(client, request.invitation); try client.requireCurrent()
+            let client = try SharedSharingManagementClient()
+            if request.invitation.hasPrefix("cinema-connect-v1:") {
+                var connection = try await client.connection(request.invitation)
+                guard secrets.accepts(request.revision) else { return }
+                if !connection.connected && !connection.network.isEmpty {
+                    networkLinks = connection.network; networkWaiting = true
+                    message = "Waiting for private connection authorization."
+                    for _ in 0..<100 {
+                        try await Task.sleep(for: .seconds(3))
+                        guard networkWaiting, secrets.accepts(request.revision) else { return }
+                        connection = try await client.connection(request.invitation, probe: true)
+                        if connection.connected { break }
+                    }
+                    guard connection.connected else { throw SharedSharingManagementError.invalid("Private connection is not ready. Finish Tailscale authorization and retry this invitation.") }
+                }
+            }
+            guard secrets.accepts(request.revision) else { return }
+            networkWaiting = false; networkLinks = []
+            let result = try await operation(client, request.invitation); try client.requireCurrent()
             guard secrets.snapshot() != nil else { return }
             imports.removeAll { $0.id == result.id }; imports.append(result); secrets.clear(ifRevision: request.revision)
             message = "Source updated. Compare the pairing code with the exporting server."
-        } catch { message = "\(error.localizedDescription). Refresh current generations before retrying explicitly." }
+        } catch { networkWaiting = false; networkLinks = []; message = "\(error.localizedDescription). Refresh current generations before retrying explicitly." }
     }
     private func rotate(_ row: SharedSharingImport) async {
         guard secrets.snapshot() != nil else { return }; busy = true; defer { busy = false }
@@ -154,6 +345,9 @@ private struct SharedSharingExportEditor: View {
     let row: SharedSharingExport
     let libraries: [SharedSharingLocalLibrary]
     @StateObject private var secrets = SharedSharingSecretDraft()
+    @StateObject private var networkSecrets = SharedSharingSecretDraft()
+    @State private var networkLinks: [SharedSharingManagementClient.NetworkShare] = []
+    @State private var networkWaiting = false
     @State private var selected: Set<String>
     @State private var busy = false
     @State private var message = ""

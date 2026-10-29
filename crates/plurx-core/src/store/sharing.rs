@@ -217,6 +217,12 @@ const GRANT_JSON: &str =
 /// Consistent authority reads and atomic mutations; no foreign account identity.
 #[async_trait]
 pub trait SharingStore: Send + Sync {
+    /// Retain external connectivity while this invitation or its grant can be used.
+    async fn sharing_network_retained(
+        &self,
+        invitation: Uuid,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     /// Canonical UUID keyset; at most 33 records (32 plus the next-page sentinel).
     async fn sharing_exports(&self, after: Option<Uuid>) -> Result<Vec<ExportSummary>, StoreError>;
     /// Credential-scoped status only, including terminal and expired pending grants.
@@ -353,6 +359,14 @@ pub trait SharingStore: Send + Sync {
 
 #[async_trait]
 impl<T: Backend> SharingStore for T {
+    async fn sharing_network_retained(
+        &self,
+        invitation: Uuid,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        Ok(!self.sharing_read("SELECT '{}' AS payload WHERE EXISTS(SELECT 1 FROM sharing_invitations WHERE id=$1 AND state='open' AND expires_at_ms>$2) OR EXISTS(SELECT 1 FROM sharing_exports WHERE invitation_id=$1 AND (state='active' OR (state='pending' AND pending_expires_at_ms>$2)))", vec![invitation.into(), now_ms.into()]).await?.is_empty())
+    }
+
     async fn sharing_exports(&self, after: Option<Uuid>) -> Result<Vec<ExportSummary>, StoreError> {
         let rows = self.sharing_read(&format!("SELECT {EXPORT_SUMMARY_JSON} AS payload FROM sharing_exports e JOIN sharing_invitations i ON i.id=e.invitation_id JOIN sharing_identity s ON s.singleton=1 WHERE e.id>$1 ORDER BY e.id LIMIT 33"), vec![after.map(|id| id.to_string()).unwrap_or_default().into()]).await?;
         rows.iter().map(|row| export_summary(row)).collect()

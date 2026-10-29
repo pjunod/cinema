@@ -760,7 +760,7 @@ impl PeerConnection {
         let response: plurx_core::sharing_catalogue_details::SourceItemDetails = self
             .request_with_budget(
                 Method::GET,
-                &format!("/sharing/v1/items/{}", item.as_str()),
+                &format!("/sharing/v1/items/{}?presentation=1", item.as_str()),
                 Some(credential),
                 None,
                 ResponseBudget::Catalogue,
@@ -1126,6 +1126,14 @@ mod tests {
                 true,
             ),
             (
+                serde_json::json!({"item":catalogue_item("9007199254740993"),"files":[],"presentation":{"runtime_ms":7200000,"air_date":"2024-06-10","tmdb_id":"9007199254740993","imdb_id":"tt1234567","ratings":[{"source":"imdb","value":8.2,"scale":10,"votes":1200}]}}),
+                true,
+            ),
+            (
+                serde_json::json!({"item":catalogue_item("9007199254740993"),"files":[],"presentation":{"runtime_ms":7200000,"air_date":null,"tmdb_id":null,"imdb_id":null,"ratings":[{"source":"imdb","value":11.0,"scale":10}]}}),
+                false,
+            ),
+            (
                 serde_json::json!({"item":catalogue_item("2"),"files":[]}),
                 false,
             ),
@@ -1146,7 +1154,7 @@ mod tests {
             );
             assert_eq!(
                 requests.lock().expect("requests")[0].0,
-                "/sharing/v1/items/9007199254740993"
+                "/sharing/v1/items/9007199254740993?presentation=1"
             );
             drop(peer);
             server.abort();

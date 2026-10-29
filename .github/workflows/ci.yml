@@ -1320,6 +1320,8 @@ jobs:
         run: make cinema-remote-browser-check
       - name: Test grouped library rows in a real browser
         run: make library-rows-browser-check
+      - name: Test Shared library layouts and enriched metadata in a real browser
+        run: make web-shared-library-browser-check
       - name: Test subtitle model setup and generated-caption completion in a real browser
         run: make subtitle-generation-browser-check
       - name: Enforce persistent Cargo bounds

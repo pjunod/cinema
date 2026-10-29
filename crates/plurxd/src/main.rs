@@ -86,6 +86,8 @@ mod shared_cache;
 mod sharing;
 mod sharing_client;
 mod sharing_connection_custody;
+mod sharing_host;
+mod sharing_network;
 #[cfg(test)]
 mod sharing_protocol_fixture;
 mod source_probe;
@@ -427,6 +429,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SharingCommand {
+    /// Fixed host-installer compatibility probe; no credentials or mutations.
+    HostCapabilities,
     /// Create an owner-only node key and certificate; refuse existing identity files.
     InitTls {
         #[arg(long)]
@@ -610,6 +614,12 @@ async fn dispatch(
     }
     match command {
         Command::Run => run(config).await,
+        Command::Sharing {
+            command: SharingCommand::HostCapabilities,
+        } => {
+            println!("{{\"schema_version\":1,\"managed_host_egress_guard\":true}}");
+            Ok(())
+        }
         Command::Sharing {
             command: SharingCommand::InitTls { key_directory },
         } => {
@@ -2364,6 +2374,19 @@ async fn boot_observing(
         .await;
     let plex_census = Arc::clone(&state.plex_census);
     let background_loops = BackgroundLoopGuard::new();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let native_managed = desktop.is_some();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let native_managed = false;
+    tokio::spawn(sharing_host::run(
+        state.clone(),
+        background_loops.token(),
+        native_managed,
+    ));
+    tokio::spawn(sharing_network::run(
+        state.clone(),
+        background_loops.token(),
+    ));
     spawn_background_loops(&state, background_loops.token());
 
     let progress = Arc::clone(&state.progress);
