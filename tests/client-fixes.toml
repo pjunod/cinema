@@ -8109,3 +8109,21 @@ source = "clients/linux-player/packaging/patches/mpv/0005-osc-draw-a-film-timeli
 source_anchor = "+-- A film timeline the embedding application sets in user-data/osc/film as"
 test = "clients/linux-player/tests/test_packaging.py"
 test_anchor = "def test_the_osc_reads_the_film_timeline_and_hands_back_outside_seeks(self):"
+
+# PR #1326: index existing regression locations; these rows do not claim execution.
+# The cleanup commit enters this ledger through its Android README counter update.
+[[fixes]]
+id = "sharing.abandoned-network-invitation-cleanup"
+commits = ["e94b4f7af012d2e94dd95b5f68484fb14fa3e2f4"]
+source = "crates/plurxd/src/sharing_network.rs"
+source_anchor = "fn abandon_file(path: &Path) -> Result<()> {"
+test = "crates/plurxd/src/sharing_network.rs"
+test_anchor = "abandoned_completed_network_job_keeps_durable_cleanup_intent"
+
+[[fixes]]
+id = "sharing.combined-invitation-consent"
+commits = ["ecba33b56a852a57d00ceb12339ec16e56530f67"]
+source = "crates/plurxd/src/web/pages/sharing-management.js"
+source_anchor = "function sharingScheduleConnection(){"
+test = "tests/web/sharing-management.test.js"
+test_anchor = "combined invitation waits for private consent then imports once automatically"
