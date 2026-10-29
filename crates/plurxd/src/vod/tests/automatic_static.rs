@@ -41,6 +41,11 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
             .await
             .expect("actual selected singleton");
     eprintln!("automatic static fixture: original Store selector returned");
+    selected_store
+        .store
+        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+        .await
+        .expect("save Source enablement before the real single-use schema startup");
     assert!(
         Box::pin(selected_store.prepare_source_schema_before_serving())
             .await

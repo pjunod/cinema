@@ -489,12 +489,22 @@ impl TranscodeManager {
         let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);
         // Real CopySink constructor refuses this only after R was queued.
         request.operation_timeout = Duration::from_secs(121);
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        // P and quota waits consume the earlier observation. Reobserve the
+        // actual node before testing the post-R constructor boundary.
+        runtime
+            .refresh_admission_capacity(deadline)
+            .await
+            .expect("actual current capacity before the constructor refusal");
         let error = runtime
-            .prepare_copy_vod(request, std::time::Instant::now() + Duration::from_secs(90))
+            .prepare_copy_vod(request, deadline)
             .await
             .err()
             .expect("actual generic post-R constructor error");
-        assert!(!error.definitely_before_reservation());
+        assert!(
+            !error.definitely_before_reservation(),
+            "the real constructor refusal must occur after R: {error:?}"
+        );
         drop(quota);
         assert!(
             crate::playback_cache::is_pinned(&path),
@@ -3081,6 +3091,14 @@ impl TranscodeManager {
                 .finish_retirement(deadline)
                 .await
                 .map_err(|error| format!("settling selected copy planning metadata: {error}"))?;
+            // P/native/journal and quota waits consume the earlier capacity
+            // observation. Reobserve before R; keep the finalized resource
+            // demand and allocation epoch unchanged: changed policy, lower
+            // capacity or Unknown evidence still refuses it.
+            runtime
+                .refresh_admission_capacity(deadline)
+                .await
+                .map_err(|error| format!("observing final selected copy admission: {error:?}"))?;
             // Error cleanup may await after R. Convert the SAME grant before
             // polling this constructor; generic errors/default Drop hold it.
             let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);

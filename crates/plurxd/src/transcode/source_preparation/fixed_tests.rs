@@ -179,6 +179,9 @@ pub(in crate::transcode) async fn source_fixed_planning_fixture(
 
     let alias = Arc::clone(&encoding);
     drop(encoding);
+    // Drive the same bounded pass used by the production manager reaper.
+    // The last real Encoding/M alias must still block that actual closer.
+    manager.reconcile_adaptive_attempt_tasks().await;
     assert_eq!(
         runtime
             .planning_ownership_diagnostics()
@@ -193,6 +196,9 @@ pub(in crate::transcode) async fn source_fixed_planning_fixture(
     drop(alias);
     tokio::time::timeout_at(deadline.into(), async {
         loop {
+            // No daemon reap_loop is running in this direct fixture. Retry
+            // only the original core book through its real manager cadence.
+            manager.reconcile_adaptive_attempt_tasks().await;
             if runtime
                 .planning_ownership_diagnostics()
                 .is_some_and(|counts| counts.metadata_owners == 0)

@@ -688,7 +688,7 @@ async fn source_copy_preadmission_fixture_with_restart(
         if fixed_case == 1 {
             source_actual_actor_boxed(
                 state,
-                manager,
+                Arc::clone(&manager),
                 prepared,
                 assignment,
                 12,
@@ -698,6 +698,9 @@ async fn source_copy_preadmission_fixture_with_restart(
             .await;
             tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
+                    // Keep the original manager and run its ordinary bounded
+                    // repair pass after actual media/application retirement.
+                    manager.reconcile_adaptive_attempt_tasks().await;
                     if runtime
                         .planning_ownership_diagnostics()
                         .is_some_and(|counts| counts.metadata_owners == 0)
