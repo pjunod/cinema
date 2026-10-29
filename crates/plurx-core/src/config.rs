@@ -148,12 +148,16 @@ pub struct SharingNetworkConfig {
     pub listener_profile: SharingListenerProfile,
     pub bind: SocketAddr,
     pub egress: SharingEgressConfig,
+    /// Installer-managed Docker transport needs a fresh host guard receipt
+    /// before making private connections, including during host startup.
+    pub require_host_egress_guard: bool,
 }
 impl Default for SharingNetworkConfig {
     fn default() -> Self {
         Self {
             listener_profile: SharingListenerProfile::HostLoopback,
             bind: SocketAddr::from(([127, 0, 0, 1], 32444)),
+            require_host_egress_guard: false,
             egress: SharingEgressConfig::Interface {
                 name: "tailscale0".into(),
             },

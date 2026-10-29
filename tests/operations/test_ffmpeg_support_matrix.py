@@ -276,7 +276,7 @@ class StaticVulkanSourceTests(unittest.TestCase):
     def test_source_lock_includes_moltenvk_binary_source_and_static_shader_dependencies(self):
         lock = json.loads((ROOT / "scripts/macos-vulkan-sources.json").read_text())
         roles = {source["role"] for source in lock["sources"]}
-        self.assertTrue({"moltenvk-binary", "moltenvk-source", "vulkan-headers", "shaderc", "glslang", "spirv-tools", "spirv-headers", "libplacebo"}.issubset(roles))
+        self.assertTrue({"moltenvk-binary", "moltenvk-source", "vulkan-headers", "shaderc", "glslang", "spirv-tools", "spirv-headers", "libplacebo", "fast-float"}.issubset(roles))
         for source in lock["sources"]:
             self.assertRegex(source["sha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(source["url"].startswith("https://"))

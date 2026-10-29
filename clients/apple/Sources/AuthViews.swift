@@ -54,6 +54,7 @@ struct PrimaryButton: View {
 private struct AuthScaffold<Content: View>: View {
     let subtitle: String
     let error: String?
+    var showReport = true
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -71,13 +72,15 @@ private struct AuthScaffold<Content: View>: View {
                     .foregroundColor(Palette.accent)
                     .multilineTextAlignment(.center)
             }
-            #if os(tvOS)
-            DiagnosticReportButton(category: "connection", label: "Help")
-                .buttonStyle(TVReadableButtonStyle(prominent: false))
-            #else
-            DiagnosticReportButton(category: "connection")
-                .shelfActionButtonStyle()
-            #endif
+            if showReport {
+                #if os(tvOS)
+                DiagnosticReportButton(category: "connection", label: "Help")
+                    .buttonStyle(TVReadableButtonStyle(prominent: false))
+                #else
+                DiagnosticReportButton(category: "connection")
+                    .shelfActionButtonStyle()
+                #endif
+            }
         }
         .frame(maxWidth: 460)
         .padding(30)
@@ -318,7 +321,7 @@ struct LoginView: View {
     @State private var password = ""
 
     var body: some View {
-        AuthScaffold(subtitle: model.serverName ?? model.origin, error: model.authError) {
+        AuthScaffold(subtitle: model.serverName ?? model.origin, error: model.authError, showReport: false) {
             TextField("Username", text: $username)
                 .plurxFieldStyle()
                 .font(.system(.body, design: .monospaced))

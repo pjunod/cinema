@@ -1280,3 +1280,77 @@ async fn sharing_capacity_refusals_preserve_existing_authority_and_reopen_expire
     })
     .await;
 }
+
+#[tokio::test]
+async fn sharing_network_retains_only_open_invites_and_live_grants() {
+    for_each_backend(|s, b| async move {
+        let l = library(s.as_ref(), "Network lifecycle movies").await;
+        let expired = invitation(s.as_ref(), vec![l], 2000).await;
+        assert!(
+            s.sharing_network_retained(expired.id, 1001)
+                .await
+                .expect("open invitation"),
+            "{b}"
+        );
+        assert!(
+            !s.sharing_network_retained(expired.id, 2000)
+                .await
+                .expect("expired invitation"),
+            "{b}"
+        );
+        s.cancel_share_invitation(expired.id)
+            .await
+            .expect("cancel invitation");
+        assert!(
+            !s.sharing_network_retained(expired.id, 1001)
+                .await
+                .expect("cancelled invitation"),
+            "{b}"
+        );
+        let active = InvitationRecord {
+            id: Uuid::new_v4(),
+            token_hash: hash(3),
+            library_ids: vec![l],
+            created_at_ms: 1000,
+            expires_at_ms: 3000,
+        };
+        assert_eq!(
+            s.create_share_invitation(active.clone())
+                .await
+                .expect("distinct invitation"),
+            MutationOutcome::Applied
+        );
+        let c = claim(&active);
+        let grant = match s.claim_share(c).await.expect("claim invitation") {
+            ClaimOutcome::Created(g) => g,
+            _ => panic!("new claim"),
+        };
+        assert!(
+            s.sharing_network_retained(active.id, 1002)
+                .await
+                .expect("pending grant"),
+            "{b}"
+        );
+        assert_eq!(
+            s.approve_share(grant.id, 1, 1002).await.expect("approve"),
+            MutationOutcome::Applied
+        );
+        s.cancel_share_invitation(active.id)
+            .await
+            .expect("cancel consumed invite");
+        assert!(
+            s.sharing_network_retained(active.id, 4000)
+                .await
+                .expect("active grant outlives invite"),
+            "{b}"
+        );
+        s.revoke_share(grant.id, 4001).await.expect("revoke grant");
+        assert!(
+            !s.sharing_network_retained(active.id, 4002)
+                .await
+                .expect("revoked grant"),
+            "{b}"
+        );
+    })
+    .await;
+}

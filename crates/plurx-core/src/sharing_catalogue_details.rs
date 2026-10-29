@@ -207,6 +207,81 @@ impl CatalogueRevisionKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sharing_detail_presentation_accepts_legacy_and_bounds_cached_ratings() {
+        let legacy = serde_json::json!({"item":{"item_id":"1","library_id":"2","parent_id":null,"kind":"movie","title":"Movie","sort_title":"Movie","year":2024,"overview":null,"genres":[],"season_number":null,"episode_number":null},"files":[]});
+        let old: SourceItemDetails = serde_json::from_value(legacy.clone()).expect("old Source");
+        assert!(old.presentation.is_none());
+        assert_eq!(
+            serde_json::to_value(old).expect("old receiver shape"),
+            legacy
+        );
+        let presentation = serde_json::json!({"runtime_ms":7200000,"air_date":"2024-06-10","tmdb_id":"9007199254740993","imdb_id":"tt1234567","ratings":[{"source":"imdb","value":8.2,"scale":10,"votes":1200},{"source":"tmdb","value":83.0,"scale":100}]});
+        let mut enriched = legacy.clone();
+        enriched["presentation"] = presentation.clone();
+        let details: SourceItemDetails = serde_json::from_value(enriched).expect("new Source");
+        details.validate().expect("bounded enrichment");
+        assert_eq!(
+            details
+                .presentation
+                .as_ref()
+                .expect("presentation")
+                .tmdb_id
+                .as_ref()
+                .expect("lossless provider ID")
+                .as_str(),
+            "9007199254740993"
+        );
+        for (key, value) in [
+            ("runtime_ms", serde_json::json!(-1)),
+            ("air_date", serde_json::json!("x".repeat(33))),
+            ("imdb_id", serde_json::json!("x".repeat(129))),
+            ("tmdb_id", serde_json::json!(9007199254740993_i64)),
+            (
+                "ratings",
+                serde_json::json!(vec![presentation["ratings"][0].clone(); 5]),
+            ),
+            (
+                "ratings",
+                serde_json::json!([{"source":"imdb","value":11.0,"scale":10}]),
+            ),
+            (
+                "ratings",
+                serde_json::json!([{"source":"tmdb","value":8.0,"scale":10}]),
+            ),
+            (
+                "ratings",
+                serde_json::json!([{"source":"imdb","value":8.0,"scale":10,"votes":-1}]),
+            ),
+            (
+                "ratings",
+                serde_json::json!([
+                    presentation["ratings"][0].clone(),
+                    presentation["ratings"][0].clone()
+                ]),
+            ),
+            (
+                "ratings",
+                serde_json::json!([{"source":"unknown","value":8.0,"scale":10}]),
+            ),
+            (
+                "ratings",
+                serde_json::json!([{"source":"imdb","value":8.0,"scale":10,"path":"private"}]),
+            ),
+        ] {
+            let mut changed = presentation.clone();
+            changed[key] = value;
+            assert!(
+                serde_json::from_value::<SourceItemPresentation>(changed)
+                    .map(|p| p.validate().is_err())
+                    .unwrap_or(true),
+                "{key}"
+            );
+        }
+        let mut unknown = presentation;
+        unknown["path"] = serde_json::json!("private");
+        assert!(serde_json::from_value::<SourceItemPresentation>(unknown).is_err());
+    }
     fn witness(identity: &SharingIdentity, projection: &str) -> SourceFileWitness {
         SourceFileWitness::from_current_projection(
             identity.server_id,
@@ -340,6 +415,62 @@ pub struct SourceItemDetails {
     pub item: crate::sharing_catalogue::SourceCatalogueItem,
     #[serde(deserialize_with = "files")]
     pub files: Vec<SourcePlayableFile>,
+    /// Explicitly requested presentation extension; omitted for older receivers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Box<SourceItemPresentation>>,
+}
+
+/// Cached public presentation only: no provider credentials or personal lists.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceItemPresentation {
+    pub runtime_ms: Option<i64>,
+    pub air_date: Option<String>,
+    pub tmdb_id: Option<SourceId>,
+    pub imdb_id: Option<String>,
+    #[serde(deserialize_with = "ratings")]
+    pub ratings: Vec<SourceItemRating>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceItemRating {
+    pub source: crate::annotations::RatingSource,
+    pub value: f64,
+    pub scale: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub votes: Option<i64>,
+}
+fn ratings<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SourceItemRating>, D::Error> {
+    bounded::<_, _, 4>(d)
+}
+impl SourceItemPresentation {
+    pub fn validate(&self) -> Result<(), StoreError> {
+        use crate::annotations::RatingSource;
+        if !number(self.runtime_ms, MAX_SAFE)
+            || self.air_date.as_ref().is_some_and(|v| !text(v, 32))
+            || self.imdb_id.as_ref().is_some_and(|v| !text(v, 128))
+            || self.ratings.len() > 4
+        {
+            return Err(invalid());
+        }
+        let mut sources = std::collections::BTreeSet::new();
+        for rating in &self.ratings {
+            let scale = if rating.source == RatingSource::Imdb {
+                10
+            } else {
+                100
+            };
+            if !sources.insert(rating.source)
+                || rating.scale != scale
+                || !rating.value.is_finite()
+                || !(0.0..=f64::from(scale)).contains(&rating.value)
+                || !number(rating.votes, MAX_SAFE)
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -515,6 +646,9 @@ impl SourcePlayableFile {
 impl SourceItemDetails {
     pub fn validate(&self) -> Result<(), StoreError> {
         self.item.validate().map_err(|_| invalid())?;
+        if let Some(presentation) = &self.presentation {
+            presentation.validate()?;
+        }
         if self.files.len() > MAX_DETAIL_FILES
             || self
                 .files

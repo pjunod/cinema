@@ -2312,16 +2312,80 @@ pub(super) async fn decision_for_source_file(
     file: MediaFile,
     q: Caps,
 ) -> Result<DecisionResponse, ApiError> {
-    decision_for_file(
+    let mut decision = decision_for_file(
         state,
-        file,
-        q,
+        file.clone(),
+        q.clone(),
         None,
         None,
         (None, None),
         MarkerReadPolicy::StoredSourceEvidence,
     )
-    .await
+    .await?;
+    // Shared copy delivery requires an immutable HLS index. Unlike Local,
+    // it has no continuous progressive remux fallback, and cold Source index
+    // preparation currently supports H.264 only. Select an actual encoded
+    // plan before Start instead of sending unindexed HEVC into copy admission.
+    // This is an Auto planning choice: Original and Dolby Vision keep their
+    // existing contracts, and a failed index read already returned above.
+    if q.force() == playback::Force::Auto
+        && decision.decision.method == playback::PlaybackMethod::Remux
+        && !decision.vod_indexed
+        && file
+            .video_codec
+            .as_deref()
+            .is_some_and(|codec| matches!(codec.to_ascii_lowercase().as_str(), "hevc" | "h265"))
+        && !playback::is_dolby_vision(&file)
+    {
+        let encoded = decision_for_file(
+            state,
+            file,
+            Caps {
+                force: Some("transcode".to_owned()),
+                ..q.clone()
+            },
+            None,
+            None,
+            (None, None),
+            MarkerReadPolicy::StoredSourceEvidence,
+        )
+        .await?;
+        let (codec, transfer) = match encoded.decision.delivered_dynamic_range {
+            "sdr" => ("h264", playback::Transfer::Sdr),
+            "hdr10" => ("hevc", playback::Transfer::Pq),
+            _ => {
+                return Err(ApiError::typed(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "sharing_decision_unsupported",
+                    "No supported Shared playback route is available",
+                ))
+            }
+        };
+        let supported = q.caps_v2.as_ref().is_some_and(|caps| {
+            caps.transports.iter().any(|transport| transport == "hls")
+                && caps
+                    .video
+                    .iter()
+                    .any(|video| video.codec == codec && video.present.contains(&transfer))
+        });
+        if !supported {
+            return Err(ApiError::typed(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "sharing_decision_unsupported",
+                "No supported Shared playback route is available",
+            ));
+        }
+        decision = encoded;
+        decision
+            .decision
+            .reasons
+            .retain(|reason| reason != "forced transcode (manual quality)");
+        decision
+            .decision
+            .reasons
+            .push("Shared HEVC copy has no usable HLS index; using an encoded stream".to_owned());
+    }
+    Ok(decision)
 }
 
 async fn decision_for_file(

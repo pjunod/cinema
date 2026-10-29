@@ -93,6 +93,7 @@ pub struct SourceItemSnapshot {
     pub server: Uuid,
     pub epoch: Uuid,
     pub files: Vec<SourceFileWitness>,
+    pub presentation: Option<crate::sharing_catalogue_details::SourceItemPresentation>,
 }
 pub enum SourceDetailsRead<T> {
     Authorized(T),
@@ -107,6 +108,16 @@ pub trait SharingSourceDetailsStore: Send + Sync {
         credential_hash: &str,
         grant: Uuid,
         item: SourceId,
+    ) -> Result<SourceDetailsRead<SourceItemSnapshot>, StoreError> {
+        self.source_item_details_snapshot_with_presentation(credential_hash, grant, item, false)
+            .await
+    }
+    async fn source_item_details_snapshot_with_presentation(
+        &self,
+        credential_hash: &str,
+        grant: Uuid,
+        item: SourceId,
+        include_presentation: bool,
     ) -> Result<SourceDetailsRead<SourceItemSnapshot>, StoreError>;
     /// Current tuple authority for a captured details response. Revision changes
     /// do not revoke metadata; deletion, movement and effective scope do.
@@ -150,11 +161,12 @@ impl<T: Backend> SharingSourceDetailsStore for T {
         let rows=self.sharing_read("SELECT json_quote(EXISTS(SELECT 1 FROM sharing_exports e JOIN sharing_identity s ON s.singleton=1 WHERE e.id=$1 AND e.state='active' AND s.server_id=$2 AND s.catalogue_epoch=$3 AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0) AND NOT EXISTS(SELECT 1 FROM json_each($4) r WHERE NOT EXISTS(SELECT 1 FROM files f JOIN items i ON i.id=f.item_id JOIN libraries l ON l.id=i.library_id JOIN sharing_export_libraries x ON x.library_id=l.id AND x.grant_id=e.id WHERE CAST(l.id AS TEXT)=json_extract(r.value,'$[0]') AND CAST(i.id AS TEXT)=json_extract(r.value,'$[1]') AND CAST(f.id AS TEXT)=json_extract(r.value,'$[2]') AND l.kind IN ('movies','shows') AND i.kind IN ('movie','episode'))))) AS payload",vec![grant.into(),server.into(),epoch.into(),tuples.into()]).await?;
         Ok(rows.len() == 1 && rows[0] == "1")
     }
-    async fn source_item_details_snapshot(
+    async fn source_item_details_snapshot_with_presentation(
         &self,
         hash: &str,
         grant: Uuid,
         item: SourceId,
+        include_presentation: bool,
     ) -> Result<SourceDetailsRead<SourceItemSnapshot>, StoreError> {
         if !is_hash(hash) {
             return Err(invalid());
@@ -165,7 +177,15 @@ impl<T: Backend> SharingSourceDetailsStore for T {
         // The aggregate estimate runs before canonical projections are built.
         // LIMIT 65 is a refusal sentinel, never a truncated file listing.
         let record = super::sharing_catalogue_source::RECORD;
-        let sql=format!("WITH allowed AS (SELECT i.id FROM sharing_exports e JOIN sharing_identity s ON s.singleton=1 AND length(CAST(s.server_id AS BLOB))=36 AND length(CAST(s.catalogue_epoch AS BLOB))=36 JOIN sharing_export_libraries x ON x.grant_id=e.id JOIN libraries l ON l.id=x.library_id JOIN items i ON i.library_id=l.id WHERE e.id=$1 AND e.token_hash=$2 AND e.state='active' AND i.id=$3 AND i.kind IN ('movie','show','season','episode') AND l.kind IN ('movies','shows') AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0)), bounded_files AS (SELECT f.id FROM files f WHERE f.item_id=$3 ORDER BY f.id LIMIT 65), capacity AS (SELECT count(*) AS n,coalesce(sum(CASE WHEN {raw} THEN {estimate} ELSE 8388609 END),0) AS bytes FROM bounded_files b JOIN files f ON f.id=b.id) SELECT json_object('server',s.server_id,'epoch',s.catalogue_epoch,'record',json({record}),'projections',CASE WHEN c.n<=64 AND c.bytes<=8388608 THEN json((SELECT json_group_array(({projection})||'') FROM bounded_files b JOIN files f ON f.id=b.id)) ELSE NULL END) AS payload FROM allowed a JOIN items i ON i.id=a.id JOIN sharing_identity s ON s.singleton=1 CROSS JOIN capacity c");
+        // Keep enrichment in the same authorized snapshot as item/file facts.
+        // Five rating rows are a refusal sentinel; the wire accepts at most four.
+        let presentation = "CASE WHEN coalesce(length(CAST(i.air_date AS BLOB)),0)<=32 AND coalesce(length(CAST(i.imdb_id AS BLOB)),0)<=128 THEN json_object('runtime_ms',i.runtime_ms,'air_date',i.air_date,'tmdb_id',CASE WHEN i.tmdb_id IS NULL THEN NULL ELSE CAST(i.tmdb_id AS TEXT) END,'imdb_id',i.imdb_id,'ratings',json((SELECT json_group_array(json_object('source',r.source,'value',r.value,'scale',r.scale,'votes',r.votes)) FROM (SELECT source,value,scale,votes FROM library_annotations_ratings WHERE item_id=i.id ORDER BY source LIMIT 5) r))) ELSE NULL END";
+        let presentation = if include_presentation {
+            presentation
+        } else {
+            "NULL"
+        };
+        let sql=format!("WITH allowed AS (SELECT i.id FROM sharing_exports e JOIN sharing_identity s ON s.singleton=1 AND length(CAST(s.server_id AS BLOB))=36 AND length(CAST(s.catalogue_epoch AS BLOB))=36 JOIN sharing_export_libraries x ON x.grant_id=e.id JOIN libraries l ON l.id=x.library_id JOIN items i ON i.library_id=l.id WHERE e.id=$1 AND e.token_hash=$2 AND e.state='active' AND i.id=$3 AND i.kind IN ('movie','show','season','episode') AND l.kind IN ('movies','shows') AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0)), bounded_files AS (SELECT f.id FROM files f WHERE f.item_id=$3 ORDER BY f.id LIMIT 65), capacity AS (SELECT count(*) AS n,coalesce(sum(CASE WHEN {raw} THEN {estimate} ELSE 8388609 END),0) AS bytes FROM bounded_files b JOIN files f ON f.id=b.id) SELECT json_object('server',s.server_id,'epoch',s.catalogue_epoch,'record',json({record}),'presentation',json({presentation}),'projections',CASE WHEN c.n<=64 AND c.bytes<=8388608 THEN json((SELECT json_group_array(({projection})||'') FROM bounded_files b JOIN files f ON f.id=b.id)) ELSE NULL END) AS payload FROM allowed a JOIN items i ON i.id=a.id JOIN sharing_identity s ON s.singleton=1 CROSS JOIN capacity c");
         let rows = self
             .sharing_read(
                 &sql,
@@ -183,6 +203,7 @@ impl<T: Backend> SharingSourceDetailsStore for T {
             epoch: Uuid,
             record: Option<SourceCatalogueRecord>,
             projections: Option<Vec<Option<String>>>,
+            presentation: Option<crate::sharing_catalogue_details::SourceItemPresentation>,
         }
         if rows.len() > 1 {
             return Err(invalid());
@@ -194,7 +215,15 @@ impl<T: Backend> SharingSourceDetailsStore for T {
         let (Some(record), Some(projections)) = (row.record, row.projections) else {
             return Ok(SourceDetailsRead::Capacity);
         };
+        let mut presentation = row.presentation;
+        if include_presentation && presentation.is_none() {
+            return Ok(SourceDetailsRead::Capacity);
+        }
         record.item.validate().map_err(|_| invalid())?;
+        if let Some(presentation) = &mut presentation {
+            presentation.validate()?;
+            presentation.ratings.sort_by_key(|rating| rating.source);
+        }
         if record.item.item_id != item || projections.len() > 64 {
             return Err(invalid());
         }
@@ -220,6 +249,7 @@ impl<T: Backend> SharingSourceDetailsStore for T {
             server: row.server,
             epoch: row.epoch,
             files,
+            presentation,
         }))
     }
     async fn source_catalogue_revision_key(
@@ -432,6 +462,7 @@ mod tests {
             store.sharing_txn(vec![("UPDATE files SET probe_json=$1".into(),vec![r#"{"chapters":[{"start_time":"0","end_time":"1.5","tags":{"title":"Opening"}}],"private":"PRIVATE PROBE"}"#.to_owned().into()])]).await.expect("bounded valid probe");
             let item = SourceId::parse("9007199254740993").expect("item");
             let file = SourceId::parse("9223372036854775807").expect("file");
+            store.sharing_txn(vec![("UPDATE items SET runtime_ms=7200000,air_date='2024-06-10',tmdb_id=9007199254740993,imdb_id='tt1234567' WHERE id=9007199254740993".into(),vec![]),("INSERT INTO library_annotations_ratings(item_id,source,value,scale,votes) VALUES(9007199254740993,'imdb',8.2,10,1200)".into(),vec![])]).await.expect("cached public enrichment");
             let read = store
                 .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
                 .await
@@ -440,6 +471,78 @@ mod tests {
                 panic!("expected details")
             };
             assert_eq!(snapshot.files.len(), 1);
+            assert!(
+                snapshot.presentation.is_none(),
+                "legacy reads keep their old projection"
+            );
+            let SourceDetailsRead::Authorized(enriched) = store
+                .source_item_details_snapshot_with_presentation(
+                    &"b".repeat(64),
+                    grant,
+                    item.clone(),
+                    true,
+                )
+                .await
+                .expect("authorized cached enrichment")
+            else {
+                panic!("expected enriched snapshot")
+            };
+            let presentation = enriched.presentation.expect("requested presentation");
+            assert_eq!(presentation.runtime_ms, Some(7200000));
+            assert_eq!(presentation.air_date.as_deref(), Some("2024-06-10"));
+            assert_eq!(
+                presentation.tmdb_id.expect("provider ID").as_str(),
+                "9007199254740993"
+            );
+            assert_eq!(presentation.imdb_id.as_deref(), Some("tt1234567"));
+            assert_eq!(presentation.ratings.len(), 1);
+            assert_eq!(presentation.ratings[0].value, 8.2);
+            assert_eq!(presentation.ratings[0].votes, Some(1200));
+            assert!(matches!(
+                store
+                    .source_item_details_snapshot_with_presentation(
+                        &"c".repeat(64),
+                        grant,
+                        item.clone(),
+                        true
+                    )
+                    .await
+                    .expect("current grant required"),
+                SourceDetailsRead::Unavailable
+            ));
+            store
+                .sharing_txn(vec![(
+                    "UPDATE items SET imdb_id=$1 WHERE id=9007199254740993".into(),
+                    vec!["x".repeat(129).into()],
+                )])
+                .await
+                .expect("oversized public identifier");
+            assert!(matches!(
+                store
+                    .source_item_details_snapshot_with_presentation(
+                        &"b".repeat(64),
+                        grant,
+                        item.clone(),
+                        true
+                    )
+                    .await
+                    .expect("bounded enrichment"),
+                SourceDetailsRead::Capacity
+            ));
+            assert!(matches!(
+                store
+                    .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
+                    .await
+                    .expect("legacy metadata remains available"),
+                SourceDetailsRead::Authorized(_)
+            ));
+            store
+                .sharing_txn(vec![(
+                    "UPDATE items SET imdb_id='tt1234567' WHERE id=9007199254740993".into(),
+                    vec![],
+                )])
+                .await
+                .expect("restore public identifier");
             let facts = snapshot.files[0].playable_file(&key).expect("closed facts");
             assert_eq!(facts.chapters[0].end_ms, 1500);
             let wire_value = serde_json::to_value(&facts).expect("closed wire");

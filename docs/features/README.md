@@ -22,6 +22,7 @@ a document to this folder.
 | [SHARED-LIBRARIES-IMPLEMENTATION.md](SHARED-LIBRARIES-IMPLEMENTATION.md) | Revised S0–S8 build contract, authority, deployment, playback integration and acceptance evidence. | open |
 | [SHARED-LIBRARIES-STATUS.md](SHARED-LIBRARIES-STATUS.md) | Shared-libraries integration, live promotion evidence, failed-only qualification and remaining acceptance. | open |
 | [SHARED-LIBRARIES-OPERATIONS.md](SHARED-LIBRARIES-OPERATIONS.md) | How to configure the implemented private listener, pair viewers, diagnose retirement and distinguish remaining Docker/cluster/device qualification. | open |
+| [SHARING-HOST-SETUP.md](SHARING-HOST-SETUP.md) | Automatic native private setup, explicit Docker host-component installation, process-bound host observations and qualification of the repaired import path. | open |
 | [SHARED-LIBRARIES-INGRESS-CUSTODY.md](SHARED-LIBRARIES-INGRESS-CUSTODY.md) | Why cluster forwarding needs durable ingress obligations and exact outer-writer closure acknowledgements, with schema and retry boundaries. | open |
 | [SHARED-LIBRARIES-HANDOFF.md](SHARED-LIBRARIES-HANDOFF.md) | Dated integration and agent snapshot, all remaining S2–S8 implementation/qualification work, compiler commands and promotion requirements. | open |
 | [SHARED-LIBRARIES-RE-REVIEW.md](SHARED-LIBRARIES-RE-REVIEW.md) | Opus re-review of the revised contract; SL-18–24 and links to their corrections. | open |

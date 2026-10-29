@@ -1,6 +1,77 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Issue #1321: credential sign-in omits reporting while connection recovery retains it.
+[[fixes]]
+id = "apple.sign-in-report-action-removed"
+commits = ["28c2d4ace2257bb51bb423bb046711cf72be4678"]
+source = "clients/apple/Sources/AuthViews.swift"
+source_anchor = 'AuthScaffold(subtitle: model.serverName ?? model.origin, error: model.authError, showReport: false)'
+test = "clients/apple/UITests/TVConnectionNavigationTests.swift"
+test_anchor = "testSignInCanChooseAnotherServerAndReconnectWithNativeRemote"
+
+[[fixes]]
+id = "web.sign-in-report-action-removed"
+commits = []
+supplements = "apple.sign-in-report-action-removed"
+source = "crates/plurxd/src/web/core/auth.js"
+source_anchor = "function authShell(title, sub, fields, btn, onsubmit, showReport=true)"
+test = "tests/web/session-expiry.test.js"
+test_anchor = "credential sign-in omits the reporting action"
+
+
+# PR #1316: QR-first invitation exchange preserves explicit import and approval.
+[[fixes]]
+id = "sharing.invitation-qr-exchange"
+commits = ["0d0deb6ec0a21de665b3707c328c52676321cec5"]
+source = "crates/plurxd/src/web/pages/sharing-qr.js"
+source_anchor = "function sharingQRMatrix(text){"
+test = "tests/web/sharing-management.test.js"
+test_anchor = "sharing QR codes round trip the exact invitation including maximum capacity and retain a quiet zone"
+
+[[fixes]]
+id = "sharing.apple-invitation-qr-roundtrip"
+commits = []
+supplements = "sharing.invitation-qr-exchange"
+source = "clients/apple/Sources/SharedSharingInvitationQR.swift"
+source_anchor = "static func image(for invitation: String)"
+test = "clients/apple/Tests/SharedSharingManagementTests.swift"
+test_anchor = "testSavedInvitationQRCodeRoundTripsExactPayload"
+
+[[fixes]]
+id = "sharing.android-invitation-qr-roundtrip"
+commits = []
+supplements = "sharing.invitation-qr-exchange"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingInvitationQR.kt"
+source_anchor = "internal fun sharingInvitationQR(text: String)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/SharingInvitationQRTest.kt"
+test_anchor = "invitationPngRoundTripPreservesTheExactSecretAtTypicalAndMaximumSizes"
+
+[[fixes]]
+id = "sharing.apple-first-use-camera-permission"
+commits = []
+supplements = "sharing.invitation-qr-exchange"
+source = "clients/apple/Sources/SharedSharingInvitationQR.swift"
+source_anchor = "enum SharedSharingQRCameraPermission"
+test = "clients/apple/Tests/SharedSharingManagementTests.swift"
+test_anchor = "testInvitationQRScanRequestsFirstCameraPermissionBeforeAvailability"
+
+[[fixes]]
+id = "sharing.android-independent-file-providers"
+commits = []
+supplements = "sharing.invitation-qr-exchange"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingInvitationTools.kt"
+source_anchor = "class SharingInvitationFileProvider : FileProvider()"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/SharingInvitationFileProviderTest.kt"
+test_anchor = "sharingPngAndDiagnosticsZipResolveThroughIndependentProvidersAndPaths"
+
+[[fixes]]
+id = "sharing.android-immutable-export-uri"
+commits = ["458b6cb4ae66faabed1e7016a7761576f6b0f99f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingInvitationTools.kt"
+source_anchor = "internal fun writeSharingInvitationImage(directory: File, bitmap: Bitmap)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/SharingInvitationFileProviderTest.kt"
+test_anchor = "laterSharesCannotReplaceTheInvitationVisibleThroughAnEarlierGrantedUri"
 
 # PR #1311: both Cinema Info buttons expose current playback observations.
 [[fixes]]

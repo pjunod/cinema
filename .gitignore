@@ -18,6 +18,7 @@ _to_delete/
 # Git bundles are a delivery/transfer artifact, not source — never commit them.
 *.bundle
 deploy/docker-compose.override.yml
+deploy/docker-compose.sharing-host.json
 deploy/.env
 
 # The Apple project and Info.plists are generated from clients/apple/project.yml.

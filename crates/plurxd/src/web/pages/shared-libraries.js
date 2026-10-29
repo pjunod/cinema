@@ -52,9 +52,31 @@ function sharedCatalogueItemHtml(item,expected,capture=null){
   if(sharedCatalogueGroupKey(ref)!==sharedCatalogueGroupKey(expected)
     ||expected.library_id&&ref.library_id!==expected.library_id) throw new TypeError("Shared source changed");
   if(typeof item.title!=="string"||item.title.length>16384) throw new TypeError("Invalid shared item");
-  return `<a class="card" href="${esc(sharedCatalogueHref(ref))}">${SHARED_ARTWORK.markup(item,expected,capture)}<strong>${esc(item.title)}</strong><div class="muted">${esc(item.kind||"")}${item.year?` · ${esc(String(item.year))}`:""}</div></a>`;
+  const art=SHARED_ARTWORK.markup(item,expected,capture);
+  return `<a class="poster shared-poster" href="${esc(sharedCatalogueHref(ref))}" title="${esc(item.title)}"><div class="artbox"><div class="art">${art||'<span class="shared-art-placeholder" aria-hidden="true">◇</span>'}</div></div><div class="meta"><strong class="t">${esc(item.title)}</strong><div class="s"><span class="stxt">${esc(item.kind||"")}${item.year?` · ${esc(String(item.year))}`:""}</span></div></div></a>`;
 }
 function sharedCatalogueError(error){return `<div class="empty" role="status">Shared source unavailable. ${esc(error.message||"Try again.")} <button class="ghost sm" onclick="render()">Retry</button></div>`;}
+function sharedCatalogueFileHtml(file,index,launch){
+  const video=[file.video_codec&&codecLabel(file.video_codec),file.width&&file.height?`${file.width}×${file.height}`:"",file.hdr_format||hdrLabel(file.hdr),file.bit_depth?`${file.bit_depth}-bit`:"",fmtMbps(file.bitrate)].filter(Boolean).join(" · ");
+  const facts=[file.container&&file.container.toUpperCase(),fmtSize(Number(file.size)),file.duration_ms?fmtDur(file.duration_ms):""].filter(Boolean).join(" · ");
+  const audio=(file.audio_streams||[]).map(a=>`<span class="trk">${esc(audioFactLabel(a))}</span>`).join("");
+  const subs=(file.subtitle_streams||[]).map(s=>`<span class="trk">${esc(subFactLabel(s))}</span>`).join("");
+  return `<section class="version shared-version"><div class="vh"><h3>Version ${index+1}</h3><button data-shared-play="${index}"${launch?"":" disabled"}>Play</button></div><div class="vbadges">${specBadges(file)}</div><dl class="specs"><dt>Video</dt><dd>${esc(video||"—")}</dd><dt>Audio</dt><dd><div class="trks">${audio||"None"}</div></dd><dt>Subtitles</dt><dd><div class="trks">${subs||"None"}</div></dd><dt>File</dt><dd>${esc(facts||"—")}</dd></dl></section>`;
+}
+function sharedCatalogueDetailHtml(detail,ref,capture){
+  const item=detail.item,launch=detail.delivery_status==="available",watched=!!detail.watch?.watched;
+  const presentation=item.presentation||{},runtime=presentation.runtime_ms||detail.files.find(f=>f.duration_ms)?.duration_ms;
+  const chips=[item.year,item.kind==="episode"&&item.season_number!=null?`Season ${item.season_number}`:"",item.episode_number!=null?`Episode ${item.episode_number}`:"",runtime?fmtDur(runtime):"",...(item.genres||[])].filter(v=>v!==null&&v!==undefined&&v!=="");
+  const ratings=ratingsHtml(presentation.ratings);
+  const poster=SHARED_ARTWORK.markup(item,ref,capture),backdrop=SHARED_ARTWORK.markup(item,ref,capture,true);
+  const watchable=item.kind==="movie"||item.kind==="episode";
+  return `<article class="shared-detail"><div class="shared-detail-hero">${backdrop?`<div class="shared-backdrop" aria-hidden="true">${backdrop}</div>`:""}<div class="shared-detail-heading"><div class="poster shared-detail-poster"><div class="art">${poster||'<span class="shared-art-placeholder" aria-hidden="true">◇</span>'}</div></div><div class="shared-detail-copy"><p class="crumbs"><a href="${esc(sharedCatalogueHref(ref,"library"))}">Library</a></p><h2>${esc(item.title||"")}</h2><div class="chips">${chips.map(v=>`<span>${esc(String(v))}</span>`).join("")}</div>${presentation.air_date?`<p class="muted">Released ${esc(presentation.air_date)}</p>`:""}${ratings?`<div class="shared-ratings" aria-label="Ratings">${ratings}</div>`:""}${item.overview?`<p class="overview">${esc(item.overview)}</p>`:""}<div class="actions">${watchable?`<button class="ghost sm" data-shared-watched="${watched?0:1}">${watched?"Mark unwatched":"Mark watched"}</button>`:""}</div>${launch?"":'<p class="muted">Playback is not available for this shared item yet.</p>'}</div></div></div>${detail.files.length?`<section class="shared-versions"><h2 class="section">Playback versions</h2>${detail.files.map((file,index)=>{
+    sharedCatalogueId(file.file_id);
+    const fileRef=sharedCatalogueReference(file.reference?.item);
+    if(JSON.stringify(fileRef)!==JSON.stringify(ref)||file.reference.file_id!==file.file_id) throw new Error("Shared file changed");
+    return sharedCatalogueFileHtml(file,index,launch);
+  }).join("")}</section>`:""}${["show","season"].includes(item.kind)?`<h2 class="section">${item.kind==="show"?"Seasons":"Episodes"}</h2>`:""}<div id="shared-children" class="grid shared-grid"></div></article>`;
+}
 async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
   const capture={generation,auth:AUTH_GENERATION,token:TOKEN,origin:API,route:location.hash};
   const parsed=sharedCatalogueRoute(capture.route);
@@ -76,7 +98,7 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
         if(!groups.has(key)) groups.set(key,{...row,assigned:new Set()});groups.get(key).assigned.add(row.library_id);if(groups.get(key).assigned.size>64) throw new Error("Shared assignments unavailable");}
       if(groups.size>32) throw new Error("Shared assignments unavailable");
       const entries=Array.from(groups.values());
-      paint(entries.length?entries.map((group,index)=>`<section class="card"><h2>${esc(group.source_name||"Shared source")}</h2><div id="shared-source-${index}">Loading source…</div><div id="shared-continue-${index}"></div></section>`).join(""):"<div class=\"empty\">No shared libraries assigned.</div>");
+      paint(entries.length?entries.map((group,index)=>`<section class="card shared-source"><h2>${esc(group.source_name||"Shared source")}</h2><div id="shared-source-${index}">Loading source…</div><div id="shared-continue-${index}"></div></section>`).join(""):"<div class=\"empty\">No shared libraries assigned.</div>");
       // Each Source paints independently; one unreachable home cannot delay another.
       let nextGroup=0;
       const loadGroup=async(group,index)=>{
@@ -93,7 +115,7 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
             if(!["online","unavailable","busy"].includes(reply.availability)||reply.availability!=="online"&&reply.items.length) throw new Error("Shared history unavailable");
             recent=reply.availability==="online"?reply.items.map(entry=>{const r=sharedCatalogueReference(entry.item?.reference);if(!group.assigned.has(r.library_id))throw new Error("Shared history assignment changed");return sharedCatalogueItemHtml(entry.item,{import_id:group.import_id,server_id:group.server_id,catalogue_epoch:group.catalogue_epoch},capture);}).join(""):'<p class="muted">Continue Watching unavailable for this Source.</p>';
           }catch(error){recent=sharedCatalogueError(error);}
-          if(sharedCatalogueCurrent(capture)){const el=document.getElementById(`shared-continue-${index}`);if(el){el.innerHTML=`<h3>Continue Watching</h3>${recent}`;SHARED_ARTWORK.hydrate(el);}}
+          if(sharedCatalogueCurrent(capture)){const el=document.getElementById(`shared-continue-${index}`);if(el){el.innerHTML=`<h3>Continue Watching</h3><div class="grid shared-grid">${recent}</div>`;SHARED_ARTWORK.hydrate(el);}}
         }
       };
       await Promise.allSettled(Array.from({length:Math.min(4,entries.length)},async()=>{
@@ -108,13 +130,7 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
         if(sharedCatalogueGroupKey(current)!==sharedCatalogueGroupKey(ref)||current.library_id!==ref.library_id||current.item_id!==ref.item_id) throw new Error("Shared source changed");
         if(!Array.isArray(detail.files)||detail.files.length>64) throw new Error("Shared details unavailable");
         const launch=detail.delivery_status==="available";
-        const watchable=item.kind==="movie"||item.kind==="episode",watched=!!detail.watch?.watched;
-        paint(`${SHARED_ARTWORK.markup(item,ref,capture,true)}<h2>${esc(item.title||"")}</h2><p>${esc(item.overview||"")}</p>${launch?"":'<p class="muted">Playback is not available for this shared item yet.</p>'}${watchable?`<p><button class="ghost sm" data-shared-watched="${watched?0:1}">${watched?"Mark unwatched":"Mark watched"}</button></p>`:""}<div>${detail.files.map((file,index)=>{
-          sharedCatalogueId(file.file_id);
-          const fileRef=sharedCatalogueReference(file.reference?.item);
-          if(JSON.stringify(fileRef)!==JSON.stringify(current)||file.reference.file_id!==file.file_id) throw new Error("Shared file changed");
-          return `<p>${esc(file.video_codec||file.container||"Media file")}${file.duration_ms?` · ${esc(fmtDur(file.duration_ms))}`:""} <button data-shared-play="${index}"${launch?"":" disabled"}>Play</button></p>`;
-        }).join("")}</div><div id="shared-children"></div>`);
+        paint(sharedCatalogueDetailHtml(detail,ref,capture));
         const mount=document.getElementById("shared-catalogue");
         const watchButton=mount?.querySelector("button[data-shared-watched]");
         if(watchButton instanceof HTMLButtonElement)watchButton.onclick=async()=>{
@@ -137,7 +153,7 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
           await sharedCatalogueLoadPage(`${base}/items/${ref.item_id}/children`,sharedCatalogueLibraryReference(ref),capture,"shared-children");
       }else{
         const ref=parsed.reference;
-        paint(`<form id="shared-search"><label>Search this library <input name="q" maxlength="512" value="${esc(parsed.q)}"></label><button class="ghost" type="submit">Search</button></form><div id="shared-items"></div>`);
+        paint(`<form id="shared-search" role="search"><label for="shared-query">Search this library</label><div class="shared-search-controls"><input id="shared-query" name="q" type="search" maxlength="512" value="${esc(parsed.q)}"><button class="ghost" type="submit">Search</button></div></form><div id="shared-items" class="grid shared-grid"></div>`);
         const form=/** @type {HTMLFormElement|null} */(document.getElementById("shared-search"));
         if(form) form.onsubmit=event=>{event.preventDefault();if(!sharedCatalogueCurrent(capture)) return;
           const value=String(new FormData(form).get("q")||"");
