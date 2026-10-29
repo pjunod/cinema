@@ -12,6 +12,16 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+## macOS parser runtime — scoped lock refresh on 2026-10-29
+
+Wasmtime 50.0.0 includes the [upstream Mach receiver fix](https://github.com/bytecodealliance/wasmtime/pull/14414).
+The macOS-only runtime and required Cranelift dependencies change; native traps,
+epoch deadlines, memory/stack limits and import restrictions remain. Tokio
+1.53.1 and Hiqlite 0.14.0 remain pinned. Refresh only the live Cargo.lock
+whole-file hash. Selected library-worker behavior, historical anchors, models,
+configurations, toolchain and qualification identities are unchanged. This
+source correspondence adds no formal execution or progress claim.
+
 ## Current validation fixtures — scoped refresh on 2026-10-29
 
 Scoped review on 2026-10-29 of conformance parent registration: the exact Store inventory records four existing text-caption methods with new typed dispatch/absence/refusal coverage on all backends. Formal-publication module registration and selected library positive examples are unchanged. Positive caption publication on Hiqlite is not claimed. Refresh only live M2 parent correspondence; historical anchors, model/configuration and qualification identities remain unchanged; source review is not execution evidence.

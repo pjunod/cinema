@@ -4,6 +4,16 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## macOS parser runtime — scoped lock refresh on 2026-10-29
+
+Wasmtime 50.0.0 includes the [upstream Mach receiver fix](https://github.com/bytecodealliance/wasmtime/pull/14414).
+The macOS-only runtime and required Cranelift dependencies change; native traps,
+epoch deadlines, memory/stack limits and import restrictions remain. Tokio
+1.53.1 and Hiqlite 0.14.0 remain pinned. Refresh only the live Cargo.lock
+whole-file hash. Selected library-worker behavior, historical anchors, models,
+configurations, toolchain and qualification identities are unchanged. This
+source correspondence adds no formal execution or progress claim.
+
 ## Current validation fixtures — scoped refresh on 2026-10-29
 
 Scoped review on 2026-10-29 of the startup test listener seam: the test-only constructor retains a prebound socket through startup; non-test binding and the selected background_work_loop spawn/argument are unchanged. Refresh only live Table44 correspondence. No selected-worker scheduling, shutdown, model, configuration, anchor or historical qualification identity changes; this source review is not execution evidence.

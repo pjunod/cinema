@@ -121,6 +121,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Update the macOS source parser runtime to fix an abort in native exception
+  handling, preserving its deadline, memory, stack and capability limits.
+
 - Sharing-host setup reaps its helper before timeout or cancellation returns,
   while retaining the helper's native user/IPC environment. The lifecycle
   inventory now records the sharing-host and invitation owners and their tests.
