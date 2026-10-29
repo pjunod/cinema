@@ -114,7 +114,7 @@ class DesktopReleaseCase(unittest.TestCase):
     def test_registered_release_dispatch_reuses_only_a_named_dry_run_build(self):
         workflow = (ROOT / ".github/workflows/github-release.yml").read_text()
         job = workflow.split("\n  resolve:", 1)[1].split("\n  linux:", 1)[0]
-        script = textwrap.dedent(job.split("        run: |\n", 1)[1])
+        script = textwrap.dedent(job.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
         output = self.root / "resolve-output"
         environment = {**os.environ, "EVENT_NAME": "workflow_dispatch", "INPUT_TAG": "",
             "INPUT_QUALIFICATION_RUN_ID": "123", "GITHUB_SHA": "a" * 40, "GITHUB_OUTPUT": str(output)}

@@ -1,3 +1,34 @@
+# Integration review (2026-10-29): preserve both reviewed owner sets below.
+# Relative to the native-fixture source: +2 joined selected-stderr test tasks,
+# +2 awaited test bounds, +3 bounded test Command constructors and +1 HTTP
+# status projection. Exact combined counts are 1029/1910/308/822; all other
+# reviewed counts, scan patterns, roots and forbidden zeroes are unchanged.
+
+# Subtitle repair ownership review (issue #1329, 2026-10-29;
+# reviewed corrective source 9996d26f4, current tree c4e32f291):
+# +2 namespaced tasks are cfg(test) bounded.rs duplex-pipe writers in
+# selected_stderr_ignores_large_metadata_and_preserves_split_records and
+# selected_stderr_overflow_and_overlong_lines_drain_before_refusal. Each
+# writer is explicitly joined after the fully draining reader reaches EOF.
+# +2 namespaced timers are those tests' awaited 10s/5s observation bounds;
+# they create no detached timer or new production deadline policy.
+# +3 Command constructors are cfg(test): bounded.rs first constructs a bare
+# `sh`, rejected by absolute-path validation before spawn, then an absolute
+# `/bin/sh` collected by the existing clean-environment child owner. The
+# third constructor is runtime.rs's actual_multichannel_decoder_keeps_clock_
+# frames_past_side_data_log_budget E-AC-3 fixture encoder; child_output awaits
+# it under the existing 20s bounded process-group/cancellation/reap owner.
+# +1 launch-shaped match is the stopped_create_conflict_exposes_only_a_
+# validated_read_handle test's Axum Response::status() assertion. It launches
+# no child and grants no producer authority.
+# The live stderr task changes from direct drain_capped to an optional
+# selected-line drain inside the same single tokio::spawn (net zero tasks).
+# Existing command owner, cancellation, process group, kill/reap and old
+# caller paths remain unchanged. No watchdog, gate or repair owner is added.
+# Counts change only: task 1027->1029, timer 1905->1907, Command 304->307,
+# launch-shaped 820->821. Patterns, scan roots, equality checks and all other
+# counts/forbidden-shape zeroes are unchanged. Source review is not execution.
+
 # Native fixture ownership review (2026-10-29): four test-only forkers keep
 # all 300 immediate fixture executions, with at most 1200 checked child
 # attempts. Each round drains child outcomes; stop/barrier release joins the
@@ -3296,7 +3327,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
-expected_occurrences = 1027
+expected_occurrences = 1029
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5001,7 +5032,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1908
+expected_occurrences = 1910
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5483,7 +5514,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 305
+expected_occurrences = 308
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6135,7 +6166,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # inspect the in-process Axum oneshot response for invalid opt-in and success.
 # These reads launch no task or child and introduce no producer ownership.
 # Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
-expected_occurrences = 821
+expected_occurrences = 822
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

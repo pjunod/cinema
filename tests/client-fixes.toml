@@ -9,6 +9,86 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = 'Task { if let model { await releaseHlsSession(model, sessionId) } }'
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "func testStopReleasesTheAttachedSessionThroughItsConfiguredOwnerExactlyOnce"
+# PR #1332: native journey harness anchors; execution remains in separate receipts.
+[[fixes]]
+id = "apple.tv-navigation-success-capture-idle-budget"
+commits = ["dd8b896e8e5f293b0e3117c92bde5f1574540cd2"]
+source = "clients/apple/UITests/TVNavigationTestCase.swift"
+source_anchor = "if result != .completed || captureOnSuccess {"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "testLiveFullscreenRevealMoreReportAndBackRetainSession"
+
+[[fixes]]
+id = "apple.meridian-tv-rail-setup-steering"
+commits = []
+supplements = "apple.tv-navigation-success-capture-idle-budget"
+source = "clients/apple/UITests/TVNavigationTestCase.swift"
+source_anchor = 'let targetIsRail = target.identifier.hasPrefix("viewer-tab-")'
+test = "clients/apple/UITests/TVMeridianNavigationTests.swift"
+test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
+
+# Issue #1329: client recovery/status anchors; execution remains in separate receipts.
+[[fixes]]
+id = "subtitles.apple-stopped-operation-recovery"
+commits = ["9996d26f4b57643f097c4b10864ca929353d81a1"]
+source = "clients/apple/Sources/ProgressiveCaptionSession.swift"
+source_anchor = "private func recoverStopped("
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "testStoppedCreateDiscoversUnpreparedOperationAndRequiresExplicitResume"
+
+[[fixes]]
+id = "subtitles.apple-current-core-failure"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "clients/apple/Sources/ProgressiveCaptionModels.swift"
+source_anchor = "func currentFailure(position:"
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "testRecoveredOperationIdentityAndNonretryableCoreStatusStayFenced"
+
+[[fixes]]
+id = "subtitles.android-stopped-operation-recovery"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ProgressiveCaptions.kt"
+source_anchor = "internal fun captionValidateRecovery("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ProgressiveCaptionsTest.kt"
+test_anchor = "stoppedCreateRecoveryRequiresItsExactSourceProfileAndLanguage"
+
+[[fixes]]
+id = "subtitles.android-current-core-failure"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ProgressiveCaptions.kt"
+source_anchor = "internal fun captionCurrentFailure("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ProgressiveCaptionsTest.kt"
+test_anchor = "currentNonretryableFailureDoesNotHideCoverageOrRelevantActiveProgress"
+
+[[fixes]]
+id = "subtitles.web-stopped-operation-recovery"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "async function translationRecoverStopped("
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "stopped Create discovers its exact operation without demand until explicit Resume"
+
+[[fixes]]
+id = "subtitles.web-stopped-operation-identity"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "function translationValidateOperation("
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "stopped Create discovery refuses mismatched observations and stale selection"
+
+[[fixes]]
+id = "subtitles.web-current-core-failure"
+commits = []
+supplements = "subtitles.apple-stopped-operation-recovery"
+source = "crates/plurxd/src/web/player/subtitle-translation.js"
+source_anchor = "function translationCurrentFailure("
+test = "tests/web/subtitle-translation.test.js"
+test_anchor = "current nonretryable range failure preserves coverage and relevant active progress"
 
 # PR #1326: abandoned completed provider jobs retain durable cleanup intent.
 [[fixes]]

@@ -121,6 +121,7 @@ Previous: [Live TV playback method](245-live-tv-playback-method.md).
 
 | Note | Answers | |
 |---|---|---|
+| [Captured session release](1331-captured-session-release.md) | How does Stop release its attached HLS session through the configured owner? | built |
 | [Subtitle text translation and shared captions](1292-subtitle-completion.md) | What does Apple build 277 add to subtitle translation and shared playback? | open |
 | [Display target session source contract follow-up](1216-display-target-session-contract.md) | What model-boundary contract coverage accompanies the display-target session work? | built |
 | [SDR display target contract follow-up](1216-sdr-display-target-contract.md) | What typed SDR processing contracts follow the display-target session work? | built |
@@ -137,3 +138,5 @@ Apple growing playlist attachment: [preparation and failover correction](914-gro
 
 [External Cinema invitation](1323-external-sharing-invitation.md) — combined network consent and automatic import continuation.
 Credential sign-in: [Keep the report action off credential sign-in screens](1321-sign-in-report-button.md).
+
+[Progressive caption recovery](1329-progressive-caption-recovery.md) — stopped-operation discovery, explicit Resume and current-range failures.

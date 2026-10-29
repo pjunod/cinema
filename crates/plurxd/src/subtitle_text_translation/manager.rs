@@ -16,7 +16,6 @@ use plurx_core::{
         },
     },
 };
-use sha2::{Digest, Sha256};
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -203,6 +202,18 @@ async fn execute(
             model_sha256,
             engine_sha256,
             ..
+        }
+        | JobPayload::SubtitleTextTranslateArtifact {
+            file_id,
+            source_size,
+            source_mtime,
+            subtitle_index,
+            input_sha256,
+            source_language,
+            target_language,
+            model_sha256,
+            engine_sha256,
+            ..
         } => {
             let admission = admission.ok_or_else(|| failure("waiting_for_playback_capacity"))?;
             if !config::read(state)
@@ -230,12 +241,15 @@ async fn execute(
             let held = crate::fragment_index_cluster::open_source_playback_fence(&file, None)
                 .await
                 .map_err(|_| failure("source_changed"))?;
-            let input = super::input_bytes(state, &file, *subtitle_index)
-                .await
-                .map_err(|_| failure("subtitle_unavailable"))?;
-            if hex::encode(Sha256::digest(&input)) != *input_sha256 {
-                return Err(failure("subtitle_changed"));
-            }
+            let (input, _input_pin) = super::artifact_input_bytes(
+                &state.subs_dir,
+                &file,
+                *subtitle_index,
+                &state.subtitle_source_access(),
+                input_sha256,
+            )
+            .await
+            .map_err(|why| failure(safe_reason(&why)))?;
             let cues = text::parse(&input).map_err(|_| failure("subtitle_invalid"))?;
             current_source(state, &file, &held).await?;
             let bundle = Arc::new(
@@ -356,12 +370,15 @@ async fn execute(
                 return Err(failure("subtitle_too_large"));
             }
             current_source(state, &file, &held).await?;
-            let current_input = super::input_bytes(state, &file, *subtitle_index)
-                .await
-                .map_err(|_| failure("subtitle_unavailable"))?;
-            if hex::encode(Sha256::digest(current_input)) != *input_sha256 {
-                return Err(failure("subtitle_changed"));
-            }
+            let (_current_input, _current_pin) = super::artifact_input_bytes(
+                &state.subs_dir,
+                &file,
+                *subtitle_index,
+                &state.subtitle_source_access(),
+                input_sha256,
+            )
+            .await
+            .map_err(|why| failure(safe_reason(&why)))?;
             if artifacts::inspect(&state.subtitle_models.root, cancel)
                 .await
                 .map_err(|why| failure(safe_reason(&why)))?
@@ -420,6 +437,7 @@ pub(crate) async fn worker_pass(
             kinds: vec![
                 JobKind::SubtitleTextModelOperation,
                 JobKind::SubtitleTextTranslate,
+                JobKind::SubtitleTextTranslateArtifact,
             ],
             after: None,
             now_ms: crate::state::clock_ms(),
@@ -431,7 +449,11 @@ pub(crate) async fn worker_pass(
         if shutdown.is_cancelled() || !authority.may_execute_job(source.kind()).await {
             continue;
         }
-        let admission = if matches!(source, JobPayload::SubtitleTextTranslate { .. }) {
+        let admission = if matches!(
+            source,
+            JobPayload::SubtitleTextTranslate { .. }
+                | JobPayload::SubtitleTextTranslateArtifact { .. }
+        ) {
             match state.transcode.admit_speech().await {
                 Some(admission) => Some(Arc::new(admission)),
                 None => continue,

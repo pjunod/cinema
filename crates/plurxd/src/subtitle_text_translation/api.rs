@@ -202,7 +202,7 @@ pub(crate) async fn create(
             )
         })?;
 
-    let payload = JobPayload::SubtitleTextTranslate {
+    let payload = JobPayload::SubtitleTextTranslateArtifact {
         file_id,
         source_size: file.size,
         source_mtime: file.mtime,
@@ -248,10 +248,63 @@ pub(crate) async fn retry(
     let mut payload = job.supported_payload()?;
     match &mut payload {
         JobPayload::SubtitleTextTranslate {
+            file_id,
+            source_size,
+            source_mtime,
+            subtitle_index,
+            input_sha256,
+            admin_user_id,
+            target_node_id,
+            ..
+        }
+        | JobPayload::SubtitleTextTranslateArtifact {
+            file_id,
+            source_size,
+            source_mtime,
+            subtitle_index,
+            input_sha256,
             admin_user_id,
             target_node_id,
             ..
         } => {
+            if !config::read(&state).await?.enabled {
+                return Err(conflict(
+                    "disabled",
+                    "Enable text subtitle translation in Settings",
+                ));
+            }
+            if !super::workers(&state)
+                .await?
+                .iter()
+                .any(|worker| worker["status"] == "verified")
+            {
+                return Err(conflict(
+                    "translation_unverified",
+                    "Install and test the text translation model in Settings",
+                ));
+            }
+            let file = state
+                .store
+                .get_file(*file_id)
+                .await?
+                .filter(|file| file.size == *source_size && file.mtime == *source_mtime)
+                .ok_or_else(|| conflict("source_changed", "The media source changed"))?;
+            // Retry is the explicit acquisition boundary. A claimed translation
+            // never regenerates missing/evicted input from the media source.
+            let bytes = super::input_bytes(&state, &file, *subtitle_index)
+                .await
+                .map_err(|_| {
+                    invalid(
+                        "subtitle_unavailable",
+                        "A complete text subtitle is required",
+                    )
+                })?;
+            if hex::encode(Sha256::digest(bytes)) != *input_sha256 {
+                return Err(conflict(
+                    "subtitle_changed",
+                    "The source subtitle changed; start a new translation",
+                ));
+            }
             *admin_user_id = user.id;
             *target_node_id = state.node_id.clone();
         }
@@ -268,7 +321,14 @@ pub(crate) async fn retry(
         _ => return Err(ApiError::NotFound("text translation job")),
     }
 
-    enqueue(&state, user.id, &input.request_id, digest, payload).await
+    enqueue(
+        &state,
+        user.id,
+        &input.request_id,
+        digest,
+        payload.into_artifact_text(),
+    )
+    .await
 }
 async fn replay(
     state: &AppState,
@@ -373,7 +433,9 @@ pub(crate) async fn job(
     let payload = job.supported_payload()?;
     if !matches!(
         payload,
-        JobPayload::SubtitleTextTranslate { .. } | JobPayload::SubtitleTextModelOperation { .. }
+        JobPayload::SubtitleTextTranslate { .. }
+            | JobPayload::SubtitleTextTranslateArtifact { .. }
+            | JobPayload::SubtitleTextModelOperation { .. }
     ) {
         return Err(ApiError::NotFound("text translation job"));
     }
@@ -386,7 +448,9 @@ async fn projection(
 ) -> Result<Value, ApiError> {
     let mut result = Value::Null;
     if job.state == JobState::Succeeded {
-        if let JobPayload::SubtitleTextTranslate { file_id, .. } = payload {
+        if let JobPayload::SubtitleTextTranslate { file_id, .. }
+        | JobPayload::SubtitleTextTranslateArtifact { file_id, .. } = payload
+        {
             if let Some(file) = state.store.get_file(*file_id).await? {
                 let key = artifact_key(payload)?;
                 for track in &file.subtitle_streams {
@@ -408,7 +472,11 @@ async fn projection(
         .filter(|checkpoint| checkpoint["fence"].as_i64() == Some(job.fence));
     let (phase, reason) = status_phase(
         job.state,
-        matches!(payload, JobPayload::SubtitleTextTranslate { .. }),
+        matches!(
+            payload,
+            JobPayload::SubtitleTextTranslate { .. }
+                | JobPayload::SubtitleTextTranslateArtifact { .. }
+        ),
         checkpoint,
         job.fence,
         state.transcode.speech_capacity_observation().await.2,

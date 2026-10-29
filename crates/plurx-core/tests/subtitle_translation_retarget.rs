@@ -205,7 +205,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .expect("current fixture checkpoint"),
-        120
+        121
     );
     let witness = rusqlite::Connection::open_in_memory().expect("published managed witness");
     witness.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE VIEW background_job_required_resources AS SELECT 1;").expect("closed witness dependencies");
@@ -223,15 +223,20 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
             "../src/store/subtitle_managed_resources_v2.sql"
         ))
         .expect("published managed v2");
-    let expected_v2 = fixture_schema_rows(&witness, MANAGED_SHAPE);
-    assert_eq!(fixture_schema_rows(&conn, MANAGED_SHAPE), expected_v2);
+    witness
+        .execute_batch(include_str!(
+            "../src/store/subtitle_managed_resources_v3.sql"
+        ))
+        .expect("published managed v3");
+    let expected_v3 = fixture_schema_rows(&witness, MANAGED_SHAPE);
+    assert_eq!(fixture_schema_rows(&conn, MANAGED_SHAPE), expected_v3);
     assert_eq!(
         conn.query_row(
-            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=2",
+            "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=3",
             [],
             |row| row.get::<_, i64>(0)
         )
-        .expect("managed v2 marker"),
+        .expect("managed v3 marker"),
         1
     );
     assert_eq!(
@@ -293,7 +298,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
     assert_eq!(store_epoch(&reopened, &id).await, "1");
     let current =
         rusqlite::Connection::open(dir.path().join("store.db")).expect("upgraded fixture");
-    assert_eq!(fixture_schema_rows(&current, MANAGED_SHAPE), expected_v2);
+    assert_eq!(fixture_schema_rows(&current, MANAGED_SHAPE), expected_v3);
     assert_eq!(
         current
             .query_row(
@@ -301,8 +306,8 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
                 [],
                 |row| row.get::<_, i64>(0)
             )
-            .expect("upgraded v2 marker"),
-        2
+            .expect("upgraded v3 marker"),
+        3
     );
     assert_eq!(current.query_row("SELECT receipt_json FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'", [], |row| row.get::<_, String>(0)).expect("retained managed model receipt"), "{}");
     assert_eq!(

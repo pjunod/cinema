@@ -73,6 +73,26 @@ selected conformance module. No production queue, reservation, lease, binding or
 publication transition changes. Model/configuration/property/toolchain inputs
 remain unchanged; this source review supplies no new execution qualification.
 
+## Artifact-only text translation — scoped source review on 2026-10-28
+
+Managed v3 / SQLite v121 exempts only the new closed
+`subtitle_text_translate_artifact` job kind. Its worker reads pinned, bounded,
+materialized VTT bytes, verifies the original input SHA, and retains source,
+model, configuration, administrative and publication authority checks. A miss
+fails explicitly; Retry reacquires input before enqueue. Legacy
+`subtitle_text_translate` remains source-fenced because old workers can extract
+media. Old candidate-kind filters cannot dispatch the new kind; queued and
+running legacy jobs are not rewritten. The upgrade requires exact v2 DDL and
+marker, commits atomically, and preserves existing owners and reservations.
+
+The selected `library_scan` / `metadata_refresh` source-domain and provider
+rows, claim identity, renewal, binding, publication and settlement remain
+unchanged, as do the two-reader and one-speculative-reader limits. The v3 view
+and upgrade guards are mapped correspondence inputs. Caption inference,
+rolling upgrades and input acquisition remain outside this finite model;
+model/configuration/property/bound/toolchain bytes are unchanged. This source
+review supplies no new runtime, formal-execution or qualification evidence.
+
 ## Subtitle resource admission — scoped refresh on 2026-10-28
 
 Codex reviewed `c3d764a01` against `f2120bd9a`. The shared claim SQL adds

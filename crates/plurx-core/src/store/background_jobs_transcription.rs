@@ -16,6 +16,7 @@ pub fn artifact_key(payload: &JobPayload) -> Result<String, StoreError> {
         JobPayload::SubtitleTranscribe { .. }
             | JobPayload::SubtitleTranscribeManaged { .. }
             | JobPayload::SubtitleTextTranslate { .. }
+            | JobPayload::SubtitleTextTranslateArtifact { .. }
     ) {
         return Err(StoreError::Task("not a transcription payload".into()));
     }
@@ -57,7 +58,10 @@ pub(super) async fn publish<T: QueueSql>(
     store: &T,
     input: PublishTranscription,
 ) -> Result<JobPublishOutcome, StoreError> {
-    if matches!(&input.source, JobPayload::SubtitleTextTranslate { .. }) {
+    if matches!(
+        &input.source,
+        JobPayload::SubtitleTextTranslate { .. } | JobPayload::SubtitleTextTranslateArtifact { .. }
+    ) {
         return publish_text(store, input).await;
     }
     input.token.validate()?;
@@ -158,7 +162,7 @@ async fn publish_text<T: QueueSql>(
 ) -> Result<JobPublishOutcome, StoreError> {
     input.token.validate()?;
     let key = artifact_key(&input.source)?;
-    let JobPayload::SubtitleTextTranslate {
+    let (JobPayload::SubtitleTextTranslate {
         source_size,
         source_mtime,
         subtitle_index,
@@ -170,7 +174,20 @@ async fn publish_text<T: QueueSql>(
         adapter_contract,
         engine_sha256,
         ..
-    } = &input.source
+    }
+    | JobPayload::SubtitleTextTranslateArtifact {
+        source_size,
+        source_mtime,
+        subtitle_index,
+        input_sha256,
+        source_language,
+        target_language,
+        model_id,
+        model_sha256,
+        adapter_contract,
+        engine_sha256,
+        ..
+    }) = &input.source
     else {
         unreachable!()
     };
@@ -200,7 +217,7 @@ async fn publish_text<T: QueueSql>(
     }
     super::downloaded_subtitles::encode(&input.caption)?;
     let body = encode(&input)?;
-    let owns = format!("{SUBTITLE_OWNS} AND job.kind='subtitle_text_translate' AND job.payload_json=json(json_extract($1,'$.source')) AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND is_admin=1) AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.text_translation.config.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.enabled')=1 ELSE 0 END)");
+    let owns = format!("{SUBTITLE_OWNS} AND job.kind IN ('subtitle_text_translate','subtitle_text_translate_artifact') AND job.payload_json=json(json_extract($1,'$.source')) AND EXISTS(SELECT 1 FROM users WHERE id=json_extract($1,'$.source.admin_user_id') AND is_admin=1) AND EXISTS(SELECT 1 FROM settings WHERE key='subtitles.text_translation.config.v1' AND CASE WHEN json_valid(value) THEN json_extract(value,'$.enabled')=1 ELSE 0 END)");
     let current = "file.id=json_extract($1,'$.source.file_id') AND file.size=json_extract($1,'$.source.source_size') AND file.mtime=json_extract($1,'$.source.source_mtime') AND file.probe_json IS NOT NULL";
     let exists = "EXISTS(SELECT 1 FROM json_each(file.downloaded_subtitles) caption WHERE json_extract(caption.value,'$.text_translation.artifact_key')=json_extract($1,'$.caption.text_translation.artifact_key') AND json_extract(caption.value,'$.source_size')=file.size AND json_extract(caption.value,'$.source_mtime')=file.mtime)";
     store.queue_transaction(vec![
@@ -356,7 +373,7 @@ pub(super) async fn observe<T: QueueSql>(
     let body = encode(
         &serde_json::to_value(&input).map_err(|error| StoreError::Task(error.to_string()))?,
     )?;
-    let sql=format!("UPDATE background_jobs AS job SET checkpoint_json=json_object('phase',json_extract($1,'$.phase'),'phase_at_ms',json_extract($1,'$.now_ms'),'fence',fence,'completed_cues',json_extract($1,'$.completed_cues'),'total_cues',json_extract($1,'$.total_cues')) WHERE {SUBTITLE_OWNS} AND kind IN ('subtitle_transcribe','subtitle_transcribe_managed','subtitle_model_operation','subtitle_translation_prepare','subtitle_translation_range','subtitle_text_translate','subtitle_text_model_operation') RETURNING 'true' AS result_json");
+    let sql=format!("UPDATE background_jobs AS job SET checkpoint_json=json_object('phase',json_extract($1,'$.phase'),'phase_at_ms',json_extract($1,'$.now_ms'),'fence',fence,'completed_cues',json_extract($1,'$.completed_cues'),'total_cues',json_extract($1,'$.total_cues')) WHERE {SUBTITLE_OWNS} AND kind IN ('subtitle_transcribe','subtitle_transcribe_managed','subtitle_model_operation','subtitle_translation_prepare','subtitle_translation_range','subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') RETURNING 'true' AS result_json");
     Ok(!store.queue_sql(sql, body, true, true).await?.is_empty())
 }
 
