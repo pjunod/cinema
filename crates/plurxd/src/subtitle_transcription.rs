@@ -3473,9 +3473,9 @@ mod tests {
         let manager_cancel = fence.loss_token().child_token();
         let admission = state
             .transcode
-            .admit_fragment()
+            .admit_speech()
             .await
-            .expect("idle admission");
+            .expect("idle speech admission");
         let mut operation = Box::pin(self_test_managed(
             &state,
             &engine,

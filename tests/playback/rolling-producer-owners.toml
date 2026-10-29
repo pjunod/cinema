@@ -1,3 +1,15 @@
+# Native fixture ownership review (2026-10-29): four test-only forkers keep
+# all 300 immediate fixture executions, with at most 1200 checked child
+# attempts. Each round drains child outcomes; stop/barrier release joins the
+# workers after fixture failure, and partial creation drops unarmed channels.
+# A bounded async-signal-safe pre_exec poll forces the inheritance window.
+# Replacing namespaced thread::spawn with Builder.spawn gives -1 namespaced
+# task spelling and +1 method/broad launch spelling; no new producer owner.
+# Five new .wait() matches are Barrier synchronization, not child lifecycle.
+# One timer diagnoses an already-failed retained-copy completion after its
+# unchanged 30s bound; it never reaps/signals a child or permits late success.
+# Patterns, roots, equality checks and forbidden zeroes remain unchanged.
+
 # Sharing-host and invitation ownership review (2026-10-28):
 # main.rs starts sharing_host::run and sharing_network::run with the existing
 # BackgroundLoopGuard token. Their polling loops observe cancellation; the
@@ -3284,7 +3296,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
-expected_occurrences = 1028
+expected_occurrences = 1027
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3525,7 +3537,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # kill_on_drop guard; no production launcher or separate reap owner is added.
 # Main contributes one HTTPS transport JoinSet.spawn; its driver is joined by
 # the listener owner. Both parent additions are present in the source union.
-expected_occurrences = 79
+expected_occurrences = 80
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4989,7 +5001,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1907
+expected_occurrences = 1908
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6123,7 +6135,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # inspect the in-process Axum oneshot response for invalid opt-in and success.
 # These reads launch no task or child and introduce no producer ownership.
 # Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
-expected_occurrences = 820
+expected_occurrences = 821
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6419,7 +6431,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 354
+expected_occurrences = 359
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

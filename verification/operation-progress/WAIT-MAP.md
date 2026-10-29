@@ -14,6 +14,12 @@ whole-file hash. Selected library-worker behavior, historical anchors, models,
 configurations, toolchain and qualification identities are unchanged. This
 source correspondence adds no formal execution or progress claim.
 
+The bounded native fixture stress changes only its test module in `main.rs`.
+Four workers still accompany all 300 fixture executions, with 1,200 checked
+fork attempts and joined ownership on failures. The selected worker spawn,
+argument, shutdown protocol and model scope remain unchanged; Table 44 gets
+only its live whole-file correspondence update.
+
 ## Current validation fixtures — scoped refresh on 2026-10-29
 
 Scoped review on 2026-10-29 of the startup test listener seam: the test-only constructor retains a prebound socket through startup; non-test binding and the selected background_work_loop spawn/argument are unchanged. Refresh only live Table44 correspondence. No selected-worker scheduling, shutdown, model, configuration, anchor or historical qualification identity changes; this source review is not execution evidence.
