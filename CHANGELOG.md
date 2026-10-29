@@ -59,6 +59,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- Linux player 0.4.0 uses Cinema-style playback controls with scoped library
+  metadata and next episode, saved autoplay, and Auto/Original/advertised
+  quality choices that retain playback position and paused state.
+
 - The closed-form CM v2.9 display management (`tools/dv_processing/dv_dm.h`)
   evaluates its output lattice once per frame instead of eight vertices per
   pixel, and CM v4.0 and CM v2.9 compile as separate shaders. The output is
@@ -115,6 +119,16 @@ bump may break compatibility and a **patch** bump never does.
   settlement; retained output releases only producer resources. Custody startup
   streams historical authority and indexes per-asset reconstruction while
   preserving every historical migration row.
+- Fresh macOS media builds retain caller macro paths and expose Homebrew
+  aclocal macros to the source-built Automake tools used by libass.
+
+- macOS source upgrades wait through transient process-inspection failures,
+  recover interrupted clean shutdowns, and print a directly runnable recovery
+  command with the complete executable path.
+
+- Fresh macOS source installs build Automake without creating a circular
+  GNUmakefile symlink when the temporary directory uses a symlinked path.
+
 - Restrict the Linux external player preference to Dolby Vision files on Linux;
   other formats and operating systems retain web playback, including mixed-version titles.
 

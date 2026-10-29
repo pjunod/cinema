@@ -160,6 +160,22 @@ impl PlaybackHandoffStore for HiqliteAuthStore {
             .map(|row| row.0))
     }
 
+    async fn advance_playback_handoff(
+        &self,
+        token_hash: &str,
+        expected_file_id: i64,
+        next_file_id: i64,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .credential_mutation(vec![(
+                ph::ADVANCE_SQL,
+                params!(next_file_id, token_hash, expected_file_id, now),
+            )])
+            .await?[0]
+            > 0)
+    }
+
     async fn revoke_playback_handoff_token(&self, token_hash: &str) -> Result<bool, StoreError> {
         Ok(self
             .credential_mutation(vec![(ph::REVOKE_SQL, params!(token_hash))])

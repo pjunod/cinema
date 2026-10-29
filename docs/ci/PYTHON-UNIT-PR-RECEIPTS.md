@@ -46,6 +46,19 @@ left an earlier journal's commit unreachable, prepare crashed, and the next
 run refused because the crashed run had no journal. The bespoke recoveries
 are gone. One rule covers every case.
 
+## Main-lane live identity
+
+Main fast-lane jobs test the PR head, not a merge preview. The
+[workflow's reviewed head-only gate](../../.github/workflows/main-fast-lane.yml)
+records Paul's 2026-10-11 decision: a base-tip advance alone does not invalidate
+that execution. The live PR must still be open, ready, from the same head/base
+repositories, targeting `main`, and at the exact checkout/event/API-run head.
+Source cleanliness, first-attempt, API-origin and receipt input/provenance guards
+remain unchanged. This does not waive `AGENTS.md` integration requirements:
+assess and integrate required current-main changes before landing, retaining
+receipts only for compatible inputs. Manual effort/full-tree qualification
+continues to bind both immutable tips and ancestry.
+
 ## Where it runs
 
 | Lane | Workflow | Producer | Journals |

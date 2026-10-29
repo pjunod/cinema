@@ -1325,6 +1325,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_translation_schema::RETARGET_MIGRATION,
     // v119: explicit playback continuity grants captured by exact range claims.
     super::subtitle_translation_schema::CONTINUITY_MIGRATION,
+    // v120: artifact-only text model setup does not reserve media source readers.
+    super::subtitle_managed_schema::RESOURCE_MIGRATION,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1778,6 +1780,9 @@ impl SqliteStore {
     ) -> Result<(), StoreError> {
         let tx = conn.unchecked_transaction()?;
         if !already_applied {
+            if version == super::subtitle_managed_schema::RESOURCE_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_resource_predecessor(&tx)?;
+            }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
         }

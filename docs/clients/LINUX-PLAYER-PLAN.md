@@ -1,6 +1,10 @@
 # Linux player — Dolby Vision on Linux through plurx
 
-**Status:** open: M6 (acceptance on the ROG) next. M1–M5 are in (#1295), and package 0.3.1 with its server change fixes the four faults the owner's first real playback found (2026-10-26) · **Owner:** Claude
+**Status:** open: M6 (physical acceptance on the ROG) pending. M1–M5 landed
+through #1295; Cinema controls and scoped server changes landed through #1307,
+and package 0.4.0 is installed (2026-10-28). See the
+[release and installation ledger](LINUX-PLAYER-CINEMA-UI.md) for qualification
+and remaining acceptance · **Owner:** Claude
 (Opus 5.5, Linux Dolby Vision session) · **Written:** 2026-10-25
 
 Companion to [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) (the browser half) and
@@ -185,6 +189,16 @@ Either way, the session response's `enhancement` is the truth. It says "FEL
 used: yes" only when the BL really came from the composed picture.
 
 ## 4. Client contract
+
+**UI extension, 2026-10-28:** the owner requested Cinema's web playback
+appearance in the existing mpv player. Package 0.4.0 source adds a native
+Cinema-style overlay, keeping the decoder, display management and launcher
+session owner. [The launcher README](../../clients/linux-player/README.md#playback-controls)
+records controls, track/menu limits and the focused Lua scenarios. This
+supersedes the original stock-controller scope for playback chrome only;
+[The release ledger](LINUX-PLAYER-CINEMA-UI.md) tracks metadata, sequential
+Next authorization, quality controls, package qualification and ROG install;
+physical acceptance is distinct from those software checks.
 
 ### 4.1 Web — one Playback setting, one action
 

@@ -88,6 +88,15 @@ pub(crate) const TOKEN_SCOPE_SQL: &str = "SELECT m.handoff_id AS handoff_id, \
      AND EXISTS (SELECT 1 FROM tokens s WHERE s.token_hash = m.source_token_hash \
                  AND s.user_id = m.user_id)";
 
+/// Advance only the currently authorized file, without extending the token or
+/// detaching it from the login that minted it. Parameters: next file, token
+/// hash, expected current file, now. The HTTP handler resolves the successor.
+pub(crate) const ADVANCE_SQL: &str = "UPDATE playback_handoffs_tokens SET file_id = $1 \
+     WHERE token_hash = $2 AND file_id = $3 AND expires_at > $4 \
+     AND EXISTS (SELECT 1 FROM tokens s \
+                 WHERE s.token_hash = playback_handoffs_tokens.source_token_hash \
+                 AND s.user_id = playback_handoffs_tokens.user_id)";
+
 /// The player revokes its own token. Parameter: token hash.
 pub(crate) const REVOKE_SQL: &str = "DELETE FROM playback_handoffs_tokens WHERE token_hash = $1";
 /// Revocation from the sessions list: exactly one handoff token of this user
@@ -201,6 +210,15 @@ pub trait PlaybackHandoffStore: Send + Sync {
         token_hash: &str,
         now: i64,
     ) -> Result<Option<PlaybackHandoffTokenScope>, StoreError>;
+    /// Compare-and-swap the live token's file to the server-resolved next
+    /// episode. False for a stale predecessor, expiry or revoked minter.
+    async fn advance_playback_handoff(
+        &self,
+        token_hash: &str,
+        expected_file_id: i64,
+        next_file_id: i64,
+        now: i64,
+    ) -> Result<bool, StoreError>;
     /// Revoke one handoff token by its digest.
     async fn revoke_playback_handoff_token(&self, token_hash: &str) -> Result<bool, StoreError>;
     /// Revoke the one handoff token of `user_id` whose digest starts with

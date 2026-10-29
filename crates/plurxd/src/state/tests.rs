@@ -2082,7 +2082,27 @@ async fn busy_workers_allow_one_foreground_self_claim_and_one_subtitle_producer(
         EncoderCaps::default(),
         Pipeline::Cpu,
     ));
-    let _busy = transcode.test_mark_live_waiting();
+    store
+        .put_setting(keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("bounded CPU pool");
+    jobs.share_subtitle_admissions(transcode.admissions());
+    let background = transcode
+        .admit_fragment()
+        .await
+        .expect("real background CPU permit");
+    assert!(transcode.fragment_worker_idle(&background));
+    let background_manager = Arc::clone(&transcode);
+    let yielding = tokio::spawn(async move {
+        tokio::time::timeout(crate::admission::QUEUE_WAIT, async {
+            while background_manager.fragment_worker_idle(&background) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background observes registered foreground pressure");
+        drop(background);
+    });
     let (request, _) = jobs
         .request_file_analysis(file_id, false, "subtitle_source", "playback")
         .await
@@ -2091,6 +2111,11 @@ async fn busy_workers_allow_one_foreground_self_claim_and_one_subtitle_producer(
     let (first, second) = tokio::join!(
         jobs.self_claim_subtitle_source(&request.request_id, work.path()),
         jobs.self_claim_subtitle_source(&request.request_id, work.path())
+    );
+    yielding.await.expect("cooperative background yield");
+    assert!(
+        !transcode.admissions().live_is_waiting(),
+        "successful admission releases waiter before extracting"
     );
     assert_eq!((first as u8) + (second as u8), 1, "one owner runs");
     let rows = store.analysis_requests(20).await.expect("requests");

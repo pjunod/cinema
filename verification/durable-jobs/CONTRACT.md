@@ -3,7 +3,8 @@
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
 `be610d6472b8717bc034e45404141ef0854c4bf2` (adaptive boundaries),
-`7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37` (title-analysis delta) · **Scope:** bound `library_scan` and
+`7d2d4a9c777d42f6f3cb28db8e2a7d5be6f46a37` (title-analysis delta),
+`c3d764a01` (subtitle admission delta) · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -12,6 +13,41 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Composed main/effort source correspondence — 2026-10-28
+
+The resolved merge combines maintenance `96ab7f0e82de` and main
+`66a33d723096`. The exact resolved source bytes are recorded in `mapping.json`;
+this source-only review does not qualify the new merge or transfer either
+parent's execution receipts. Earlier review and model qualification identities
+below remain historical.
+
+Main's caption-kind demand predicates, managed-v2 active resource view, exact
+predecessor/transaction guards and strict rewind fixtures are retained. The
+selected library kinds keep their source-domain/provider requirements. Caption
+work can compete for existing resources; caption fairness and online schema
+upgrade correctness remain outside these finite models. The progressive speech
+path retains the effort's original restart admission through its capacity wait
+and the admitted work; this adds no native-close or resource-refund witness.
+
+The effort's `finish_original_controller` anchor, retained heartbeat/token mutex
+and acknowledged/resolved retirement abstraction remain authoritative. The old
+move-consuming `finish(mut self)` anchor is not restored. Failed joins,
+ambiguous retirement, last-alias release, native closure and the separate title
+requalification read/bind TOCTOU keep their recorded limits. Queue renewal and
+resource-currentness SQL are byte-identical to both parents; the selected
+fragment admission remains try-only. Conformance registration is unchanged. The
+formal-publication module is identical to maintenance; its sole difference
+from main relocates an Arc import into the replicated test module.
+
+Six distinct mapped files require new whole-file pins: the shared queue,
+replicated store, SQLite store, conformance parent, daemon state and transcode
+manager constructor. Every mapped anchor remains unique. Both parents' source
+reviews and exclusions, including main's subtitle/managed-v2 authority and the
+effort's title/Linux-cfg review, are preserved. Models, configurations, bounds,
+fairness premises, properties, action/check/test inventories and validators do
+not change. No tests, compilers or models ran for this correspondence review;
+no new acceptance or qualification is claimed.
 
 ## Linux-only title helper correspondence — 2026-10-28
 
@@ -30,6 +66,55 @@ are refreshed; earlier review identities and exclusions are retained. Models,
 configurations, bounds, fairness premises, action/check/test inventories and
 validators do not change. This correspondence audit runs no model or
 behavioral tests and grants no native closure, progress or new qualification.
+
+## Managed-v2 fixture follow-through — scoped refresh on 2026-10-28
+
+The test-only follow-through on `48e2acc2a` restores the current managed marker
+as v2 in the owned replicated refusal fixtures. Both backend rewind helpers use
+the canonical published v1/v2 DDL with a matching marker and reject populated,
+partial or drifted managed extensions before mutation. Historical v1 authority
+remains exact; a v1 marker cannot certify the v2 view. The v120 downgrade
+inventory entry names the new managed marker definition. The separate baseline
+handoff rewind still supports v115 only and its v116–v119 inventory gap remains;
+these focused managed-fixture checks do not qualify a complete current-schema
+historical downgrade.
+
+Only the whole-file pin for the conformance parent module changes. Its
+`formal_publication` registration remains unique and byte-identical, as does the
+selected conformance module. No production queue, reservation, lease, binding or
+publication transition changes. Model/configuration/property/toolchain inputs
+remain unchanged; this source review supplies no new execution qualification.
+
+## Subtitle resource admission — scoped refresh on 2026-10-28
+
+Codex reviewed `c3d764a01` against `f2120bd9a`. The shared claim SQL adds
+qualified progressive caption preparation/range demand to the reserved live
+source-reader slot. A new claim requires the current operation, source,
+configuration and unexpired administrative demand; a held range can retain its
+exact claim-fence continuity grant while that demand remains valid. These
+branches require caption job and waiter kinds. Ordinary `library_scan` and
+`metadata_refresh` callers do not gain that authority. The existing two-reader
+ceiling and one-speculative-reader ceiling remain unchanged.
+
+The managed v2 resource view exempts artifact-only text model setup from
+`source_io`; both selected library kinds retain their existing source-domain
+and provider rows. SQLite v120 validates the exact v1 predecessor inside its
+migration transaction. The replicated installer checks the predecessor marker
+and exact view in one transaction, accepts a verified v2 winner after ambiguous
+acknowledgement, and preserves that view during bootstrap. Existing queue
+owners, leases, attempts and reservations are retained. Mapping now pins this
+active view, its historical predecessor and the shape/transaction guards;
+valid installed schema remains a premise, not a modeled migration theorem.
+
+The changed queue trait/token/adapter, renewal, expiry, resource-currentness,
+fenced SQLite transaction, replicated timeout and retention anchors remain
+unique and unchanged. Selected library claim identity, binding, publication,
+renewal and settlement authority is unchanged. Nineteen whole-file pins are
+refreshed after this review; model, configuration, property, bound and toolchain
+bytes retain their identities. Caption fairness, online upgrade correctness and
+physical playback are outside this model. Runtime regressions for model
+contention, upgrade preservation and demand-bound caption admission are separate
+source evidence; this mapping refresh claims no new execution or qualification.
 
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 
