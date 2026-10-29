@@ -5099,6 +5099,19 @@ is not a reason to overwrite the saved enable choice.
 
 ## Sharing Cinema addresses — set up before creating invitations
 
+Managed native installations now discover their Tailscale address and configure
+private forwarding after sharing is enabled. Settings → Sharing shows progress
+and specific sign-in, permission or port-conflict instructions. Addresses and
+the local certificate pin are filled automatically. No router configuration is
+needed. Pairing remains an explicit approval of the other Cinema and its scope.
+
+Linux Compose installations use the separately installed host component in
+[the host setup guide](features/SHARING-HOST-SETUP.md). Its one-time local
+administrator installation prepares the private bridge and worker; after that,
+the worker follows the sharing switch. Ordinary deployment commands do not
+install privileged host components. The manual address form remains under
+Advanced addresses for custom or older host setups.
+
 Settings → Sharing always lists the observed local TLS listener and sharing
 certificate, whether private addresses are configured, and the host network
 setup that remains unverified. A listening socket inside the container is

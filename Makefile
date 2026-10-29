@@ -2143,3 +2143,9 @@ ripwire-smoke:
 .PHONY: web-shared-artwork-browser-check
 web-shared-artwork-browser-check: ## Qualify actual Shared artwork decode and retirement in isolated Chromium
 	@python3 tests/web/shared-artwork.browser.py
+
+.PHONY: web-shared-library-browser-check
+web-shared-library-browser-check: ## Check Shared browse and enriched details at desktop and phone widths
+	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
+		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
+		--test tests/web/shared-libraries.browser.cjs
