@@ -22,6 +22,15 @@ the shared runtime/store is outside the selected-worker abstraction; this
 review establishes no new fairness, latency or whole-daemon shutdown guarantee.
 Fresh affected smoke receipts remain separate execution evidence.
 
+The later main merge `10f45ae5f` adds only the sharing-network module and an
+independent invitation-cleanup task to this file. The selected worker spawn
+and its guard/token/drop code remain byte-identical. The new task observes
+its cloned cancellation token after asynchronous sharing cleanup; it never
+cancels the owner token or changes selected library claim/lease/settlement
+paths. Its additional runtime/store/network work stays outside the model,
+with no new cancel-and-join or whole-daemon shutdown guarantee. Table 44's
+whole-file pin follows this reviewed source; the exact anchor stays unique.
+
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 
 Codex compared PR #1301 source `7d2d4a9c7` with main `77e985827`.
