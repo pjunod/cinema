@@ -135,6 +135,12 @@ bump may break compatibility and a **patch** bump never does.
 - Shared Auto playback selects a supported encoded plan when an HEVC remux
   lacks a usable HLS index, avoiding a Source startup refusal for titles that
   local playback can serve through its progressive fallback.
+- Sharing can configure a managed native host's private Tailscale connection,
+  discover its addresses and certificate, and report sign-in or setup problems.
+  A separately installed Linux Compose host component manages private forwarding
+  and a scoped egress guard without giving the server host-control sockets.
+  Native Mac sharing binds the actual private interface instead of requiring a
+  Linux interface name. The address form explains that no router changes are needed.
 
 - Restrict the Linux external player preference to Dolby Vision files on Linux;
   other formats and operating systems retain web playback, including mixed-version titles.
