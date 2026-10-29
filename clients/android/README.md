@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.7.0**, build `186` — progressive captions discover stopped
+> Status: **v0.8.0**, build `187` — progressive captions discover stopped
 > operations before explicit Resume and show current nonretryable range failures.
 > Discovery creates no demand; focused validation and physical acceptance remain open.
 >

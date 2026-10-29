@@ -8,6 +8,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-29
+
 ### Added
 
 - Progressive text subtitle translation can create and observe durable jobs,
@@ -3669,7 +3671,8 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/pjunod/plurx/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.7.0
 [0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/pjunod/plurx/compare/v0.2.7...v0.2.8
