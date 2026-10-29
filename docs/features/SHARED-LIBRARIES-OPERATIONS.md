@@ -124,6 +124,11 @@ Warnings include fixed codes and import/file identifiers, without peer
 credentials, file paths or raw decision payloads. The generic viewer error
 alone does not identify a codec or HDR problem.
 
+The browser also logs fixed client-validation phases (for example
+`details_identity` or `decision_identity`) and the HTTP status of refused
+requests. These warnings contain no peer payloads, locators or credentials;
+they distinguish a client contract refusal from a Source planning failure.
+
 The peer decoder accepts the current named 5.1/7.1 and limited-default audio
 downmix plans while refusing unknown fields. Process-local measured-output
 advisories are omitted from the private Source response; they cannot become
