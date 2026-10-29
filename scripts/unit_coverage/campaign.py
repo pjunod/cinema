@@ -64,7 +64,20 @@ def write_json(path, value):
         stream.write('\n')
 
 
-def verify_source(root, archive, expected_digest, commit):
+# crates/plurx-core/src/testfixtures.rs deliberately ignores CARGO_TARGET_DIR:
+# fixture_dir/source/pipe_path/source_with_eac3_audio/source_with_chapters keep
+# these completed media artifacts in the checkout. Publication scratch files
+# are renamed, and its two nested-directory regressions clean up their roots.
+FIXTURE_KINDS = ('open-gop', 'closed-gop', 'clean-cra', 'alternate-pps', 'h264', 'vp9')
+GENERATED_FIXTURE_PATHS = frozenset(
+    [Path('target/fixtures') / (kind + suffix)
+     for kind in FIXTURE_KINDS for suffix in ('.mkv', '.edit-free.pipe.mp4')]
+    + [Path('target/fixtures') / name
+       for name in ('eac3.mkv', 'chaptered.mkv', 'chapters.ffmeta', '.publication.lock')]
+)
+
+
+def verify_source(root, archive, expected_digest, commit, *, allow_generated_fixtures=False):
     root, archive = Path(root).resolve(), Path(archive).resolve()
     if digest(archive) != expected_digest:
         raise ValueError('source archive SHA256 mismatch')
@@ -93,6 +106,7 @@ def verify_source(root, archive, expected_digest, commit):
             if digest(path) != wanted:
                 raise ValueError('extracted source differs: ' + member.name)
     actual = set()
+    generated = []
     for parent, dirs, files in os.walk(root, followlinks=False):
         for name in dirs:
             path = Path(parent) / name
@@ -102,12 +116,20 @@ def verify_source(root, archive, expected_digest, commit):
             path = Path(parent) / name
             if path.is_symlink():
                 raise ValueError('unexpected source link: ' + str(path))
-            actual.add(path.relative_to(root))
+            relative = path.relative_to(root)
+            if (allow_generated_fixtures and relative not in expected
+                    and relative in GENERATED_FIXTURE_PATHS):
+                if not path.is_file():
+                    raise ValueError('non-regular generated fixture: ' + str(path))
+                generated.append(str(relative))
+                continue
+            actual.add(relative)
     if actual != expected:
         raise ValueError('unarchived or missing source files: ' + repr(sorted(map(str, actual ^ expected))[:20]))
     if not expected:
         raise ValueError('empty source archive')
-    return {'source_sha256': expected_digest, 'source_commit': commit, 'files_verified': len(expected)}
+    return {'source_sha256': expected_digest, 'source_commit': commit,
+            'files_verified': len(expected), 'generated_fixture_files': sorted(generated)}
 
 
 def parse_show_env(text):
@@ -415,7 +437,9 @@ class Campaign:
         expanded, core_scope = self.augmented()
         if self.args.native:
             self.native(default_metadata, default_receipt)
-        verify_source(self.root, self.args.source_archive, self.args.source_sha256, self.args.source_commit)
+        source = verify_source(self.root, self.args.source_archive, self.args.source_sha256,
+                               self.args.source_commit, allow_generated_fixtures=True)
+        write_json(self.output / 'source-post-verification.json', source)
         self.run('export', [sys.executable, HERE / 'exact_coverage.py', 'export',
                  '--objects', self.output / 'objects-default/objects.json',
                  '--objects', expanded / 'objects/objects.json',

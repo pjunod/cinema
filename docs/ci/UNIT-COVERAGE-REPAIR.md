@@ -9,9 +9,11 @@ upper target. Keep the existing source scope; do not exclude difficult code
 or mark tests ignored to increase the percentage. Hardware qualification
 remains distinct from portable behavior tests.
 
-Repair `2b3730f8` passes all 29 previously failing cases within 103 focused
-regressions. The replacement full workspace and coverage campaign remain
-pending; focused success is not a completed coverage measurement.
+Repair `7080f5fd` passes all 31 previously failing cases within 110 focused
+regressions. Its isolated sharing preflight exposed two further failures with
+one shared playlist-validation cause, described below. The replacement full
+workspace and coverage campaign remain pending; focused success is not a
+completed coverage measurement.
 
 ## Execution and ownership
 
@@ -94,6 +96,25 @@ the production two-thread speech admission rather than a machine-dependent
 whole-pool fragment admission. Its child-start, reap, private scratch and
 admission-retention assertions remain intact. These five cases are required
 preflight regressions for the replacement full measurement.
+
+The subsequent full run found a discarded invitation-cancellation result and
+an HTTP fixture relying on the old invitation default. Cancellation now uses
+the closed Store-result observer. The fixture first asserts the current
+network-authorization refusal, then explicitly selects the manually provisioned
+sharing path; the isolated transport and restart fixtures select that same
+path. All 31 known cases passed within 110 focused regressions on `7080f5fd`.
+
+The next isolated sharing preflight passed nine daemon cases and the separate
+restart case, but prepared handoff and quality reopen both returned 503 for the
+successor playlist. Both request a nonzero start, whose actual producer emits
+`EXT-X-START` with `PRECISE=NO`; the strict sharing validator allowed only
+`TIME-OFFSET`. The correction accepts optional unquoted `PRECISE=YES|NO`, as
+specified in [RFC 8216 section 4.3.5.2](https://www.rfc-editor.org/rfc/rfc8216.txt).
+Unknown attributes, duplicate keys, quoted or invalid precision values,
+URI-bearing additions and nonfinite or out-of-bounds offsets remain refused.
+The existing producer regression passes actual attachment and acquisition
+playlists through that validator. The two real sharing regressions must pass
+before the next long default suite starts.
 
 ## Reproducing the measurement
 
