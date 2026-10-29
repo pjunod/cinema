@@ -18,6 +18,28 @@
 # lifecycle356, kill-on-drop118 over450 Rust files. All original pattern/root
 # definitions, equality checks, forbidden-shape zeroes and owner rows remain.
 # This source correspondence is not task/process execution or qualification.
+# Private sharing setup/network ownership review (2026-10-28; main 10f45ae5f):
+# Exact sharing-only deltas from 66a33d723: +3 namespaced tasks, +4 timers,
+# +1 Command, +9 launch-shaped status observations, +2 child lifecycle calls
+# and +1 kill-on-drop construction. No patterns, roots, equality checks or
+# forbidden-shape zeroes change.
+# Two startup tasks run the node-local host/network maintenance loops with
+# the existing shutdown token, observed between maintenance iterations.
+# One invitation issuance task survives a dropped HTTP receiver; it
+# bounds issue_inner at 22s, records durable abandonment on failed delivery,
+# cancels Cinema authority and invokes the persisted provider cleanup owner.
+# These are not rolling-media producers; no join/reap claim is added here.
+# Host setup owns one registered ChildWork::background command, null stdin/
+# stderr and capped stdout, with an 8s timeout and kill_on_drop. Normal
+# completion awaits wait; the explicit error path awaits kill. Timeout/drop
+# kill is not a confirmed-reap receipt. The other host timer is its poll;
+# network timers bound issuance and the 30s cleanup observation interval.
+# All nine new launch-shaped matches are HTTP or domain .status() reads,
+# not nine process launches. The two lifecycle matches are this child's
+# wait/kill. Existing provider HTTPS requests have finite connect/request
+# bounds; cleanup intent remains journal-owned after requester cancellation.
+# Main-8b changes only invitation-response parsing and its tests; the existing
+# sharing task/timer/child owners and all structural shapes remain unchanged.
 
 # Live TV upload regression ownership review (PR #1312, 2026-10-28;
 # Rust source 9c5aa95df): +2 namespaced timers are the awaited five-second
