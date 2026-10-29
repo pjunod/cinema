@@ -383,6 +383,16 @@ bump may break compatibility and a **patch** bump never does.
 - Apple Playback info reports the installed Auto rung after a prepared quality
   switch, so an encoded 720p stream no longer retains the original Remux label.
 
+- GitHub macOS releases sign and notarize the complete install archive in a
+  protected job before publication, retaining component hashes and the stapled
+  app ticket. A single canonical WASM parser is shared by both native slices
+  so host-specific floating-point folding cannot prevent universal assembly.
+  Manual installers publish independently of in-app upgrade
+  qualification; unqualified releases omit update metadata. Dry-run builds
+  remain available without Apple credentials. Linux release smoke tests force
+  reinstall before removal, preserve the missing-guard refusal, and retain
+  package-manager diagnostics on failure.
+
 ## [0.7.0] — 2026-10-17
 
 ### Added
