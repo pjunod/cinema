@@ -5099,37 +5099,38 @@ is not a reason to overwrite the saved enable choice.
 
 ## Sharing Cinema addresses — set up before creating invitations
 
-Settings → Sharing always lists the observed local TLS listener and sharing
-certificate, whether private addresses are configured, and the host network
-setup that remains unverified. A listening socket inside the container is
-not evidence that Tailscale is installed on the host or that another Cinema
-can reach it. Missing address information and a failed address read are
-shown separately. The Developer switch remains available.
+Settings → Sharing lists the local TLS listener, certificate, saved private
+addresses and unverified host setup. A listening socket does not prove that
+Tailscale is installed or another Cinema can connect. Missing addresses and
+failed reads are distinct; the Developer switch stays available.
 
-Settings → Sharing → Create invitation reads this Cinema's saved address
-manifest before allowing Create. If it is absent, choose **Configure this
-Cinema’s addresses**. Your selected movie/show libraries stay in the draft;
-**Return to invitation** reloads current address information and retains that
-selection. Saving addresses does not create an invitation or verify that the
-recipient can connect. Create remains an explicit action.
+Create invitation reads this Cinema's saved addresses. If absent, choose
+**Configure this Cinema’s addresses**, then **Return to invitation**; your
+movie/show library selection is kept. Saving addresses neither creates an
+invitation nor tests connectivity. Choose **Create** explicitly.
 
-Get each host's Tailscale IPv4 address (`100.64.0.0/10`), optional Tailscale
-IPv6 address and private `.ts.net` name from that host's Tailscale setup.
-Enter the published private TCP Serve port, normally **32443**, rather than
-the internal TLS listener port **32444**. Ask the Cinema administrator for
-the sharing certificate's SHA-256 public-key (SPKI) pin: its authenticated
-`GET /api/v1/sharing/status` exposes `certificate.spki_sha256` when that
-serving node has a certificate. Match each address to that host's certificate
-and verify the pin through a trusted channel. The form neither installs
-Tailscale nor configures Serve; follow the private transport setup in
+**Save QR code** saves the invitation PNG; **Share QR code** opens the device
+share sheet where available. On the receiving Cinema,
+choose **Import invitation**, then upload the image or scan it with a phone
+camera. Scanning only fills the draft: choose **Save** to import, then compare
+the pairing code with the source owner before approval. **Invitation text**
+expands for copying and pasting, and is the fallback for invitations too large
+for one QR code. QR encoding and image decoding run locally. Camera scanning
+on the web needs HTTPS and camera permission; image upload and text remain
+available. Use a phone for camera scanning. QR and text contain the same secret. Leaving
+Sharing clears the draft; saved copies remain on the device.
+
+Get each host's Tailscale IPv4 (`100.64.0.0/10`), optional IPv6 and private
+`.ts.net` name from Tailscale. Use the published TCP Serve port,
+normally **32443**, rather than the internal listener port **32444**. Verify
+the certificate's SHA-256 SPKI pin with the Cinema owner through a trusted
+channel; authenticated `GET /api/v1/sharing/status` reports
+`certificate.spki_sha256` when the serving node has a certificate. To install Tailscale and configure Serve, follow
 [Shared libraries implementation §2.1](features/SHARED-LIBRARIES-IMPLEMENTATION.md).
 
-A `409 sharing_endpoints_unavailable` during invitation creation means the
-address manifest was absent when the server handled the request. The form
-offers the same configuration action and keeps the draft. It never retries
-an invitation POST automatically. Other failures retain their error and
-require a fresh read before another mutation. API details are in
-[Sharing administration](API.md#24-sharing-administration--local-owners-manage-private-peer-authority).
+A `409 sharing_endpoints_unavailable` during Create offers address setup and
+retains the draft. The form never retries an invitation POST automatically.
+Other failures require a fresh read before another mutation. See [Sharing administration](API.md#24-sharing-administration--local-owners-manage-private-peer-authority).
 
 ## Pairing another application (Curator) — the runbook
 

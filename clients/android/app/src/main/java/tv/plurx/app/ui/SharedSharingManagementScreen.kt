@@ -83,7 +83,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
                     }
                 }
             } }) { Text("Create one-day invitation") }
-            OutlinedTextField(keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false), value = draft.invitation, onValueChange = { secrets.edit(invitation = it) }, label = { Text("Invitation to import or copy") }, modifier = Modifier.fillMaxWidth())
+            SharedSharingInvitationTools(secrets, draft, invitationId, busy)
             Text("Invitation material is transient and clears on leaving or account changes.")
             invitationId?.let { id -> TextButton(enabled = !busy, onClick = { confirmation = "Cancel invitation" to { client -> client.cancelInvitation(id); client.requireCurrent(); if (secrets.snapshot() != null) { secrets.snapshot()?.let { secrets.clear(it.revision) }; invitationId = null } } }) { Text("Cancel this invitation") } }
             Button(enabled = !busy && draft.invitation.isNotEmpty(), onClick = { scope.launch {

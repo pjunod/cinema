@@ -1,6 +1,6 @@
 # Keep the report action off credential sign-in screens
 
-Build: 278
+Build: 279
 Issue: #1321
 
 Credential sign-in on web, iOS, tvOS, and Android no longer offers Report a

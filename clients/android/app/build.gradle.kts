@@ -108,7 +108,7 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 183
+        versionCode = 184
         versionName = "0.7.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -188,6 +188,7 @@ android {
         buildConfig = true
         compose = true
     }
+    testOptions { unitTests.isIncludeAndroidResources = true }
     sourceSets {
         // Shared JVM resources: player-input-contract.json and
         // playback-info-fields.json are consumed directly from tests/playback.
@@ -242,6 +243,7 @@ dependencies {
     implementation(libs.google.code.scanner)
 
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
     // The reporter's rules are about ordering and backoff, so its tests drive
     // a virtual clock rather than waiting out real seconds.
     testImplementation(libs.kotlin.test.junit)
