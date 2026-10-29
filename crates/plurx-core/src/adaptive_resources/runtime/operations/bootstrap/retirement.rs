@@ -14,6 +14,8 @@ pub(in crate::adaptive_resources) struct RetainedFiniteClosure {
     head: AssetEventRefV1,
 }
 /// Producer-R output closure after its own Open→Retiring cancellation event.
+/// This is native-prefix closure, not application/response destruction or
+/// refund authority. Copy consumes it only after its separate final barriers.
 /// This cannot be consumed as a retained-S close receipt.
 pub(in crate::adaptive_resources) struct ProducerFiniteClosure {
     binding: ReservationBinding,
@@ -36,6 +38,23 @@ impl ProducerFiniteClosure {
 enum CleanupMode {
     Retained,
     Producer,
+    // Selected only by the original Copy cleanup claim. Native prefix closure
+    // precedes application/response destruction; final Copy preflight still
+    // requires the original application and response budget to be empty.
+    #[cfg(target_os = "linux")]
+    CopyProducer,
+}
+impl CleanupMode {
+    fn is_producer(self) -> bool {
+        self != Self::Retained
+    }
+    fn requires_response_barrier(self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self == Self::CopyProducer {
+            return false;
+        }
+        true
+    }
 }
 impl RetainedFiniteClosure {
     pub(in crate::adaptive_resources) fn binding(&self) -> ReservationBinding {
@@ -154,7 +173,7 @@ fn next_step(bootstrap: &BootstrapMember) -> Result<CleanupPending, OperationErr
         .mode;
     if (mode == CleanupMode::Retained
         && state.asset.lifecycle == ScratchLifecycleV1::RetainedReadOnly)
-        || (mode == CleanupMode::Producer
+        || (mode.is_producer()
             && state.asset.lifecycle == ScratchLifecycleV1::Open
             && (matches!(
                 state.bootstrap.phase,
@@ -173,7 +192,7 @@ fn next_step(bootstrap: &BootstrapMember) -> Result<CleanupPending, OperationErr
     if state.asset.lifecycle != ScratchLifecycleV1::Retiring {
         return Err(OperationError::State);
     }
-    if mode == CleanupMode::Producer
+    if mode.is_producer()
         && matches!(
             state.bootstrap.phase,
             BootstrapPhase::Traversing | BootstrapPhase::ParentReady
@@ -371,7 +390,7 @@ impl BootstrapMember {
     ) -> Result<(ScratchPlanV3, AssetEventRefV1), OperationError> {
         let run = self.retirement.as_ref().ok_or(OperationError::State)?;
         let closed = run.producer_closed.as_ref().ok_or(OperationError::State)?;
-        if run.mode != CleanupMode::Producer
+        if !run.mode.is_producer()
             || closed.binding() != expected_binding
             || closed.member() != expected_member
             || run.issued
@@ -402,6 +421,30 @@ impl BootstrapMember {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn validate_copy_cleanup_claim(
+    role: &OwnedRole,
+    mode: CleanupMode,
+    claim: Option<&crate::adaptive_resources::runtime::copy_vod::CopyCloseClaim>,
+) -> Result<(), OperationError> {
+    if mode == CleanupMode::CopyProducer {
+        if !claim.is_some_and(|claim| {
+            role.copy_cleanup
+                .as_ref()
+                .is_some_and(|custody| claim.matches(custody))
+        }) || role.copy_vod.as_ref().is_none_or(|copy| !copy.closing)
+            || role.finite_vod.is_some()
+            || role.retirement.is_some()
+            || role.refunded
+        {
+            return Err(OperationError::State);
+        }
+    } else if claim.is_some() {
+        return Err(OperationError::State);
+    }
+    Ok(())
+}
+
 impl NodeResourceRuntime {
     /// Run the exact V3 S cleanup lineage. The same member-owned run and native
     /// cell survive cancellation and uncertain journal waits.
@@ -412,8 +455,16 @@ impl NodeResourceRuntime {
         member: Uuid,
         deadline: Instant,
     ) -> Result<(), OperationError> {
-        self.close_finite_native(owner, index, member, deadline, CleanupMode::Retained)
-            .await
+        self.close_finite_native(
+            owner,
+            index,
+            member,
+            deadline,
+            CleanupMode::Retained,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+        .await
     }
 
     pub(in crate::adaptive_resources::runtime) async fn close_producer_finite_native(
@@ -423,10 +474,44 @@ impl NodeResourceRuntime {
         member: Uuid,
         deadline: Instant,
     ) -> Result<(), OperationError> {
-        self.close_finite_native(owner, index, member, deadline, CleanupMode::Producer)
-            .await
+        self.close_finite_native(
+            owner,
+            index,
+            member,
+            deadline,
+            CleanupMode::Producer,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+        .await
     }
 
+    /// Native Copy prefix closure under the SAME exclusive cleanup claim.
+    /// This grants no response destruction, typed settlement or refund fact.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) async fn close_copy_producer_finite_native(
+        &self,
+        owner: &OwnedPreparation,
+        claim: &crate::adaptive_resources::runtime::copy_vod::CopyCloseClaim,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.close_finite_native(
+            owner,
+            index,
+            member,
+            deadline,
+            CleanupMode::CopyProducer,
+            Some(claim),
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The Linux Copy path must borrow its exact original cleanup claim separately from the retained native member and deadline; no caller boolean or replacement owner can authorize this native-only stage."
+    )]
     async fn close_finite_native(
         &self,
         owner: &OwnedPreparation,
@@ -434,8 +519,20 @@ impl NodeResourceRuntime {
         member: Uuid,
         deadline: Instant,
         mode: CleanupMode,
+        #[cfg(target_os = "linux")] copy_claim: Option<
+            &crate::adaptive_resources::runtime::copy_vod::CopyCloseClaim,
+        >,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
+        #[cfg(target_os = "linux")]
+        {
+            let bundle = owner.state.lock().await;
+            validate_copy_cleanup_claim(
+                bundle.roles.get(index).ok_or(OperationError::State)?,
+                mode,
+                copy_claim,
+            )?;
+        }
         self.close_dropped_finite_readers(owner, index, deadline)
             .await?;
         loop {
@@ -445,6 +542,8 @@ impl NodeResourceRuntime {
             let mut bundle = owner.state.lock().await;
             let bundle_id = bundle.id;
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+            #[cfg(target_os = "linux")]
+            validate_copy_cleanup_claim(role, mode, copy_claim)?;
             #[cfg(target_os = "linux")]
             let recovered_producer = role.finite_vod.is_none()
                 && role
@@ -470,7 +569,7 @@ impl NodeResourceRuntime {
             let closed_copy_producer = false;
             if role.refunded
                 || (mode == CleanupMode::Retained && role.retirement.is_none())
-                || (mode == CleanupMode::Producer
+                || (mode.is_producer()
                     && (role.retirement.is_some()
                         || (!recovered_producer
                             && !closed_copy_producer
@@ -521,10 +620,12 @@ impl NodeResourceRuntime {
             {
                 return Err(OperationError::State);
             }
-            role.response_budget
-                .as_ref()
-                .ok_or(OperationError::State)?
-                .begin_close_if_empty()?;
+            if mode.requires_response_barrier() {
+                role.response_budget
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .begin_close_if_empty()?;
+            }
             if bootstrap.retirement.is_none() {
                 // Install the owner before the first await, journal arm or
                 // destructive native entry.
@@ -535,7 +636,7 @@ impl NodeResourceRuntime {
                 return Err(OperationError::State);
             }
             if (mode == CleanupMode::Retained && run.closed.is_some())
-                || (mode == CleanupMode::Producer && run.producer_closed.is_some())
+                || (mode.is_producer() && run.producer_closed.is_some())
             {
                 return Ok(());
             }
@@ -606,7 +707,7 @@ impl NodeResourceRuntime {
                 bootstrap
                     .retirement
                     .as_ref()
-                    .is_some_and(|run| run.mode == CleanupMode::Producer)
+                    .is_some_and(|run| run.mode.is_producer())
                     && state.bootstrap.phase == BootstrapPhase::Unstarted
                     && bootstrap.root_arm.is_some()
                     && bootstrap
@@ -638,7 +739,7 @@ impl NodeResourceRuntime {
                             CleanupMode::Retained => AssetEventV1::BeginRetirement {
                                 exact_head_before_retirement: head.ok_or(OperationError::State)?,
                             },
-                            CleanupMode::Producer => AssetEventV1::BeginProducerCancellation {
+                            _ => AssetEventV1::BeginProducerCancellation {
                                 exact_head_before_cancellation: head
                                     .ok_or(OperationError::State)?,
                             },
@@ -664,7 +765,7 @@ impl NodeResourceRuntime {
                     .as_ref()
                     .ok_or(OperationError::State)?
                     .state();
-                if !budget_closed
+                if (mode.requires_response_barrier() && !budget_closed)
                     || bootstrap.change.is_some()
                     || bootstrap.next_arm.is_some()
                     || !bootstrap.native_io_dormant()
@@ -939,6 +1040,12 @@ impl NodeResourceRuntime {
             retry_transition(role, &self.journal, member, deadline)?;
             self.finish_transition(bundle_id, role).await?;
         }
+        let mode = role
+            .bootstrap
+            .get(&member)
+            .and_then(|bootstrap| bootstrap.retirement.as_ref())
+            .ok_or(OperationError::State)?
+            .mode;
         let budget_closed = role
             .response_budget
             .as_ref()
@@ -971,7 +1078,7 @@ impl NodeResourceRuntime {
                 .as_ref()
                 .ok_or(OperationError::State)?
                 .state();
-            if !budget_closed
+            if (mode.requires_response_barrier() && !budget_closed)
                 || !io.cell.positive_close_acknowledged()
                 || !bootstrap
                     .native_root
@@ -1015,7 +1122,7 @@ impl NodeResourceRuntime {
                         head,
                     });
                 }
-                CleanupMode::Producer => {
+                _ => {
                     run.producer_closed = Some(ProducerFiniteClosure {
                         binding: role.binding,
                         member,

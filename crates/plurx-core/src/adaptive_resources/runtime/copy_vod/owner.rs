@@ -261,8 +261,14 @@ impl CopyCloseTicket {
         }
         tokio::time::timeout_at(
             deadline.into(),
-            self.runtime
-                .finish_finite_close(&mut self.preparation, 0, deadline),
+            self.runtime.finish_copy_close(
+                &mut self.preparation,
+                self.cleanup_claim
+                    .as_ref()
+                    .ok_or(super::super::operations::OperationError::State)?,
+                0,
+                deadline,
+            ),
         )
         .await
         .map_err(|_| super::super::operations::OperationError::Deadline)?
@@ -1379,7 +1385,7 @@ impl NodeResourceRuntime {
                 let mut selection = Some(preparation);
                 tokio::time::timeout_at(
                     deadline.into(),
-                    self.finish_finite_close(&mut selection, 0, deadline),
+                    self.finish_copy_close(&mut selection, &cleanup_claim, 0, deadline),
                 )
                 .await
                 .map_err(|_| super::super::operations::OperationError::Deadline)??;

@@ -161,7 +161,7 @@ impl NodeResourceRuntime {
                 if matches!(
                     tokio::time::timeout_at(
                         deadline.into(),
-                        self.finish_finite_close(&mut selection, 0, deadline)
+                        self.finish_copy_close(&mut selection, &cleanup_claim, 0, deadline)
                     )
                     .await,
                     Ok(Ok(()))
@@ -225,7 +225,7 @@ impl NodeResourceRuntime {
             if matches!(
                 tokio::time::timeout_at(
                     deadline.into(),
-                    self.finish_finite_close(&mut selection, 0, deadline)
+                    self.finish_copy_close(&mut selection, &cleanup_claim, 0, deadline)
                 )
                 .await,
                 Ok(Ok(()))
@@ -280,6 +280,13 @@ impl NodeResourceRuntime {
             return Ok(());
         }
         let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+        // Work and budget install atomically. A genuine early constructor
+        // rollback has neither; absence does not assert budget emptiness.
+        if let Some(budget) = role.response_budget.as_ref() {
+            budget.stop_new_allocations()?;
+        } else if copy.work.is_some() {
+            return Err(OperationError::State);
+        }
         if copy.entered
             || copy.task.is_some()
             || copy.task_observed_committed
@@ -326,9 +333,63 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
+        Ok(())
+    }
+
+    async fn finish_unaccepted_copy_close(
+        &self,
+        owner: &OwnedPreparation,
+        cleanup_claim: &CopyCloseClaim,
+    ) -> Result<(), OperationError> {
+        // Consume only the cached original native-stage absence witness.
+        // Finalization cannot mint a replacement witness or retry native entry.
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if !finite_prepare_definitely_unaccepted(&bundle) || bundle.roles.len() != 1 {
+            return Err(OperationError::State);
+        }
+        let role = &mut bundle.roles[0];
+        if !role
+            .copy_cleanup
+            .as_ref()
+            .is_some_and(|custody| cleanup_claim.matches(custody))
+            || !role
+                .finite_app
+                .as_ref()
+                .is_some_and(|state| state.released())
+        {
+            return Err(OperationError::State);
+        }
+        if role.receipt.is_some() && role.copy_vod.is_none() {
+            return Ok(());
+        }
+        let copy = role.copy_vod.as_ref().ok_or(OperationError::State)?;
+        let absent = copy
+            .never_root_closure
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        if role.receipt.is_some()
+            || !absent.matches(role.sealed.as_ref().ok_or(OperationError::State)?)
+            || absent.root_member() != copy.root_member
+            || absent.task_member() != copy.task_member
+            || absent.acquisition_id() != copy.acquisition_id
+            || copy.entered
+            || copy.task.is_some()
+            || copy.fixed_image.is_some()
+            || copy.process_closure.is_some()
+            || copy.root_only_closure.is_some()
+            || copy.terminal.is_some()
+            || role.graph.is_some()
+            || !role.sources.is_empty()
+            || !role.bootstrap.is_empty()
+            || !role.roots.is_empty()
+        {
+            return Err(OperationError::State);
+        }
         if let Some(budget) = role.response_budget.as_ref() {
             budget.begin_close_if_empty()?;
         }
+        let copy = role.copy_vod.as_mut().ok_or(OperationError::State)?;
         let receipt = PhysicalCloseReceipt::from_copy_cancel(CopyCancellationClosure {
             binding: role.binding,
             _process: CopyCancelProcess::NeverRoot {
@@ -413,6 +474,15 @@ impl NodeResourceRuntime {
             }
             copy.closing = true;
             copy.progress.notify_waiters();
+            // The exact claim was checked above. Fence only NEW allocations:
+            // all existing metadata/client/body owners and counts stay live.
+            if let Some(budget) = role.response_budget.as_ref() {
+                budget.stop_new_allocations()?;
+            } else if copy.work.is_some() {
+                // Original constructor queue precedes the atomic work/budget
+                // install. Only its still-empty early state needs no fence.
+                return Err(OperationError::State);
+            }
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());
             }
@@ -472,8 +542,14 @@ impl NodeResourceRuntime {
         if has_output {
             self.observe_finite_bootstrap_arm(owner, index, output_member, deadline)
                 .await?;
-            self.close_producer_finite_native(owner, index, output_member, deadline)
-                .await?;
+            self.close_copy_producer_finite_native(
+                owner,
+                cleanup_claim,
+                index,
+                output_member,
+                deadline,
+            )
+            .await?;
         }
         let needs_seal = {
             let bundle = owner.state.lock().await;
@@ -485,12 +561,95 @@ impl NodeResourceRuntime {
         if needs_seal {
             self.seal_role(owner, index, deadline).await?;
         }
-        self.prepare_copy_settlement(owner, index, output_member)
-            .await?;
+        // Native closure is ready for a ticket. Application/response owners
+        // still retain full R and the SAME unconsumed native witnesses.
         #[cfg(all(test, feature = "fixtures"))]
-        self.fixture_copy_stage(super::copy_vod::CopyStartFixtureStage::CleanupSettlementPrepared)
+        self.fixture_copy_stage(super::copy_vod::CopyStartFixtureStage::CleanupTicketPrepared)
             .await;
         Ok(())
+    }
+
+    /// Finalize only this original claim, after its actual application and
+    /// response owners disappear. No admission/native proof is reconstructed.
+    pub(in crate::adaptive_resources::runtime) async fn finish_copy_close(
+        &self,
+        selection: &mut Option<OwnedPreparation>,
+        cleanup_claim: &CopyCloseClaim,
+        index: usize,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        let owner = selection.as_ref().ok_or(OperationError::State)?;
+        self.validate_preparation(owner)?;
+        let (application, response, unaccepted, output_member) = {
+            let bundle = owner.state.lock().await;
+            let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+            // Check the original cell/claim BEFORE waiting on any owners or
+            // consuming budget, metadata, native witnesses or typed facts.
+            if !role
+                .copy_cleanup
+                .as_ref()
+                .is_some_and(|custody| cleanup_claim.matches(custody))
+            {
+                return Err(OperationError::State);
+            }
+            let unaccepted = finite_prepare_definitely_unaccepted(&bundle);
+            let terminal = role.pending_finite_close.is_some()
+                || role.transition.as_ref().is_some_and(|transition| {
+                    matches!(transition.effect, Effect::Settle | Effect::Cancel)
+                });
+            let member = if unaccepted || terminal {
+                None
+            } else {
+                if role.copy_vod.is_none() {
+                    return Err(OperationError::State);
+                }
+                let mut outputs = role
+                    .typed_members
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .iter()
+                    .filter_map(|plan| match plan {
+                        v2::MemberPlan::ScratchAssetsV3 { slot, .. } => Some(slot.member_id.uuid()),
+                        _ => None,
+                    });
+                let member = outputs.next().ok_or(OperationError::State)?;
+                if outputs.next().is_some() {
+                    return Err(OperationError::State);
+                }
+                Some(member)
+            };
+            (
+                role.finite_app.clone().ok_or(OperationError::State)?,
+                role.response_budget.clone(),
+                unaccepted,
+                member,
+            )
+        };
+        if !application.wait_released(deadline).await {
+            return Err(OperationError::Deadline);
+        }
+        drop(application);
+        if let Some(response) = response {
+            response.wait_drained(deadline).await?;
+        } // Drop this temporary Arc BEFORE rich payload disposal/refund.
+        if unaccepted {
+            self.finish_unaccepted_copy_close(owner, cleanup_claim)
+                .await?;
+            #[cfg(all(test, feature = "fixtures"))]
+            self.fixture_copy_stage(
+                super::copy_vod::CopyStartFixtureStage::CleanupSettlementPrepared,
+            )
+            .await;
+        } else if let Some(member) = output_member {
+            self.prepare_copy_settlement(owner, cleanup_claim, index, member)
+                .await?;
+            #[cfg(all(test, feature = "fixtures"))]
+            self.fixture_copy_stage(
+                super::copy_vod::CopyStartFixtureStage::CleanupSettlementPrepared,
+            )
+            .await;
+        }
+        self.finish_finite_close(selection, index, deadline).await
     }
 
     async fn close_copy_never_root(
@@ -734,11 +893,24 @@ impl NodeResourceRuntime {
     async fn prepare_copy_settlement(
         &self,
         owner: &OwnedPreparation,
+        cleanup_claim: &CopyCloseClaim,
         index: usize,
         output_member: Uuid,
     ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
         let mut bundle = owner.state.lock().await;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        if !role
+            .copy_cleanup
+            .as_ref()
+            .is_some_and(|custody| cleanup_claim.matches(custody))
+            || !role
+                .finite_app
+                .as_ref()
+                .is_some_and(|state| state.released())
+        {
+            return Err(OperationError::State);
+        }
         // A positive original closure may settle an existing hold directly.
         // Keep UnknownHeld until that exact settlement commits; generic Seal
         // deliberately cannot erase a hold classification.

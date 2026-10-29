@@ -922,56 +922,11 @@ async fn real_drain_refusal_drops_original_acknowledged_start_and_keeps_acquired
         .expect("actual original closure after drain");
     let operation = {
         let bundle = preparation.state.lock().await;
-        let role = &bundle.roles[0];
-        assert!(!role.refunded);
-        let pending = role
-            .pending_finite_close
+        bundle.roles[0]
+            .copy_vod
             .as_ref()
-            .expect("same prepared typed settlement");
-        let Mutation::SettleTyped(closed) = &pending.mutation else {
-            panic!("actual typed copy settlement")
-        };
-        assert_eq!(closed.settlement.members.len(), 5);
-        let task_facts: Vec<_> = closed
-            .settlement
-            .members
-            .iter()
-            .filter_map(|disposition| match disposition {
-                v2::MemberDisposition::Closed {
-                    member_id,
-                    fact:
-                        v2::ClosedFact::VodOutputTaskV1 {
-                            task,
-                            join_operation_id,
-                            owners,
-                        },
-                } if member_id.uuid() == task_member => Some((task, join_operation_id, owners)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            task_facts.len(),
-            1,
-            "ACKed acquired parser cannot become NeverAcquired"
-        );
-        assert_eq!(task_facts[0].0.member_id.uuid(), task_member);
-        assert_eq!(task_facts[0].0.actor, v2::VodActor::RollingCopyV1);
-        assert!(!task_facts[0].1.uuid().is_nil());
-        assert_eq!(
-            task_facts[0].2.len(),
-            3,
-            "original buffer and both readers closed"
-        );
-        assert!(
-            !closed.settlement.members.iter().any(|disposition| matches!(
-                disposition,
-                v2::MemberDisposition::Closed {
-                    fact: v2::ClosedFact::VodOutputTaskNeverAcquiredV1 { .. },
-                    ..
-                }
-            ))
-        );
-        pending.key.operation_id
+            .expect("same retained native ticket")
+            .settlement_operation_id
     };
     drop(owner);
     assert_eq!(ticket.fixture_application_released(), Some(false));
@@ -998,11 +953,10 @@ async fn real_drain_refusal_drops_original_acknowledged_start_and_keeps_acquired
         let bundle = preparation.state.lock().await;
         assert_eq!(
             bundle.roles[0]
-                .pending_finite_close
+                .copy_vod
                 .as_ref()
-                .expect("retained original command")
-                .key
-                .operation_id,
+                .expect("same retained native close operation")
+                .settlement_operation_id,
             operation
         );
         assert!(!bundle.roles[0].refunded);
@@ -1014,12 +968,79 @@ async fn real_drain_refusal_drops_original_acknowledged_start_and_keeps_acquired
             .used,
         charge
     );
-    drop(preparation);
     drop(application);
     assert_eq!(ticket.fixture_application_released(), Some(true));
-    bounded(ticket.finish_retirement(deadline()))
-        .await
-        .expect("one original typed settlement after real aliases disappear");
+    bounded(super::runtime_tests::finish_validated_ticket_with(
+        &runtime,
+        &mut ticket,
+        preparation,
+        true,
+        operation,
+        move |preparation| {
+            Box::pin(async move {
+                let actual_operation = {
+                    let bundle = preparation.state.lock().await;
+                    let role = &bundle.roles[0];
+                    assert!(!role.refunded);
+                    let pending = role
+                        .pending_finite_close
+                        .as_ref()
+                        .expect("same prepared typed settlement");
+                    let Mutation::SettleTyped(closed) = &pending.mutation else {
+                        panic!("actual typed copy settlement")
+                    };
+                    assert_eq!(closed.settlement.members.len(), 5);
+                    let task_facts: Vec<_> = closed
+                        .settlement
+                        .members
+                        .iter()
+                        .filter_map(|disposition| match disposition {
+                            v2::MemberDisposition::Closed {
+                                member_id,
+                                fact:
+                                    v2::ClosedFact::VodOutputTaskV1 {
+                                        task,
+                                        join_operation_id,
+                                        owners,
+                                    },
+                            } if member_id.uuid() == task_member => {
+                                Some((task, join_operation_id, owners))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        task_facts.len(),
+                        1,
+                        "ACKed acquired parser cannot become NeverAcquired"
+                    );
+                    assert_eq!(task_facts[0].0.member_id.uuid(), task_member);
+                    assert_eq!(task_facts[0].0.actor, v2::VodActor::RollingCopyV1);
+                    assert!(!task_facts[0].1.uuid().is_nil());
+                    assert_eq!(
+                        task_facts[0].2.len(),
+                        3,
+                        "original buffer and both readers closed"
+                    );
+                    assert!(
+                        !closed.settlement.members.iter().any(|disposition| matches!(
+                            disposition,
+                            v2::MemberDisposition::Closed {
+                                fact: v2::ClosedFact::VodOutputTaskNeverAcquiredV1 { .. },
+                                ..
+                            }
+                        ))
+                    );
+                    pending.key.operation_id
+                };
+                assert_eq!(
+                    actual_operation, operation,
+                    "same original prepared typed command"
+                );
+            })
+        },
+    ))
+    .await;
     assert_eq!(
         runtime.accounting().expect("one exact refund").used,
         ResourceVector::default()

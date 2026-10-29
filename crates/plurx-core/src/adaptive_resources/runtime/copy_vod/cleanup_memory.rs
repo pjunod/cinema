@@ -54,7 +54,9 @@ where
 }
 
 /// Same sequential outer cleanup phases, including their actual nested async
-/// frames. Their maximum is a requested Rust component, not a task/stack peak.
+/// frames. finish_frame includes the actual nested claim-guarded
+/// finish_copy_close future, including its application/response waits and
+/// deferred full preflight. Their maximum is requested Rust storage, not a peak.
 fn cleanup_frame_bytes() -> usize {
     prepare_frame(CopyVodOwner::prepare_retirement)
         .max(finish_frame(CopyCloseTicket::finish_retirement))

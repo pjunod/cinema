@@ -1,7 +1,7 @@
 //! Real copy owners and original native/journal lifecycle boundaries.
 //! Authored only: no behavioral or mutation execution before candidate review.
 use super::*;
-use crate::adaptive_resources::runtime::copy_vod::{CopyOutput, CopyVodOwner};
+use crate::adaptive_resources::runtime::copy_vod::{CopyCloseTicket, CopyOutput, CopyVodOwner};
 use std::path::Path;
 use std::time::Duration;
 
@@ -143,6 +143,177 @@ async fn pending_command(preparation: &OwnedPreparation, task_acquired: bool) ->
     );
     pending.key.operation_id
 }
+async fn retained_native_close_operation(
+    preparation: &OwnedPreparation,
+    task_acquired: bool,
+) -> Uuid {
+    let bundle = preparation.state.lock().await;
+    let role = &bundle.roles[0];
+    assert!(!role.refunded, "the same full R remains held");
+    if let Some(copy) = role.copy_vod.as_ref() {
+        assert!(role.pending_finite_close.is_none() && role.transition.is_none());
+        assert!(role.graph.is_none() && role.sealed.is_some());
+        assert!(matches!(role.phase, Phase::Sealed | Phase::UnknownHeld));
+        assert_eq!(
+            usize::from(copy.never_root_closure.is_some())
+                + usize::from(copy.root_only_closure.is_some())
+                + usize::from(copy.process_closure.is_some()),
+            1,
+            "same original native witness retained, never a typed close DTO"
+        );
+        assert_eq!(copy.task.is_some(), task_acquired);
+        assert!(role.sources.values().all(|source| source.parent_closed()));
+        for (member, bootstrap) in &role.bootstrap {
+            bootstrap
+                .producer_close_fact(role.binding, *member)
+                .expect("same prefix native close remains unconsumed");
+        }
+        return copy.settlement_operation_id;
+    }
+    if let Some(transition) = role.transition.as_ref() {
+        assert!(transition.effect == Effect::Settle);
+        return transition.operation.id;
+    }
+    drop(bundle);
+    pending_command(preparation, task_acquired).await
+}
+
+// Inspect the unchanged FULL five-fact DTO only after real application and
+// response release. The gate delays delivery, never substitutes a result.
+pub(super) async fn finish_validated_ticket_with<F>(
+    runtime: &NodeResourceRuntime,
+    ticket: &mut CopyCloseTicket,
+    preparation: OwnedPreparation,
+    task_acquired: bool,
+    expected: Uuid,
+    inspect: F,
+) where
+    F: for<'a> FnOnce(
+        &'a OwnedPreparation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+{
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
+    let mut finish = Box::pin(ticket.finish_retirement(deadline()));
+    tokio::select! {
+        result=&mut finish=>panic!("finish skipped real pending DTO gate: {result:?}"),
+        ()=gate.reached()=>{},
+        ()=tokio::time::sleep(Duration::from_secs(15))=>panic!("real full DTO gate watchdog"),
+    }
+    assert_eq!(pending_command(&preparation, task_acquired).await, expected);
+    inspect(&preparation).await;
+    drop(preparation);
+    drop(gate);
+    finish
+        .await
+        .expect("same original validated close and matching refund");
+}
+
+async fn finish_validated_ticket(
+    runtime: &NodeResourceRuntime,
+    ticket: &mut CopyCloseTicket,
+    preparation: OwnedPreparation,
+    task_acquired: bool,
+    expected: Uuid,
+) {
+    finish_validated_ticket_with(
+        runtime,
+        ticket,
+        preparation,
+        task_acquired,
+        expected,
+        |_| Box::pin(async {}),
+    )
+    .await;
+}
+
+async fn finish_existing_ticket_with_aliases<L, F>(
+    runtime: Arc<NodeResourceRuntime>,
+    owner: CopyVodOwner,
+    preparation: OwnedPreparation,
+    task_acquired: bool,
+    aliases: (CopyOutput, L),
+    mut ticket: CopyCloseTicket,
+    inspect: F,
+) where
+    F: for<'a> FnOnce(
+        &'a OwnedPreparation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+{
+    let (output, application) = aliases;
+    let charge = runtime.accounting().expect("actual native ticket R").used;
+    let operation = retained_native_close_operation(&preparation, task_acquired).await;
+    drop(owner);
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "original output/application aliases still retain full R"
+    );
+    assert_eq!(
+        runtime.accounting().expect("actual aliases charged").used,
+        charge
+    );
+    drop(output);
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "last original application lease still gates final preflight"
+    );
+    assert_eq!(
+        retained_native_close_operation(&preparation, task_acquired).await,
+        operation
+    );
+    assert_eq!(
+        runtime.accounting().expect("last alias charged").used,
+        charge
+    );
+    drop(application);
+    finish_validated_ticket_with(
+        &runtime,
+        &mut ticket,
+        preparation,
+        task_acquired,
+        operation,
+        inspect,
+    )
+    .await;
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("one matching original refund")
+            .used,
+        ResourceVector::default()
+    );
+    drop(ticket);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("same original journal drained");
+}
+
+async fn finish_validated_maintenance(
+    runtime: &NodeResourceRuntime,
+    preparation: OwnedPreparation,
+    task_acquired: bool,
+    expected: Uuid,
+) {
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
+    let mut finish = Box::pin(runtime.maintain_failed_copy_admissions(deadline()));
+    tokio::select! {
+        result=&mut finish=>panic!("repair skipped same full DTO gate: {result:?}"),
+        ()=gate.reached()=>{},
+        ()=tokio::time::sleep(Duration::from_secs(15))=>panic!("original repair DTO watchdog"),
+    }
+    assert_eq!(pending_command(&preparation, task_acquired).await, expected);
+    drop(preparation);
+    drop(gate);
+    assert_eq!(finish.await.expect("same original maintenance close"), 1);
+}
+
 async fn retire_with_actual_alias_barriers(
     runtime: Arc<NodeResourceRuntime>,
     owner: CopyVodOwner,
@@ -222,7 +393,7 @@ async fn retire_with_retained_aliases<L>(
             );
         }
     };
-    let command = pending_command(&preparation, task_acquired).await;
+    let command = retained_native_close_operation(&preparation, task_acquired).await;
     drop(owner);
     assert!(
         ticket
@@ -232,7 +403,7 @@ async fn retire_with_retained_aliases<L>(
         "live output/application aliases refunded original R"
     );
     assert_eq!(
-        pending_command(&preparation, task_acquired).await,
+        retained_native_close_operation(&preparation, task_acquired).await,
         command,
         "blocked waiter replaced original close operation"
     );
@@ -245,17 +416,16 @@ async fn retire_with_retained_aliases<L>(
             .is_err(),
         "last actual app lease did not gate release"
     );
-    assert_eq!(pending_command(&preparation, task_acquired).await, command);
+    assert_eq!(
+        retained_native_close_operation(&preparation, task_acquired).await,
+        command
+    );
     assert_eq!(
         runtime.accounting().expect("last alias charged").used,
         charge
     );
-    drop(preparation);
     drop(application);
-    ticket
-        .finish_retirement(deadline())
-        .await
-        .expect("known original close after actual aliases and rich bundle drop");
+    finish_validated_ticket(&runtime, &mut ticket, preparation, task_acquired, command).await;
     assert_eq!(
         runtime.accounting().expect("one matching refund").used,
         ResourceVector::default()
@@ -665,7 +835,8 @@ async fn copy_cancelled_cleanup_after_acquisition_replay_keeps_same_original_tas
 }
 
 // R19/R22: lose the waiter after positive native closure but before a ticket
-// is exposed. This is pending-command retention, not a commit-unknown claim.
+// is exposed. Original native witnesses and the preplanned logical ID remain
+// retained; no app/response-close DTO or commit-unknown result is invented.
 #[tokio::test]
 async fn copy_cancelled_close_before_ticket_exposure_retains_same_receipt_and_last_alias_barrier() {
     let root = tempfile::tempdir().expect("actual close ticket handoff fixture");
@@ -675,21 +846,401 @@ async fn copy_cancelled_close_before_ticket_exposure_retains_same_receipt_and_la
     let application = owner
         .take_application_lease(1024)
         .expect("original app lease before sealing");
-    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupTicketPrepared);
     let mut cleanup = Box::pin(owner.prepare_retirement(true, deadline()));
     tokio::select! { result=&mut cleanup=>panic!("original cleanup returned before pending receipt gate: {}",result.is_ok()), ()=gate.reached()=>{}, ()=tokio::time::sleep(Duration::from_secs(15))=>panic!("original pending receipt watchdog") }
     drop(cleanup);
     drop(gate);
-    let original = pending_command(&preparation, false).await;
+    let original = retained_native_close_operation(&preparation, false).await;
     assert!(!original.is_nil());
     retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
+}
+
+// The native ticket is valid while real actor metadata/client allocations
+// remain. Neither those top leases nor their last original slot alias may be
+// treated as gone after the actual acquired sources, child and output prefix close.
+#[tokio::test]
+async fn copy_native_ticket_precedes_original_metadata_client_and_last_slot_destruction() {
+    let root = tempfile::tempdir().expect("actual copy actor partition fixture");
+    let (runtime, mut owner, preparation) = original(root.path()).await;
+    let charge = runtime.accounting().expect("actual full R").used;
+    let output = owner.output();
+    let application = owner
+        .take_application_lease(1024)
+        .expect("actual app lease");
+    let (metadata, client) = output
+        .reserve_metadata_partitions(4096, 4096)
+        .await
+        .expect("same actual metadata/client budget partitions");
+    let slot = client.reserve(128).expect("original real client slot");
+    let last_slot = Arc::clone(&slot);
+    cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::TaskArmed).await;
+    let mut ticket = owner
+        .prepare_retirement(true, deadline())
+        .await
+        .expect("native ticket must not require actor allocations to be destroyed");
+    let operation = retained_native_close_operation(&preparation, false).await;
+    assert!(
+        client.reserve(128).is_err(),
+        "native close fences new client allocations"
+    );
+    assert!(
+        slot.reserve_related(128).is_err(),
+        "same retained slot cannot extend closing budget"
+    );
+    assert!(
+        output
+            .allocate_response_buffer(128, deadline())
+            .await
+            .is_err(),
+        "actual closed prefix cannot allocate a new body"
+    );
+    assert!(ticket
+        .finish_retirement(Instant::now() + Duration::from_millis(1))
+        .await
+        .is_err());
+    assert_eq!(
+        runtime.accounting().expect("actual aliases retain R").used,
+        charge
+    );
+    drop(owner);
+    drop(output);
+    drop(application);
+    assert_eq!(ticket.fixture_application_released(), Some(true));
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "real metadata/client owners block final preflight"
+    );
+    let mut borrowed = Box::pin(ticket.finish_retirement(deadline()));
+    std::future::poll_fn(|cx| {
+        assert!(
+            std::future::Future::poll(borrowed.as_mut(), cx).is_pending(),
+            "real response owners keep finish pending"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(borrowed); // Only the waiter; original ticket/claim/budget remain.
+    assert_eq!(
+        retained_native_close_operation(&preparation, false).await,
+        operation
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("cancelled wait retains full R")
+            .used,
+        charge
+    );
+    drop(metadata);
+    assert!(ticket
+        .finish_retirement(Instant::now() + Duration::from_millis(1))
+        .await
+        .is_err());
+    drop(client);
+    drop(slot);
+    assert!(
+        ticket
+            .finish_retirement(Instant::now() + Duration::from_millis(1))
+            .await
+            .is_err(),
+        "last real client-slot alias still retains the original response budget"
+    );
+    assert_eq!(
+        retained_native_close_operation(&preparation, false).await,
+        operation
+    );
+    assert_eq!(
+        runtime.accounting().expect("last slot retains full R").used,
+        charge
+    );
+    assert!(
+        !runtime.has_failed_copy_admission(),
+        "same live ticket retains exclusive custody"
+    );
+    drop(last_slot);
+    finish_validated_ticket(&runtime, &mut ticket, preparation, false, operation).await;
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("same completed ticket idempotent");
+    assert_eq!(
+        runtime.accounting().expect("one matching R refund").used,
+        ResourceVector::default()
+    );
+    drop(ticket);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("original journal drained");
+}
+
+// A real CopySink constructor refusal occurs after R and the original empty
+// CopyLaunch queue, before the atomic work/response-budget installation.
+// Its generic error provenance alone cannot prove that cleanup returned R.
+#[tokio::test]
+async fn copy_constructor_refusal_before_budget_install_closes_same_charged_bundle() {
+    let root = tempfile::tempdir().expect("actual empty-copy constructor rollback");
+    let (runtime, mut request) =
+        NodeResourceRuntime::fixture_actual_copy_request(root.path(), false).await;
+    let baseline = runtime
+        .accounting()
+        .expect("original pre-constructor ledger")
+        .used;
+    assert_eq!(baseline, ResourceVector::default());
+    request.operation_timeout = Duration::from_secs(121); // actual CopySink refusal
+    let native_gate =
+        runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupTicketPrepared);
+    let mut prepare = Box::pin(runtime.prepare_copy_vod(request, deadline()));
+    tokio::select! {
+        result = &mut prepare => panic!("constructor returned before original empty-prefix cleanup: {}", result.is_ok()),
+        () = native_gate.reached() => {},
+        () = tokio::time::sleep(Duration::from_secs(15)) => panic!("actual constructor native-close watchdog"),
+    }
+    let charge = runtime
+        .accounting()
+        .expect("same queued constructor R")
+        .used;
+    assert_ne!(charge, baseline);
+    let mut retained = runtime
+        .retained_preparations()
+        .expect("original charged book entry");
+    assert_eq!(retained.len(), 1);
+    let preparation = retained
+        .pop()
+        .expect("same original constructor preparation");
+    drop(retained);
+    let (binding, operation, absence_close) = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let copy = role
+            .copy_vod
+            .as_ref()
+            .expect("same original empty CopyLaunch");
+        assert!(
+            copy.work.is_none() && role.response_budget.is_none(),
+            "refusal must precede the actual atomic work/budget installation"
+        );
+        assert!(!copy.entered && copy.task.is_none() && !role.refunded);
+        assert!(role.sources.is_empty() && role.bootstrap.is_empty() && role.roots.is_empty());
+        let absence = copy
+            .never_root_closure
+            .as_ref()
+            .expect("original graph absence witness");
+        assert!(absence.matches(role.sealed.as_ref().expect("same sealed original graph")));
+        (
+            role.binding,
+            copy.settlement_operation_id,
+            absence.close_operation_id(),
+        )
+    };
+    let dto_gate =
+        runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
+    drop(native_gate);
+    tokio::select! {
+        result = &mut prepare => panic!("constructor skipped unchanged final DTO preflight: {}", result.is_ok()),
+        () = dto_gate.reached() => {},
+        () = tokio::time::sleep(Duration::from_secs(15)) => panic!("actual constructor settlement watchdog"),
+    }
+    {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        assert_eq!(role.binding, binding);
+        assert!(!role.refunded && role.copy_vod.is_none() && role.response_budget.is_none());
+        let pending = role
+            .pending_finite_close
+            .as_ref()
+            .expect("same original deferred settlement");
+        assert_eq!(pending.key.operation_id, operation);
+        let Mutation::SettleTyped(closed) = &pending.mutation else {
+            panic!("original typed constructor close")
+        };
+        assert_eq!(closed.settlement.members.len(), 5);
+        assert!(closed.settlement.members.iter().any(|member| matches!(member,
+            v2::MemberDisposition::Closed { fact: v2::ClosedFact::LegacyNeverAcquiredV1 { operation_id, .. }, .. }
+            if operation_id.uuid() == absence_close)), "same native absence witness must back the DTO");
+    }
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("real preflight is not ledger release")
+            .used,
+        charge
+    );
+    drop(preparation); // actual last inspection alias, before book destruction
+    drop(dto_gate);
+    let error = prepare
+        .await
+        .err()
+        .expect("original actual CopySink refusal");
+    assert!(!error.definitely_before_reservation());
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("one matching original R refund")
+            .used,
+        baseline
+    );
+    assert!(!runtime.has_failed_copy_admission());
+    assert!(runtime
+        .retained_preparations()
+        .expect("original book after actual destruction")
+        .is_empty());
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("no original constructor owner remains")
+        .drain()
+        .expect("positive original journal drain after rollback");
+}
+
+// The actual rejected immutable Scratch limits make the original journal
+// prepare definitively RolledBack. Cancellation below happens only AFTER the
+// original graph absence witness became the retained physical receipt.
+#[tokio::test]
+async fn copy_unaccepted_cached_receipt_replays_after_cancelled_finalizer_clears_budget() {
+    let root = tempfile::tempdir().expect("actual rejected-copy receipt replay");
+    let (runtime, request) =
+        NodeResourceRuntime::fixture_actual_copy_request(root.path(), true).await;
+    let mut owner = runtime
+        .prepare_copy_vod(request, deadline())
+        .await
+        .expect("original queued rejected copy");
+    let preparation = NodeResourceRuntime::fixture_copy_original_preparation(&owner);
+    let output = owner.output();
+    let charge = runtime
+        .accounting()
+        .expect("original rejected prepare remains charged")
+        .used;
+    assert_ne!(charge, ResourceVector::default());
+    let mut ticket = owner
+        .prepare_retirement(true, deadline())
+        .await
+        .expect("actual known rollback native ticket");
+    let binding = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        assert!(finite_prepare_definitely_unaccepted(&bundle));
+        assert!(role.response_budget.is_some() && role.receipt.is_none());
+        let copy = role.copy_vod.as_ref().expect("same retained absent graph");
+        assert!(copy
+            .never_root_closure
+            .as_ref()
+            .expect("original absence proof")
+            .matches(role.sealed.as_ref().expect("same original sealed graph")));
+        role.binding
+    };
+    drop(owner);
+    drop(output);
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
+    let mut finish = Box::pin(ticket.finish_retirement(deadline()));
+    tokio::select! {
+        result = &mut finish => panic!("finalizer skipped original receipt boundary: {result:?}"),
+        () = gate.reached() => {},
+        () = tokio::time::sleep(Duration::from_secs(15)) => panic!("real unaccepted receipt watchdog"),
+    }
+    {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        assert_eq!(role.binding, binding);
+        assert_eq!(
+            role.receipt
+                .as_ref()
+                .expect("actual retained absence receipt")
+                .custody_binding(),
+            binding
+        );
+        assert!(!role.refunded && role.copy_vod.is_none() && role.response_budget.is_none());
+        assert!(
+            role.sealed.is_none()
+                && role.typed_members.is_none()
+                && role.pending_finite_close.is_none()
+        );
+    }
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("receipt alone is not refund")
+            .used,
+        charge
+    );
+    drop(finish); // only borrowed waiting; the original receipt stays in role
+    drop(gate);
+    drop(ticket); // existing claim Drop requests repair of THIS same role
+    assert!(runtime.has_failed_copy_admission());
+    let replay_gate =
+        runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
+    let mut repair = Box::pin(runtime.maintain_failed_copy_admissions(deadline()));
+    tokio::select! {
+        result = &mut repair => panic!("repair failed to replay retained budget-less receipt: {result:?}"),
+        () = replay_gate.reached() => {},
+        () = tokio::time::sleep(Duration::from_secs(15)) => panic!("same original receipt replay watchdog"),
+    }
+    {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        assert_eq!(role.binding, binding);
+        assert_eq!(
+            role.receipt
+                .as_ref()
+                .expect("same original receipt remains")
+                .custody_binding(),
+            binding
+        );
+        assert!(role.copy_vod.is_none() && role.response_budget.is_none() && role.sealed.is_none());
+        assert!(!role.refunded && finite_prepare_definitely_unaccepted(&bundle));
+    }
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("replay still holds original R")
+            .used,
+        charge
+    );
+    drop(preparation);
+    drop(replay_gate);
+    assert_eq!(
+        repair
+            .await
+            .expect("positive same-receipt maintenance close"),
+        1
+    );
+    assert_eq!(
+        runtime
+            .accounting()
+            .expect("one exact original refund")
+            .used,
+        ResourceVector::default()
+    );
+    assert!(!runtime.has_failed_copy_admission());
+    assert!(runtime
+        .retained_preparations()
+        .expect("actual destroyed original book entry")
+        .is_empty());
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("no original rejected-copy owner remains")
+        .drain()
+        .expect("positive original journal drain after receipt replay");
 }
 
 // C5: scheduling custody never replaces the actual native/journal facts.
 async fn retained_copy_close_operation(preparation: &OwnedPreparation) -> Uuid {
     let bundle = preparation.state.lock().await;
     let role = &bundle.roles[0];
-    assert!(!role.refunded && role.copy_vod.is_none());
+    assert!(!role.refunded);
+    if let Some(copy) = role.copy_vod.as_ref() {
+        assert!(role.pending_finite_close.is_none() && role.transition.is_none());
+        assert!(
+            copy.never_root_closure.is_some()
+                || copy.root_only_closure.is_some()
+                || copy.process_closure.is_some()
+        );
+        return copy.settlement_operation_id;
+    }
     if let Some(pending) = role.pending_finite_close.as_ref() {
         pending.key.operation_id
     } else {
@@ -713,7 +1264,7 @@ async fn copy_live_close_ticket_excludes_maintenance_and_repeated_preparation() 
         .prepare_retirement(true, deadline())
         .await
         .expect("actual native close");
-    let operation = pending_command(&preparation, false).await;
+    let operation = retained_native_close_operation(&preparation, false).await;
     assert!(
         !runtime.has_failed_copy_admission(),
         "live ticket owns close custody"
@@ -750,13 +1301,12 @@ async fn copy_live_close_ticket_excludes_maintenance_and_repeated_preparation() 
     );
     // Old maintenance could move the pending command even while the ticket's
     // preparation alias prevented refund. Check the untouched command itself.
-    assert_eq!(pending_command(&preparation, false).await, operation);
+    assert_eq!(
+        retained_native_close_operation(&preparation, false).await,
+        operation
+    );
     assert_eq!(runtime.accounting().expect("same full R").used, charge);
-    drop(preparation); // inspection must not obstruct actual rich-bundle destruction
-    ticket
-        .finish_retirement(deadline())
-        .await
-        .expect("same ticket finalizes once");
+    finish_validated_ticket(&runtime, &mut ticket, preparation, false, operation).await;
     ticket
         .finish_retirement(deadline())
         .await
@@ -791,7 +1341,7 @@ async fn copy_lost_close_ticket_requests_original_repair_while_owner_remains_ali
         .prepare_retirement(true, deadline())
         .await
         .expect("actual original ticket");
-    let operation = pending_command(&preparation, false).await;
+    let operation = retained_native_close_operation(&preparation, false).await;
     drop(ticket); // owner is still alive: its Drop cannot be the repair signal
     assert!(runtime.has_failed_copy_admission());
     assert_eq!(
@@ -810,14 +1360,7 @@ async fn copy_lost_close_ticket_requests_original_repair_while_owner_remains_ali
         charge
     );
     drop(owner);
-    drop(preparation);
-    assert_eq!(
-        runtime
-            .maintain_failed_copy_admissions(deadline())
-            .await
-            .expect("original repair after last actual owner"),
-        1
-    );
+    finish_validated_maintenance(&runtime, preparation, false, operation).await;
     assert!(!runtime.has_failed_copy_admission());
     assert_eq!(
         runtime.accounting().expect("one original refund").used,
@@ -836,7 +1379,7 @@ async fn copy_cancelled_close_before_ticket_exposure_hands_original_custody_to_m
     let (runtime, mut owner, preparation) = original(root.path()).await;
     cancel_actual_start(&runtime, &mut owner, CopyStartFixtureStage::TaskArmed).await;
     let charge = runtime.accounting().expect("actual original R").used;
-    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupTicketPrepared);
     let mut close = Box::pin(owner.prepare_retirement(true, deadline()));
     tokio::select! {
         result=&mut close=>panic!("close returned before original handoff gate: {}",result.is_ok()),
@@ -849,7 +1392,7 @@ async fn copy_cancelled_close_before_ticket_exposure_hands_original_custody_to_m
     );
     drop(close);
     drop(gate);
-    let operation = pending_command(&preparation, false).await;
+    let operation = retained_native_close_operation(&preparation, false).await;
     assert!(
         runtime.has_failed_copy_admission(),
         "cancellation hands back original custody before owner Drop"
@@ -867,14 +1410,7 @@ async fn copy_cancelled_close_before_ticket_exposure_hands_original_custody_to_m
         charge
     );
     drop(owner);
-    drop(preparation);
-    assert_eq!(
-        runtime
-            .maintain_failed_copy_admissions(deadline())
-            .await
-            .expect("same original repair"),
-        1
-    );
+    finish_validated_maintenance(&runtime, preparation, false, operation).await;
     assert_eq!(
         runtime.accounting().expect("one original refund").used,
         ResourceVector::default()
@@ -1108,7 +1644,7 @@ async fn copy_cancelled_settlement_reply_after_real_commit_reuses_same_ticket_op
         .prepare_retirement(true, deadline())
         .await
         .expect("same original copy native closure and typed DTO");
-    let operation = pending_command(&preparation, true).await;
+    let operation = retained_native_close_operation(&preparation, true).await;
     let gate = runtime
         .journal
         .fixture_settlement_reply_gate(operation)
@@ -1121,7 +1657,16 @@ async fn copy_cancelled_settlement_reply_after_real_commit_reuses_same_ticket_op
         Some(true),
         "only real alias destruction permits final close"
     );
+    let dto_gate =
+        runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
     let mut finish = Box::pin(ticket.finish_retirement(deadline()));
+    tokio::select! {
+        result=&mut finish=>panic!("finish skipped original DTO gate: {result:?}"),
+        ()=dto_gate.reached()=>{},
+        ()=tokio::time::sleep(Duration::from_secs(15))=>panic!("original DTO gate watchdog"),
+    }
+    assert_eq!(pending_command(&preparation, true).await, operation);
+    drop(dto_gate);
     let committed = tokio::select! {
         result=&mut finish=>panic!("original ticket returned before committed reply gate: {result:?}"),
         diagnostic=gate.committed()=>diagnostic,
@@ -1274,41 +1819,47 @@ async fn cancellation_after_native_close(stage: CopyStartFixtureStage, task_acqu
         .prepare_retirement(true, deadline())
         .await
         .expect("retry uses metadata and SAME stored native proof");
-    {
-        let bundle = preparation.state.lock().await;
-        let pending = bundle.roles[0]
-            .pending_finite_close
-            .as_ref()
-            .expect("same pending close");
-        let Mutation::SettleTyped(closed) = &pending.mutation else {
-            panic!("original typed close")
-        };
-        assert!(
-            closed.settlement.members.iter().any(|d| match d {
-                v2::MemberDisposition::Closed {
-                    fact:
-                        v2::ClosedFact::VodOutputTaskV1 {
-                            join_operation_id, ..
-                        },
-                    ..
-                } if task_acquired => join_operation_id.uuid() == close,
-                v2::MemberDisposition::Closed {
-                    fact: v2::ClosedFact::VodOutputTaskNeverAcquiredV1 { operation_id, .. },
-                    ..
-                } if !task_acquired => operation_id.uuid() == close,
-                _ => false,
-            }),
-            "retry replaced the original process/task close operation"
-        );
-    }
-    drop(ticket); // losing a returned selector still cannot replace its receipt
-    retire_with_retained_aliases(
+    finish_existing_ticket_with_aliases(
         runtime,
         owner,
         preparation,
         task_acquired,
-        output,
-        application,
+        (output, application),
+        ticket,
+        move |preparation| {
+            Box::pin(async move {
+                {
+                    let bundle = preparation.state.lock().await;
+                    let pending = bundle.roles[0]
+                        .pending_finite_close
+                        .as_ref()
+                        .expect("same pending close");
+                    let Mutation::SettleTyped(closed) = &pending.mutation else {
+                        panic!("original typed close")
+                    };
+                    assert!(
+                        closed.settlement.members.iter().any(|d| match d {
+                            v2::MemberDisposition::Closed {
+                                fact:
+                                    v2::ClosedFact::VodOutputTaskV1 {
+                                        join_operation_id, ..
+                                    },
+                                ..
+                            } if task_acquired => join_operation_id.uuid() == close,
+                            v2::MemberDisposition::Closed {
+                                fact:
+                                    v2::ClosedFact::VodOutputTaskNeverAcquiredV1 {
+                                        operation_id, ..
+                                    },
+                                ..
+                            } if !task_acquired => operation_id.uuid() == close,
+                            _ => false,
+                        }),
+                        "retry replaced the original process/task close operation"
+                    );
+                }
+            })
+        },
     )
     .await;
 }
@@ -1395,6 +1946,10 @@ async fn copy_never_root_witness_is_stored_before_cancellable_contended_bundle_h
         .prepare_retirement(true, deadline())
         .await
         .expect("same one-shot absence proof resumed");
+    drop(graph);
+    finish_existing_ticket_with_aliases(
+        runtime, owner, preparation, false, (output, application), ticket,
+        move |preparation| Box::pin(async move {
     {
         let bundle = preparation.state.lock().await;
         let Mutation::SettleTyped(closed) = &bundle.roles[0]
@@ -1407,11 +1962,9 @@ async fn copy_never_root_witness_is_stored_before_cancellable_contended_bundle_h
         };
         assert!(closed.settlement.members.iter().any(|d|matches!(d,v2::MemberDisposition::Closed{fact:v2::ClosedFact::LegacyNeverAcquiredV1{operation_id,..},..} if operation_id.uuid()==close)),"retry minted a replacement no-root proof");
     }
-    drop(ticket);
-    drop(graph);
-    retire_with_retained_aliases(runtime, owner, preparation, false, output, application).await;
+        }),
+    ).await;
 }
-
 // R3/R6 acknowledgment-unknown shape: the real original source observation
 // is queued; its worker may already have committed, but this waiter never
 // observed the reply. Explicit storage-Unknown is a separate unforced case.
@@ -1475,8 +2028,19 @@ async fn copy_full_preflight_rejection_retains_original_witnesses_and_same_settl
         copy.settlement_operation_id
     };
     assert!(!settlement.is_nil());
+    let mut ticket = owner
+        .prepare_retirement(true, deadline())
+        .await
+        .expect("native ticket precedes application disposal and full DTO preflight");
+    assert_eq!(
+        retained_native_close_operation(&preparation, true).await,
+        settlement
+    );
+    drop(owner);
+    drop(output);
+    drop(application);
     assert!(
-        owner.prepare_retirement(true, deadline()).await.is_err(),
+        ticket.finish_retirement(deadline()).await.is_err(),
         "malformed constructed DTO bypassed full preflight before witness consumption"
     );
     let close = {
@@ -1519,18 +2083,21 @@ async fn copy_full_preflight_rejection_retains_original_witnesses_and_same_settl
         charge
     );
     assert!(
-        runtime.has_failed_copy_admission(),
-        "metadata rejection must keep the same original retry eligible"
+        !runtime.has_failed_copy_admission(),
+        "the same live ticket retains its claim across a borrowed finish refusal"
     );
     assert_eq!(
         runtime.copy_cleanup_holds().expect("actual metadata hold")[0].reason,
         CopyCleanupHoldReason::ValidationRejected
     );
 
-    let ticket = owner
-        .prepare_retirement(true, deadline())
-        .await
-        .expect("same original metadata restored, full validation then one-shot custody");
+    let gate = runtime.fixture_pause_copy_start(CopyStartFixtureStage::CleanupSettlementPrepared);
+    let mut retry = Box::pin(ticket.finish_retirement(deadline()));
+    tokio::select! {
+        result=&mut retry=>panic!("retry skipped full original preflight gate: {result:?}"),
+        ()=gate.reached()=>{},
+        ()=tokio::time::sleep(Duration::from_secs(15))=>panic!("original preflight retry watchdog"),
+    }
     assert_eq!(
         pending_command(&preparation, true).await,
         settlement,
@@ -1548,8 +2115,21 @@ async fn copy_full_preflight_rejection_retains_original_witnesses_and_same_settl
         };
         assert!(closed.settlement.members.iter().any(|m|matches!(m,v2::MemberDisposition::Closed{fact:v2::ClosedFact::VodOutputTaskV1{join_operation_id,..},..} if join_operation_id.uuid()==close)),"preflight retry replaced original native close proof");
     }
+    drop(preparation);
+    drop(gate);
+    retry
+        .await
+        .expect("same original validated witnesses settle after metadata retry");
+    assert_eq!(
+        runtime.accounting().expect("one matching refund").used,
+        ResourceVector::default()
+    );
     drop(ticket);
-    retire_with_retained_aliases(runtime, owner, preparation, true, output, application).await;
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("same original journal drained");
 }
 
 // C1: unlike the deadline case, these actual refusals occur inside the
@@ -1786,22 +2366,7 @@ async fn copy_entered_parser_full_window_retirement_wakes_and_joins_before_deadl
     .await
     .expect("R15 FAILURE: original full-window parser did not naturally join")
     .expect("same original native/scratch closure");
-    {
-        let bundle = preparation.state.lock().await;
-        let role = &bundle.roles[0];
-        assert!(role.copy_vod.is_none() && role.pending_finite_close.is_some());
-        let Mutation::SettleTyped(closed) = &role
-            .pending_finite_close
-            .as_ref()
-            .expect("same pending close")
-            .mutation
-        else {
-            panic!("original typed close")
-        };
-        assert!(closed.settlement.members.iter().any(|m| matches!(m,
-            v2::MemberDisposition::Closed { fact: v2::ClosedFact::VodOutputTaskV1 { task: actual, .. }, .. }
-                if actual.root_member_id.uuid() == root_member)), "original registered task inventory survives closure");
-    }
+    let operation = retained_native_close_operation(&preparation, true).await;
     assert!(!observation.is_nil());
     assert_eq!(
         runtime
@@ -1820,11 +2385,25 @@ async fn copy_entered_parser_full_window_retirement_wakes_and_joins_before_deadl
     );
     drop(output);
     drop(application);
-    drop(preparation);
-    ticket
-        .finish_retirement(deadline())
-        .await
-        .expect("same original joined ticket and alias release");
+    finish_validated_ticket_with(&runtime, &mut ticket, preparation, true, operation,
+        move |preparation| Box::pin(async move {
+    {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        assert!(role.copy_vod.is_none() && role.pending_finite_close.is_some());
+        let Mutation::SettleTyped(closed) = &role
+            .pending_finite_close
+            .as_ref()
+            .expect("same pending close")
+            .mutation
+        else {
+            panic!("original typed close")
+        };
+        assert!(closed.settlement.members.iter().any(|m| matches!(m,
+            v2::MemberDisposition::Closed { fact: v2::ClosedFact::VodOutputTaskV1 { task: actual, .. }, .. }
+                if actual.root_member_id.uuid() == root_member)), "original registered task inventory survives closure");
+    }
+        })).await;
     assert_eq!(
         runtime.accounting().expect("known original refund").used,
         ResourceVector::default()
@@ -2331,14 +2910,20 @@ int main(void) { alarm(20); for (;;) pause(); }
         expected: (ResourceVector, Uuid),
     ) {
         let (charge, settlement) = expected;
-        assert_eq!(pending_command(&preparation, false).await, settlement);
+        assert_eq!(
+            retained_native_close_operation(&preparation, false).await,
+            settlement
+        );
         assert_eq!(runtime.accounting().unwrap().used, charge);
         drop(owner);
         assert!(ticket
             .finish_retirement(Instant::now() + Duration::from_millis(1))
             .await
             .is_err());
-        assert_eq!(pending_command(&preparation, false).await, settlement);
+        assert_eq!(
+            retained_native_close_operation(&preparation, false).await,
+            settlement
+        );
         assert_eq!(runtime.accounting().unwrap().used, charge);
         drop(output);
         assert!(ticket
@@ -2346,12 +2931,8 @@ int main(void) { alarm(20); for (;;) pause(); }
             .await
             .is_err());
         assert_eq!(runtime.accounting().unwrap().used, charge);
-        drop(preparation);
         drop(application);
-        ticket
-            .finish_retirement(deadline())
-            .await
-            .expect("actual original closure after all aliases");
+        finish_validated_ticket(&runtime, &mut ticket, preparation, false, settlement).await;
         assert_eq!(
             runtime.accounting().unwrap().used,
             ResourceVector::default()
@@ -2728,6 +3309,11 @@ int main(void) { alarm(20); for (;;) pause(); }
             .prepare_retirement(true, deadline())
             .await
             .expect("same original source worker resumes");
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        assert_eq!(original_ids(&preparation).await.3, ids.3);
+        finish_existing_ticket_with_aliases(
+            runtime, owner, preparation, false, (output, application), ticket,
+            move |preparation| Box::pin(async move {
         {
             let bundle = preparation.state.lock().await;
             let Mutation::SettleTyped(closed) = &bundle.roles[0]
@@ -2743,16 +3329,8 @@ int main(void) { alarm(20); for (;;) pause(); }
                 if member_id.uuid() == member && copies.iter().any(|copy| matches!(copy,
                     v2::CopyClosed::ActualOwnedClose { operation_id, .. } if operation_id.uuid() == operation)))));
         }
-        finish_aliases(
-            runtime,
-            owner,
-            preparation,
-            output,
-            application,
-            ticket,
-            (charge, ids.3),
-        )
-        .await;
+            }),
+        ).await;
     }
 
     #[tokio::test]
@@ -2839,6 +3417,11 @@ int main(void) { alarm(20); for (;;) pause(); }
             .prepare_retirement(true, deadline())
             .await
             .expect("actual same acquired prefix retirement");
+        assert_eq!(runtime.accounting().unwrap().used, charge);
+        assert_eq!(original_ids(&preparation).await.3, ids.3);
+        finish_existing_ticket_with_aliases(
+            runtime, owner, preparation, false, (output, application), ticket,
+            move |preparation| Box::pin(async move {
         {
             let bundle = preparation.state.lock().await;
             let Mutation::SettleTyped(closed) = &bundle.roles[0]
@@ -2853,17 +3436,10 @@ int main(void) { alarm(20); for (;;) pause(); }
                 v2::MemberDisposition::Closed { member_id, fact: v2::ClosedFact::ScratchAssetsV3 { .. } } if member_id.uuid() == member)),
                 "actual acquired prefix must close at exact head, never become NeverAcquired");
         }
-        finish_aliases(
-            runtime,
-            owner,
-            preparation,
-            output,
-            application,
-            ticket,
-            (charge, ids.3),
-        )
-        .await;
+            }),
+        ).await;
     }
+
     // R19 native-result delivery boundaries. These gates retain real positive
     // native results in their original registered workers. No gate supplies a
     // result, acknowledgment, replacement task, descriptor or close witness.

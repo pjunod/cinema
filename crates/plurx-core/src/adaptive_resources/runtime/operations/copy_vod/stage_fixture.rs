@@ -13,6 +13,7 @@ pub(in crate::adaptive_resources::runtime) enum CopyStartFixtureStage {
     CleanupNativeClosed,
     NeverRootProofReadyToMint,
     NeverRootProofStored,
+    CleanupTicketPrepared,
     CleanupSettlementPrepared,
     TaskArmed,
     TaskRegistered,
