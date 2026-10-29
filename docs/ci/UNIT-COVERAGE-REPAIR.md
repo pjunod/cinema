@@ -105,12 +105,13 @@ network namespace are required. The command preserves source archives, full
 logs, exact Cargo artifact manifests and coverage receipts outside compiler
 cache directories; cleanup targets only its labelled container and network.
 
-The fixed corpus runs the full default workspace suite, the existing ignored
-sharing tests, and the replicated feature graph. Both complete artifact
+The fixed corpus preflights sharing admission and Store-result auditing, then
+runs the existing ignored sharing tests before the long full default workspace
+suite and replicated feature graph. Both complete artifact
 manifests remain in the report denominator. The augmented core replay uses the
 reviewed cluster/Hiqlite prefix set plus every feature-added test only while its
 reviewed source digest matches; any drift selects the full augmented core
-suite. The five affected integration targets run completely. Optional `--native`
+suite. The eight affected integration targets run completely. Optional `--native`
 adds twelve named software-media/storage tests, never hardware qualification.
 No corpus phase stops early based on the measured percentage.
 

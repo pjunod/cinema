@@ -30,6 +30,9 @@ AUGMENTED = (
     ('plurx-core', 'plurx_core', 'lib', 2),
     ('plurx-core', 'store_contract', 'test', 1),
     ('plurx-core', 'schema_lineage_upgrade', 'test', 1),
+    ('plurx-core', 'hiqlite_encoded_bootstrap', 'test', 1),
+    ('plurx-core', 'hiqlite_tls_provider', 'test', 1),
+    ('plurx-core', 'rustls_single_provider', 'test', 1),
     ('plurxd', 'cluster_activation', 'test', 1),
     ('plurxd', 'cluster_activity', 'test', 1),
     ('plurxd', 'live_tv_two_node', 'test', 1),
@@ -298,6 +301,21 @@ class Campaign:
     def test_env(self, metadata):
         return {p['name']: str(Path(p['manifest_path']).parent) for p in metadata['packages']}
 
+    def preflight(self, metadata, receipt):
+        directories = self.test_env(metadata)
+        binary = self.artifact(receipt, 'plurxd', 'plurxd', 'bin')
+        available = self.names('daemon-preflight', binary, directories['plurxd'])
+        required = {
+            'http::tests::sharing_http_claim_approval_rotation_and_pending_catalogue_denial',
+            'store_result::tests::production_store_results_never_use_bare_let_underscore',
+            'store_result::tests::every_classified_failure_has_a_bounded_metric_row',
+        }
+        if not required <= available:
+            raise ValueError('required sharing/store preflight tests are missing')
+        selected = required | {name for name in available if name.startswith('store_result::tests::')}
+        self.run('daemon-preflight', [binary, *sorted(selected), '--exact', '--test-threads=1'],
+                 cwd=directories['plurxd'], bound=300)
+
     def sharing(self, metadata, receipt):
         if os.environ.get('PLURX_SHARING_FIXTURE_IP') != self.env['PLURX_SHARING_FIXTURE_IP']:
             raise ValueError('host wrapper must provide the declared CGNAT fixture endpoint')
@@ -387,12 +405,13 @@ class Campaign:
         self.bootstrap()
         default_metadata, default_receipt = self.build(self.output)
         self.verify_normal_bins(default_receipt)
+        self.preflight(default_metadata, default_receipt)
+        self.sharing(default_metadata, default_receipt)
         status = self.run('default-tests', ['cargo', 'test', '--offline', '--workspace', '--tests',
                           '--locked', '--exclude', EXCLUDED, '--no-fail-fast'], bound=21600, check=False)
         (self.output / 'test-exit-status.txt').write_text(str(status) + '\n')
         if status:
             raise RuntimeError('full default workspace suite failed')
-        self.sharing(default_metadata, default_receipt)
         expanded, core_scope = self.augmented()
         if self.args.native:
             self.native(default_metadata, default_receipt)

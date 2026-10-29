@@ -99,9 +99,33 @@ class CollectorGuards(unittest.TestCase):
         self.assertFalse((output / 'receipt.json').exists())
         self.assertEqual(json.loads((output / 'failure.json').read_text())['status'], 'failed')
 
+    def test_failed_sharing_preflight_prevents_expensive_default_execution(self):
+        collector = object.__new__(campaign.Campaign)
+        collector.root = self.root
+        collector.output = self.directory / 'early-failure'
+        collector.output.mkdir()
+        collector.args = argparse.Namespace(source_archive=self.archive,
+            source_sha256=self.sha, source_commit=self.commit, source_epoch=0, native=False)
+        phases = []
+        def fail_sharing(*_args):
+            phases.append('sharing')
+            raise RuntimeError('sharing preflight failed')
+        with patch.object(collector, 'bootstrap', side_effect=lambda: phases.append('bootstrap')), \
+             patch.object(collector, 'build', return_value=({}, {})), \
+             patch.object(collector, 'verify_normal_bins'), \
+             patch.object(collector, 'preflight', side_effect=lambda *_: phases.append('preflight')), \
+             patch.object(collector, 'sharing', side_effect=fail_sharing), \
+             patch.object(collector, 'run') as expensive:
+            with self.assertRaisesRegex(RuntimeError, 'sharing preflight failed'):
+                collector.collect()
+            expensive.assert_not_called()
+        self.assertEqual(phases, ['bootstrap', 'preflight', 'sharing'])
+        self.assertFalse((collector.output / 'cov.json').exists())
+        self.assertFalse((collector.output / 'receipt.json').exists())
+
     def test_no_native_threshold_or_driver_corpus(self):
         self.assertEqual(len(campaign.NATIVE), 12)
-        self.assertEqual(len(campaign.AUGMENTED), 6)
+        self.assertEqual(len(campaign.AUGMENTED), 9)
         self.assertEqual(campaign.EXCLUDED, 'plurx-cluster-check')
         self.assertIn(('plurx-core', 'store_contract', 'test', 1), campaign.AUGMENTED)
 
