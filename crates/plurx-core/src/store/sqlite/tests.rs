@@ -860,9 +860,10 @@ async fn v6_rebuild_preserves_everything() {
     // v115 adds one-time playback handoff codes and file-scoped tokens;
     // v116 appends text translation, v117 Shared caption leases,
     // v118 producer retargeting and v119 claim-bound playback continuity;
-    // v120 gives artifact-only text model setup its managed v2 resource view.
+    // v120 gives artifact-only text model setup its managed v2 resource view;
+    // v121 appends the managed v3 view for verified text-artifact inference.
     assert_eq!(
-        version, 120,
+        version, 121,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );
