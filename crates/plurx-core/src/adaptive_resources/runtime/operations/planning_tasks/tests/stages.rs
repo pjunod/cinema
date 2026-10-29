@@ -11,30 +11,46 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::{Notify, Semaphore};
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Stage {
+    Native,
+    Registered,
+    BetweenEntries,
+}
 struct Barrier {
     entered: Notify,
     probe_joined: Notify,
     release: Semaphore,
     visits: AtomicUsize,
 }
-fn registry() -> &'static Mutex<BTreeMap<Uuid, Arc<Barrier>>> {
-    static REGISTRY: OnceLock<Mutex<BTreeMap<Uuid, Arc<Barrier>>>> = OnceLock::new();
+fn registry() -> &'static Mutex<BTreeMap<(Uuid, Stage), Arc<Barrier>>> {
+    static REGISTRY: OnceLock<Mutex<BTreeMap<(Uuid, Stage), Arc<Barrier>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
-fn lookup(id: Uuid) -> Option<Arc<Barrier>> {
+fn lookup(id: Uuid, stage: Stage) -> Option<Arc<Barrier>> {
     registry()
         .lock()
         .expect("fixture registry")
-        .get(&id)
+        .get(&(id, stage))
         .cloned()
 }
 
 pub(in crate::adaptive_resources::runtime::operations) struct Gate {
     id: Uuid,
+    stage: Stage,
     barrier: Arc<Barrier>,
 }
 impl Gate {
     pub(super) fn install(id: Uuid) -> Self {
+        Self::install_at(id, Stage::Native)
+    }
+    pub(super) fn registered(id: Uuid) -> Self {
+        Self::install_at(id, Stage::Registered)
+    }
+    pub(super) fn between_entries(id: Uuid) -> Self {
+        Self::install_at(id, Stage::BetweenEntries)
+    }
+    fn install_at(id: Uuid, stage: Stage) -> Self {
         let barrier = Arc::new(Barrier {
             entered: Notify::new(),
             probe_joined: Notify::new(),
@@ -44,9 +60,9 @@ impl Gate {
         assert!(registry()
             .lock()
             .expect("fixture registry")
-            .insert(id, Arc::clone(&barrier))
+            .insert((id, stage), Arc::clone(&barrier))
             .is_none());
-        Self { id, barrier }
+        Self { id, stage, barrier }
     }
     pub(super) async fn entered(&self) {
         self.barrier.entered.notified().await;
@@ -66,14 +82,14 @@ impl Drop for Gate {
         registry()
             .lock()
             .expect("fixture registry")
-            .remove(&self.id);
+            .remove(&(self.id, self.stage));
         // A failing assertion must not leave the original native job gated.
         self.barrier.release.add_permits(1);
     }
 }
 
 pub(in crate::adaptive_resources::runtime::operations) async fn before_engine_native(id: Uuid) {
-    if let Some(barrier) = lookup(id) {
+    if let Some(barrier) = lookup(id, Stage::Native) {
         barrier.visits.fetch_add(1, Ordering::SeqCst);
         barrier.entered.notify_one();
         barrier
@@ -85,14 +101,14 @@ pub(in crate::adaptive_resources::runtime::operations) async fn before_engine_na
     }
 }
 pub(in crate::adaptive_resources::runtime::operations) fn probe_joined(engine_id: Uuid) {
-    if let Some(barrier) = lookup(engine_id) {
+    if let Some(barrier) = lookup(engine_id, Stage::Native) {
         barrier.probe_joined.notify_one();
     }
 }
 pub(in crate::adaptive_resources::runtime::operations) async fn before_enrichment_ack(
     operation: Uuid,
 ) {
-    if let Some(barrier) = lookup(operation) {
+    if let Some(barrier) = lookup(operation, Stage::Native) {
         barrier.visits.fetch_add(1, Ordering::SeqCst);
         barrier.entered.notify_one();
         barrier
@@ -100,6 +116,28 @@ pub(in crate::adaptive_resources::runtime::operations) async fn before_enrichmen
             .acquire()
             .await
             .expect("fixture release")
+            .forget();
+    }
+}
+
+// These delays observe the real registered handles; they grant no entry.
+pub(in crate::adaptive_resources::runtime::operations) async fn before_registered_entry(id: Uuid) {
+    pause_entry(id, Stage::Registered).await;
+}
+pub(in crate::adaptive_resources::runtime::operations) async fn between_registered_entries(
+    id: Uuid,
+) {
+    pause_entry(id, Stage::BetweenEntries).await;
+}
+async fn pause_entry(id: Uuid, stage: Stage) {
+    if let Some(barrier) = lookup(id, stage) {
+        barrier.visits.fetch_add(1, Ordering::SeqCst);
+        barrier.entered.notify_one();
+        barrier
+            .release
+            .acquire()
+            .await
+            .expect("fixture entry release")
             .forget();
     }
 }

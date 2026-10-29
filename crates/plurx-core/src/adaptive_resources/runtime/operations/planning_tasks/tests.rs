@@ -510,3 +510,226 @@ async fn v7_original_planning_prepare_persists_p_and_metadata_claim_before_nativ
     assert_only_m_survives(&runtime, &owner).await;
     Arc::try_unwrap(runtime).ok().unwrap().drain().unwrap();
 }
+
+#[derive(Clone, Copy)]
+enum EntryFence {
+    Epoch,
+    Drain,
+    Overage,
+    EpochBetweenSiblings,
+    DrainAfterEntry,
+}
+
+async fn registered_planning_entry_respects_original_fence(fence: EntryFence) {
+    let root = tempfile::tempdir().expect("real registered P entry fixture");
+    std::fs::write(
+        root.path().join("never-opened.mp4"),
+        b"same retained source",
+    )
+    .expect("actual original source");
+    let runtime = fixture_runtime(root.path());
+    let request = fixture_request(
+        root.path(),
+        "/never-entered/ffprobe".into(),
+        "/never-entered/ffmpeg".into(),
+    );
+    let original = plan::prepare(&runtime, request, deadline()).expect("actual charged P/M");
+    let preparation = plan::original_preparation_for_test(&original);
+    runtime
+        .prepare_planning_inputs(&preparation, deadline())
+        .await
+        .expect("actual original source parent acquired");
+    let charged = runtime.accounting().expect("full original P/M charge").used;
+    let (binding, member) = {
+        let bundle = preparation.state.lock().await;
+        let role = &bundle.roles[0];
+        let tasks = role.planning_tasks.as_ref().expect("same original P");
+        assert!(!tasks.entered && tasks.probe.is_none() && tasks.engine.is_none());
+        assert!(!role.sources[&tasks.source_member].parent_closed());
+        (role.binding, tasks.engine_plan.member_id.uuid())
+    };
+    let gate = match fence {
+        EntryFence::EpochBetweenSiblings => stages::Gate::between_entries(member),
+        EntryFence::DrainAfterEntry => stages::Gate::install(member),
+        _ => stages::Gate::registered(member),
+    };
+    let engine_native = if matches!(fence, EntryFence::DrainAfterEntry) {
+        None
+    } else {
+        Some(stages::Gate::install(member))
+    };
+    let mut collect = Some(Box::pin(
+        runtime.collect_planning_tasks(&preparation, deadline()),
+    ));
+    tokio::select! {
+        result = collect.as_mut().expect("same borrowed collector") => panic!("original P skipped registered entry boundary: {}", result.is_ok()),
+        () = gate.entered() => {},
+        () = tokio::time::sleep(Duration::from_secs(15)) => panic!("real original P registration watchdog"),
+    }
+    // These exercise the actual existing authority controls. The overage case
+    // installs an accounting fence, not a fabricated kernel overage witness.
+    match fence {
+        EntryFence::Epoch | EntryFence::EpochBetweenSiblings => {
+            let bound = u64::MAX / 4;
+            runtime
+                .update_capacity(
+                    2,
+                    Metric::Known(ResourceVector {
+                        cpu_ns_per_second: bound,
+                        peak_memory_bytes: bound,
+                        handles: bound,
+                        processes: bound,
+                        hardware_slots: bound,
+                        tuner_slots: bound,
+                        scratch_bytes: bound,
+                    }),
+                )
+                .expect("actual intervening allocation epoch");
+        }
+        EntryFence::Drain | EntryFence::DrainAfterEntry => {
+            runtime.begin_drain().expect("actual intervening drain");
+        }
+        EntryFence::Overage => runtime
+            .ledger
+            .record_native_overage(
+                binding,
+                Uuid::new_v4(),
+                ResourceVector {
+                    handles: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("actual retained-ledger overage fence"),
+    }
+    if matches!(fence, EntryFence::DrainAfterEntry) {
+        assert_eq!(
+            gate.visits(),
+            1,
+            "same engine passed its original released latch"
+        );
+        drop(collect.take()); // only waiter; same original handle remains in P
+    }
+    drop(gate);
+    let result = if let Some(collect) = collect.take() {
+        collect.await
+    } else {
+        // A new policy fence refuses new entry, but cannot prevent original
+        // handle collection and cleanup under the same prepaid P.
+        runtime
+            .collect_planning_tasks(&preparation, deadline())
+            .await
+    };
+    assert!(
+        result.is_err(),
+        "failed native work cannot produce a planning report"
+    );
+    if let Some(engine_native) = engine_native {
+        assert_eq!(
+            engine_native.visits(),
+            0,
+            "refused engine never passed its original receiver"
+        );
+    }
+    {
+        let mut bundle = preparation.state.lock().await;
+        let role = &mut bundle.roles[0];
+        let tasks = role.planning_tasks.as_mut().expect("same retained P");
+        assert!(tasks.entered && tasks.unknown);
+        assert!(
+            tasks.probe.is_none() && tasks.engine.is_none(),
+            "both original handles joined"
+        );
+        let probe = tasks
+            .probe_failure
+            .as_ref()
+            .expect("original probe outcome retained");
+        if matches!(
+            fence,
+            EntryFence::EpochBetweenSiblings | EntryFence::DrainAfterEntry
+        ) {
+            assert!(
+                !matches!(probe.error, DecodeFactError::Deadline),
+                "first released sibling ran its original collector"
+            );
+        } else {
+            assert!(
+                matches!(probe.error, DecodeFactError::Deadline),
+                "closed original receiver prevented native discovery"
+            );
+        }
+        assert_eq!(
+            tasks
+                .engine_failure
+                .as_ref()
+                .expect("original engine outcome retained")
+                .phase,
+            crate::process::fixed_planning_engine::FixedEngineFailurePhase::BeforeNativeEntry
+        );
+        assert!(tasks.probe_closed.is_none() && tasks.engine_closed.is_none());
+        assert!(
+            tasks.never_entered.is_none(),
+            "registered tasks cannot become NeverAcquired"
+        );
+        assert!(!role.refunded && role.pending_finite_close.is_none());
+    }
+    let held = runtime.accounting().expect("same full held charge");
+    let mut expected = charged;
+    if matches!(fence, EntryFence::Overage) {
+        expected.handles += 1;
+    }
+    assert_eq!(held.used, expected);
+    assert!(held.unknown_held > 0);
+    // Joining the outcomes and checked cleanup does not invent a typed P close.
+    runtime
+        .retry_planning_native_failures(&preparation, deadline())
+        .await
+        .expect("same original failed owners positively drained");
+    {
+        let mut bundle = preparation.state.lock().await;
+        for source in bundle.roles[0].sources.values_mut() {
+            source
+                .close_parent()
+                .await
+                .expect("same actual source parent closed");
+        }
+    }
+    assert_eq!(
+        runtime.accounting().expect("cleanup is not refund").used,
+        expected
+    );
+    drop(original);
+    drop(preparation);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("original journal owner drained");
+    // No registered-but-unentered settlement adapter is claimed by this slice.
+    // Keep the durable full hold rather than remove its original namespace.
+    eprintln!(
+        "retained original R1 P fixture custody at {}",
+        root.keep().display()
+    );
+}
+
+#[tokio::test]
+async fn registered_planning_latches_refuse_intervening_epoch_and_join_both_originals() {
+    registered_planning_entry_respects_original_fence(EntryFence::Epoch).await;
+}
+#[tokio::test]
+async fn registered_planning_latches_refuse_intervening_drain_and_join_both_originals() {
+    registered_planning_entry_respects_original_fence(EntryFence::Drain).await;
+}
+#[tokio::test]
+async fn registered_planning_latches_refuse_intervening_overage_and_join_both_originals() {
+    registered_planning_entry_respects_original_fence(EntryFence::Overage).await;
+}
+#[tokio::test]
+async fn released_probe_and_refused_engine_keep_both_original_outcomes_and_full_charge() {
+    registered_planning_entry_respects_original_fence(EntryFence::EpochBetweenSiblings).await;
+}
+
+#[tokio::test]
+async fn registered_planning_join_survives_waiter_cancellation_and_later_drain() {
+    registered_planning_entry_respects_original_fence(EntryFence::DrainAfterEntry).await;
+}

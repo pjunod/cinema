@@ -444,7 +444,17 @@ impl NodeResourceRuntime {
         if !bundle.installed || bundle.roles.len() != 2 {
             return Err(OperationError::State);
         }
-        self.eligible(&bundle)?;
+        // Epoch/drain/overage gates new entry, never the join of tasks that
+        // this SAME original P already registered and may have released.
+        let registered = bundle.roles[0]
+            .planning_tasks
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .entered;
+        if !registered {
+            self.eligible(&bundle)?;
+        }
+        let mut hold_error = None;
         let bundle_id = bundle.id;
         let cleanup_requested = bundle.roles[1]
             .planning_metadata
@@ -532,8 +542,22 @@ impl NodeResourceRuntime {
             task.entered = true;
             // Both handles are now original retained book members. Neither
             // source, process, image nor parser can enter before this point.
-            let _ = probe_start.send(());
-            let _ = engine_start.send(());
+            #[cfg(test)]
+            tests::stages::before_registered_entry(task.engine_plan.member_id.uuid()).await;
+            let probe_released = self.release_native_entry(binding, probe_start).is_ok();
+            #[cfg(test)]
+            tests::stages::between_registered_entries(task.engine_plan.member_id.uuid()).await;
+            let engine_released = self.release_native_entry(binding, engine_start).is_ok();
+            if !probe_released || !engine_released {
+                // Each failed release drops only its own unopened sender.
+                // An earlier sibling may already own native work: retain and
+                // join BOTH original handles below before reporting refusal.
+                task.unknown = true;
+                hold_error = self
+                    .retain_planning_uncertainty(binding)
+                    .err()
+                    .or(hold_error);
+            }
         }
         if let Some(original) = task.probe.as_mut() {
             let joined = tokio::time::timeout_at(deadline.into(), original)
@@ -541,7 +565,7 @@ impl NodeResourceRuntime {
                 .map_err(|_| OperationError::Deadline)?;
             task.probe = None;
             let native = match joined {
-                Ok(Ok(native)) => native,
+                Ok(Ok(native)) => Some(native),
                 Ok(Err(failure)) => {
                     #[cfg(all(test, feature = "fixtures"))]
                     eprintln!(
@@ -551,42 +575,50 @@ impl NodeResourceRuntime {
                     tracing::warn!(reason = ?failure.error.fallback_reason(), "original planning probe failed; retaining native owners for cleanup");
                     task.probe_failure = Some(failure);
                     task.unknown = true;
-                    self.retain_planning_uncertainty(binding)?;
-                    return Err(OperationError::State);
+                    hold_error = self
+                        .retain_planning_uncertainty(binding)
+                        .err()
+                        .or(hold_error);
+                    None
                 }
                 _ => {
                     task.unknown = true;
-                    self.retain_planning_uncertainty(binding)?;
-                    return Err(OperationError::State);
+                    hold_error = self
+                        .retain_planning_uncertainty(binding)
+                        .err()
+                        .or(hold_error);
+                    None
                 }
             };
-            if task.probe_plan.source_member_id.uuid() != task.source_member {
-                return Err(OperationError::State);
+            if let Some(native) = native {
+                if task.probe_plan.source_member_id.uuid() != task.source_member {
+                    return Err(OperationError::State);
+                }
+                let known = FixedProbeKnownClosed::from_joined_original(
+                    native,
+                    &task.probe_plan,
+                    task.observed_source
+                        .as_deref()
+                        .ok_or(OperationError::State)?,
+                )
+                .inspect_err(|error| {
+                    #[cfg(all(test, feature = "fixtures"))]
+                    eprintln!("original planning probe completion proof refused: {error:?}");
+                    #[cfg(not(all(test, feature = "fixtures")))]
+                    let _ = error;
+                })?;
+                let (report, closure) = known.split();
+                task.probe_observed = Some(v2::FixedProbeDiscoverTaskObservedV1 {
+                    task: task.probe_plan.clone(),
+                    executable_object_version: report.executable_object_version.clone(),
+                    executable_sha256: report.executable_sha256.clone(),
+                    build_digest: report.build_digest.clone(),
+                });
+                task.probe_report = Some(report);
+                task.probe_closed = Some(closure);
+                #[cfg(test)]
+                tests::stages::probe_joined(task.engine_plan.member_id.uuid());
             }
-            let known = FixedProbeKnownClosed::from_joined_original(
-                native,
-                &task.probe_plan,
-                task.observed_source
-                    .as_deref()
-                    .ok_or(OperationError::State)?,
-            )
-            .inspect_err(|error| {
-                #[cfg(all(test, feature = "fixtures"))]
-                eprintln!("original planning probe completion proof refused: {error:?}");
-                #[cfg(not(all(test, feature = "fixtures")))]
-                let _ = error;
-            })?;
-            let (report, closure) = known.split();
-            task.probe_observed = Some(v2::FixedProbeDiscoverTaskObservedV1 {
-                task: task.probe_plan.clone(),
-                executable_object_version: report.executable_object_version.clone(),
-                executable_sha256: report.executable_sha256.clone(),
-                build_digest: report.build_digest.clone(),
-            });
-            task.probe_report = Some(report);
-            task.probe_closed = Some(closure);
-            #[cfg(test)]
-            tests::stages::probe_joined(task.engine_plan.member_id.uuid());
         }
         if let Some(original) = task.engine.as_mut() {
             // Refuse an unencodable audit plan before awaiting/taking the
@@ -598,7 +630,7 @@ impl NodeResourceRuntime {
                 .map_err(|_| OperationError::Deadline)?;
             task.engine = None;
             let native = match joined {
-                Ok(Ok(native)) => native,
+                Ok(Ok(native)) => Some(native),
                 Ok(Err(failure)) => {
                     #[cfg(all(test, feature = "fixtures"))]
                     eprintln!(
@@ -607,33 +639,41 @@ impl NodeResourceRuntime {
                     );
                     task.engine_failure = Some(failure);
                     task.unknown = true;
-                    self.retain_planning_uncertainty(binding)?;
-                    return Err(OperationError::State);
+                    hold_error = self
+                        .retain_planning_uncertainty(binding)
+                        .err()
+                        .or(hold_error);
+                    None
                 }
                 _ => {
                     task.unknown = true;
-                    self.retain_planning_uncertainty(binding)?;
-                    return Err(OperationError::State);
+                    hold_error = self
+                        .retain_planning_uncertainty(binding)
+                        .err()
+                        .or(hold_error);
+                    None
                 }
             };
-            let known =
-                FixedEngineKnownClosed::from_joined_original(native, task.engine_plan.clone())?;
-            let (report, closure) = known.split();
-            task.engine_observed = Some(v2::FixedPlanningEngineTaskObservedV2 {
-                member_id: task.engine_plan.member_id,
-                plan_sha256,
-                used_file_slots: u16::try_from(closure.used_file_slots())
-                    .map_err(|_| OperationError::State)?,
-                media_digest: closure.media_digest().to_owned(),
-            });
-            task.engine_report = Some(report);
-            task.engine_closed = Some(closure);
+            if let Some(native) = native {
+                let known =
+                    FixedEngineKnownClosed::from_joined_original(native, task.engine_plan.clone())?;
+                let (report, closure) = known.split();
+                task.engine_observed = Some(v2::FixedPlanningEngineTaskObservedV2 {
+                    member_id: task.engine_plan.member_id,
+                    plan_sha256,
+                    used_file_slots: u16::try_from(closure.used_file_slots())
+                        .map_err(|_| OperationError::State)?,
+                    media_digest: closure.media_digest().to_owned(),
+                });
+                task.engine_report = Some(report);
+                task.engine_closed = Some(closure);
+            }
         }
         // An uncertain sibling cannot justify discarding or replacing the
         // other original task. Join any retained handles above, but never
         // turn partial completion into a successful planning report.
         if task.unknown {
-            return Err(OperationError::State);
+            return Err(hold_error.unwrap_or(OperationError::State));
         }
         let probe = task.probe_report.take().ok_or(OperationError::State)?;
         let engine = task.engine_report.take().ok_or(OperationError::State)?;

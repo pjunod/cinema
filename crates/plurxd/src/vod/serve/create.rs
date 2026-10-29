@@ -3483,6 +3483,68 @@ impl VodServe {
 
 #[cfg(test)]
 impl VodServe {
+    /// Observe the same cached M-backed Encoding only after the actual Source
+    /// assignment's dispatch/child associations and reader demand retired.
+    /// Weak observation adds no metadata/application owner or close witness.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn settled_source_recipe_for_actor_test(
+        &self,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    ) -> (
+        std::path::PathBuf,
+        std::sync::Weak<crate::vodencode::Encoding>,
+    ) {
+        let originals: Vec<_> = self
+            .shared
+            .renditions
+            .lock()
+            .await
+            .values()
+            .filter(|rendition| {
+                rendition
+                    .source_owners
+                    .settled_assignment_for_actor_test(assignment)
+            })
+            .cloned()
+            .collect();
+        assert_eq!(originals.len(), 1, "one original settled Source recipe");
+        let rendition = &originals[0];
+        assert!(rendition.key.starts_with("source-"));
+        assert!(
+            rendition.readers.lock().await.is_empty(),
+            "actual Source readers must retire before cache eviction"
+        );
+        assert!(
+            rendition
+                .dormant_since
+                .lock()
+                .expect("dormant lock")
+                .is_some(),
+            "the original recipe is already dormant"
+        );
+        let encoding = rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("original encoded Source recipe");
+        assert!(
+            encoding.planning_metadata.is_some(),
+            "the cached original Encoding still owns its original M report"
+        );
+        (rendition.dir.path().to_owned(), Arc::downgrade(encoding))
+    }
+
+    /// Exercise the existing actual cache owner's eviction callback. Its
+    /// original gates/readers/pool/producer/refcount/path-identity checks still
+    /// decide eligibility; this fixture does not fabricate capacity pressure.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn pressure_evict_source_recipe_for_actor_test(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<bool> {
+        super::cache_budget::pressure_evict_test(&self.shared, path).await
+    }
+
     /// Move only the fixture's actual last-media clock past the existing idle
     /// allowance, then run the unmodified production maintenance/reap path.
     pub(crate) async fn expire_source_viewer_for_actor_test(

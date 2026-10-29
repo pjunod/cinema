@@ -690,21 +690,54 @@ async fn source_copy_preadmission_fixture_with_restart(
                 state,
                 Arc::clone(&manager),
                 prepared,
-                assignment,
+                assignment.clone(),
                 12,
                 restart_case,
                 client.clone(),
             )
             .await;
+            // Media/ingress/child/body retirement is complete, but the same
+            // long-lived manager still caches its original dormant recipe.
+            // That Encoding legitimately retains M; planning repair alone
+            // cannot evict a live cache alias or treat it as already absent.
+            let (cached_path, original_encoding) = manager
+                .vod
+                .settled_source_recipe_for_actor_test(&assignment)
+                .await;
+            assert!(original_encoding.upgrade().is_some());
+            assert_eq!(
+                runtime
+                    .planning_ownership_diagnostics()
+                    .expect("actual original M inventory before cache eviction")
+                    .metadata_owners,
+                1,
+                "logical media retirement must not refund the cached recipe's M"
+            );
             tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
-                    // Keep the original manager and run its ordinary bounded
-                    // repair pass after actual media/application retirement.
+                    // Explicitly exercise the original eviction callback,
+                    // without claiming real capacity pressure or TTL expiry.
+                    // It must retire/drop the actual cached recipe before the
+                    // original planning supervisor can return M's charge.
+                    manager
+                        .vod
+                        .pressure_evict_source_recipe_for_actor_test(&cached_path)
+                        .await
+                        .expect("original Source cache eviction callback");
+                    manager.vod.maintain().await;
                     manager.reconcile_adaptive_attempt_tasks().await;
                     if runtime
                         .planning_ownership_diagnostics()
                         .is_some_and(|counts| counts.metadata_owners == 0)
                     {
+                        assert!(
+                            original_encoding.upgrade().is_none(),
+                            "M cannot return while the original cached Encoding remains alive"
+                        );
+                        assert!(
+                            matches!(std::fs::symlink_metadata(&cached_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                            "the actual cache owner must remove the original recipe directory"
+                        );
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;

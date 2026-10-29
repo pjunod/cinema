@@ -33,6 +33,8 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     config.cluster.api_bind = api.local_addr().expect("fixture API address");
     config.cluster.advertise_host = "localhost".into();
     drop((raft, api));
+    crate::canonicalize_storage_roots(&mut config)
+        .expect("production non-destructive storage preflight before Store ownership");
     eprintln!("automatic static fixture: before original Store selector");
     // Only Store bootstrap uses the existing owned debug-frame allowance;
     // the actual producer and native workers stay on this original runtime.
@@ -55,7 +57,8 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         .await
         .expect("actual startup custody")
         .expect("Linux runtime");
-    let dirs = crate::create_dirs_for_config(&config).expect("managed directories");
+    let dirs = crate::create_dirs_for_config_with_runtime(&config, Some(runtime.as_ref()))
+        .expect("managed directories under actual startup custody");
     let store = Arc::clone(&selected_store.store);
     let playback_cache = crate::playback_cache::PlaybackCacheBudget::new(
         Arc::clone(&store),
