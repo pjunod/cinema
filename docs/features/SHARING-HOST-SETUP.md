@@ -127,3 +127,61 @@ do not acquire host changes merely by starting.
   execution order, and restart an isolated per-registration worker on update.
 - Passing focused unit results are retained across a main rebase when their
   covered source is unchanged, following the owner's 2026-10-28 instruction.
+
+
+## External recipients — one Cinema invitation
+
+Source implementation added 2026-10-28; real cross-tailnet acceptance remains
+open until exercised with two independently authorized accounts. Host setup
+and same-tailnet catalogue browsing do not certify this flow.
+
+Connect the publishing Cinema node's Tailscale account once in Settings →
+Sharing → Private network. [Tailscale’s API](https://tailscale.com/api) requires a
+user-owned API key; OAuth client credentials cannot create these shares. The
+node verifies it against the fixed HTTPS control API, seals it under its local
+credential key, and returns configuration facts only. Keys expire according
+to the Tailscale account's chosen deadline; rotating a key verifies existing
+provider IDs before replacing the encrypted cleanup credentials.
+
+The serving nodes discover and publish their own Tailscale FQDN, private IPv4,
+optional IPv6, listener port and observed Cinema certificate pin. A user need
+not copy those values. Manual endpoint editing remains advanced recovery;
+an open invitation editor refreshes discovery without replacing library choices.
+The provider's device inventory must agree with each selected serving endpoint;
+Cinema never shares an arbitrary device supplied by an invitation request.
+
+Creating an invitation defaults to one `cinema-connect-v1` envelope containing
+the unchanged pinned Cinema invitation and single-use Tailscale consent URLs.
+Exit-node access and reusable shares are disabled. Cinema sends no provider
+email. Device sharing permits network access according to the tailnet policy;
+library authority still requires the existing explicit pairing approval and
+viewer assignments. Restrict the serving device's network policy accordingly.
+
+A recipient pastes that one invitation into Cinema. Import presents Tailscale's
+consent page inside the workflow, using the account of the **importing Cinema
+server**, which can differ from the account on a phone. A bounded read-only
+probe observes pinned reachability; success automatically continues import once.
+Browser return alone grants nothing. Route/account/draft changes retire the
+attempt; an uncertain import POST is never automatically replayed. Tailscale
+installation/sign-in and the recipient's account consent remain necessary.
+Personal device shares cannot be consumed by externally tagged recipient nodes;
+Cinema does not silently change either tailnet's policy or device ownership.
+
+Per-invitation cleanup journals contain exact provider IDs and sealed issuing
+credentials. Known provider invitations are removed after Cinema cancellation,
+expiry or final grant revocation. Active grants retain network connectivity
+beyond bootstrap expiry. Cleanup retries independently; Cinema revocation is
+immediate even if the control API is unavailable. Account replacement cannot
+turn another account's 404 into deletion evidence. Creation is owned beyond
+HTTP cancellation, bounded to 22 seconds, and incomplete jobs are retired on
+restart. If a provider creation times out without returning its ID, Cinema
+retains an unconfirmed-outcome observation and never guesses ownership or
+replays that provider mutation. Its unused provider URL was never published;
+review such observations in Private network rather than claiming cleanup proof.
+
+The legacy `cinema-share-v1` format remains readable. Callers explicitly using
+`include_network: false` retain the already-connected private-network path.
+Focused tests cover the envelope's identity and URL boundaries, provider-device
+matching, consent continuation/account retirement, and retained connectivity
+across invitation and grant state changes. They do not certify real provider
+permissions, policy, tagged-device compatibility or external playback.

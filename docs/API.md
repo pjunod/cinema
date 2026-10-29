@@ -4119,7 +4119,9 @@ including errors, carries `Cache-Control: no-store`.
 | GET / PUT | `/api/v1/sharing/settings` | Read or save the sharing enabled choice. Saving either choice succeeds independently of readiness. |
 | GET | `/api/v1/sharing/status` | Read this serving node's timestamped listener, certificate, egress and import observations. Unobserved host Serve and node-key state are `unknown`. |
 | GET / PUT | `/api/v1/sharing/endpoints` | Read or replace approved source endpoints with `expected_revision` CAS. |
-| POST | `/api/v1/sharing/invitations` | Issue an expiring invitation for selected local movie/show libraries. |
+| GET / PUT | `/api/v1/sharing/network-authorization` | Inspect node-local authorization/cleanup facts or seal a verified user-owned Tailscale API key; never returns the key. |
+| POST | `/api/v1/sharing/connection` | Inspect a combined invitation, return bounded Tailscale consent links, or probe pinned reachability with `probe: true`; never accepts provider permissions on behalf of the recipient. |
+| POST | `/api/v1/sharing/invitations` | Issue one expiring Cinema invitation including single-use Tailscale device shares for selected local movie/show libraries. `include_network: false` explicitly issues the legacy format for an existing private connection. |
 | DELETE | `/api/v1/sharing/invitations/{id}` | Cancel the invitation. |
 | GET | `/api/v1/sharing/exports` | List source grants and their pending or active authority. |
 | POST | `/api/v1/sharing/exports/{id}/approve` | Approve the compared pairing code using the expected grant generation. |

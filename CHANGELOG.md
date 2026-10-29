@@ -113,6 +113,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Cinema invitations now include external Tailscale device consent and resume import when the private connection is ready; account authorization, endpoint discovery and invitation cleanup are managed in Sharing.
+
 - Fresh macOS media builds retain caller macro paths and expose Homebrew
   aclocal macros to the source-built Automake tools used by libass.
 

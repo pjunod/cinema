@@ -65,6 +65,8 @@ pub(crate) struct SharingManager {
     pub(crate) receiver_starts: crate::http::shared_receiver_playback::ReceiverStartRegistry,
     pub key: Arc<CredentialKey>,
     pub network: SharingNetworkConfig,
+    pub(crate) network_invite_error: Mutex<Option<&'static str>>,
+    pub(crate) network_invite_lock: tokio::sync::Mutex<()>,
     automatic_egress: RwLock<Option<std::net::IpAddr>>,
     host_egress_guard: std::sync::atomic::AtomicBool,
     key_directory: PathBuf,
@@ -279,6 +281,8 @@ impl SharingManager {
         network: SharingNetworkConfig,
     ) -> Self {
         Self {
+            network_invite_error: Mutex::new(None),
+            network_invite_lock: tokio::sync::Mutex::new(()),
             receiver_starts: Default::default(),
             accepted_drivers: Default::default(),
             key,

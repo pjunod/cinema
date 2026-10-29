@@ -2,6 +2,9 @@ import SwiftUI
 
 struct SharedSharingManagementView: View {
     @StateObject private var secrets = SharedSharingSecretDraft()
+    @StateObject private var networkSecrets = SharedSharingSecretDraft()
+    @State private var networkLinks: [SharedSharingManagementClient.NetworkShare] = []
+    @State private var networkWaiting = false
     @State private var libraries: [SharedSharingLocalLibrary] = []
     @State private var imports: [SharedSharingImport] = []
     @State private var exports: [SharedSharingExport] = []
@@ -25,6 +28,12 @@ struct SharedSharingManagementView: View {
         Form {
             if secrets.snapshot() == nil { Text("Sharing authorization changed or was refused. Leave and reopen management.") }
             else {
+                Section("Private network") {
+                    Text("Connect the server's Tailscale account once to create external Cinema invitations. The API key is encrypted on this server and never shared with recipients.").font(.caption)
+                    Link("Create a Tailscale user API key", destination: URL(string: "https://login.tailscale.com/admin/settings/keys")!)
+                    SecureField("Tailscale API key", text: Binding(get: { networkSecrets.snapshot()?.invitation ?? "" }, set: { networkSecrets.edit(invitation: $0) }))
+                    Button("Connect Tailscale account") { Task { await authorizeNetwork() } }.disabled(busy || (networkSecrets.snapshot()?.invitation.isEmpty ?? true))
+                }
                 Section("Source invitations") {
                     Text("Select this server's movie/show libraries. An invitation grants no access until you explicitly approve the recipient's pairing code.").font(.caption)
                     ForEach(libraries) { library in
@@ -36,6 +45,13 @@ struct SharedSharingManagementView: View {
                     TextField("Invitation to import or copy", text: Binding(get: { secrets.snapshot()?.invitation ?? "" }, set: { secrets.edit(invitation: $0) })).autocorrectionDisabled()
                     Text("Invitation material is transient and cleared on leaving or account changes.").font(.caption)
                     if let invitationId { Button("Cancel this invitation", role: .destructive) { confirmation = .cancel(invitationId) }.disabled(busy) }
+                    if networkWaiting {
+                        Text("Authorize with the Tailscale account used by the importing Cinema server. Import continues automatically when it can connect.").font(.caption)
+                        ForEach(networkLinks, id: \.tsFqdn) { share in
+                            if let url = URL(string: share.inviteUrl) { Link("Authorize connection to \(share.tsFqdn)", destination: url) }
+                        }
+                        Button("Cancel connection") { networkWaiting = false; networkLinks = [] }
+                    }
                     Button("Import this invitation") { Task { await importSource() } }.disabled(busy || (secrets.snapshot()?.invitation.isEmpty ?? true))
                 }
                 Section("Imported Sources") {
@@ -77,9 +93,9 @@ struct SharedSharingManagementView: View {
         .sheet(item: $editingExport) { row in NavigationStack { SharedSharingExportEditor(row: row, libraries: libraries) } }
         .task { await load() }
         .onReceive(secrets.objectWillChange) { _ in
-            if secrets.snapshot() == nil { imports = []; exports = []; invitationId = nil; editingExport = nil; editingImport = nil; editingEndpoints = nil; confirmation = nil }
+            if secrets.snapshot() == nil { networkWaiting = false; networkLinks = []; imports = []; exports = []; invitationId = nil; editingExport = nil; editingImport = nil; editingEndpoints = nil; confirmation = nil }
         }
-        .onDisappear { secrets.leave(); imports = []; exports = []; invitationId = nil }
+        .onDisappear { networkWaiting = false; networkLinks = []; networkSecrets.leave(); secrets.leave(); imports = []; exports = []; invitationId = nil }
         .alert(confirmation?.label ?? "Confirm", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } })) {
             Button("Cancel", role: .cancel) { confirmation = nil }
             Button("Confirm", role: .destructive) { if let action = confirmation { confirmation = nil; Task { await confirmed(action) } } }
@@ -113,16 +129,40 @@ struct SharedSharingManagementView: View {
             secrets.edit(invitation: result.invitation); invitationId = result.id; message = "Invitation created. Compare the recipient pairing code before approving."
         } catch { message = error.localizedDescription }
     }
+    private func authorizeNetwork() async {
+        guard let request = networkSecrets.snapshot() else { return }
+        networkSecrets.clear(ifRevision: request.revision); busy = true; defer { busy = false }
+        do { let client = try SharedSharingManagementClient(); try await client.authorizeNetwork(request.invitation); try client.requireCurrent(); message = "Tailscale account connected on this Cinema server." }
+        catch { message = error.localizedDescription }
+    }
     private func importSource() async { await consumeInvitation { try await $0.importSource(invitation: $1) } }
     private func rePair(_ row: SharedSharingImport) async { await consumeInvitation { try await $0.rePair(row.import, invitation: $1) } }
     private func consumeInvitation(_ operation: (SharedSharingManagementClient, String) async throws -> SharedSharingImport) async {
-        guard let request = secrets.snapshot() else { return }; busy = true; defer { busy = false }
+        guard let request = secrets.snapshot() else { return }; busy = true; defer { networkWaiting = false; networkLinks = []; busy = false }
         do {
-            let client = try SharedSharingManagementClient(); let result = try await operation(client, request.invitation); try client.requireCurrent()
+            let client = try SharedSharingManagementClient()
+            if request.invitation.hasPrefix("cinema-connect-v1:") {
+                var connection = try await client.connection(request.invitation)
+                guard secrets.accepts(request.revision) else { return }
+                if !connection.connected && !connection.network.isEmpty {
+                    networkLinks = connection.network; networkWaiting = true
+                    message = "Waiting for private connection authorization."
+                    for _ in 0..<100 {
+                        try await Task.sleep(for: .seconds(3))
+                        guard networkWaiting, secrets.accepts(request.revision) else { return }
+                        connection = try await client.connection(request.invitation, probe: true)
+                        if connection.connected { break }
+                    }
+                    guard connection.connected else { throw SharedSharingManagementError.invalid("Private connection is not ready. Finish Tailscale authorization and retry this invitation.") }
+                }
+            }
+            guard secrets.accepts(request.revision) else { return }
+            networkWaiting = false; networkLinks = []
+            let result = try await operation(client, request.invitation); try client.requireCurrent()
             guard secrets.snapshot() != nil else { return }
             imports.removeAll { $0.id == result.id }; imports.append(result); secrets.clear(ifRevision: request.revision)
             message = "Source updated. Compare the pairing code with the exporting server."
-        } catch { message = "\(error.localizedDescription). Refresh current generations before retrying explicitly." }
+        } catch { networkWaiting = false; networkLinks = []; message = "\(error.localizedDescription). Refresh current generations before retrying explicitly." }
     }
     private func rotate(_ row: SharedSharingImport) async {
         guard secrets.snapshot() != nil else { return }; busy = true; defer { busy = false }
@@ -154,6 +194,9 @@ private struct SharedSharingExportEditor: View {
     let row: SharedSharingExport
     let libraries: [SharedSharingLocalLibrary]
     @StateObject private var secrets = SharedSharingSecretDraft()
+    @StateObject private var networkSecrets = SharedSharingSecretDraft()
+    @State private var networkLinks: [SharedSharingManagementClient.NetworkShare] = []
+    @State private var networkWaiting = false
     @State private var selected: Set<String>
     @State private var busy = false
     @State private var message = ""

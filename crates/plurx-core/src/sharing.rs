@@ -619,3 +619,204 @@ pub struct ImportClaimReceipt {
     pub credential: crate::secrets::SealedSecret,
     pub now_ms: i64,
 }
+
+/// One transferable Cinema invitation, including the external network consent.
+/// Provider credentials are never part of this envelope.
+pub struct ConnectionInvitation {
+    pub invitation: Secret,
+    pub network: Vec<NetworkShare>,
+}
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkShare {
+    pub ts_fqdn: String,
+    pub invite_url: String,
+}
+pub fn validate_network_invite_url(value: &str) -> Result<(), StoreError> {
+    let code = value
+        .strip_prefix("https://login.tailscale.com/admin/invite/")
+        .ok_or_else(invalid)?;
+    if code.is_empty()
+        || code.len() > 256
+        || !code
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+impl ConnectionInvitation {
+    fn validate(&self) -> Result<Invitation, StoreError> {
+        let inner = Invitation::parse(&self.invitation)?;
+        if self.network.len() > 4 {
+            return Err(invalid());
+        }
+        let mut names = std::collections::HashSet::new();
+        let mut urls = std::collections::HashSet::new();
+        for share in &self.network {
+            validate_network_invite_url(&share.invite_url)?;
+            if !inner.endpoints.iter().any(|e| e.ts_fqdn == share.ts_fqdn)
+                || !names.insert(&share.ts_fqdn)
+                || !urls.insert(&share.invite_url)
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(inner)
+    }
+    pub fn encode(&self) -> Result<Secret, StoreError> {
+        use base64::Engine;
+        self.validate()?;
+        if self.network.is_empty() {
+            return Ok(Secret::from_cleartext(self.invitation.expose().to_owned()));
+        }
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            version: u8,
+            invitation: &'a str,
+            network: &'a [NetworkShare],
+        }
+        let bytes = zeroize::Zeroizing::new(
+            serde_json::to_vec(&Wire {
+                version: 1,
+                invitation: self.invitation.expose(),
+                network: &self.network,
+            })
+            .map_err(|_| invalid())?,
+        );
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes.as_slice());
+        if encoded.len() > 15000 {
+            return Err(invalid());
+        }
+        Ok(Secret::from_cleartext(format!(
+            "cinema-connect-v1:{encoded}"
+        )))
+    }
+    pub fn parse(blob: &Secret) -> Result<Self, StoreError> {
+        use base64::Engine;
+        if blob.expose().starts_with("cinema-share-v1:") {
+            Invitation::parse(blob)?;
+            return Ok(Self {
+                invitation: Secret::from_cleartext(blob.expose().to_owned()),
+                network: Vec::new(),
+            });
+        }
+        let encoded = blob
+            .expose()
+            .strip_prefix("cinema-connect-v1:")
+            .ok_or_else(invalid)?;
+        if encoded.len() > 15000 {
+            return Err(invalid());
+        }
+        let bytes = zeroize::Zeroizing::new(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map_err(|_| invalid())?,
+        );
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            version: u8,
+            invitation: String,
+            network: Vec<NetworkShare>,
+        }
+        let wire: Wire = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if wire.version != 1 || wire.network.is_empty() {
+            return Err(invalid());
+        }
+        let result = Self {
+            invitation: Secret::from_cleartext(wire.invitation),
+            network: wire.network,
+        };
+        result.validate()?;
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod connection_invitation_tests {
+    use super::*;
+    fn fixture() -> ConnectionInvitation {
+        let invite = Invitation {
+            identity: SharingIdentity {
+                server_id: Uuid::new_v4(),
+                catalogue_epoch: Uuid::new_v4(),
+                created_at_ms: 0,
+            },
+            name: "Cinema".into(),
+            endpoints: vec![Endpoint {
+                ipv4: "100.64.1.2".parse().expect("fixture address"),
+                ipv6: None,
+                ts_fqdn: "cinema.tail123.ts.net".into(),
+                port: 32443,
+                spki_sha256: "a".repeat(64),
+            }],
+            id: Uuid::new_v4(),
+            secret: new_secret().expect("fixture secret"),
+            expires_at_ms: 1000,
+        };
+        ConnectionInvitation {
+            invitation: invite.encode().expect("fixture invitation"),
+            network: vec![NetworkShare {
+                ts_fqdn: "cinema.tail123.ts.net".into(),
+                invite_url: "https://login.tailscale.com/admin/invite/test_code-123".into(),
+            }],
+        }
+    }
+    #[test]
+    fn combined_invitation_preserves_pinned_identity_and_legacy_input() {
+        let original = fixture();
+        let encoded = original.encode().expect("combined invitation");
+        let decoded = ConnectionInvitation::parse(&encoded).expect("decode combined invitation");
+        assert_eq!(original.invitation.expose(), decoded.invitation.expose());
+        assert_eq!(decoded.network.len(), 1);
+        let legacy = ConnectionInvitation::parse(&original.invitation).expect("legacy invitation");
+        assert!(legacy.network.is_empty());
+        assert_eq!(
+            legacy.encode().expect("legacy output").expose(),
+            original.invitation.expose()
+        );
+    }
+    #[test]
+    fn combined_invitation_rejects_provider_redirects_and_unbound_hosts() {
+        let mut invitation = fixture();
+        for url in [
+            "http://login.tailscale.com/admin/invite/x",
+            "https://login.tailscale.com.evil.invalid/admin/invite/x",
+            "https://login.tailscale.com/admin/invite/x?redirect=evil",
+            "https://login.tailscale.com/admin/invite/x#token",
+            "https://login.tailscale.com/admin/invite/../x",
+            "https://user@login.tailscale.com/admin/invite/x",
+        ] {
+            invitation.network[0].invite_url = url.into();
+            assert!(
+                invitation.encode().is_err(),
+                "refuse noncanonical consent URL"
+            );
+        }
+        invitation.network[0].invite_url = "https://login.tailscale.com/admin/invite/x".into();
+        invitation.network[0].ts_fqdn = "other.tail123.ts.net".into();
+        assert!(invitation.encode().is_err());
+    }
+    #[test]
+    fn combined_invitation_rejects_oversize_nested_and_unknown_wire_data() {
+        use base64::Engine;
+        let original = fixture();
+        for wire in [
+            serde_json::json!({"version":1,"invitation":original.invitation.expose(),"network":original.network,"extra":true}),
+            serde_json::json!({"version":1,"invitation":"cinema-connect-v1:AAAA","network":[]}),
+        ] {
+            let blob = Secret::from_cleartext(format!(
+                "cinema-connect-v1:{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(wire.to_string())
+            ));
+            assert!(ConnectionInvitation::parse(&blob).is_err());
+        }
+        assert!(ConnectionInvitation::parse(&Secret::from_cleartext(format!(
+            "cinema-connect-v1:{}",
+            "A".repeat(15001)
+        )))
+        .is_err());
+    }
+}

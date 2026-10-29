@@ -360,3 +360,62 @@ test("unavailable peer explains setup and stale invitations without replaying th
  await assert.rejects(h.m.request("/sharing/imports",{method:"POST",body:{invitation:"test"}}),error=>error.code==="sharing_peer_unavailable"&&/Check both Cinemas/.test(error.message)&&/fresh invitation/.test(error.message));
  assert.equal(h.requests.length,1);assert.equal(h.requests[0].options.method,"POST");
 });
+
+test("combined invitation waits for private consent then imports once automatically",async()=>{
+ const timers=[];
+ const {c,m,requests}=harness(async(path,options)=>path.endsWith("/sharing/connection")?reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:JSON.parse(options.body).probe===true}):reply(imported()));
+ c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
+ assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,0);
+ assert.match(String(c.document.getElementById().innerHTML),/Authorize connection to source/);
+ assert.equal(m.state().editor.waitingConnection,true);
+ await timers.shift()();
+ assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,1);
+ assert.equal(m.state().editor.text,"");
+});
+test("combined invitation never resumes after authorization changes",async()=>{
+ const timers=[];
+ const {c,m,requests}=harness(async()=>reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:false}));
+ c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();m.retire();
+ for(const fn of timers)await fn();
+ assert.equal(requests.filter(r=>r.path.endsWith("/sharing/imports")).length,0);
+});
+test("combined invitation rejects arbitrary consent destinations before publishing links",async()=>{
+ const {m,requests,element}=harness(async()=>reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://evil.invalid/admin/invite/token"}],connected:false}));
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
+ assert.match(m.state().editor.error,/Invalid private connection/);assert.doesNotMatch(element.innerHTML,/href="https:\/\/evil/);
+ assert.equal(requests.length,1);
+});
+test("connected combined invitation imports directly without a second consent action",async()=>{
+ const {m,requests}=harness(async(path)=>path.endsWith("/sharing/connection")?reply({network:[{ts_fqdn:"source.tail123.ts.net",invite_url:"https://login.tailscale.com/admin/invite/consent_123"}],connected:true}):reply(imported()));
+ await m.open("import");m.edit("text","cinema-connect-v1:AAAA");await m.save();
+ assert.deepEqual(requests.map(r=>r.path),["/api/v1/sharing/connection","/api/v1/sharing/imports"]);
+});
+test("network authorization clears the transient API key and never returns it to invitations",async()=>{
+ const {m,requests}=harness(async()=>reply({configured:true}));
+ await m.open("network");m.edit("text","tskey-api-fixture");await m.save();
+ assert.equal(m.state().editor.text,"");assert.equal(requests.length,2);
+ assert.equal(requests[0].options.body,null);
+ assert.equal(requests[1].path,"/api/v1/sharing/network-authorization");
+ assert.deepEqual(JSON.parse(requests[1].options.body),{token:"tskey-api-fixture"});
+});
+
+test("automatic endpoint discovery refreshes an open invitation without losing library choices",async()=>{
+ const timers=[];let reads=0;
+ const {c,m,requests}=harness(async(path)=>{
+  if(path.endsWith("/libraries"))return reply([{id:1n,name:"Movies",kind:"movies"}]);
+  if(path.endsWith("/sharing/status"))return reply({host_setup:{state:"ready",message:"Private connection ready"}});
+  if(path.endsWith("/sharing/endpoints"))return reply({manifest:++reads===1?null:{revision:1n,endpoints:[endpoint]}});
+  throw new Error("No mutation should be sent");
+ });
+ c.setTimeout=fn=>{timers.push(fn);return timers.length;};c.clearTimeout=()=>{};
+ m.state().status.host_setup={state:"pending",message:"Discovering private connection"};
+ await m.open("invite");m.select(0,true);
+ assert.equal(m.state().editor.needsEndpoints,true);
+ assert.deepEqual([...m.state().editor.selected],["1"]);
+ await timers.shift()();
+ assert.equal(m.state().editor.needsEndpoints,false);
+ assert.deepEqual([...m.state().editor.selected],["1"]);
+ assert.equal(requests.filter(r=>r.options.method!=="GET").length,0);
+});
