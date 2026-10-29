@@ -24,8 +24,9 @@ struct Barrier {
     release: Semaphore,
     visits: AtomicUsize,
 }
-fn registry() -> &'static Mutex<BTreeMap<(Uuid, Stage), Arc<Barrier>>> {
-    static REGISTRY: OnceLock<Mutex<BTreeMap<(Uuid, Stage), Arc<Barrier>>>> = OnceLock::new();
+type StageRegistry = Mutex<BTreeMap<(Uuid, Stage), Arc<Barrier>>>;
+fn registry() -> &'static StageRegistry {
+    static REGISTRY: OnceLock<StageRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 fn lookup(id: Uuid, stage: Stage) -> Option<Arc<Barrier>> {
