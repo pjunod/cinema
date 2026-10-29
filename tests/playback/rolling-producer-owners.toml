@@ -1,6 +1,6 @@
 # Latest main5ac integration source audit (2026-10-29; 460 Rust files):
 # exact counts are 1029 namespaced tasks, 81 method spawns, 1917 timers,
-# 312 Commands, 837 launch-shaped methods, 360 lifecycle methods, 74 UFCS
+# 312 Commands, 838 launch-shaped methods, 360 lifecycle methods, 74 UFCS
 # lifecycle sites and 117 kill-on-drop constructors. Roots, patterns, row IDs,
 # exact equality and all forbidden zeroes remain unchanged.
 # Native fixture stress replaces the unbounded fork loop with four joined
@@ -6283,7 +6283,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # inspect the in-process Axum oneshot response for invalid opt-in and success.
 # These reads launch no task or child and introduce no producer ownership.
 # Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
-expected_occurrences = 837
+# Sharing native-host regression: +1 SetupState::status() lookup in
+# native_host_mode_keeps_unmanaged_hosts_out_of_container_handoff. It builds
+# the setup message and reads the clock; it starts no task, timer or process
+# and adds no child or producer owner. Existing command ownership is unchanged.
+expected_occurrences = 838
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
