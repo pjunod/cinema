@@ -1425,7 +1425,6 @@ pub(crate) struct PendingDvTitle {
 #[cfg(target_os = "linux")]
 impl DvTitleRide {
     /// A title the scanner covers, on a node with the processing bundle.
-    #[cfg(target_os = "linux")]
     async fn for_file(file: &MediaFile, stream_index: u32) -> Option<Self> {
         let facts = &file.dolby_vision;
         if !matches!(file.video_codec.as_deref(), Some("hevc"))
@@ -1474,7 +1473,6 @@ impl DvTitleRide {
 
     /// The scan's aggregate when the pass's lead output built; anything else
     /// keeps nothing, and the title's own job reads the file itself.
-    #[cfg(target_os = "linux")]
     async fn finish(
         &self,
         file_id: i64,
@@ -1584,7 +1582,7 @@ impl DvTitleScanInput {
 }
 
 /// Judge the companion scan's output exactly as the title job judges its own.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn dv_title_aggregate(
     output: &plurx_core::process::bounded::Output,
     scanner_current: bool,

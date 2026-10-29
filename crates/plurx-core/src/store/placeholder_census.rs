@@ -197,6 +197,7 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
 /// these, such a statement resolves to a neutral token, stops looking like a
 /// statement, and is never judged.
 const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
+    ("playback_handoffs.rs", include_str!("playback_handoffs.rs")),
     ("jellyfin_login.rs", include_str!("jellyfin_login.rs")),
     ("jellyfin_catalog.rs", include_str!("jellyfin_catalog.rs")),
     ("jellyfin_play.rs", include_str!("jellyfin_play.rs")),

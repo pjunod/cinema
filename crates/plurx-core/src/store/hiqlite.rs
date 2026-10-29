@@ -4005,13 +4005,13 @@ impl HiqliteAuthStore {
             .map(|r| (r.name, r.sql))
             .collect::<Vec<_>>();
         let version = super::subtitle_managed_schema::version(&shape)?;
-        if version == Some(1) {
+        if let Some(version) = version {
             let rows = self
                 .client()
                 // authority: the installed marker must agree with the current replicated shape.
                 .query_consistent_map::<CountRow, _>(
-                    "SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=1",
-                    params!(),
+                    "SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=$1",
+                    params!(version),
                 )
                 .await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
@@ -4027,21 +4027,44 @@ impl HiqliteAuthStore {
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
         admit_schema_migration(admission)?;
-        if self.subtitle_managed_schema_version().await? == Some(1) {
+        let version = self.subtitle_managed_schema_version().await?;
+        if version == Some(2) {
             return Ok(());
         }
-        let statements = super::subtitle_managed_schema::statements()
-            .into_iter()
-            .map(|sql| (sql, params!()))
-            .collect::<Vec<_>>();
+        if version.is_none() {
+            let statements = super::subtitle_managed_schema::statements()
+                .into_iter()
+                .map(|sql| (sql, params!()))
+                .collect::<Vec<_>>();
+            admit_schema_migration(admission)?;
+            let result = self.schema_migration_transaction(statements).await;
+            if self.subtitle_managed_schema_version().await?.is_none() {
+                result?;
+                return Err(StoreError::Migration(
+                    "managed subtitle schema install did not settle".into(),
+                ));
+            }
+        }
+        if self.subtitle_managed_schema_version().await? == Some(2) {
+            return Ok(());
+        }
+        let mut statements = vec![(
+            super::subtitle_managed_schema::RESOURCE_GUARD.to_owned(),
+            params!(super::subtitle_managed_schema::resource_predecessor_view()),
+        )];
+        statements.extend(
+            super::subtitle_managed_schema::resource_statements()
+                .into_iter()
+                .map(|sql| (sql, params!())),
+        );
         admit_schema_migration(admission)?;
         let result = self.schema_migration_transaction(statements).await;
-        if self.subtitle_managed_schema_version().await? == Some(1) {
+        if self.subtitle_managed_schema_version().await? == Some(2) {
             return Ok(());
         }
         result?;
         Err(StoreError::Migration(
-            "managed subtitle schema install did not settle".into(),
+            "managed resource schema upgrade did not settle".into(),
         ))
     }
 

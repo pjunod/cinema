@@ -7,6 +7,66 @@ and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).
 This contract defines the meaning of `OperationProgress.tla`; it does not
 extend the original [safety contract](../durable-jobs/CONTRACT.md).
 
+## Composed main/effort source correspondence — 2026-10-28
+
+The resolved merge combines maintenance `96ab7f0e82de` and main
+`66a33d723096`. The exact resolved source bytes are recorded in `mapping.json`;
+this source-only review does not qualify the new merge or transfer either
+parent's execution receipts. Earlier review and model qualification identities
+below remain historical.
+
+Main's caption-kind demand predicates, managed-v2 active resource view, exact
+predecessor/transaction guards and strict rewind fixtures are retained. The
+selected library kinds keep their source-domain/provider requirements. Caption
+work can compete for existing resources; caption fairness and online schema
+upgrade correctness remain outside these finite models. The progressive speech
+path retains the effort's original restart admission through its capacity wait
+and the admitted work; this adds no native-close or resource-refund witness.
+
+The effort's `finish_original_controller` anchor, retained heartbeat/token mutex
+and acknowledged/resolved retirement abstraction remain authoritative. The old
+move-consuming `finish(mut self)` anchor is not restored. Failed joins,
+ambiguous retirement, last-alias release, native closure and the separate title
+requalification read/bind TOCTOU keep their recorded limits. Queue renewal and
+resource-currentness SQL are byte-identical to both parents; the selected
+fragment admission remains try-only. Conformance registration is unchanged. The
+formal-publication module is identical to maintenance; its sole difference
+from main relocates an Arc import into the replicated test module.
+
+Six distinct mapped files require new whole-file pins: the shared queue,
+replicated store, SQLite store, conformance parent, daemon state and transcode
+manager constructor. Every mapped anchor remains unique. Both parents' source
+reviews and exclusions, including main's subtitle/managed-v2 authority and the
+effort's title/Linux-cfg review, are preserved. Models, configurations, bounds,
+fairness premises, properties, action/check/test inventories and validators do
+not change. No tests, compilers or models ran for this correspondence review;
+no new acceptance or qualification is claimed.
+
+## Subtitle resource admission — scoped refresh on 2026-10-28
+
+Codex reviewed `c3d764a01` against `f2120bd9a`. Five mapped whole-file pins
+change: the shared queue adds exact demand-bound caption admission, the
+replicated store installs a guarded managed-resource v2 view, and the transcode
+manager adds a bounded cooperative wait used only by demanded progressive
+captions. The selected `admit_fragment` path remains try-only. Library worker
+admission, claim, domain/token/publication lock order, completion, settlement,
+heartbeat retirement and physical-admission lifetime are unchanged.
+
+The v2 view is now a mapped input because it supplies current source-reader
+requirements. `library_scan` and `metadata_refresh` keep their source-domain
+and provider rows. Artifact-only text model setup loses its media-reader row;
+qualified caption demand can use the existing reserved live slot without
+changing the two-reader/one-speculative-reader limits. Competing caption work
+can cause selected background work to yield; this package does not establish
+per-job source scheduling fairness or caption progress. Its stable-demand and
+external-return premises remain explicit.
+
+Every existing mapped anchor remains unique and unchanged. Model, configuration,
+fairness, property, bound and toolchain bytes are unchanged; no model delta is
+needed for these out-of-scope caption paths. Online schema upgrades, caption
+admission and playback require their own runtime evidence. This source mapping
+review does not renew historical qualification or claim fresh TLC execution.
+
 ## Useful completion and cleanup are separate observations
 
 `request = "done"` means a durable, non-pending library request result

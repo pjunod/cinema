@@ -743,6 +743,51 @@ pub fn recover(i: &InstallationV1, id: &str) -> Result<()> {
             "recovery requires the active transaction for this installation",
         ));
     }
+    if j.phase == Phase::ShutdownCommitted {
+        if i.current_version != j.old_version {
+            return Err(Error::new(
+                ErrorCode::RecoveryRequired,
+                "old binary identity changed; explicit repair required",
+            ));
+        }
+        let retained: InstallationV1 = store.dir(id)?.json("installation-before.json")?;
+        retained.validate()?;
+        if retained.installation_id != i.installation_id
+            || retained.current_commit != i.current_commit
+            || retained.current_version != j.old_version
+            || retained.owner_uid != i.owner_uid
+            || retained.service_uid != i.service_uid
+        {
+            return Err(Error::new(
+                ErrorCode::RecoveryRequired,
+                "retained installation identity changed; explicit repair required",
+            ));
+        }
+        transaction::revalidate_policy(i, &j)?;
+        let receipt: ShutdownReceiptV1 = i
+            .receipt_dir()?
+            .json(&format!("{}.json", j.transaction_id))?;
+        let expected = j.process.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorCode::UnsafeShutdown,
+                "committed shutdown has no bound process identity",
+            )
+        })?;
+        if expected.uid != i.service_uid {
+            return Err(Error::new(
+                ErrorCode::UnsafeShutdown,
+                "committed process does not belong to the installed service UID",
+            ));
+        }
+        let process_gone = !process::still_same(&process::KernelProcess {
+            pid: expected.pid,
+            uid: expected.uid,
+            generation: expected.start_generation.clone(),
+        })?;
+        let observed = transaction::revalidate_policy(i, &j)?;
+        j.complete_clean_shutdown(receipt, process_gone, observed.stopped())?;
+        store.save(&j)?;
+    }
     match j.phase {
         Phase::Committed | Phase::Cancelled => Ok(()),
         Phase::Prepared => { j.transition(Phase::Cancelled)?; store.save(&j) },

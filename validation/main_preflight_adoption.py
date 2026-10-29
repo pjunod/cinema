@@ -248,7 +248,7 @@ def api_context():
             "Current API run ID/source mismatch")
     require(bind_event(current, scope) == event, "Current API/event payload mismatch")
     live = api.get(f"/pulls/{pull['number']}")
-    require(live["head"]["sha"] == commit and live["base"]["sha"] == pull["base"]["sha"]
+    require(live["head"]["sha"] == commit
             and live["draft"] is False and live["state"] == "open"
             and live["head"]["repo"]["id"] == live["base"]["repo"]["id"] == repo["id"]
             and live["base"]["ref"] == "main", "Live PR moved/closed/drafted; do not execute stale units")

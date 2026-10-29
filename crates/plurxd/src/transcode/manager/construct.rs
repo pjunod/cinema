@@ -1268,6 +1268,74 @@ impl TranscodeManager {
         self.admit_speech_with_heavy(heavy).await
     }
 
+    /// A currently demanded progressive caption operation asks background work
+    /// to yield, while retaining the ordinary two-thread and heavy-lane bounds.
+    /// Model installation and self-tests continue to use speculative admission.
+    pub(crate) async fn admit_progressive_speech(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<FragmentAdmission> {
+        // Retain the original restart admission through the capacity wait and
+        // the admitted native work, as ordinary speech admission does.
+        let restart_admission = self.serving_authority.try_restart_admission().await?;
+        // Resolve the same configured budget as ordinary speech admission
+        // before starting the bounded resource wait.
+        let budget = self.software_budget().await;
+        if budget < 2 {
+            return None;
+        }
+        let mut waiting = self.admissions.software_pool().queue_for_capacity();
+        let deadline = tokio::time::Instant::now() + crate::admission::QUEUE_WAIT;
+        loop {
+            if cancel.is_cancelled()
+                || self
+                    .offline_waiting
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return None;
+            }
+            if let Ok(heavy) = Arc::clone(&self.background_heavy).try_acquire_owned() {
+                // Never use the lone-job oversized exception for inference.
+                if self.admissions.software_in_use().checked_add(2)? <= budget {
+                    if let Some(permit) = self.admissions.try_admit_bundle(
+                        0,
+                        budget,
+                        &TranscodeResourceEstimate {
+                            hardware_slot: false,
+                            cpu_threads: 2,
+                            decoder_threads: None,
+                        },
+                        Priority::Live,
+                    ) {
+                        let admission = FragmentAdmission {
+                            _restart_admission: restart_admission,
+                            _heavy: heavy,
+                            threads: 2,
+                            _permit: permit,
+                            extension: std::sync::Mutex::new(None),
+                        };
+                        // Our registration may not reject its own reservation.
+                        // A remaining viewer/offline waiter still takes priority.
+                        drop(waiting);
+                        return (!cancel.is_cancelled()
+                            && self.speech_capacity_available(&admission))
+                        .then_some(admission);
+                    }
+                }
+            }
+            waiting.mark_capacity_blocked();
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return None,
+                () = tokio::time::sleep(crate::transcode::ADMISSION_POLL.min(deadline - now)) => {}
+            }
+        }
+    }
+
     pub(crate) async fn admit_speech_queued(
         &self,
         cancel: &tokio_util::sync::CancellationToken,

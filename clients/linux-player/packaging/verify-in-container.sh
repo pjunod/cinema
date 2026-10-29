@@ -46,7 +46,7 @@ step "apt snapshot"
 bash "$packaging/apt-snapshot.sh" "$packaging/upstream.lock" > /tmp/apt.txt 2>&1 || { cat /tmp/apt.txt; fail "apt snapshot"; }
 tail -n1 /tmp/apt.txt
 # desktop-file-utils owns the update-desktop-database trigger, as on a desktop.
-apt-get install -y -q --no-install-recommends desktop-file-utils lintian binutils git >/dev/null || fail "install the tools"
+apt-get install -y -q --no-install-recommends desktop-file-utils lintian binutils git lua5.2 >/dev/null || fail "install the tools"
 pass "tools installed"
 
 step "lintian $deb $dsc"
@@ -185,7 +185,10 @@ expect_log /tmp/control "$private/bin/mpv" --vo=null --ao=null --frames=1 --log-
 grep -m1 '/root/.config/mpv/mpv.conf' /tmp/control.txt || fail "control: mpv without --config-dir did not name ~/.config/mpv/mpv.conf"
 pass "control: without --config-dir, mpv reads ~/.config/mpv/mpv.conf"
 # --no-terminal (from the launcher) silences stdout, so these log to a file.
-xvfb-run -a "${argv[@]}" --vulkan-device="$device" --ao=null --frames=24 \
+# These standalone probes have no launcher to send quit. Override only their
+# lifetime so EOF/failure terminates instead of waiting for Next indefinitely;
+# all renderer, private config and Cinema script arguments remain in effect.
+xvfb-run -a "${argv[@]}" --idle=no --keep-open=no --vulkan-device="$device" --ao=null --frames=24 \
   --log-file=/tmp/launcher-argv.txt /tmp/pq.mkv > /tmp/launcher-argv.out 2>&1 \
   || { cat /tmp/launcher-argv.out; tail -40 /tmp/launcher-argv.txt; fail "the launcher's argv did not play"; }
 grep -m1 -E 'VO: \[gpu-next\]' /tmp/launcher-argv.txt || fail "the launcher's argv did not open vo=gpu-next"
@@ -198,7 +201,7 @@ expect_log /tmp/ytdl-control "$private/bin/mpv" --no-config --ytdl=yes --msg-lev
   --vo=null --ao=null --log-file=/tmp/ytdl-control.txt http://127.0.0.1:1/x.mkv
 grep -m1 '\[ytdl_hook\]' /tmp/ytdl-control.txt || fail "control: --ytdl=yes did not run the ytdl hook"
 pass "control: with --ytdl=yes the ytdl hook runs on an unopenable URL"
-expect_log /tmp/ytdl-launcher xvfb-run -a "${argv[@]}" --msg-level=ytdl_hook=trace \
+expect_log /tmp/ytdl-launcher xvfb-run -a "${argv[@]}" --idle=no --keep-open=no --msg-level=ytdl_hook=trace \
   --log-file=/tmp/ytdl-launcher.txt http://127.0.0.1:1/x.mkv
 grep -m1 'Failed to open http://127.0.0.1:1/x.mkv' /tmp/ytdl-launcher.txt || fail "the launcher's argv never tried the URL"
 # The module tag, as in the control: mpv's own echo of the command line
@@ -210,6 +213,12 @@ rm -rf /root/.config/mpv
 step "launcher tests ($(python3 --version)), no skip allowed"
 python3 -B "$packaging/run-tests" /repo/clients/linux-player/tests || fail "launcher tests (a failure, an error or a skip)"
 pass "launcher tests, none skipped"
+
+step "installed Cinema overlay and Lua behavior"
+test -r "$private/plurx_player/scripts/cinema.lua" || fail "Cinema overlay missing from installed package"
+lua5.2 /repo/clients/linux-player/tests/test_cinema.lua "$private/plurx_player/scripts/cinema.lua" || fail "installed Cinema overlay scenarios"
+! grep -E 'cinema.*(Error|error)|Lua error' /tmp/launcher-argv.txt || fail "Cinema overlay failed during gpu-next playback"
+pass "installed Cinema overlay: behavior and gpu-next render"
 
 step "dpkg -r"
 dpkg -r plurx-player || fail "dpkg -r"
