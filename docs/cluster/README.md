@@ -15,7 +15,8 @@ failures.
 | File | Answers | |
 |---|---|---|
 | [ASYNC-STORE-REFINEMENT-STATUS.md](ASYNC-STORE-REFINEMENT-STATUS.md) | Current driver/SQL proof evidence and acceptance ledger; run 6115 capped, paged implementation and qualification pending. | open |
-| [PAGED-ASYNC-PROOF-IMPLEMENTATION.md](PAGED-ASYNC-PROOF-IMPLEMENTATION.md) | How exact paged storage, independent component proof and authenticated sessions replace the global cap; M0 contracts, resource amendment and file ownership. | open |
+| [PAGED-ASYNC-PROOF-IMPLEMENTATION.md](PAGED-ASYNC-PROOF-IMPLEMENTATION.md) | Delivery history, implementation ownership and evidence for paged proof sessions; see the separate capacity amendment for current admission design. | open |
+| [PAGED-CHECKPOINT-CAPACITY.md](PAGED-CHECKPOINT-CAPACITY.md) | Why current record and upload-slot admission cannot cover historical scale, and the proposed physical accounting, full-snapshot publication and acceptance bar. | open |
 | [RUST-ADMISSION-REFINEMENT-STATUS.md](RUST-ADMISSION-REFINEMENT-STATUS.md) | Production admission/start refinement pilot: scope, ownership, verifier feasibility, proof obligations and current delivery state. | built |
 | [WORKER-REFINEMENT-STATUS.md](WORKER-REFINEMENT-STATUS.md) | Built source correspondence and two full workers; PR receipt tracks qualification, ownership and landing. | built |
 | [OPERATION-PROGRESS-IMPLEMENTATION.md](OPERATION-PROGRESS-IMPLEMENTATION.md) | Source wait-map, repeated-operation model, acceptance and delivery plan. | built |
