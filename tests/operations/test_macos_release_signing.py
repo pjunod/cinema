@@ -11,6 +11,8 @@ from pathlib import Path
 import plistlib
 import struct
 import subprocess
+import shutil
+import sys
 import tempfile
 import tarfile
 import textwrap
@@ -348,6 +350,81 @@ class MacosReleaseSigningCase(unittest.TestCase):
         self.assertEqual((self.package / "control/plurx-control").read_bytes(),
             (self.app / "Contents/MacOS/plurx-control").read_bytes(),
             "native qualification requires the GUI frontend to be the identical signed controller")
+
+    @staticmethod
+    def workflow_step_script(title):
+        workflow = (ROOT / ".github/workflows/github-release.yml").read_text()
+        step = workflow.split("      - name: " + title + "\n", 1)[1]
+        body = step.split("        run: |\n", 1)[1]
+        return textwrap.dedent(re.split(r"(?m)^ {0,9}\S", body, maxsplit=1)[0])
+
+    def test_update_publication_selector_requires_every_qualified_field(self):
+        script = self.workflow_step_script("Select qualified in-app update publication")
+        fields = ["UPGRADE_FROM", "DATA_COMPATIBILITY", "CLUSTER_COMPATIBILITY", "MINIMUM_CONTROLLER", "ROLLBACK"]
+        cases = [dict.fromkeys(fields, ""), {**dict.fromkeys(fields, ""), "UPGRADE_FROM": "=1.0.0"},
+            dict(zip(fields, ["=1.0.0", "fixture-data", "fixture-cluster", "1.0.0", "manual_recovery"]))]
+        cases += [{**dict.fromkeys(fields, "fixture"), missing: ""} for missing in fields]
+        for index, values in enumerate(cases):
+            with self.subTest(values=values):
+                output = self.root / f"qualification-output-{index}"
+                summary = self.root / f"qualification-summary-{index}"
+                result = subprocess.run(["bash", "-c", script], cwd=self.root,
+                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GITHUB_OUTPUT": str(output),
+                         "GITHUB_STEP_SUMMARY": str(summary), **values}, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                enabled = all(values.values())
+                self.assertEqual(output.read_text(), "enabled=" + str(enabled).lower() + "\n")
+                if not enabled:
+                    self.assertIn("Verified installers will publish", summary.read_text())
+                    for field, value in values.items():
+                        if not value:
+                            self.assertIn(field, summary.read_text())
+        workflow = (ROOT / ".github/workflows/github-release.yml").read_text()
+        signer = workflow.split("\n  desktop_signing:\n", 1)[1].split("\n  publish:\n", 1)[0]
+        gate = next(line for line in signer.splitlines() if line.strip().startswith("if:"))
+        self.assertIn("needs.resolve.outputs.publish_updates == 'true'", gate)
+        publisher = workflow.split("\n  publish:\n", 1)[1]
+        gate = next(line for line in publisher.splitlines() if line.strip().startswith("if:"))
+        self.assertIn("!cancelled()", gate)
+        self.assertIn("!failure()", gate)
+
+    def test_installer_publication_requires_exact_assets_and_never_advertises_fixture_feed(self):
+        script = self.workflow_step_script("Check the asset set and compute its checksums")
+        version = "1.2.3"
+        native = [f"plurxd_{version}-1_amd64.deb", f"plurxd_{version}-1_arm64.deb",
+            f"plurxd-{version}-1.x86_64.rpm", f"plurxd-{version}-1.aarch64.rpm",
+            f"plurx-desktop_{version}-1_amd64.deb", f"plurx-desktop_{version}-1_arm64.deb",
+            f"plurx-desktop-{version}-1.x86_64.rpm", f"plurx-desktop-{version}-1.aarch64.rpm",
+            f"plurx-tray-{version}-linux-amd64.tar.gz", f"plurx-tray-{version}-linux-arm64.tar.gz",
+            f"plurxd-{version}-macos-universal.tar.gz", f"plurxd-{version}-windows-x86_64.zip"]
+        metadata = ["plurx-update-v1.json", "plurx-update-v1.json.sig"]
+        # Exercise the actual shell asset validator; macOS hosts may lack GNU sha256sum.
+        tools = self.root / "checksum-tools"
+        tools.mkdir()
+        if shutil.which("sha256sum") is None:
+            checksum = tools / "sha256sum"
+            checksum.write_text("#!" + sys.executable + "\nimport hashlib, pathlib, sys\n"
+                "for name in sys.argv[1:]: print(hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() + '  ' + name)\n")
+            checksum.chmod(0o755)
+        cases = [(False, native, True), (False, native + metadata[:1], False),
+            (False, native + metadata, False), (False, native[:-2] + native[-1:], False),
+            (True, native, False), (True, native + metadata[:1], False), (True, native + metadata, True)]
+        for index, (enabled, files, success) in enumerate(cases):
+            with self.subTest(enabled=enabled, files=files):
+                run = self.root / f"publisher-{index}"
+                (run / "assets").mkdir(parents=True)
+                for name in files:
+                    (run / "assets" / name).write_bytes(b"fixture asset; never a production feed")
+                result = subprocess.run(["bash", "-c", script], cwd=run,
+                    env={"PATH": str(tools) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+                         "VERSION": version, "PUBLISH_UPDATES": str(enabled).lower()}, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
+                if success:
+                    checksums = (run / "SHA256SUMS").read_text().splitlines()
+                    self.assertEqual(len(checksums), len(files))
+                    self.assertEqual({line.split()[-1] for line in checksums}, set(files))
+                else:
+                    self.assertFalse((run / "SHA256SUMS").exists())
 
 if __name__ == "__main__":
     unittest.main()

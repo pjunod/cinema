@@ -4795,7 +4795,11 @@ assert.equal(context.ACT_TIMER, null);
                     # environment or requests owner signing credentials.
                     expected_gate = gate
                     if path == ".github/workflows/github-release.yml":
-                        if name in ("macos_signing", "desktop_signing", "publish"):
+                        if name == "desktop_signing":
+                            expected_gate += " && needs.resolve.outputs.mode == 'release' && needs.resolve.outputs.publish_updates == 'true'"
+                        elif name == "publish":
+                            expected_gate += " && !cancelled() && !failure() && needs.resolve.outputs.mode == 'release'"
+                        elif name == "macos_signing":
                             expected_gate += " && needs.resolve.outputs.mode == 'release'"
                         elif name == "desktop_metadata":
                             expected_gate += " && !cancelled() && !failure() && needs.resolve.outputs.mode != 'qualification'"

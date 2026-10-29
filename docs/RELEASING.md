@@ -179,7 +179,7 @@ builds and publishes the GitHub release for that tag:
 |---|---|---|
 | `plurxd_X.Y.Z-1_amd64.deb`, `_arm64.deb` | Debian 12+, Ubuntu 24.04+ | installed, started as `plurx` to `/readyz`, removed and reinstalled on Debian 12 and Ubuntu 24.04 |
 | `plurxd-X.Y.Z-1.x86_64.rpm`, `.aarch64.rpm` | Fedora, RHEL 9+ (ffmpeg from RPM Fusion) | the same on Fedora 42; scriptlets and binary on AlmaLinux 9 |
-| `plurxd-X.Y.Z-macos-universal.tar.gz` | macOS, Apple Silicon and Intel | each slice runs on its own hardware; `./install` from the unpacked archive readies the agent |
+| `plurxd-X.Y.Z-macos-universal.tar.gz` | macOS, Apple Silicon and Intel | each slice reports its version on its own hardware; complete closure, Developer ID, notarization, stapled ticket and Gatekeeper checks |
 | `plurxd-X.Y.Z-windows-x86_64.zip` | Windows x64 | `scripts/package-windows`; `plurxd.exe --version` on Windows Server 2022 |
 | `SHA256SUMS` | all of the above | computed over exactly the files published |
 
@@ -196,12 +196,15 @@ repointed at `/usr/bin`. Installing creates the `plurx` user and
 it and no removal deletes it), then enables and starts the service; an upgrade
 restarts it only if it is running; removing stops and disables it and keeps
 the state, and installing again re-enables it. The macOS archive is the
-universal binary beside `deploy/install` and the agent template, so `./install`
-in the unpacked folder is the whole install.
+universal runtime, desktop app and controllers beside `deploy/install`, so
+`./install` in the unpacked folder is the whole install. Actual startup, login,
+reboot and rollback behavior remain separate native qualification evidence.
 
-The build jobs hold a read-only token and pass their output on as one-day
-workflow artifacts. Only the last job can write, and it compiles nothing: it
-checks that it holds exactly the six expected files, computes `SHA256SUMS`, and
+The build jobs hold a read-only token and pass their output on as
+workflow artifacts retained for seven days. Only the last job can write, and
+it compiles nothing: it checks the exact twelve native assets (plus the
+manifest/signature pair only when in-app upgrades are qualified), computes
+`SHA256SUMS`, and
 creates the release in one `gh release create`, which publishes only once
 every file is attached. A release that is already published is never rebuilt
 over; a draft an interrupted publish left behind is replaced. The tag is
@@ -216,9 +219,10 @@ everything and publishes nothing. GitHub starts no workflow for a push that
 carries more than three tags, so a mirror catching up on several releases at
 once needs the back-fill dispatch for each.
 
-Forgejo reads `.github/workflows` too. Every job's whole condition is
-`github.server_url == 'https://github.com'`, which Forgejo evaluates on the
-server and records as skipped without a runner. The contract
+Forgejo reads `.github/workflows` too. Every job starts with the positive
+`github.server_url == 'https://github.com'` condition, with explicit mode and
+status routing where needed. Forgejo evaluates that gate on the server and
+records these jobs as skipped without allocating a runner. The contract
 `test_github_only_workflows_never_reach_the_fleet` holds the file to that
 exact gate, to GitHub-hosted runners, to local actions plus GitHub's two
 pinned artifact actions, to tag-push and dispatch triggers only, and to one
@@ -339,8 +343,10 @@ native upgrade path.
 restrict deployment branches/tags to `main` and `v*`, and upload the private PEM
 with `gh secret set PLURX_UPDATE_ED25519_PRIVATE_KEY --env desktop-release-signing
 --repo pjunod/cinema < /protected/path/key.pem`. Keep private bytes out of command
-arguments, logs, pull requests and build artifacts. Set these environment
-variables only for the reviewed, qualified release:
+arguments, logs, pull requests and build artifacts. Set the trusted packaging
+commit in the protected signing environment. Set the five `PLURX_UPDATE_*`
+qualification values as **repository variables** only for a reviewed, qualified
+release; the resolver reads them before allocating a protected signing job:
 
 | Variable | Required value |
 |---|---|
@@ -351,13 +357,23 @@ variables only for the reviewed, qualified release:
 | `PLURX_UPDATE_MINIMUM_CONTROLLER` | Lowest controller version tested with this release. |
 | `PLURX_UPDATE_ROLLBACK` | `binary_compatible` after rollback qualification, otherwise `manual_recovery`. |
 
-**Publication:** the GitHub release workflow checks that the dispatch commit
+**Installer publication:** verified native packages/archives and `SHA256SUMS`
+publish independently of in-app upgrade qualification. If any of the five
+`PLURX_UPDATE_*` qualification variables is absent, the release omits update
+metadata and explicitly advertises manual installation only. It does not enter
+the protected update-signing environment or publish an unsigned/fixture feed.
+Apple distribution verification remains mandatory for macOS.
+
+**Authenticated update publication:** when all five qualification variables are
+configured, the GitHub release workflow checks that the dispatch commit
 matches `PLURX_TRUSTED_PACKAGING_COMMIT`, that candidate and approved packaging
 roots agree, and that the private key matches a pinned public key. It signs the
-exact manifest bytes only after checking the native artifact cohort. A complete
-release includes `plurx-update-v1.json` and its detached `.sig`, plus the native
-packages/archives and `SHA256SUMS`. Missing signing configuration or qualification
-must remain a refusal; never substitute fixture keys or bypass authentication.
+exact manifest bytes only after checking the native artifact cohort. Such a
+release also includes `plurx-update-v1.json` and its detached `.sig`, plus the native
+packages/archives and `SHA256SUMS`. Once update publication is selected, missing
+signing configuration or invalid qualification remains a refusal; never
+substitute fixture keys or bypass authentication. Partial qualification never
+advertises an update manifest, even when an Ed25519 key is already configured.
 
 **Reading the result:** a populated public-root document and configured secret
 establish signing capability; they do not mean a signed release is published.
@@ -402,9 +418,10 @@ Add these environment variables:
 The signing job imports the certificate into a temporary keychain and removes
 it and the notarization key on success, failure or cancellation. Missing
 configuration, rejected notarization, or failed distribution verification
-prevents the upload and publication. Configure the existing desktop update
-signing environment and compatibility variables above as well; publication
-requires the complete platform cohort and signed update metadata.
+prevents the macOS upload and publication. The complete native platform cohort
+is always required. The separate desktop update-signing environment and
+qualified compatibility variables above are required only to advertise
+authenticated in-app upgrades; they do not gate manual installer downloads.
 
 A dry run needs neither Apple credentials nor environment approval. It uploads
 an ad-hoc `release-macos` workflow artifact without publishing a GitHub release.
