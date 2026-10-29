@@ -1,7 +1,8 @@
 # Paged async proof — delivery and ownership
 
-**Status: M0 conforms; implementation and native CI integration built; current
-Main reconciliation, separate final review and acceptance pending. Updated 2026-10-28.** This extends
+**Status:** Open — verification and acceptance pending. Updated 2026-10-29.
+
+This extends
 [the async refinement ledger](ASYNC-STORE-REFINEMENT-STATUS.md) after the actual
 run 6115 product hit its global Store cap. It implements a paged exact proof
 for the same selected finite domain. It adds no production feature switch.
@@ -17,9 +18,11 @@ interfaces and complete predecessor transactions are committed and compile-clean
 through `a3b584e9`. The paged default driver and expand/import/restore wiring
 are committed; the bounded static ABI audit found no owned Rust mismatch. The
 independent verifier baseline and input-continuation correction are committed
-and integrated. The CI session and native integration are implemented; current
-Main reconciliation and final source review remain. No tests or paged qualification
-have run for this implementation; no accepted receipt exists.
+and integrated. Source and active-route review are approved through `ce1909d7`
+and Main `85910425`. Four public runtime identities have been collected; full
+runtime and source-export approval, capability probes, and global qualification
+remain pending. No tests or paged qualification have run for this implementation;
+no accepted receipt exists.
 
 ## Why the architecture changes
 
