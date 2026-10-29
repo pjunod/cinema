@@ -66,6 +66,44 @@ class MediaSupportMatrixTests(unittest.TestCase):
                 self.assertFalse((source / "GNUmakefile").is_symlink())
                 self.assertEqual((source / "GNUmakefile").read_text(), makefile)
 
+    @unittest.skipUnless(shutil.which("aclocal") and shutil.which("autoconf"),
+                         "requires aclocal and autoconf")
+    def test_source_aclocal_discovers_homebrew_and_inherited_macro_directories(self):
+        media = load("build-macos-source-media")
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            brew = root / "brew"
+            brew_macros = brew / "share/aclocal"
+            inherited = root / "caller-aclocal"
+            empty_system = root / "source-prefix-aclocal"
+            project = root / "project"
+            prepared = root / "prepared"
+            for directory in [brew_macros, inherited, empty_system, project, prepared]:
+                directory.mkdir(parents=True)
+            for directory, name in [(brew_macros, "BREW"), (inherited, "CALLER")]:
+                (directory / (name.lower() + ".m4")).write_text(
+                    "AC_DEFUN([AC_PLURX_" + name + "_MACRO], "
+                    "[AC_DEFINE([PLURX_" + name + "_VISIBLE], [1], [macro found])])\n")
+            (project / "configure.ac").write_text(
+                "AC_INIT([aclocal-path-fixture], [1])\n"
+                "AC_PLURX_BREW_MACRO\nAC_PLURX_CALLER_MACRO\nAC_OUTPUT\n")
+            env = dict(os.environ, ACLOCAL_PATH=str(inherited))
+            with mock.patch.object(media, "BREW_PREFIXES", [brew, root / "absent-brew"]), \
+                    mock.patch.object(media, "recipe", return_value=mock.Mock()), \
+                    mock.patch.object(media, "run"):
+                media.source_generation_tools(prepared, env)
+            # Reproduce source-built aclocal's empty third-party system prefix:
+            # only the environment can expose the two external macro owners.
+            subprocess.run([shutil.which("aclocal"), "--system-acdir=" + str(empty_system)],
+                           cwd=project, env=env, check=True, capture_output=True)
+            subprocess.run([shutil.which("autoconf")], cwd=project, env=env,
+                           check=True, capture_output=True)
+            subprocess.run(["/bin/sh", "./configure"], cwd=project, env=env,
+                           check=True, capture_output=True)
+            configured = (project / "config.log").read_text()
+            self.assertIn("#define PLURX_BREW_VISIBLE 1", configured)
+            self.assertIn("#define PLURX_CALLER_VISIBLE 1", configured)
+
     def test_cold_build_discovers_homebrew_and_new_tools_with_system_only_path(self):
         media = load("build-macos-source-media")
         with tempfile.TemporaryDirectory() as work:
