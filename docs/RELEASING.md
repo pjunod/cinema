@@ -199,7 +199,12 @@ the state. With a retained managed installation record, installing again after
 removal requires restoring the trusted package guard first; preinstall refuses
 to unpack a new payload when that guard is absent. The workflow tests forced
 reinstallation while the guard remains installed, followed by removal. The macOS archive is the
-universal runtime, desktop app and controllers beside `deploy/install`, so
+universal runtime, desktop app and controllers beside `deploy/install`. Its
+architecture-neutral WASM source parser is built once and shared unchanged by
+both native media slices; independent host SDK builds can emit slightly
+different floating-point constants, and universal assembly requires identical
+parser bytes and ABI. The complete parser provenance travels with that shared
+artifact. Thus
 `./install` in the unpacked folder is the whole install. Actual startup, login,
 reboot and rollback behavior remain separate native qualification evidence.
 

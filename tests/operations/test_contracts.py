@@ -4806,7 +4806,7 @@ assert.equal(context.ACT_TIMER, null);
                         elif name == "desktop_qualification":
                             expected_gate += " && needs.resolve.outputs.mode == 'qualification'"
                         elif name != "resolve":
-                            self.assertIn(name, {"linux", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata"})
+                            self.assertIn(name, {"linux", "macos_source_parser", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata"})
                             expected_gate += " && needs.resolve.outputs.mode != 'qualification'"
                     self.assertEqual([expected_gate], conditions, f"{path}:{name}")
                     if path == ".github/workflows/github-release.yml" and name == "desktop_qualification":

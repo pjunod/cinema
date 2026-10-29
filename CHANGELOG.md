@@ -374,7 +374,9 @@ bump may break compatibility and a **patch** bump never does.
 
 - GitHub macOS releases sign and notarize the complete install archive in a
   protected job before publication, retaining component hashes and the stapled
-  app ticket. Manual installers publish independently of in-app upgrade
+  app ticket. A single canonical WASM parser is shared by both native slices
+  so host-specific floating-point folding cannot prevent universal assembly.
+  Manual installers publish independently of in-app upgrade
   qualification; unqualified releases omit update metadata. Dry-run builds
   remain available without Apple credentials. Linux release smoke tests force
   reinstall before removal, preserve the missing-guard refusal, and retain

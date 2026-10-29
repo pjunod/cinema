@@ -288,6 +288,33 @@ class MacosReleaseSigningCase(unittest.TestCase):
                 self.assertEqual(list(destination.iterdir()), [], "all members must be checked before extraction")
         self.assertFalse((self.root / "outside").exists())
 
+    def test_workflow_shares_one_canonical_parser_between_native_slices(self):
+        workflow = (ROOT / ".github/workflows/github-release.yml").read_text()
+        blocks = dict(re.findall(r"(?ms)^  ([a-z_]+):\n(.*?)(?=^  [a-z_]+:|\Z)", workflow.split("\njobs:\n", 1)[1]))
+        parser, native = blocks["macos_source_parser"], blocks["macos_build"]
+        self.assertIn("    needs: resolve\n", parser)
+        self.assertIn("    runs-on: ubuntu-24.04\n", parser)
+        self.assertEqual(workflow.count("python3 scripts/build-macos-source-parser --output"), 1)
+        self.assertIn('tar -C "$RUNNER_TEMP/source-parser" -czf ../source-parser.tar.gz .', parser)
+        self.assertIn("name: macos-source-parser\n          path: source-parser.tar.gz", parser)
+        self.assertNotIn("secrets.", parser)
+        self.assertIn("    needs: [resolve, macos_source_parser]\n", native)
+        self.assertIn("name: macos-source-parser\n          path: shared-parser", native)
+        unpack = 'tar -C "$RUNNER_TEMP/source-parser" -xzf ../shared-parser/source-parser.tar.gz'
+        self.assertIn(unpack, native)
+        self.assertLess(native.index(unpack), native.index("python3 scripts/build-macos-video-ffmpeg"))
+        self.assertIn('--source-parser-package "$RUNNER_TEMP/source-parser"', native)
+        self.assertNotIn("scripts/build-macos-source-parser", native)
+
+    def test_universal_media_refuses_different_parser_bytes_before_native_combination(self):
+        shared = dict(source_commit="source", source_sha256="source-hash", parser_abi="same-abi", module_bytes=8)
+        left, right = dict(shared, module_sha256="arm-host-bytes"), dict(shared, module_sha256="intel-host-bytes")
+        with patch.object(self.package_tool, "validate_native_package", side_effect=[left, right]), \
+             patch.object(self.package_tool.subprocess, "check_output") as lipo:
+            with self.assertRaisesRegex(ValueError, "different source parser bytes/ABI"):
+                self.package_tool.combine_ffmpeg_packages(self.root / "arm", self.root / "intel", self.root / "universal")
+        lipo.assert_not_called()
+
     def test_workflow_isolates_apple_credentials_and_routes_only_signed_release_artifact(self):
         workflow = (ROOT / ".github/workflows/github-release.yml").read_text()
         blocks = dict(re.findall(r"(?ms)^  ([a-z_]+):\n(.*?)(?=^  [a-z_]+:|\Z)", workflow.split("\njobs:\n", 1)[1]))

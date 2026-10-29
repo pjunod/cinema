@@ -451,9 +451,40 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  macos_source_parser:
+    name: canonical macOS source parser
+    needs: resolve
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Fetch the release source
+        env:
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git init -q release-source
+          git -C release-source fetch -q --depth 1 "$REPO_URL" "$COMMIT"
+          git -C release-source checkout -q --detach FETCH_HEAD
+      - name: Build the architecture-neutral parser once for both native slices
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential patch curl ca-certificates
+          python3 scripts/build-macos-source-parser --output "$RUNNER_TEMP/source-parser" --jobs 3
+          tar -C "$RUNNER_TEMP/source-parser" -czf ../source-parser.tar.gz .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-source-parser
+          path: source-parser.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   macos_build:
     name: macOS plurxd (${{ matrix.arch }})
-    needs: resolve
+    needs: [resolve, macos_source_parser]
     if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
     runs-on: ${{ matrix.runner }}
     # A slice takes about an hour on these runners (63 min arm64, 72 min
@@ -485,6 +516,10 @@ jobs:
           git init -q release-source
           git -C release-source fetch -q --depth 1 "$REPO_URL" "$COMMIT"
           git -C release-source checkout -q --detach FETCH_HEAD
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-source-parser
+          path: shared-parser
       - name: Build and run plurxd on ${{ matrix.arch }}
         working-directory: release-source
         env:
@@ -508,7 +543,10 @@ jobs:
             --version "$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)" \
             --output "$RUNNER_TEMP/Plurx Server.app"
           tar -C "$RUNNER_TEMP" -czf "../slice/desktop-$ARCH.tar.gz" 'Plurx Server.app'
-          python3 scripts/build-macos-source-parser --output "$RUNNER_TEMP/source-parser" --jobs 3
+          # Independent host compilers can round WASM floating constants
+          # differently. Both native packages must carry the exact same module.
+          mkdir "$RUNNER_TEMP/source-parser"
+          tar -C "$RUNNER_TEMP/source-parser" -xzf ../shared-parser/source-parser.tar.gz
           python3 scripts/build-macos-video-ffmpeg --output "$RUNNER_TEMP/media-package" \
             --source-parser-package "$RUNNER_TEMP/source-parser"
           tar -C "$RUNNER_TEMP/media-package" -czf "../slice/media-$ARCH.tar.gz" .
