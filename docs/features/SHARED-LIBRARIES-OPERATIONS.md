@@ -1,6 +1,6 @@
 # Shared libraries — operating the effort build
 
-**Status:** implemented paths with qualification open · **Updated:** 2026-10-06.
+**Status:** implemented paths with qualification open · **Updated:** 2026-10-29.
 This guide describes the effort build, not a released or fleet-qualified
 feature. See [current status](SHARED-LIBRARIES-STATUS.md) for outstanding
 cluster, topology and device work, and the
@@ -9,7 +9,10 @@ cluster, topology and device work, and the
 ## Prepare the private listener
 
 Managed native installations can prepare the private connection when sharing
-is enabled. Supported Linux Compose hosts use a separately installed host
+is enabled, including verified legacy macOS server-only LaunchAgents. A
+manually started native daemon observes the private connection without changing
+host forwarding and reports native setup guidance when that forward is absent.
+Supported Linux Compose hosts use a separately installed host
 component; its installer prepares the bridge and its worker follows the switch.
 See [automatic host setup](SHARING-HOST-SETUP.md) for installation, observations
 and source qualification. The configuration below describes the manual path.
@@ -111,6 +114,20 @@ Daemon logs distinguish `phase="probe"` (private connection verification),
 code and correlation UUIDs; they do not include invitation secrets, Tailscale
 consent links or peer credentials. A probe failure never substitutes for an
 actual import or pairing approval.
+
+### When shared playback cannot prepare
+
+The receiver distinguishes upstream, decision decoding and resource projection
+failures in daemon warnings with `phase="upstream"`, `phase="decode"` and
+`phase="project"`; Source planning failures use `phase="source_plan"`.
+Warnings include fixed codes and import/file identifiers, without peer
+credentials, file paths or raw decision payloads. The generic viewer error
+alone does not identify a codec or HDR problem.
+
+The peer decoder accepts the current named 5.1/7.1 and limited-default audio
+downmix plans while refusing unknown fields. Process-local measured-output
+advisories are omitted from the private Source response; they cannot become
+peer authority.
 
 ## Understand playback and retirement
 

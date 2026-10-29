@@ -126,6 +126,10 @@ bump may break compatibility and a **patch** bump never does.
   imports verify an existing private connection immediately, show actionable
   failures with bounded retries, and log connection/import failure codes
   without exposing invitation secrets or credentials.
+  Native Mac setup recognizes legacy installed services and no longer treats
+  ordinary native daemons as Docker containers. Shared playback accepts the
+  current audio downmix plans and excludes public-only output advisories from
+  peer decisions instead of reporting an unexplained preparation failure.
 
 - Progressive subtitle translation keeps FFmpeg progress updates out of source
   clock evidence, preventing valid decoded ranges from failing before inference.

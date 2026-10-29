@@ -855,7 +855,7 @@ async fn disconnect(
     Ok(Json(json!({"disabled":true})))
 }
 
-fn peer_error_code(error: &crate::sharing_client::PeerError) -> &'static str {
+pub(super) fn peer_error_code(error: &crate::sharing_client::PeerError) -> &'static str {
     use crate::sharing_client::PeerError;
     match error {
         PeerError::IdentityMismatch => "sharing_identity_mismatch",

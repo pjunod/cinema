@@ -4160,7 +4160,10 @@ CAS writes with pin confirmation; no invitation POST is replayed.
 `state`, `message` and `checked_at_ms`. States distinguish `pending`,
 `disabled`, `ready`, `tailscale_missing`, `sign_in_required`,
 `permission_required`, `port_conflict`, `host_helper_required`,
-`deployment_required` and `unavailable`. `ready` confirms local host
+`deployment_required`, `native_setup_required` and `unavailable`.
+`native_setup_required` describes a native installation needing its installed
+service or manual private forwarding, rather than a Docker host helper.
+`ready` confirms local host
 configuration; peer access and two-home reachability still need pairing.
 Managed host reconciliation may CAS-update this node's observed address and
 certificate in the endpoint manifest. Other hosts, custom ports and an existing

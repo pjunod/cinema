@@ -18,6 +18,124 @@ const TARGET: &str = "127.0.0.1:32444";
 const PORT: u16 = 32443;
 const POLL: Duration = Duration::from_secs(5);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostMode {
+    ManagedNative,
+    UnmanagedNative,
+    ExternalContainer,
+}
+impl HostMode {
+    fn select(managed: bool, container: bool) -> Self {
+        if container {
+            Self::ExternalContainer
+        } else if managed {
+            Self::ManagedNative
+        } else {
+            Self::UnmanagedNative
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn legacy_launchd_identity(output: &[u8], service: &str) -> Option<(u32, PathBuf, PathBuf)> {
+    let text = std::str::from_utf8(output).ok()?;
+    if !text.trim_end().ends_with("\n}") {
+        return None;
+    }
+    let mut lines = text.lines();
+    if lines.next()? != format!("{service} = {{") {
+        return None;
+    }
+    let (mut pid, mut program, mut path) = (None, None, None);
+    for line in lines {
+        // launchctl indents first-level attributes with one tab. Nested
+        // arguments/environment values cannot supply process identity.
+        if let Some(value) = line.strip_prefix("\tpid = ") {
+            if pid.is_some() {
+                return None;
+            }
+            pid = Some(value.parse::<u32>().ok()?);
+        } else if let Some(value) = line.strip_prefix("\tprogram = ") {
+            if program.is_some() || value.is_empty() {
+                return None;
+            }
+            program = Some(PathBuf::from(value));
+        } else if let Some(value) = line.strip_prefix("\tpath = ") {
+            if path.is_some() || value.is_empty() {
+                return None;
+            }
+            path = Some(PathBuf::from(value));
+        }
+    }
+    Some((pid.filter(|pid| *pid > 1)?, program?, path?))
+}
+
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn legacy_service_matches(
+    output: &[u8],
+    service: &str,
+    pid: u32,
+    executable: &Path,
+    registration: &Path,
+    uid: u32,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some((observed_pid, program, path)) = legacy_launchd_identity(output, service) else {
+        return false;
+    };
+    if observed_pid != pid || path != registration || uid == 0 {
+        return false;
+    }
+    let Ok(definition) = std::fs::symlink_metadata(registration) else {
+        return false;
+    };
+    if !definition.is_file() || definition.uid() != uid || definition.mode() & 0o022 != 0 {
+        return false;
+    }
+    let (Ok(program), Ok(executable)) = (program.canonicalize(), executable.canonicalize()) else {
+        return false;
+    };
+    let Ok(binary) = std::fs::metadata(&executable) else {
+        return false;
+    };
+    program == executable
+        && binary.is_file()
+        && [0, uid].contains(&binary.uid())
+        && binary.mode() & 0o022 == 0
+}
+
+#[cfg(target_os = "macos")]
+async fn legacy_native_service() -> bool {
+    // A legacy --server-only LaunchAgent has no desktop-control environment.
+    // Prove that launchd owns this exact process before allowing host changes.
+    // SAFETY: geteuid has no pointer arguments or side effects.
+    let uid = unsafe { libc::geteuid() };
+    let Ok(home) = plurx_desktop_control::installation::home_for(uid) else {
+        return false;
+    };
+    let Ok(executable) = std::env::current_exe() else {
+        return false;
+    };
+    let service = format!("gui/{uid}/com.plurx.plurxd");
+    let Ok(output) = command_with_timeout(
+        Path::new("/bin/launchctl"),
+        &["print", &service],
+        Duration::from_secs(2),
+    )
+    .await
+    else {
+        return false;
+    };
+    legacy_service_matches(
+        &output,
+        &service,
+        std::process::id(),
+        &executable,
+        &home.join("Library/LaunchAgents/com.plurx.plurxd.plist"),
+        uid,
+    )
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SetupState {
@@ -30,6 +148,7 @@ pub(crate) enum SetupState {
     PermissionRequired,
     PortConflict,
     HostHelperRequired,
+    NativeSetupRequired,
     DeploymentRequired,
     Unavailable,
 }
@@ -50,6 +169,7 @@ impl SetupState {
             Self::PermissionRequired => "Allow Cinema's host setup component to configure Tailscale, then retry.",
             Self::PortConflict => "Another Tailscale rule uses Cinema's private port. Cinema has preserved that rule; resolve the conflict on this host.",
             Self::HostHelperRequired => "Install Cinema's sharing host component on the Docker host. The container cannot configure the host's Tailscale service.",
+            Self::NativeSetupRequired => "Native sharing needs Cinema's listener at 127.0.0.1:32444 and private TCP forwarding from port 32443. Start the installed Cinema service for automatic setup, or configure this forwarding on the host.",
             Self::DeploymentRequired => "The Docker host setup must publish Cinema's sharing listener on host loopback and select its private bridge.",
             Self::Unavailable => "Private host setup could not be verified. Check Tailscale on this host; Cinema will retry automatically.",
         }.into() }
@@ -334,26 +454,57 @@ async fn native_setup(
     enabled: bool,
     state: &AppState,
     discovered: &mut Option<IpAddr>,
+    managed: bool,
 ) -> Result<Option<HostAddress>, SetupState> {
     let marker = directory.join("serve-owned.json");
-    if !enabled && !marker.exists() {
+    if !enabled && (!managed || !marker.exists()) {
         return Ok(None);
     }
     let program = tailscale_program()?;
+    native_setup_with_program(
+        directory,
+        enabled,
+        state.store.as_ref(),
+        discovered,
+        managed,
+        &program,
+    )
+    .await
+}
+
+async fn native_setup_with_program(
+    directory: &Path,
+    enabled: bool,
+    store: &dyn plurx_core::store::Store,
+    discovered: &mut Option<IpAddr>,
+    managed: bool,
+    program: &Path,
+) -> Result<Option<HostAddress>, SetupState> {
+    let marker = directory.join("serve-owned.json");
+    if !enabled && (!managed || !marker.exists()) {
+        return Ok(None);
+    }
     let address = if enabled {
         Some(host_address(
-            &command_json(&program, &["status", "--json", "--peers=false"]).await?,
+            &command_json(program, &["status", "--json", "--peers=false"]).await?,
         )?)
     } else {
         None
     };
     *discovered = address.as_ref().map(|address| IpAddr::V4(address.ipv4));
-    let config = command_json(&program, &["serve", "status", "--json"]).await?;
+    let config = command_json(program, &["serve", "status", "--json"]).await?;
+    if !managed {
+        return match serve_rule(&config) {
+            ServeRule::Ours => Ok(address),
+            ServeRule::Missing => Err(SetupState::NativeSetupRequired),
+            ServeRule::Conflict => Err(SetupState::PortConflict),
+        };
+    }
     let owned =
         read_json(&marker).is_ok_and(|v| v == serde_json::json!({"port":PORT,"target":TARGET}));
     match (enabled, serve_rule(&config), owned) {
         (true, ServeRule::Missing, _) => {
-            if crate::sharing::enabled(state.store.as_ref())
+            if crate::sharing::enabled(store)
                 .await
                 .map_err(|_| SetupState::Unavailable)?
                 != enabled
@@ -365,11 +516,11 @@ async fn native_setup(
             write_json(&marker, &serde_json::json!({"port":PORT,"target":TARGET}))
                 .map_err(|_| SetupState::Unavailable)?;
             command(
-                &program,
+                program,
                 &["serve", "--bg", "--tcp=32443", "tcp://127.0.0.1:32444"],
             )
             .await?;
-            if serve_rule(&command_json(&program, &["serve", "status", "--json"]).await?)
+            if serve_rule(&command_json(program, &["serve", "status", "--json"]).await?)
                 != ServeRule::Ours
             {
                 return Err(SetupState::Unavailable);
@@ -379,14 +530,14 @@ async fn native_setup(
             return Err(SetupState::PortConflict)
         }
         (false, ServeRule::Ours, true) => {
-            if crate::sharing::enabled(state.store.as_ref())
+            if crate::sharing::enabled(store)
                 .await
                 .map_err(|_| SetupState::Unavailable)?
                 != enabled
             {
                 return Err(SetupState::Pending);
             }
-            command(&program, &["serve", "--tcp=32443", "off"]).await?;
+            command(program, &["serve", "--tcp=32443", "off"]).await?;
             std::fs::remove_file(marker).map_err(|_| SetupState::Unavailable)?;
         }
         (false, ServeRule::Missing, true) => {
@@ -501,10 +652,20 @@ async fn publish_endpoint(state: &AppState, address: &HostAddress) -> Result<(),
 pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_managed: bool) {
     let directory = state.sharing.host_directory();
     let generation = uuid::Uuid::new_v4().to_string();
-    let external = !native_managed
-        || state.sharing.network.listener_profile == SharingListenerProfile::DockerBridge
+    let container = state.sharing.network.listener_profile == SharingListenerProfile::DockerBridge
         || Path::new("/.dockerenv").exists()
         || Path::new("/run/.containerenv").exists();
+    #[cfg(target_os = "macos")]
+    let native_managed = native_managed
+        || (!container
+            && plurx_core::process::bounded::cancellable(shutdown.clone(), async {
+                Ok::<_, SetupState>(legacy_native_service().await)
+            })
+            .await
+            .unwrap_or(false));
+    let mode = HostMode::select(native_managed, container);
+    tracing::info!(?mode, "sharing host setup mode selected");
+    let mut last_setup = None;
     loop {
         if shutdown.is_cancelled() {
             return;
@@ -514,7 +675,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
             let mut guard = false;
             let result = if private_directory(&directory).is_err() {
                 Err(SetupState::Unavailable)
-            } else if external {
+            } else if mode == HostMode::ExternalContainer {
                 let request = HostRequest {
                     schema_version: 1,
                     generation: &generation,
@@ -552,13 +713,19 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
                     }
                 }
             } else if enabled && state.sharing.network.bind.to_string() != TARGET {
-                Err(SetupState::DeploymentRequired)
+                Err(SetupState::NativeSetupRequired)
             } else {
                 // Signal the child owner and await settlement; dropping this
                 // future on shutdown would skip its confirmed reap path.
                 plurx_core::process::bounded::cancellable(
                     shutdown.clone(),
-                    native_setup(&directory, enabled, &state, &mut discovered),
+                    native_setup(
+                        &directory,
+                        enabled,
+                        &state,
+                        &mut discovered,
+                        mode == HostMode::ManagedNative,
+                    ),
                 )
                 .await
             };
@@ -570,6 +737,14 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
                 Ok(_) => (SetupState::Disabled, None),
                 Err(error) => (error, discovered),
             };
+            if last_setup != Some(setup) {
+                if matches!(setup, SetupState::Ready | SetupState::Disabled) {
+                    tracing::info!(?mode, ?setup, "sharing host setup changed");
+                } else {
+                    tracing::warn!(?mode, ?setup, "sharing host setup needs attention");
+                }
+                last_setup = Some(setup);
+            }
             state
                 .sharing
                 .observe_host_setup(setup.status(), address, guard);
@@ -584,6 +759,202 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken, native_man
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_host_mode_keeps_unmanaged_hosts_out_of_container_handoff() {
+        assert_eq!(HostMode::select(false, false), HostMode::UnmanagedNative);
+        assert_eq!(HostMode::select(true, false), HostMode::ManagedNative);
+        assert_eq!(HostMode::select(false, true), HostMode::ExternalContainer);
+        assert_eq!(HostMode::select(true, true), HostMode::ExternalContainer);
+        assert!(!SetupState::NativeSetupRequired
+            .status()
+            .message
+            .contains("Docker"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_launchd_identity_requires_exact_process_and_owned_registration() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let directory = tempfile::tempdir().expect("fixture");
+        let program = directory.path().join("plurxd");
+        let registration = directory.path().join("com.plurx.plurxd.plist");
+        std::fs::write(&program, b"fixture").expect("program");
+        std::fs::write(&registration, b"fixture registration").expect("registration");
+        for file in [&program, &registration] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))
+                .expect("private fixture");
+        }
+        let uid = std::fs::metadata(&registration).expect("metadata").uid();
+        let service = "gui/501/com.plurx.plurxd";
+        let fixture = format!(
+            "{service} = {{\n\tpath = {}\n\tprogram = {}\n\tpid = 42\n}}\n",
+            registration.display(),
+            program.display()
+        );
+        let matches = |output: &str, pid, executable: &Path, owner| {
+            legacy_service_matches(
+                output.as_bytes(),
+                service,
+                pid,
+                executable,
+                &registration,
+                owner,
+            )
+        };
+        assert_eq!(matches(&fixture, 42, &program, uid), uid != 0);
+        assert!(!matches(&fixture, 43, &program, uid));
+        assert!(!matches(&fixture, 42, &registration, uid));
+        assert!(!matches(&fixture, 42, &program, uid.saturating_add(1)));
+        for bad in [
+            fixture.replace("\tpid = 42", "\targuments = {\n\t\tpid = 42\n\t}"),
+            fixture.replace("\tpid = 42", "\tpid = 42\n\tpid = 43"),
+            fixture.replace("\tpid = 42", "\tpid = invalid"),
+            fixture.replace("\tpath = ", "\t\tpath = "),
+            fixture.replace("gui/501/", "gui/502/"),
+            fixture.trim_end_matches("}\n").to_owned(),
+        ] {
+            assert!(
+                !matches(&bad, 42, &program, uid),
+                "accepted malformed registration"
+            );
+        }
+        std::fs::set_permissions(&registration, std::fs::Permissions::from_mode(0o666))
+            .expect("unsafe registration");
+        assert!(!matches(&fixture, 42, &program, uid));
+        std::fs::remove_file(&registration).expect("remove registration");
+        std::os::unix::fs::symlink(&program, &registration).expect("symlink registration");
+        assert!(!matches(&fixture, 42, &program, uid));
+    }
+
+    #[cfg(unix)]
+    fn native_cli_fixture(directory: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let program = directory.join("tailscale-fixture");
+        std::fs::write(directory.join("serve.json"), b"{}").expect("empty Serve config");
+        std::fs::write(
+            directory.join("expected.json"),
+            br#"{"TCP":{"32443":{"TCPForward":"127.0.0.1:32444"}}}"#,
+        )
+        .expect("expected private forward");
+        std::fs::write(&program, r#"#!/bin/sh
+set -eu
+root=$(dirname "$0")
+printf '%s\n' "$*" >> "$root/calls"
+case "$*" in
+  'status --json --peers=false') printf '%s' '{"BackendState":"Running","Self":{"DNSName":"cinema.tail123.ts.net.","TailscaleIPs":["100.80.1.2"]}}' ;;
+  'serve status --json') cat "$root/serve.json" ;;
+  'serve --bg --tcp=32443 tcp://127.0.0.1:32444') cp "$root/expected.json" "$root/serve.json" ;;
+  'serve --tcp=32443 off') printf '{}' > "$root/serve.json" ;;
+  *) exit 97 ;;
+esac
+"#).expect("fixture CLI");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("fixture executable");
+        program
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_native_setup_creates_only_fixed_private_forward() {
+        use plurx_core::store::{keys, SettingsStore, SqliteStore};
+        let directory = tempfile::tempdir().expect("fixture");
+        let program = native_cli_fixture(directory.path());
+        let store = SqliteStore::open_in_memory().expect("store");
+        store
+            .put_setting(keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable");
+        let mut discovered = None;
+        let address = native_setup_with_program(
+            directory.path(),
+            true,
+            &store,
+            &mut discovered,
+            true,
+            &program,
+        )
+        .await
+        .expect("automatic private forwarding")
+        .expect("host address");
+        assert_eq!(address.ipv4, Ipv4Addr::new(100, 80, 1, 2));
+        assert_eq!(discovered, Some(IpAddr::V4(address.ipv4)));
+        assert!(directory.path().join("serve-owned.json").is_file());
+        let calls = std::fs::read_to_string(directory.path().join("calls")).expect("calls");
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            vec![
+                "status --json --peers=false",
+                "serve status --json",
+                "serve --bg --tcp=32443 tcp://127.0.0.1:32444",
+                "serve status --json",
+            ]
+        );
+        store
+            .put_setting(keys::SHARING_ENABLED, "0")
+            .await
+            .expect("disable");
+        native_setup_with_program(
+            directory.path(),
+            false,
+            &store,
+            &mut discovered,
+            true,
+            &program,
+        )
+        .await
+        .expect("owned forwarding cleanup");
+        assert!(!directory.path().join("serve-owned.json").exists());
+        assert_eq!(
+            read_json(&directory.path().join("serve.json")),
+            Ok(json!({}))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unmanaged_native_observation_discovers_egress_without_host_mutation() {
+        use plurx_core::store::SqliteStore;
+        let directory = tempfile::tempdir().expect("fixture");
+        let program = native_cli_fixture(directory.path());
+        let store = SqliteStore::open_in_memory().expect("store");
+        for (config, expected) in [
+            (json!({}), Err(SetupState::NativeSetupRequired)),
+            (json!({"TCP":{"32443":{"TCPForward":TARGET}}}), Ok(true)),
+            (
+                json!({"TCP":{"32443":{"TCPForward":"127.0.0.1:9000"}}}),
+                Err(SetupState::PortConflict),
+            ),
+        ] {
+            write_json(&directory.path().join("serve.json"), &config).expect("config");
+            let mut discovered = None;
+            let result = native_setup_with_program(
+                directory.path(),
+                true,
+                &store,
+                &mut discovered,
+                false,
+                &program,
+            )
+            .await;
+            assert_eq!(result.map(|address| address.is_some()), expected);
+            assert_eq!(discovered, Some(IpAddr::V4(Ipv4Addr::new(100, 80, 1, 2))));
+            assert_eq!(read_json(&directory.path().join("serve.json")), Ok(config));
+            assert!(!directory.path().join("serve-owned.json").exists());
+        }
+        let calls = std::fs::read_to_string(directory.path().join("calls")).expect("calls");
+        assert_eq!(calls.lines().count(), 6);
+        assert!(calls
+            .lines()
+            .all(|line| matches!(line, "status --json --peers=false" | "serve status --json")));
+        native_setup_with_program(directory.path(), false, &store, &mut None, false, &program)
+            .await
+            .expect("disabled observation");
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("calls")).expect("calls"),
+            calls
+        );
+    }
+
     #[cfg(unix)]
     fn assert_reaped(pid_file: &std::path::Path) {
         let pid: i32 = std::fs::read_to_string(pid_file)

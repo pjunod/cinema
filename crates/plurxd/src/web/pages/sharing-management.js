@@ -502,7 +502,7 @@ function sharingNetworkRows(rows){
 }
 function sharingConnectionMessage(code){
   const messages={
-    sharing_peer_unavailable:"The other Cinema’s sharing listener is not reachable. Tailscale authorization alone does not verify it. Check connection setup on both servers, including the Docker sharing host component where required.",
+    sharing_peer_unavailable:"The other Cinema’s sharing listener is not reachable. Tailscale authorization alone does not verify it. Check Connection setup on both Cinema servers; the private listener and forwarding must be configured.",
     sharing_identity_mismatch:"The address reached a different Cinema identity. Ask the owner to check its sharing addresses and send a fresh invitation.",
     sharing_protocol_unsupported:"These Cinema versions cannot pair. Update both servers before trying again.",
     sharing_peer_auth_failed:"The other Cinema refused verification. Ask its owner to check the sharing setup and send a fresh invitation.",
