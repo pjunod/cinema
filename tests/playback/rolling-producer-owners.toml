@@ -1,3 +1,24 @@
+# Private sharing setup/network ownership review (2026-10-28; main 10f45ae5f):
+# Exact sharing-only deltas from 66a33d723: +3 namespaced tasks, +4 timers,
+# +1 Command, +9 launch-shaped status observations, +2 child lifecycle calls
+# and +1 kill-on-drop construction. No patterns, roots, equality checks or
+# forbidden-shape zeroes change.
+# Two startup tasks run the node-local host/network maintenance loops with
+# the existing shutdown token, observed between maintenance iterations.
+# One invitation issuance task survives a dropped HTTP receiver; it
+# bounds issue_inner at 22s, records durable abandonment on failed delivery,
+# cancels Cinema authority and invokes the persisted provider cleanup owner.
+# These are not rolling-media producers; no join/reap claim is added here.
+# Host setup owns one registered ChildWork::background command, null stdin/
+# stderr and capped stdout, with an 8s timeout and kill_on_drop. Normal
+# completion awaits wait; the explicit error path awaits kill. Timeout/drop
+# kill is not a confirmed-reap receipt. The other host timer is its poll;
+# network timers bound issuance and the 30s cleanup observation interval.
+# All nine new launch-shaped matches are HTTP or domain .status() reads,
+# not nine process launches. The two lifecycle matches are this child's
+# wait/kill. Existing provider HTTPS requests have finite connect/request
+# bounds; cleanup intent remains journal-owned after requester cancellation.
+
 # Live TV upload regression ownership review (PR #1312, 2026-10-28;
 # Rust source 9c5aa95df): +2 namespaced timers are the awaited five-second
 # fixture observation deadline and its five-millisecond poll. Neither starts
@@ -3259,7 +3280,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # pressure, bounded by QUEUE_WAIT; `subtitle_work.rs` adds one test task for
 # the cancellation regression, which explicitly aborts and awaits it. Both
 # are test-only and settle their handles before fixture teardown.
-expected_occurrences = 1024
+expected_occurrences = 1027
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4964,7 +4985,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `transcode/manager/construct.rs`. The fixture timers are awaited; production
 # polls stay inside the registered live-waiter owners and cap each sleep by
 # their existing admission deadline.
-expected_occurrences = 1901
+expected_occurrences = 1905
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5446,7 +5467,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Main10 decode probe decodes a shipped clip, so its libx265 clip-encode child
 # is gone; the store-less physical qualification test and its ffprobe child
 # are replaced by the real title-job physical test.
-expected_occurrences = 303
+expected_occurrences = 304
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6098,7 +6119,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # inspect the in-process Axum oneshot response for invalid opt-in and success.
 # These reads launch no task or child and introduce no producer ownership.
 # Combined with main's Live TV HTTP assertion: 809 + 2 = 811 reviewed matches.
-expected_occurrences = 811
+expected_occurrences = 820
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6394,7 +6415,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Subtitle completion adds two installer qualification child lifecycle calls;
 # the child remains owned through wait or kill-and-wait on its 60s bound.
 # Main retains the HTTPS transport listener's awaited task/connection boundary.
-expected_occurrences = 354
+expected_occurrences = 356
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6618,7 +6639,7 @@ pattern = "kill_on_drop\\s*\\("
 # `source_probe/fel_qualification.rs` (helper, consumer, decoder; one site
 # counts once). Each is also explicitly waited, or killed and waited, by its
 # owner; kill-on-drop is the backstop, not the settlement.
-expected_occurrences = 117
+expected_occurrences = 118
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

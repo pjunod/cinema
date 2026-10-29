@@ -358,7 +358,7 @@ release; the resolver reads them before allocating a protected signing job:
 
 | Variable | Required value |
 |---|---|
-| `PLURX_TRUSTED_PACKAGING_COMMIT` | Exact reviewed workflow commit used to dispatch publication; update after review when packaging changes. |
+| `PLURX_TRUSTED_PACKAGING_COMMIT` | Exact reviewed workflow commit used for this tag/dispatch; refresh it after review for every release, including version-only changes. |
 | `PLURX_UPDATE_UPGRADE_FROM` | Qualified source-version requirement, such as `=0.7.0`; do not infer compatibility from the new version number. |
 | `PLURX_UPDATE_DATA_COMPATIBILITY` | Qualified data-format compatibility identity. |
 | `PLURX_UPDATE_CLUSTER_COMPATIBILITY` | Qualified cluster compatibility identity. |
@@ -421,7 +421,7 @@ Add these environment variables:
 | `PLURX_MACOS_DEVELOPER_TEAM_ID` | Ten-character Apple team ID matching the certificate. |
 | `PLURX_MACOS_NOTARY_KEY_ID` | Ten-character App Store Connect team API key ID. |
 | `PLURX_MACOS_NOTARY_ISSUER_ID` | API key issuer UUID. |
-| `PLURX_TRUSTED_PACKAGING_COMMIT` | Exact reviewed workflow commit, matching the dispatch commit; also required by desktop metadata signing. |
+| `PLURX_TRUSTED_PACKAGING_COMMIT` | Exact reviewed workflow commit matching this tag/dispatch; refresh it for every release after review. Desktop metadata signing has its own pin. |
 
 The signing job imports the certificate into a temporary keychain and removes
 it and the notarization key on success, failure or cancellation. Missing

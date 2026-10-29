@@ -188,3 +188,7 @@ Focused tests cover the envelope's identity and URL boundaries, provider-device
 matching, consent continuation/account retirement, and retained connectivity
 across invitation and grant state changes. They do not certify real provider
 permissions, policy, tagged-device compatibility or external playback.
+
+Tailscale can omit false-valued `multiUse` and `allowExitNode` response fields.
+The invitation parser uses false defaults and rejects explicit true or malformed
+values; `provider_invite_accepts_omitted_false_flags` covers this compatibility.

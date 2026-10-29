@@ -4,32 +4,18 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
-## Sharing host setup — scoped refresh on 2026-10-28
+## Sharing host startup — scoped refresh on 2026-10-28
 
-Reviewed main merge `b76d309dd` against its first parent. The main-file delta
-adds the sharing-host module, a capability-probe command and an independent
-sharing-host task before the existing background-loop spawn. Table 44's
-selected worker spawn, the remainder of `spawn_background_loops`, and the
-`BackgroundLoopGuard` token/drop implementation are byte-identical. The new
-task only observes its cloned shutdown token and publishes sharing endpoint
-manifests; it does not cancel the owner token or alter library claims, leases,
-waiter settlement or fenced publication.
+Compared the pinned `main.rs` from `2975dec487d2` with `10f45ae5f`.
+The additions declare sharing host/network modules, expose a host-capability
+probe and start independent sharing loops using the existing cancellation
+token. Table 44's selected `background_work_loop` spawn and its argument are
+unchanged. These sharing loops are outside this selected library-worker model;
+this review adds no fairness, shutdown or liveness claim for them.
 
-One whole-file mapping pin is refreshed; its exact anchor remains unique.
-The historical source-anchor snapshot, models, configurations, bounds and
-fairness premises retain their identities. Additional sharing-host work on
-the shared runtime/store is outside the selected-worker abstraction; this
-review establishes no new fairness, latency or whole-daemon shutdown guarantee.
-Fresh affected smoke receipts remain separate execution evidence.
-
-The later main merge `10f45ae5f` adds only the sharing-network module and an
-independent invitation-cleanup task to this file. The selected worker spawn
-and its guard/token/drop code remain byte-identical. The new task observes
-its cloned cancellation token after asynchronous sharing cleanup; it never
-cancels the owner token or changes selected library claim/lease/settlement
-paths. Its additional runtime/store/network work stays outside the model,
-with no new cancel-and-join or whole-daemon shutdown guarantee. Table 44's
-whole-file pin follows this reviewed source; the exact anchor stays unique.
+Refresh only Table 44's whole-file hash. The exact anchor, model, configurations,
+bounds and historical source anchors stay unchanged. This records source
+correspondence; it does not claim a new formal execution or qualification.
 
 ## Metadata-only title analysis — scoped refresh on 2026-10-28
 
