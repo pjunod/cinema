@@ -345,7 +345,7 @@ final class MeridianTests: XCTestCase {
         window.rootViewController = hosting
         window.makeKeyAndVisible()
         defer { window.isHidden = true }
-        settle(0.5)
+        settle(until: { findTabs(hosting)?.selectedViewController != nil })
         let nativeTabs = try XCTUnwrap(findTabs(hosting))
         let libraryRoot = try XCTUnwrap(nativeTabs.selectedViewController)
 
@@ -397,7 +397,7 @@ final class MeridianTests: XCTestCase {
         window.rootViewController = hosting
         window.makeKeyAndVisible()
         defer { window.isHidden = true }
-        settle(0.6)
+        settle(until: { findTabs(hosting)?.selectedViewController != nil })
         let tabs = try XCTUnwrap(findTabs(hosting))
         let settings = try XCTUnwrap(tabs.selectedViewController)
         XCTAssertFalse(tabs.isTabBarHidden)

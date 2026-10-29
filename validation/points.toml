@@ -60,8 +60,8 @@ command = "scripts/history-audit --report target/validation/history.json"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["git", "python3"]
 missing = "fail"
-# The complete corrective-history audit measured 172s in release CI.
-timeout_seconds = 300
+# The complete audit measured 312s on macOS and 172s in release CI.
+timeout_seconds = 600
 
 [[checks]]
 id = "operations-contract"
@@ -258,7 +258,8 @@ profiles = ["ci", "full", "nightly"]
 platforms = ["darwin"]
 requires = ["xcodebuild", "xcodegen"]
 missing = "fail"
-timeout_seconds = 2400
+# Use the native CI lane's two-hour ceiling for the complete journey suite.
+timeout_seconds = 7200
 
 [[checks]]
 id = "android-jvm"

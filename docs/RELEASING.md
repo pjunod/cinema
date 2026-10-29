@@ -83,6 +83,17 @@ CI passes the tag name automatically when it publishes an image.
    passes `make operations-check`, and lets Cargo relock `Cargo.lock` and
    `spikes/hiqlite-m0/Cargo.lock`. It never tags.
 
+   Review the exact-file fingerprints before pushing. Apple project version
+   and build changes need a reviewed refresh of `BUILD_SPECS` in
+   `validation/native_receipts.py`. Cargo manifest and lockfile changes also
+   need reviewed fingerprints in the durable-jobs and operation-progress
+   formal mappings, even when only workspace versions changed. The release
+   script leaves these independent review records alone. Preserve their
+   exact-byte checks and record which source changes were reviewed. Run
+   `python3 -m unittest tests.validation.test_native_receipts` and
+   `python3 scripts/check-formal check-mapping --package <package>` for
+   `durable-jobs`, `operation-progress`, and `worker-refinement` before pushing.
+
 3. **Read the changelog it dated.** Entries are for people running the server,
    not for people reading the diff; edit them in the release pull request.
 
