@@ -245,9 +245,22 @@ class WebTestInventory(unittest.TestCase):
             self.assertTrue((ROOT / path).is_file(), f"web-check runs {path}, which does not exist")
 
     def test_web_check_alone_is_not_a_lane(self):
-        # The rule this file exists for: a test named only in web-check runs
-        # in no pull request, so it does not count as executed.
-        self.assertNotIn("make web-check", workflow_commands())
+        # A syntax recipe or its commentary may mention web-check. Only the
+        # fixed suite role can supply the pull request's Node unit inventory.
+        from unittest.mock import patch
+        from validation import web_unit_receipts as controller
+
+        self.assertIn('run: python3 -m validation.web_unit_receipts --command suite',
+                      fast_lane_web_job())
+        self.assertEqual(controller.command_argv('suite', 'unused-base'),
+                         ['make', 'web-unit-check'])
+        wrong = {**controller.COMMANDS, 'suite': ['make', 'web-check']}
+        tree = ast.Module(body=[ast.Assign(targets=[ast.Name(id='COMMANDS', ctx=ast.Store())],
+                                          value=ast.parse(repr(wrong), mode='eval').body)],
+                          type_ignores=[])
+        with patch.object(ast, 'parse', return_value=tree):
+            with self.assertRaisesRegex(AssertionError, 'exact command inventory'):
+                expanded_web_commands('python3 -m validation.web_unit_receipts --command suite')
         lane = "\n".join(lane_node_test_commands())
         self.assertNotIn("scripts/contrast-check", lane)
         self.assertIn("node tests/web/player-typedef.test.js", lane)
