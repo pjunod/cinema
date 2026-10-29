@@ -284,6 +284,34 @@ fn jobs(state: &AppState) -> Result<Vec<Job>> {
     }
     Ok(jobs)
 }
+/// Tailscale omits false-valued flags in DeviceInvite responses.
+/// Missing means the requested default, while explicit broader permissions
+/// and malformed flag values remain refusals.
+fn created_invite(value: Value) -> Result<(String, String)> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CreatedInvite {
+        id: String,
+        invite_url: String,
+        #[serde(default)]
+        multi_use: bool,
+        #[serde(default)]
+        allow_exit_node: bool,
+    }
+    let mut rows: Vec<CreatedInvite> =
+        serde_json::from_value(value).map_err(|_| "sharing_network_invalid_response")?;
+    if rows.len() != 1 {
+        return Err("sharing_network_invalid_response");
+    }
+    let row = rows.remove(0);
+    if !good_id(&row.id) || row.multi_use || row.allow_exit_node {
+        return Err("sharing_network_invalid_response");
+    }
+    plurx_core::sharing::validate_network_invite_url(&row.invite_url)
+        .map_err(|_| "sharing_network_invalid_response")?;
+    Ok((row.id, row.invite_url))
+}
+
 async fn issue_inner(state: &AppState, invite: &Invitation) -> Result<Secret> {
     let _guard = state.sharing.network_invite_lock.lock().await;
     let token = token(state).await?;
@@ -332,31 +360,7 @@ async fn issue_inner(state: &AppState, invite: &Invitation) -> Result<Secret> {
             Some(json!([{"multiUse":false,"allowExitNode":false}])),
         )
         .await;
-        let result = raw.and_then(|v| {
-            let rows = v.as_array().ok_or("sharing_network_invalid_response")?;
-            if rows.len() != 1 {
-                return Err("sharing_network_invalid_response");
-            }
-            let id = rows[0]
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|v| good_id(v))
-                .ok_or("sharing_network_invalid_response")?
-                .to_owned();
-            let url = rows[0]
-                .get("inviteUrl")
-                .and_then(Value::as_str)
-                .ok_or("sharing_network_invalid_response")?
-                .to_owned();
-            plurx_core::sharing::validate_network_invite_url(&url)
-                .map_err(|_| "sharing_network_invalid_response")?;
-            if rows[0].get("multiUse").and_then(Value::as_bool) != Some(false)
-                || rows[0].get("allowExitNode").and_then(Value::as_bool) != Some(false)
-            {
-                return Err("sharing_network_invalid_response");
-            }
-            Ok((id, url))
-        });
+        let result = raw.and_then(created_invite);
         match result {
             Ok((id, url)) => {
                 job.shares.push(Share {
@@ -598,6 +602,36 @@ async fn retain_other_authority(state: &AppState, token: &Secret, share: &Share)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn provider_invite_accepts_omitted_false_flags() {
+        for fields in [
+            json!({"id":"123","inviteUrl":"https://login.tailscale.com/admin/invite/fixture"}),
+            json!({"id":"123","inviteUrl":"https://login.tailscale.com/admin/invite/fixture","multiUse":false,"allowExitNode":false}),
+        ] {
+            let result = created_invite(json!([fields]))
+                .expect("single-use response uses default false flags");
+            assert_eq!(result.0, "123");
+        }
+    }
+    #[test]
+    fn provider_invite_refuses_reusable_exit_node_and_malformed_flags() {
+        for (key, value) in [
+            ("multiUse", json!(true)),
+            ("allowExitNode", json!(true)),
+            ("multiUse", json!("false")),
+            ("allowExitNode", Value::Null),
+        ] {
+            let mut row =
+                json!({"id":"123","inviteUrl":"https://login.tailscale.com/admin/invite/fixture"});
+            row[key] = value;
+            assert!(created_invite(json!([row])).is_err());
+        }
+        assert!(created_invite(json!([])).is_err());
+        assert!(created_invite(
+            json!([{"id":"123","inviteUrl":"https://evil.invalid/invite/fixture"}])
+        )
+        .is_err());
+    }
     fn endpoint() -> Endpoint {
         Endpoint {
             ipv4: "100.64.1.2".parse().expect("fixture IP"),
