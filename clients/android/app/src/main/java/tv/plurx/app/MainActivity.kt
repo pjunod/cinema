@@ -195,7 +195,7 @@ private fun AppRoot(
         Phase.NeedLogin -> LoginScreen(vm, busy, authError)
         Phase.Ready -> MainNav(vm, reminderChannel, onReminderChannelUsed, invitationId, onInvitationUsed)
     }
-        if (phase != Phase.Ready) Box(Modifier.align(androidx.compose.ui.Alignment.BottomEnd).navigationBarsPadding().padding(16.dp)) { tv.plurx.app.diagnostics.DiagnosticReportButton(category="connection") }
+        if (phase != Phase.Ready && phase != Phase.NeedLogin) Box(Modifier.align(androidx.compose.ui.Alignment.BottomEnd).navigationBarsPadding().padding(16.dp)) { tv.plurx.app.diagnostics.DiagnosticReportButton(category="connection") }
         tv.plurx.app.diagnostics.DiagnosticReportHost()
     }
 }
