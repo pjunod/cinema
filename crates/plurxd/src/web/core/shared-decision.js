@@ -2,13 +2,30 @@
 // Decisions describe delivery; they never acquire a B session or start media.
 const SHARED_DECISION=(()=>{
   const MAX=4*1024*1024,REQUEST_MAX=128*1024;
-  let contexts=new WeakMap();const accepted=new WeakMap(),bases=new WeakMap(),watches=new Map(),jobs=new Set();let watchAuth=AUTH_GENERATION;
+  let contexts=new WeakMap(),accepted=new WeakMap(),bases=new WeakMap();const watches=new Map(),jobs=new Set();let watchAuth=AUTH_GENERATION;
   const fail=()=>{throw new Error("Shared decision unavailable");};
+  // Keep the closed server reason instead of presenting every failed Start as
+  // a decision failure. Peer messages and arbitrary response text stay private.
+  function refusal(status,value,mode){
+    const messages={sharing_start_unresolved:"The sharing host could not confirm playback preparation.",
+      sharing_start_unavailable:"The sharing host is unavailable for playback.",
+      sharing_start_deadline:"The sharing host took too long to prepare playback.",
+      sharing_start_capacity:"The sharing host is busy. Try again shortly.",
+      sharing_start_conflict:"This shared playback request changed. Reopen the item and try again.",
+      sharing_start_unsupported:"This shared playback change is not available yet.",
+      sharing_start_dolby_vision_unsupported:"Dolby Vision is not available for shared playback yet.",
+      sharing_decision_unavailable:"The sharing host could not determine how to play this file."};
+    const code=typeof value?.code==="string"&&Object.hasOwn(messages,value.code)?value.code:null;
+    const message=status===401||status===403?"Shared playback authorization is no longer available.":
+      code?messages[code]:mode==="start"||mode==="restart"?"Shared playback could not prepare.":"Shared decision unavailable";
+    throw Object.assign(new Error(message),{status,...(code?{code}:{})});
+  }
   function authorized(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API;}
   function current(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API&&c.generation===PAGE_RENDER_GENERATION&&c.route===location.hash;}
   function capture(){const c=Object.freeze({auth:AUTH_GENERATION,token:TOKEN,origin:API,generation:PAGE_RENDER_GENERATION,route:location.hash});if(!c.token||!current(c))fail();origin(c);return c;}
   function origin(c){const u=new URL(c.origin,location.href);if(!["http:","https:"].includes(u.protocol)||u.username||u.password||u.search||u.hash||u.pathname!=="/api/v1")fail();return u.origin;}
   function retire(){contexts=new WeakMap();for(const j of jobs){j.controller.abort();j.reader?.cancel().catch(()=>{});}}
+  function retireAuthorization(){retire();accepted=new WeakMap();bases=new WeakMap();}
   function copy(value){if(Array.isArray(value))return Object.freeze(value.map(copy));if(value&&typeof value==="object"){const o=Object.create(null);for(const [k,v]of Object.entries(value))o[k]=copy(v);return Object.freeze(o);}return value;}
   // Engine fields stay numbers where exact, while future/identity integers that
   // cannot be represented by Number remain lossless BigInts.
@@ -20,13 +37,17 @@ const SHARED_DECISION=(()=>{
     try{
       const expected=origin(c)+path,response=await fetch(expected,{method:body===null?"GET":"POST",headers:{authorization:"Bearer "+c.token,...(body===null?{}:{"content-type":"application/json"})},...(body===null?{}:{body}),credentials:"omit",cache:"no-store",redirect:"error",signal:controller.signal});
       if(!valid()||controller.signal.aborted||response.redirected||response.url!==expected){await response.body?.cancel();fail();}
-      if(response.status!==200&&!(conflict&&response.status===409)){await response.body?.cancel();if(response.status===401||response.status===403)retire();fail();}
-      const declared=response.headers.get("content-length");if(declared!==null&&(!/^(0|[1-9][0-9]*)$/.test(declared)||BigInt(declared)>BigInt(MAX))){await response.body?.cancel();fail();}
+      if(response.status===401||response.status===403){retireAuthorization();void response.body?.cancel().catch(()=>{});refusal(response.status,null,mode);}
+      const rejected=response.status!==200&&!(conflict&&response.status===409),maximum=rejected?16384:MAX;
+      const declared=response.headers.get("content-length");if(declared!==null&&(!/^(0|[1-9][0-9]*)$/.test(declared)||BigInt(declared)>BigInt(maximum))){await response.body?.cancel();if(rejected){if(response.status===401||response.status===403)retire();refusal(response.status,null,mode);}fail();}
       const reader=response.body?.getReader();if(!reader)fail();job.reader=reader;const chunks=[];let length=0;
-      try{for(;;){const p=await reader.read();if(!valid()||controller.signal.aborted)fail();if(p.done)break;if(!(p.value instanceof Uint8Array))fail();length+=p.value.byteLength;if(length>MAX)fail();chunks.push(p.value);}}
+      try{for(;;){const p=await reader.read();if(!valid()||controller.signal.aborted)fail();if(p.done)break;if(!(p.value instanceof Uint8Array))fail();length+=p.value.byteLength;if(length>maximum){if(rejected){if(response.status===401||response.status===403)retire();refusal(response.status,null,mode);}fail();}chunks.push(p.value);}}
       catch(e){await reader.cancel().catch(()=>{});throw e;}finally{job.reader=null;reader.releaseLock();}
       if(!valid()||controller.signal.aborted)fail();const bytes=new Uint8Array(length);let offset=0;for(const p of chunks){bytes.set(p,offset);offset+=p.byteLength;}
-      const value=sharingJSON(new TextDecoder("utf-8",{fatal:true}).decode(bytes));
+      let value;
+      try{value=sharingJSON(new TextDecoder("utf-8",{fatal:true}).decode(bytes));}
+      catch(error){if(!rejected)throw error;}
+      if(rejected){if(response.status===401||response.status===403)retire();refusal(response.status,value,mode);}
       return conflict?{status:response.status,value}:value;
     }finally{clearTimeout(timer);signal?.removeEventListener("abort",abort);jobs.delete(job);}
   }
