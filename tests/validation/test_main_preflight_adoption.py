@@ -249,6 +249,42 @@ class MainPreflightAdoptionCase(unittest.TestCase):
         self.assertEqual(set(adopted), {TWO})
         self.assertIn(f"Not adopted: {ONE} — Missing reviewed input witness", output)
 
+    def test_live_head_guard_allows_base_advance_and_refuses_identity_or_readiness_changes(self):
+        event = {"number": 7, "repository": REPO, "action": "synchronize", "pull_request": {
+            "number": 7, "draft": False, "state": "open", "head": {"repo": dict(REPO), "sha": CURRENT},
+            "base": {"repo": dict(REPO), "ref": "main", "sha": X}}}
+        run = {"id": 99, "repository": REPO, "commit_sha": CURRENT, "event": "pull_request",
+               "event_payload": json.dumps(event), "workflow_id": "main-fast-lane.yml"}
+        env = {"GITHUB_EVENT_PATH": "fixture-event.json", "GITHUB_EVENT_NAME": "pull_request",
+               "GITHUB_REPOSITORY": REPO["full_name"], "GITHUB_SHA": CURRENT,
+               "GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "99", "GITHUB_TOKEN": "fixture",
+               "GITHUB_SERVER_URL": "https://forge.example", "GITHUB_API_URL": "https://forge.example/api/v1"}
+        cases = [("base advance", None),
+                 ("head", lambda p: p["head"].update(sha=Y)),
+                 ("closed", lambda p: p.update(state="closed")),
+                 ("draft", lambda p: p.update(draft=True)),
+                 ("head repo", lambda p: p["head"]["repo"].update(id=2)),
+                 ("base repo", lambda p: p["base"]["repo"].update(id=2)),
+                 ("base ref", lambda p: p["base"].update(ref="effort/other"))]
+        for name, change in cases:
+            with self.subTest(name=name):
+                live = copy.deepcopy(event["pull_request"])
+                live["base"]["sha"] = Z
+                if change:
+                    change(live)
+                api = mock.Mock()
+                api.get.side_effect = [copy.deepcopy(run), live]
+                with mock.patch.dict(os.environ, env), \
+                     mock.patch.object(adoption.Path, "read_bytes", return_value=json.dumps(event).encode()), \
+                     mock.patch.object(adoption, "git", side_effect=lambda *a: {
+                         ("rev-parse", "HEAD"): CURRENT, ("diff", "--name-only", "HEAD"): ""}[a]), \
+                     mock.patch.object(adoption, "API", return_value=api):
+                    if change:
+                        with self.assertRaisesRegex(ReceiptError, "Live PR moved/closed/drafted"):
+                            adoption.api_context()
+                    else:
+                        self.assertEqual(adoption.api_context(), (api, SCOPE, CURRENT, 99))
+
     def test_current_run_integrity_still_refuses(self):
         ledger = Ledger()
         ledger.run(10, X, own=[ONE])
