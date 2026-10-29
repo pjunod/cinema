@@ -516,10 +516,16 @@ jobs:
       - name: Compile iOS and tvOS without running simulator tests
         if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         run: make apple-build
+      - name: Reauthenticate original native cases before executing the pending selection
+        if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.native_receipts --verify-tv-plan
       - name: Require native TV navigation journeys
         if: needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+          PLURX_TV_NAVIGATION_PLAN: .main-preflight-receipts/native/receipt.json
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
         if: always() && needs.scope.outputs.apple == 'true' && steps.native_receipts.outputs.tv_navigation != 'true'

@@ -1,8 +1,20 @@
 # Subtitle completion — one inventory for unfinished subtitle work
 
-**Status:** ACTIVE · repair reviewed · all 18 focused regressions pass · deployed acceptance incomplete
+**Status:** ACTIVE · repair reviewed · all 21 focused regressions pass · deployed acceptance incomplete
 
 **Date:** 2026-10-25 · **Updated:** 2026-10-29 · **Owner:** Codex /root · **Branch:** `codex/subtitle-artifact-admission`
+
+The current repair is [PR #1332](http://forge.lan:3000/noirr/plurx/pulls/1332).
+All 21 focused subtitle/storage cases and 2,129 policy cases have passed;
+unchanged passing evidence remains retained. Native qualification exposed two
+test interaction failures: Meridian setup steered vertically at a vertical
+rail, and successful diagnostic captures consumed the live controls' idle
+interval before Select. The fixture corrections preserve their assertions and
+failure captures. Authenticated per-case native reuse is being completed so
+only failed or missing journeys repeat. Review and a green final gate remain
+required; the PR records the live counts and owner. The maintainer deploys,
+then translation publication and visible generated/translated captions on the
+physical TV still require deployed acceptance.
 
 [PR #1309](http://forge.lan:3000/noirr/plurx/pulls/1309) merged as
 `f9074711`, and the maintainer has now deployed `10f45ae5`, which contains it.
@@ -25,9 +37,10 @@ reader fence and explicit Retry reacquires the original verified input.
 Implementation, the pinned workspace/all-target compiler check, normal
 format/Clippy/syntax hooks and final adversarial review pass. The review found
 one native pagination-status issue, which is fixed and covered by the new
-methods. All 18 focused cases pass: seven new/expanded core, four daemon,
-three Web, two tvOS and two Android cases. This includes a real 40-second
-surround decode. Previously passing cases remain retained across main updates.
+methods. The original 18 focused cases pass: seven new/expanded core, four daemon,
+three Web, two tvOS and two Android cases. Two additional changed managed-v3
+fixtures pass against real replicated stores, and the strict clock-header
+selector regression passes. This includes a real 40-second surround decode. Previously passing cases remain retained across main updates.
 The only integration conflict was adjacent changelog entries; both are kept.
 The unrelated sharing update does not change subtitle source or invalidate
 these passes. The repair PR records its current fast-lane result and merge state; a green
