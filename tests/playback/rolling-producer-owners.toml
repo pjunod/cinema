@@ -6082,7 +6082,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in-process responses, while the finite FFmpeg fixture is explicitly awaited.
 # Main's HTTPS admin/transport/startup owners and source/status reads remain in
 # the source scan; none changes launch authorization.
-expected_occurrences = 808
+# Shared browse repair (source c5be7ea56): +2 Response::status reads in
+# sharing_catalogue_detail_presentation_is_opt_in_and_uses_cached_public_fields
+# (http/shared_library/tests.rs). Both inspect the already awaited Axum oneshot
+# response for OK/BAD_REQUEST; neither starts a process or an independent task.
+expected_occurrences = 810
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
