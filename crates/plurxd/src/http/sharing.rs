@@ -855,23 +855,20 @@ async fn disconnect(
     Ok(Json(json!({"disabled":true})))
 }
 
-fn peer_error(error: crate::sharing_client::PeerError) -> ApiError {
+pub(super) fn peer_error_code(error: &crate::sharing_client::PeerError) -> &'static str {
     use crate::sharing_client::PeerError;
     match error {
-        PeerError::IdentityMismatch => {
-            failure(StatusCode::BAD_GATEWAY, "sharing_identity_mismatch")
-        }
-        PeerError::ProtocolUnsupported => {
-            failure(StatusCode::BAD_GATEWAY, "sharing_protocol_unsupported")
-        }
-        PeerError::Authentication => failure(StatusCode::BAD_GATEWAY, "sharing_peer_auth_failed"),
-        PeerError::InvalidResponse => {
-            failure(StatusCode::BAD_GATEWAY, "sharing_invalid_peer_response")
-        }
+        PeerError::IdentityMismatch => "sharing_identity_mismatch",
+        PeerError::ProtocolUnsupported => "sharing_protocol_unsupported",
+        PeerError::Authentication => "sharing_peer_auth_failed",
+        PeerError::InvalidResponse => "sharing_invalid_peer_response",
         PeerError::Unavailable | PeerError::Rejected(_) | PeerError::DolbyVisionUnsupported => {
-            failure(StatusCode::BAD_GATEWAY, "sharing_peer_unavailable")
+            "sharing_peer_unavailable"
         }
     }
+}
+fn peer_error(error: crate::sharing_client::PeerError) -> ApiError {
+    failure(StatusCode::BAD_GATEWAY, peer_error_code(&error))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1025,7 +1022,16 @@ async fn create_import(
     raw: Body,
 ) -> Result<Json<Value>, ApiError> {
     let import_id = Uuid::new_v4();
-    let import = verified_import(&state, body(raw).await?, import_id).await?;
+    let import = verified_import(&state, body(raw).await?, import_id)
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(
+                %import_id,
+                phase = "verify",
+                code = error.code().unwrap_or("sharing_import_failed"),
+                "sharing import did not complete"
+            );
+        })?;
     match state
         .store
         .create_share_import(import)
@@ -1046,9 +1052,22 @@ async fn create_import(
                 .await
                 .map_err(authority)?
             {
-                let _ = state.sharing.resume_import(&state, import).await;
+                if let Err(error) = state.sharing.resume_import(&state, import).await {
+                    tracing::warn!(
+                        %import_id,
+                        phase = "claim",
+                        code = peer_error_code(&error),
+                        "sharing import retained for claim retry"
+                    );
+                }
             }
-            Ok(Json(import_status(&state, import_id).await?))
+            let status = import_status(&state, import_id).await?;
+            tracing::info!(
+                %import_id,
+                state = status["import"]["state"].as_str().unwrap_or("unknown"),
+                "sharing import created"
+            );
+            Ok(Json(status))
         }
     }
 }
@@ -1171,15 +1190,38 @@ async fn connection(
     if invite.expires_at_ms > now.saturating_add(MAX_INVITATION_TTL_MS + 300_000) {
         return Err(invalid());
     }
-    let connected = request.probe
-        && crate::sharing_client::PeerConnection::verified(
+    let (connected, connection_error) = if request.probe {
+        match crate::sharing_client::PeerConnection::verified(
             &state.sharing,
             &invite.endpoints,
             &invite.identity,
         )
         .await
-        .is_ok();
+        {
+            Ok(_) => (true, None),
+            Err(error) => (false, Some(peer_error_code(&error))),
+        }
+    } else {
+        (false, None)
+    };
+    if let Some(code) = connection_error {
+        tracing::warn!(
+            source_server_id = %invite.identity.server_id,
+            invitation_id = %invite.id,
+            phase = "probe",
+            code,
+            "sharing connection could not be verified"
+        );
+    } else {
+        tracing::debug!(
+            source_server_id = %invite.identity.server_id,
+            phase = "probe",
+            probed = request.probe,
+            connected,
+            "sharing connection checked"
+        );
+    }
     Ok(Json(
-        json!({"name":invite.name,"network":combined.network,"connected":connected}),
+        json!({"name":invite.name,"network":combined.network,"connected":connected,"connection_error":connection_error}),
     ))
 }

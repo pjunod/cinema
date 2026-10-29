@@ -2017,7 +2017,10 @@ impl SharingManager {
             self.read_catalogue_inner(state, import_id, user, request),
         )
         .await
-        .map_err(|_| crate::sharing_client::PeerError::Unavailable)?
+        .map_err(|_| {
+            tracing::warn!(phase = "catalogue_deadline", %import_id, "shared catalogue read timed out");
+            crate::sharing_client::PeerError::Unavailable
+        })?
     }
     async fn read_catalogue_inner(
         &self,
@@ -2093,40 +2096,55 @@ impl SharingManager {
             catalogue_epoch: import.summary.catalogue_epoch,
             created_at_ms: 0,
         };
-        let (mut peer, _) =
-            PeerConnection::verified(self, &import.summary.endpoints, &expected).await?;
+        let verify_started = std::time::Instant::now();
+        let (mut peer, _) = PeerConnection::verified(self, &import.summary.endpoints, &expected)
+            .await
+            .inspect_err(|error| {
+                tracing::warn!(phase = "catalogue_verify", %import_id, ?error,
+                    elapsed_ms = verify_started.elapsed().as_millis() as u64,
+                    "shared catalogue peer verification failed");
+            })?;
         self.ensure_current(state, &import.summary).await?;
-        let mut reply = match request {
-            CatalogueRead::Libraries => CatalogueReply::Libraries(
-                peer.catalogue_libraries(&credentials.credential)
-                    .await?
-                    .libraries,
-            ),
-            CatalogueRead::Page {
-                library,
-                parent,
-                q,
-                cursor,
-                limit,
-            } => CatalogueReply::Page(
-                peer.catalogue_page(
-                    &credentials.credential,
-                    &library,
-                    parent.as_ref(),
-                    &q,
-                    cursor.as_deref(),
+        let request_started = std::time::Instant::now();
+        let mut reply = async {
+            Ok::<_, PeerError>(match request {
+                CatalogueRead::Libraries => CatalogueReply::Libraries(
+                    peer.catalogue_libraries(&credentials.credential)
+                        .await?
+                        .libraries,
+                ),
+                CatalogueRead::Page {
+                    library,
+                    parent,
+                    q,
+                    cursor,
                     limit,
-                )
-                .await?,
-            ),
-            CatalogueRead::Item(item) => {
-                CatalogueReply::Item(peer.catalogue_item(&credentials.credential, &item).await?)
-            }
-            CatalogueRead::Batch(batch) => CatalogueReply::Batch(
-                peer.catalogue_batch(&credentials.credential, &batch)
+                } => CatalogueReply::Page(
+                    peer.catalogue_page(
+                        &credentials.credential,
+                        &library,
+                        parent.as_ref(),
+                        &q,
+                        cursor.as_deref(),
+                        limit,
+                    )
                     .await?,
-            ),
-        };
+                ),
+                CatalogueRead::Item(item) => {
+                    CatalogueReply::Item(peer.catalogue_item(&credentials.credential, &item).await?)
+                }
+                CatalogueRead::Batch(batch) => CatalogueReply::Batch(
+                    peer.catalogue_batch(&credentials.credential, &batch)
+                        .await?,
+                ),
+            })
+        }
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(phase = "catalogue_request", %import_id, ?error,
+                elapsed_ms = request_started.elapsed().as_millis() as u64,
+                "shared catalogue request failed");
+        })?;
         let current = state
             .store
             .sharing_import(import_id)

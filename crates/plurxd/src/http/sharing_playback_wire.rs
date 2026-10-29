@@ -608,6 +608,73 @@ mod tests {
         assert!(project_shared_decision(wrong, &reference, &key).is_err());
     }
     #[test]
+    fn sharing_peer_decision_accepts_current_downmix_matrices_and_preserves_projection() {
+        use super::super::sharing_decision_decode::DecodedDecision;
+        use plurx_core::playback::DownmixMatrix;
+        let reference = reference();
+        let key = key();
+        for matrix in [
+            DownmixMatrix::RequiresLayoutMeasurement { source_channels: 6 },
+            DownmixMatrix::LoRo51,
+            DownmixMatrix::LoRo71,
+            DownmixMatrix::LimitedDefault { source_channels: 8 },
+        ] {
+            let mut engine = decision(PlaybackMethod::Remux);
+            engine.prior_kbps = None;
+            engine.decision.delivered_audio.action = AudioAction::Encode {
+                codec: "aac".into(),
+                channels: 2,
+                layout: Some("stereo".into()),
+                bitrate_kbps: 192,
+                sample_rate: 48000,
+            };
+            engine.decision.delivered_audio.downmix = Some(matrix);
+            let payload = super::super::shared_playback::source_decision_payload(engine);
+            let decoded = DecodedDecision::parse(payload.clone(), i64::MAX)
+                .expect("current Source audio decision");
+            let projected = serde_json::to_value(
+                project_decoded_decision(decoded, &reference, &key).expect("receiver projection"),
+            )
+            .expect("wire");
+            assert_eq!(projected["delivered_audio"], payload["delivered_audio"]);
+            assert_eq!(projected["file_id"], json!(reference.file_id));
+            let mut unknown = payload;
+            unknown["delivered_audio"]["downmix"]["unnegotiated_field"] = json!(true);
+            assert!(DecodedDecision::parse(unknown, i64::MAX).is_err());
+        }
+    }
+
+    #[test]
+    fn sharing_source_decision_omits_public_output_advisories_before_peer_decode() {
+        use super::super::sharing_decision_decode::DecodedDecision;
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute};
+        let mut engine = decision(PlaybackMethod::Remux);
+        engine.prior_kbps = None;
+        engine.measured_candidate_outputs =
+            Some(vec![crate::vodserve::retained::MeasuredCandidateOutput {
+                candidate_id: CandidateId([4; 16]),
+                recipe_digest: [7; 32],
+                route: CandidateRoute::Remux,
+                artifact_id: "source-private-artifact".into(),
+                output_identity: "source-private-output".into(),
+                qualification: "complete_full_mux_rfc8216_v1",
+                average_bps: 2_000_000,
+                peak_bps: 3_000_000,
+            }]);
+        let public = serde_json::to_value(&engine).expect("public decision");
+        assert!(public.get("measured_candidate_outputs").is_some());
+        assert!(DecodedDecision::parse(public, i64::MAX).is_err());
+        let peer = super::super::shared_playback::source_decision_payload(engine);
+        assert!(peer.get("measured_candidate_outputs").is_none());
+        let decoded = DecodedDecision::parse(peer, i64::MAX).expect("closed peer decision");
+        let projected = serde_json::to_string(
+            &project_decoded_decision(decoded, &reference(), &key()).expect("receiver projection"),
+        )
+        .expect("wire");
+        assert!(!projected.contains("source-private"));
+    }
+
+    #[test]
     fn sharing_peer_decision_decoder_retains_complete_engine_and_refuses_shape_drift() {
         use super::super::sharing_decision_decode::DecodedDecision;
         for method in [

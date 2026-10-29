@@ -2575,9 +2575,9 @@ assert.equal(context.ACT_TIMER, null);
         ), "make effort-rust-check")
         self.assertRegex(full_jobs["check"], r"(?m)^    timeout-minutes: 120$")
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
-        # Both receipt-producing preflights retain a finite fifteen-minute
-        # budget so the full history/contracts can publish their evidence.
-        self.assertIn("timeout-minutes: 15", fast_jobs["preflight"])
+        # Main must also finish the cold full-unit fallback when prior receipts
+        # cannot authenticate; effort retains its separate finite budget.
+        self.assertIn("timeout-minutes: 30", fast_jobs["preflight"])
         self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
         self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
@@ -4316,7 +4316,7 @@ assert.equal(context.ACT_TIMER, null);
                 preflight = workflow_job_blocks(
                     f".github/workflows/{workflow}.yml"
                 )["preflight"]
-                budget = 10 if workflow == "ci" else 15
+                budget = {"ci": 10, "effort-ci": 15, "main-fast-lane": 30}[workflow]
                 self.assertIn(f"timeout-minutes: {budget}", preflight)
                 for command in (
                     "make history-check",
