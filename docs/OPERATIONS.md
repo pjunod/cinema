@@ -5099,13 +5099,25 @@ is not a reason to overwrite the saved enable choice.
 
 ## Sharing Cinema addresses — set up before creating invitations
 
-Settings → Sharing lists the local TLS listener, certificate, saved private
-addresses and unverified host setup. A listening socket does not prove that
-Tailscale is installed or another Cinema can connect. Missing addresses and
-failed reads are distinct; the Developer switch stays available.
+Managed native installations discover their Tailscale address and configure
+private forwarding after sharing is enabled. Settings → Sharing shows setup
+progress and required sign-in, permission or port-conflict actions. No router
+configuration is needed. Pairing still requires explicit approval and scope.
+
+Linux Compose uses the separately installed component in
+[the host setup guide](features/SHARING-HOST-SETUP.md). Its one-time local
+administrator installation prepares the private bridge and worker; the worker
+then follows the sharing switch. Ordinary deploys do not install host components.
+**Advanced addresses** supports custom or older setups.
+
+Sharing lists the local listener, certificate, saved addresses and setup status.
+A listening socket cannot prove another Cinema can connect. Missing addresses
+and failed reads are distinct; the Developer switch stays available.
+
 
 Create invitation reads this Cinema's saved addresses. If absent, choose
-**Configure this Cinema’s addresses**, then **Return to invitation**; your
+**Advanced addresses** (or **Configure this Cinema’s addresses** on older
+servers), then **Return to invitation**; your
 movie/show library selection is kept. Saving addresses neither creates an
 invitation nor tests connectivity. Choose **Create** explicitly.
 
