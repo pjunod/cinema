@@ -1,5 +1,37 @@
 use super::*;
 
+/// Failed fixture preparation still retains the original Core cleanup selector
+/// and application lifetime. Its caller preserves the owned fixture namespace
+/// on error; neither this diagnostic nor Drop proves native/journal closure.
+#[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
+pub(crate) struct SelectedStaticResolverTestError {
+    reason: String,
+    _cleanup:
+        Option<plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeCleanup>,
+    _application:
+        Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease>,
+}
+#[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
+impl std::fmt::Debug for SelectedStaticResolverTestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SelectedStaticResolverTestError")
+            .field("reason", &self.reason)
+            .field("original_custody_retained", &self._cleanup.is_some())
+            .finish()
+    }
+}
+#[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
+impl SelectedStaticResolverTestError {
+    fn before_owner(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            _cleanup: None,
+            _application: None,
+        }
+    }
+}
+
 impl TranscodeManager {
     /// The claimed worker distinguishes a proved missing/changed row from a
     /// Store failure. The latter must remain retryable, not terminal authority.
@@ -161,6 +193,127 @@ impl TranscodeManager {
             .await?
             .ok_or("encoded plan unavailable".to_owned())
     }
+    /// Fixture counterpart of the selected static worker's actual P factory.
+    /// The generic test resolver above intentionally retains legacy admission.
+    /// Return the SAME cleanup and application lease alongside the Encoding:
+    /// the caller drops rich aliases before retiring M, after this frame leaves.
+    #[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
+    pub(crate) async fn resolve_selected_static_output_test(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        planning: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
+        source_object_version: String,
+        coordinator_frame_bytes: usize,
+        deadline: Instant,
+    ) -> Result<
+        (
+            Arc<crate::vodencode::Encoding>,
+            plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeCleanup,
+            plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease,
+        ),
+        SelectedStaticResolverTestError,
+    > {
+        if coordinator_frame_bytes == 0 {
+            return Err(SelectedStaticResolverTestError::before_owner(
+                "unmeasured selected fixture coordinator",
+            ));
+        }
+        let runtime = self.resource_runtime.as_ref().ok_or_else(|| {
+            SelectedStaticResolverTestError::before_owner("selected fixture needs original runtime")
+        })?;
+        // Count actual retained request/snapshot capacities, original native
+        // coordinator frame and the EXISTING checked P-to-recipe allowance.
+        let application_bytes = (|| -> Option<usize> {
+            coordinator_frame_bytes
+                .checked_add(std::mem::size_of::<SessionRequest>())?
+                .checked_add(request.selected_finite_requested_heap_bytes()?)?
+                .checked_add(std::mem::size_of::<
+                    plurx_core::store::PlaybackPlanningSnapshot,
+                >())?
+                .checked_add(2 * std::mem::size_of::<usize>())?
+                .checked_add(
+                    super::adaptive_attempts::planning_snapshot_requested_heap_bytes(&planning)?,
+                )?
+                .checked_add(source_object_version.capacity())?
+                .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)
+        })()
+        .ok_or_else(|| {
+            SelectedStaticResolverTestError::before_owner(
+                "selected fixture application capacity overflow",
+            )
+        })?;
+        runtime
+            .refresh_admission_capacity(deadline)
+            .await
+            .map_err(|error| {
+                SelectedStaticResolverTestError::before_owner(format!(
+                    "actual selected fixture P capacity: {error:?}"
+                ))
+            })?;
+        let probe = super::adaptive_attempts::fixed_planning_request(
+            self,
+            &planning,
+            &source_object_version,
+            application_bytes,
+        )
+        .map_err(SelectedStaticResolverTestError::before_owner)?;
+        // Synchronous registration in the original Core book precedes every
+        // source/parser/engine await. No test DTO or legacy permit stands in.
+        let mut owner = runtime
+            .prepare_fixed_planning_probe(probe, deadline)
+            .map_err(|error| SelectedStaticResolverTestError::before_owner(error.to_string()))?;
+        let application = match owner.take_application_lease(application_bytes) {
+            Ok(application) => application,
+            Err(error) => {
+                return Err(SelectedStaticResolverTestError {
+                    reason: error.to_string(),
+                    _cleanup: Some(owner.into_cleanup()),
+                    _application: None,
+                })
+            }
+        };
+        let result = async {
+            owner
+                .prepare_inputs(deadline)
+                .await
+                .map_err(|error| error.to_string())?;
+            let report = owner
+                .collect_and_refine(deadline)
+                .await
+                .map_err(|error| error.to_string())?;
+            if report.source_object_version() != source_object_version {
+                return Err("selected fixture original source changed".to_owned());
+            }
+            let encoding = self
+                .resolve_adaptive_encoding_from_probe(request, file, &planning, report)
+                .await?;
+            let requested = encoding
+                .requested_heap_bytes()
+                .ok_or("selected fixture recipe capacity overflow")?;
+            if requested > super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES {
+                return Err(
+                    "selected fixture recipe exceeds original P-to-recipe allowance".to_owned(),
+                );
+            }
+            owner
+                .finish_native(deadline)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(encoding)
+        }
+        .await;
+        let cleanup = owner.into_cleanup();
+        match result {
+            Ok(encoding) => Ok((encoding, cleanup, application)),
+            Err(reason) => Err(SelectedStaticResolverTestError {
+                reason,
+                _cleanup: Some(cleanup),
+                _application: Some(application),
+            }),
+        }
+    }
+
     pub(crate) fn encoded_output_intent(
         &self,
         request: &SessionRequest,

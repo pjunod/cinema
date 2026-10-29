@@ -348,6 +348,13 @@ impl TranscodeManager {
                 .expect("authentic global quota");
         let quota = crate::playback_cache::FiniteCacheReservation::enter(quota);
         let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        // Match production after the original P retirement and cache wait:
+        // obtain a real current observation without rebinding the finalized
+        // request's demand or allocation epoch.
+        runtime
+            .refresh_admission_capacity(deadline)
+            .await
+            .expect("actual current capacity before original copy R");
         let mut original = runtime
             .prepare_copy_vod(request, deadline)
             .await
@@ -653,6 +660,13 @@ impl TranscodeManager {
             .await
             .expect("same original P application/journal retirement");
         let path_id = request.rendition_id.clone();
+        // The actual P/journal close can outlive its earlier observation.
+        // Production reobserves here while keeping this exact finalized
+        // demand and allocation epoch; exercise that same boundary.
+        runtime
+            .refresh_admission_capacity(deadline)
+            .await
+            .expect("actual current capacity after original copy planning close");
         let mut original = runtime
             .prepare_copy_vod(request, deadline)
             .await

@@ -140,7 +140,7 @@ def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> 
 
 
 def resolve_effort_history_binding(environment: Mapping[str, str], repository: Path) -> dict[str, object]:
-    """Authenticate a dispatched task's PR, live effort tips and actual main."""
+    """Bind task history to the unique already-included authenticated main base."""
     from validation.python_unit_receipts import API, ReceiptError, identity
 
     if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
@@ -173,13 +173,28 @@ def resolve_effort_history_binding(environment: Mapping[str, str], repository: P
         main_tip = api_document(environment, "/branches/main")["commit"]["id"]
         assert head_tip == commit and base["sha"] == base_tip
         assert all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base_tip, main_tip))
-        for ancestor, descendant in ((base_tip, "HEAD"), (main_tip, base_tip)):
-            check = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        check = subprocess.run(["git", "merge-base", "--is-ancestor", base_tip, "HEAD"],
+                               cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        assert check.returncode == 0
+        # A task targets the current effort. Only final effort promotion must
+        # integrate current main. Authenticate main to derive the unique
+        # already-landed baseline; new main commits cannot waive task history
+        # or require invalidating an otherwise exact effort/task candidate.
+        common = subprocess.run(["git", "merge-base", "--all", main_tip, base_tip],
+                                cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=15)
+        merge_bases = common.stdout.split()
+        assert common.returncode == 0 and len(merge_bases) == 1
+        included_main = merge_bases[0]
+        assert re.fullmatch(r"[0-9a-f]{40}", included_main)
+        for descendant in (base_tip, main_tip):
+            check = subprocess.run(["git", "merge-base", "--is-ancestor", included_main, descendant],
                                    cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
             assert check.returncode == 0
     except (ReceiptError, KeyError, TypeError, AssertionError) as exc:
         raise QualificationError("effort task identity, live tips or main ancestry mismatch") from exc
-    return dict(base_sha=main_tip, effort_sha=base_tip, head_sha=commit, pull_request=scope["pr"])
+    return dict(base_sha=included_main, main_sha=main_tip, effort_sha=base_tip,
+                head_sha=commit, pull_request=scope["pr"])
 
 
 def build_receipt(

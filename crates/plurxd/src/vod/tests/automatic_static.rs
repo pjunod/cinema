@@ -16,6 +16,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     let source = crate::fragment_index_cluster::open_source_fence(&preliminary, None)
         .await
         .expect("held source");
+    let original_source_version = source.object_version().to_owned();
     let raw = crate::ffmpeg::held_source_probe_json(
         &source.handle,
         crate::process_control::ChildWork::background("automatic carrier fixture probe"),
@@ -57,6 +58,7 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
         .await
         .expect("actual startup custody")
         .expect("Linux runtime");
+    let resource_baseline = runtime.accounting().expect("initial actual ledger").used;
     let dirs = crate::create_dirs_for_config_with_runtime(&config, Some(runtime.as_ref()))
         .expect("managed directories under actual startup custody");
     let store = Arc::clone(&selected_store.store);
@@ -201,15 +203,41 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     let mut context = crate::transcode::TranscodeManager::candidate_context(&candidate);
     context.canonical_caps = Some(caps);
     context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
-    context.planning_snapshot = Some(Arc::new(planning));
+    let planning = Arc::new(planning);
+    context.planning_snapshot = Some(Arc::clone(&planning));
     context.owner_node_id = Some(node.clone());
     selected.candidate_context = Some(Box::new(context));
     let mut resolved_file = file.clone();
     resolved_file.audio_offset_ms = 250;
-    let encoding = manager
-        .resolve_encoded_output_test(&selected, &resolved_file)
-        .await
-        .expect("actual canonical resolver");
+    let frame_bytes = {
+        let original = manager.resolve_selected_static_output_test(
+            &selected,
+            &resolved_file,
+            Arc::clone(&planning),
+            original_source_version.clone(),
+            0,
+            Instant::now() + Duration::from_secs(40),
+        );
+        std::mem::size_of_val(&original)
+    };
+    let (encoding, mut catalog_cleanup, catalog_application) = match Box::pin(
+        manager.resolve_selected_static_output_test(
+            &selected,
+            &resolved_file,
+            Arc::clone(&planning),
+            original_source_version.clone(),
+            frame_bytes,
+            Instant::now() + Duration::from_secs(40),
+        ),
+    )
+    .await
+    {
+        Ok(original) => original,
+        Err(error) => {
+            let namespace = base.keep();
+            panic!("actual admitted canonical resolver failed: {error:?}; original fixture retained at {}", namespace.display());
+        }
+    };
     selected.audio_delivery = encoding.options.audio.clone();
     manager
         .enqueue_encoded_output(&selected, &resolved_file, &settings(), &encoding)
@@ -284,6 +312,20 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     );
     let compatibility_pool = encoding.admissions.clone();
     let compatibility_baseline = compatibility_pool.snapshot();
+    // Only this shared admissions service survives the catalog recipe. It has
+    // no report/native ownership. Destroy Encoding before its original M lease.
+    drop(encoding);
+    drop(catalog_application);
+    catalog_cleanup
+        .finish_retirement(Instant::now() + Duration::from_secs(40))
+        .await
+        .expect("original catalog P/M positive cleanup");
+    assert!(catalog_cleanup.known_closed());
+    assert_eq!(
+        runtime.accounting().expect("catalog fixture retired").used,
+        resource_baseline
+    );
+    drop(catalog_cleanup);
     let legacy = compatibility_pool
         .try_admit_software(0, 1, crate::admission::Priority::Live)
         .expect("actual original legacy owner");
@@ -345,10 +387,35 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
             .state,
         JobState::Succeeded
     );
-    let encoding = manager
-        .resolve_encoded_output_test(&selected, &resolved_file)
-        .await
-        .expect("new attachment same canonical resolver");
+    let frame_bytes = {
+        let original = manager.resolve_selected_static_output_test(
+            &selected,
+            &resolved_file,
+            Arc::clone(&planning),
+            original_source_version.clone(),
+            0,
+            Instant::now() + Duration::from_secs(40),
+        );
+        std::mem::size_of_val(&original)
+    };
+    let (encoding, mut attachment_cleanup, attachment_application) = match Box::pin(
+        manager.resolve_selected_static_output_test(
+            &selected,
+            &resolved_file,
+            Arc::clone(&planning),
+            original_source_version.clone(),
+            frame_bytes,
+            Instant::now() + Duration::from_secs(40),
+        ),
+    )
+    .await
+    {
+        Ok(original) => original,
+        Err(error) => {
+            let namespace = base.keep();
+            panic!("actual admitted attachment resolver failed: {error:?}; original fixture retained at {}", namespace.display());
+        }
+    };
     let measured_candidate = crate::vodserve::RetainedCandidateBinding {
         kind: selected.kind,
         normalized_geometry: candidate.normalized_geometry,
@@ -534,6 +601,29 @@ async fn automatic_selected_static_carrier_uses_typed_custody_and_counted_retain
     );
     drop(manager);
     drop(serve);
+    // Serve has destroyed every actual rendition/Encoding alias. The separate
+    // original application lease then permits the same M journal retirement.
+    drop(attachment_application);
+    attachment_cleanup
+        .finish_retirement(Instant::now() + Duration::from_secs(40))
+        .await
+        .expect("original attachment P/M positive cleanup after Serve aliases");
+    assert!(attachment_cleanup.known_closed());
+    drop(attachment_cleanup);
+    let until = Instant::now() + Duration::from_secs(40);
+    while runtime
+        .accounting()
+        .expect("original static cleanup ledger")
+        .used
+        != resource_baseline
+    {
+        assert!(
+            Instant::now() < until,
+            "original background P/M cleanup did not finish"
+        );
+        runtime.maintain_planning_cleanup(until).await;
+        tokio::task::yield_now().await;
+    }
     drop(runtime);
     selected_store
         .shutdown()
