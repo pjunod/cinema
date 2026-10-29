@@ -42,6 +42,7 @@ not an instruction to build in that order.
 
 | Project | State | Canonical ledger |
 |---|---|---|
+| Unit coverage repair | Open: repair all 24 failures in the completed October 28 measurement, add behavioral coverage, and qualify at least 85% without narrowing the source scope. | [Coverage repair](../ci/UNIT-COVERAGE-REPAIR.md) |
 | Optional public HTTPS | Implementation built and locally verified through H1–H4 and current-main integration. Required exact-head qualification gates, receipts, review and merge outcome are tracked on [promotion PR #1134](http://forge.lan:3000/noirr/plurx/pulls/1134). Physical trust/playback acceptance remains open; HTTPS stays in Developer. Sol 6.1 builds and parent manages/reviews. | [HTTPS build](../server/HTTPS-BUILD.md) |
 
 HTTPS workflow amendment (2026-10-15): independently reviewed consolidation

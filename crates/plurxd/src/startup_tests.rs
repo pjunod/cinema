@@ -3062,9 +3062,9 @@ fn split_children_log_under_their_parent_target() {
                     let dedicated = [
                         ("plurxd::retained_reuse", "transcode/manager/create.rs"),
                         ("plurxd::retained_reuse", "vod/retained.rs"),
+                        ("plurxd::dv", "transcode/manager/create.rs"),
                         ("plurxd::auto_prepare", "http/hls/create.rs"),
                         ("plurxd::auto_prepare", "http/hls/preparation.rs"),
-                        ("plurxd::dv", "transcode/manager/create.rs"),
                     ]
                     .iter()
                     .any(|(channel, owner)| {

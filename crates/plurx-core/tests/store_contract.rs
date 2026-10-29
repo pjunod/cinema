@@ -67,6 +67,8 @@ mod sharing_source_sessions;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/source_contract.rs"]
 mod source_contract;
+#[path = "store_contract/subtitle_text.rs"]
+mod subtitle_text;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/subtitle_translation_upgrade.rs"]
 mod subtitle_translation_upgrade;
@@ -617,8 +619,9 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "publish_translation_segment",
     // text_caption_dispatch_refuses_unowned_work_and_reads_absent_state checks
     // typed dispatch, absent state and invalid-input refusal on every backend.
-    // Positive publication and grant-lease lifecycles retain their SQLite tests;
-    // this is not full positive Hiqlite publication qualification.
+    // subtitle_text_contract_preserves_receipts_and_immutable_cues additionally
+    // exercises positive publication/receipt fences and read-only grant
+    // projection through for_each_backend, including replicated storage.
     "publish_text_translation_slice",
     "read_text_translation_cues",
     "text_translation_request_receipt",
@@ -13026,6 +13029,29 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
+    let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
+    assert_eq!(
+        handoff_shape,
+        queue_fixture::handoff_fixture_shape(),
+        "exact handoff shape required before inventory"
+    );
+    require_replicated_fixture_marker(client, "playback_handoffs_schema", 1).await;
+    let mut handoff_counts = Vec::new();
+    for (name, sql) in &handoff_shape {
+        if sql.starts_with("CREATE TABLE") {
+            let rows: Vec<I64Value> = client
+                .query_consistent_map(
+                    format!("SELECT count(*) AS value FROM {name}"),
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("complete handoff data inventory");
+            assert_eq!(rows.len(), 1);
+            handoff_counts.push((name.clone(), rows[0].value));
+        }
+    }
+    let handoff_drops =
+        queue_fixture::validated_empty_handoff_rewind(&handoff_shape, &handoff_counts);
     let tail_shape = extension_shape(client, queue_fixture::CURRENT_TAIL_FIXTURE_SHAPE_SQL).await;
     assert_eq!(
         tail_shape,
@@ -13167,6 +13193,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
     let mut statements: Vec<_> = tail_drops
         .into_iter()
+        .chain(handoff_drops)
         .chain(title_drops)
         .chain(annotations_drops)
         .chain(translation_drops)

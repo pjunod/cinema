@@ -27,7 +27,7 @@ RUNTIME = {'node':'v22.23.4','npm':'10.9.9','git':'git version 2.55.0','typescri
 
 POLICY_VERSION = 3
 
-SCRIPTS_RESOLVER_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '48743b916c2a75d4e0e9531a52abff0b9f318d726be407f84d5fe1cc760e3a99', '087e836d369eb2b8f94ec1d0454ea6c157612df9': '72f0accba4f82129287fb12cb8b53c5739cf49f4dff530eb6d64bc464be6ec61', 'integrated-main-77e985-v1': '1ba18caa8750ee8b6f3a1b3aeaf5ed7954c531fd92faa7fb1ff548c2dca8caf2'}
+SCRIPTS_RESOLVER_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '48743b916c2a75d4e0e9531a52abff0b9f318d726be407f84d5fe1cc760e3a99', '087e836d369eb2b8f94ec1d0454ea6c157612df9': '72f0accba4f82129287fb12cb8b53c5739cf49f4dff530eb6d64bc464be6ec61', 'integrated-main-77e985-v1': '1ba18caa8750ee8b6f3a1b3aeaf5ed7954c531fd92faa7fb1ff548c2dca8caf2', 'integrated-main-28edf-v1': 'ca4337b7b6840903eba37aa11afec90ca10e59d7e34bf442346064cf0a80e945'}
 
 PYTHON_POLICY = 'python3 stdlib planning, summary and loopback HTTP fixtures v1'
 
@@ -58,7 +58,7 @@ COMMANDS = (
     'make web-unit-check',
 )
 
-SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '97f338f93705406847d3987b80bf2f0fa8402755a4d1b80003f2434d5d44b814', '9569dd03dcbd4a84b408078f90601d075fe726a9': '4bddf7fb49972695846029e71e65c488052eefbd39a52e747b17b9c86dd28c6c', 'integrated-main-94da-census-v1': 'fb5fd36641c7a21899f01dc9f20473c8085f794739c5de0c907eac251a9969ea', 'integrated-main-656a-v1': 'e11a97162c43e2637c83af099533a3024dc2302872d05e17f4791d0c80dfe35a', 'integrated-main-77e985-v1': 'ccdc1e9b04e7e77ef72d48c93b77481ade06d20d56dd044051daa6a16dc9a951', 'integrated-main-5ac9-v1': 'b905b36a381ff87c747f86687a419bbfaaa4b586efa176f76091752020a832ef'}
+SHAPE_FAMILIES = {'fbbf4078d48ef894dcd1c154f5e404ac8656a99a': '97f338f93705406847d3987b80bf2f0fa8402755a4d1b80003f2434d5d44b814', '9569dd03dcbd4a84b408078f90601d075fe726a9': '4bddf7fb49972695846029e71e65c488052eefbd39a52e747b17b9c86dd28c6c', 'integrated-main-94da-census-v1': 'fb5fd36641c7a21899f01dc9f20473c8085f794739c5de0c907eac251a9969ea', 'integrated-main-656a-v1': 'e11a97162c43e2637c83af099533a3024dc2302872d05e17f4791d0c80dfe35a', 'integrated-main-77e985-v1': 'ccdc1e9b04e7e77ef72d48c93b77481ade06d20d56dd044051daa6a16dc9a951', 'integrated-main-5ac9-v1': 'b905b36a381ff87c747f86687a419bbfaaa4b586efa176f76091752020a832ef', 'integrated-main-28edf-v1': '356a8799b84dd1941c02393b39af8d0c24f0a4b19b7dd5e359801abb9583fdb7'}
 
 HELPERS = ('scripts/js-check', 'scripts/web-types', 'scripts/web-jsconfig', 'scripts/playback-lab', 'scripts/playback-frame-clock.js', 'scripts/continuous-quality-qualification', 'scripts/player-contract-table', 'scripts/ui-baseline', 'scripts/subtitle-readiness-browser-check', 'scripts/cq-native-shipping/check-evidence.js', 'tests/vendor/acorn.js', 'scripts/playback-startup-lab')
 

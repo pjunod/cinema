@@ -523,7 +523,14 @@ async fn observe_failed_issue_cleanup(state: &AppState, invitation: Uuid) {
         .store
         .cancel_share_invitation(invitation)
         .await
-        .map_err(|_| "sharing_authority_unavailable");
+        .map_err(|error| {
+            crate::store_result::observe(
+                crate::store_result::Operation::CancelUnpublishedShareInvitation,
+                crate::store_result::Discard::LostWork,
+                Err::<(), _>(error),
+            );
+            "sharing_authority_unavailable"
+        });
     // Always attempt cleanup. A failed issue may have no saved job, so an
     // empty successful sweep must not hide its failed authority cancellation.
     let cleanup = cleanup(state).await;
